@@ -36,6 +36,8 @@ Private temporary files are flushed before publication. Windows replacement uses
 
 ## One-off verification
 
+On September 28, 2026, revision `1390410` passed **10/10 checks on both Python 3.11.9 and 3.14.7** on native Windows Server 2022. [Successful Actions run](https://github.com/DylanHallahan/raincli/actions/runs/36479606073). The same revision passed all 195 existing Linux agent tests. The first Windows run exposed an 8.3 short-path false positive in shareable-context validation; the successful revision fixes it and checks junction ancestors explicitly.
+
 [Manual Windows client smoke](../.github/workflows/windows-client-smoke.yml) has only a `workflow_dispatch` trigger, read-only repository permissions, and no production credentials. It installs the client without server dependencies on Windows Server 2022 with Python 3.11 and 3.14.
 
 The smoke script exercises installed CLI entry points, downloaded-config import, Windows credential ACLs, send/reply/inbox, UTF-8 and CRLF attachment integrity, conflict handling, restart without duplicate submission, competing-process locks, killed-process lock recovery, and symlink/junction refusal. The relay is a local fake API and Herdr is a fake adapter. It does not test production HTTPS, PostgreSQL, a real Herdr session or desktop Windows 10/11.
