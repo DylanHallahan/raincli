@@ -78,3 +78,48 @@
 - **`versions/`** is not pruned automatically.
 - **PATH** is captured at install.
 - **Live Herdr:** no live-Herdr delivery or login-restart was tested (fakes only), by design.
+
+## Windows run 36492621534 (da8a178): the managed runtime never published
+
+**Result:** W1 fixed, and the direct runtime section passed on 3.11 and 3.14. The first managed-launcher section timed out at `runtime-platform-smoke.py:149`.
+
+**Cause (found in the code, reproduced on Linux):**
+- On Windows, a venv's `Scripts\python.exe` is a redirector. It starts the base interpreter as a **child process with a different pid**.
+- The runtime spawns each connector with `sys.executable`. Inside a managed venv, that is the redirector, so `Popen(...).pid` is never the connector's `os.getpid()`.
+- Readiness compared the two pids (`record == {"pid": process.pid, ...}`; that pid check predates F1). The connector therefore never counted as ready: it was published as `offline`, and the smoke's wait for `unknown` timed out.
+- The direct section passed only because it runs the runner's plain `python.exe`, which isn't a venv.
+
+**Fix:** a fresh handshake path per spawn (`Worker._new_handshake`, called at every `_spawn`). Only the child started with that path can write the readiness record there, and the record must still match the exact binding and the confirmed handle. The recorded pid is informational and no longer compared. The Worker's last-resort kill is now `taskkill /T /F` on Windows, so a killed redirector can't leave its interpreter holding the queue lock.
+
+**Regression test:** `test_readiness_through_an_interpreter_redirector` uses a shell wrapper that runs the real interpreter as a child, like the Windows redirector, with a real connector and FakeApi. It fails on the da8a178 `service.py` (it stays at `offline` for 30 s) and passes with the fix. It also asserts the stop stays graceful (exit 0 through the stop file).
+
+**Other suspects considered:**
+
+| Suspect | Assessment |
+|---|---|
+| `pythonw.exe` / `CREATE_NO_WINDOW` | Not active in the smoke, where the launcher runs from a console (`HIDDEN` is empty). In real logon startup, though, the runtime had no stdout/stderr, so a crash left no trace. **Fixed:** without a console, the launcher sends the runtime's output to a private `runtime.log` in the managed root (0600, rotated at 1 MiB on start). |
+| Crash-restart loop | It would mask a crash as a timeout. Not the cause: the redirector issue explains the symptom exactly. The new diagnostics would show restarts. |
+| Self-reexec | Not triggered in the smoke: both staged versions ship an identical launcher, so `sync_launcher` makes no change. |
+| Path quoting | `--version` through the launcher had already passed. The Run value is covered by W1. |
+| Pointer file | The replace already retries on Windows sharing violations, and the launcher keeps its version if the pointer read fails. Not the cause. |
+| Locks on the state dir | Different files (`run.lock`, `runtime-owner.lock`); the direct section had already released them. Not the cause. |
+| Background update | `automatic` is false in the smoke, so no update runs. |
+
+**Smoke diagnostics** (both runtime sections): on any failure the smoke prints the following, with token-shaped text redacted:
+- `runtime status` JSON;
+- every `state/*.json` (including ready handshakes);
+- `*.stop` files and the connector logs;
+- the managed `current.json`, `update.log` and the version directories;
+- the captured runtime/launcher stdout and stderr (`runtime-direct.log`, `launcher.log`);
+- the process table filtered to `raincli` (PowerShell `Win32_Process` with parent pids, or `ps` on Linux).
+
+The smoke's cleanup now kills whole process trees on Windows.
+
+**Rerun:** warranted. Linux: the full suite passes (376 passed, 1 skipped), and so does the runtime smoke.
+
+### Delta since da8a178 (for the reviewer)
+- `service.py`: per-spawn handshake (no pid comparison), and a `kill_tree` fallback in `Worker.stop`.
+- `launcher.py`: `runtime_output` (`runtime.log` when there is no console).
+- `scripts/runtime-platform-smoke.py`: `diagnose`, `scrub`, captured process output, and tree-kill cleanup.
+- Tests: `test_readiness_through_an_interpreter_redirector`; `test_worker_waits_for_authenticated_queue_owner` now checks that a record at an earlier handshake path is ignored.
+- User-visible: a managed runtime started without a console (Windows logon) writes errors to `~/.raincli/client/runtime.log`.

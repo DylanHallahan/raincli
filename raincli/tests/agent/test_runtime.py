@@ -54,7 +54,11 @@ def test_worker_waits_for_authenticated_queue_owner(tmp_path):
     assert worker.tick(1)["status"] == "offline"
     atomic_write_json(worker.ready_path, {"pid": 123})  # pid alone no longer suffices
     assert worker.tick(2)["status"] == "offline"
-    atomic_write_json(worker.ready_path, {"pid": 456, "handle": "inbox-agent", **binding})
+    # A record at an earlier spawn's handshake path is never accepted; pids are not
+    # compared, because a Windows venv python.exe redirector has a different pid.
+    earlier = worker.ready_path
+    worker._new_handshake()
+    atomic_write_json(earlier, {"pid": 456, "handle": "inbox-agent", **binding})
     assert worker.tick(3)["status"] == "offline"
     atomic_write_json(worker.ready_path, {"pid": 123, "handle": "someone-else", **binding})
     assert worker.tick(4)["status"] == "offline"

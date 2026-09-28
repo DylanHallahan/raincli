@@ -3,6 +3,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -17,7 +18,7 @@ from raincli_agent.config import write_config
 from raincli_agent.connector.queue import Queue
 from raincli_agent.fsutil import atomic_write_json
 from raincli_agent.runtime import updates
-from raincli_agent.runtime.service import request_stop
+from raincli_agent.runtime.service import request_stop, status
 from raincli_agent.runtime.startup import systemd_unit
 
 
@@ -29,6 +30,58 @@ def wait_for(action, timeout=45):
             return value
         time.sleep(0.2)
     raise AssertionError("timed out waiting for runtime state")
+
+
+def scrub(text):
+    # Nothing here should hold a credential; redact token-shaped text regardless.
+    return re.sub(r"rca_[A-Za-z0-9_-]{8,}", "rca_<redacted>", text)
+
+
+def show(label, path, limit=6000):
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        text = f"<unreadable: {type(exc).__name__}>"
+    print(f"--- {label}: {path} ---\n{scrub(text[-limit:])}", flush=True)
+
+
+def diagnose(label, config, state, managed=None, logs=()):
+    """Print local runtime evidence on failure: paths, statuses, logs, processes."""
+    print(f"===== DIAGNOSTICS ({label}) =====", flush=True)
+    try:
+        print("runtime status:", scrub(json.dumps(status(config), indent=2)), flush=True)
+    except Exception as exc:
+        print("runtime status unavailable:", type(exc).__name__, exc, flush=True)
+    for path in sorted(state.glob("*.json")) + sorted(state.glob("*.stop")) + sorted(state.glob("connector-*.log*")):
+        show("state file", path)
+    if managed is not None:
+        for name in ("current.json", "update.log"):
+            show("managed", managed / name)
+        for path in sorted(managed.glob("versions/*")):
+            print("managed version:", path.name, sorted(p.name for p in path.iterdir()), flush=True)
+    for path in logs:
+        show("process output", path)
+    if os.name == "nt":
+        listing = ["powershell", "-NoProfile", "-Command",
+                   "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'raincli' } | "
+                   "ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }"]
+    else:
+        listing = ["ps", "-eo", "pid,ppid,args"]
+    try:
+        output = subprocess.run(listing, capture_output=True, text=True, timeout=30).stdout
+        print("--- processes (pid ppid command) ---", flush=True)
+        print(scrub("\n".join(line for line in output.splitlines() if "raincli" in line)), flush=True)
+    except Exception as exc:
+        print("process listing unavailable:", type(exc).__name__, flush=True)
+    print("===== END DIAGNOSTICS =====", flush=True)
+
+
+def kill_tree(process):
+    if os.name == "nt":  # include the runtime and connectors behind the launcher
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True)
+    else:
+        process.kill()
+    process.wait(timeout=10)
 
 
 def main():
@@ -43,7 +96,10 @@ def main():
                                      "poll_wait": 1})
         config = root / "runtime.json"
         atomic_write_json(config, {"connectors": [str(connector)], "state_dir": str(state)})
-        process = subprocess.Popen([sys.executable, "-m", "raincli_agent", "runtime", "run", "--config", str(config)])
+        direct_log = root / "runtime-direct.log"
+        with open(direct_log, "wb") as output:
+            process = subprocess.Popen([sys.executable, "-m", "raincli_agent", "runtime", "run", "--config", str(config)],
+                                       stdout=output, stderr=subprocess.STDOUT)
         try:
             # First tick correctly reports offline until the child confirms it
             # authenticated and acquired the queue. Next tick sees unavailable Herdr.
@@ -68,14 +124,16 @@ def main():
             q.acquire_run_lock()
             q.release_run_lock()  # no orphan child holding the delivery queue
             print("PASS: real runtime/connector processes, authenticated presence write-back, singleton and graceful stop", flush=True)
+        except BaseException:
+            diagnose("direct runtime", config, state, logs=[direct_log])
+            raise
         finally:
             if process.poll() is None:
                 try:
                     request_stop(config)
                     process.wait(timeout=30)
                 except Exception:
-                    process.kill()
-                    process.wait(timeout=10)
+                    kill_tree(process)
         if os.name == "nt":
             import winreg
             from raincli_agent.runtime import startup
@@ -144,7 +202,10 @@ def main():
             updates.configure(managed, automatic=False)
             # Exercise the installed launcher and both installed environments as
             # real processes, including queue ownership across two handoffs.
-            managed_process = subprocess.Popen([sys.executable, str(launcher), "runtime", "run", "--config", str(config)])
+            launcher_log = root / "launcher.log"
+            with open(launcher_log, "wb") as output:
+                managed_process = subprocess.Popen([sys.executable, str(launcher), "runtime", "run", "--config", str(config)],
+                                                   stdout=output, stderr=subprocess.STDOUT)
             try:
                 first = wait_for(published_report)
                 assert updates.install(managed, {**release, "commit": "b" * 40})["status"] == "installed"
@@ -169,14 +230,16 @@ def main():
                 assert server.state.presence["runtime-test"] == "offline"
                 q.acquire_run_lock()
                 q.release_run_lock()
+            except BaseException:
+                diagnose("managed launcher runtime", config, state, managed, logs=[launcher_log])
+                raise
             finally:
                 if managed_process.poll() is None:
                     try:
                         request_stop(config)
                         managed_process.wait(timeout=45)
                     except Exception:
-                        managed_process.kill()
-                        managed_process.wait(timeout=10)
+                        kill_tree(managed_process)
             print("PASS: staged venv installation, live managed update/rollback handoff, opt-in updates and released queue", flush=True)
         finally:
             updates.fetch = original_fetch

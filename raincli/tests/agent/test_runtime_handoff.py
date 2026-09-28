@@ -212,3 +212,39 @@ def test_launcher_reexecutes_itself_after_a_launcher_update(tmp_path):
     finally:
         if process.poll() is None:
             process.kill()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell stand-in for the Windows venv redirector")
+def test_readiness_through_an_interpreter_redirector(tmp_path, monkeypatch):
+    """Windows venv python.exe starts the real interpreter as a child with another
+    pid. Readiness must still be confirmed, and the stop must stay graceful."""
+    from .fake_server import FakeApi
+    redirector = tmp_path / "python"
+    raincli = Path(__file__).resolve().parents[2]
+    # Deliberately not exec: the interpreter runs as a child of this wrapper.
+    redirector.write_text(f'#!/bin/sh\nPYTHONPATH="{raincli}" "{sys.executable}" "$@"\nexit $?\n')
+    redirector.chmod(0o755)
+    monkeypatch.setattr(service.sys, "executable", str(redirector))
+    with FakeApi() as server:
+        write_config(tmp_path / "agent.json", server.url, server.state.add_agent("runtime-test"))
+        atomic_write_json(tmp_path / "connector.json", {"agent_config": "agent.json", "herdr_agent": "inbox",
+                                                        "herdr_bin": "intentionally-missing-herdr",
+                                                        "state_dir": "queue", "poll_wait": 1})
+        cfg, identity, binding = load_bound(str(tmp_path / "connector.json"))
+        ensure_private_dir(tmp_path / "state")
+        worker = Worker(str(tmp_path / "connector.json"), cfg, identity, tmp_path / "state", binding)
+        try:
+            deadline = time.monotonic() + 30
+            report = worker.tick(time.monotonic())
+            while report["status"] != "unknown" and time.monotonic() < deadline:
+                time.sleep(0.2)
+                report = worker.tick(time.monotonic())
+            # "unknown" = the connector confirmed readiness and only Herdr is unavailable.
+            assert report["status"] == "unknown", worker.log_path.read_text()
+            record = __import__("json").loads(worker.ready_path.read_text())
+            assert record["pid"] != worker.process.pid  # the redirector's pid differs
+            process = worker.process
+        finally:
+            worker.retire()
+        assert process.returncode == 0  # stopped via the stop file, not killed
+        assert server.state.presence["runtime-test"] == "offline"

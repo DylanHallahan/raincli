@@ -21,6 +21,20 @@ GRACEFUL_STOP = 60  # the runtime allows each connector poll_wait + 10 s, in par
 HIDDEN = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" and sys.stdout is None else {}
 
 
+def runtime_output(root):
+    """Where the runtime's own output goes. With a console it is inherited; under
+    pythonw.exe there is none, so errors go to a private, size-capped runtime.log."""
+    if not HIDDEN:
+        return None
+    path = root / "runtime.log"
+    try:
+        if path.stat().st_size > 1024 * 1024:
+            os.replace(path, root / "runtime.log.1")
+    except OSError:
+        pass
+    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+
+
 def exit_status(code):
     # A child killed by a POSIX signal reports -N; shells report 128 + N.
     return 128 - code if code < 0 else code
@@ -109,7 +123,13 @@ def main():
                     time.sleep(1)
                     continue
                 current = (pointer, python)
-                process = subprocess.Popen([str(python), "-m", "raincli_agent", *args], stdin=subprocess.DEVNULL, **HIDDEN)
+                output = runtime_output(root)
+                try:
+                    process = subprocess.Popen([str(python), "-m", "raincli_agent", *args], stdin=subprocess.DEVNULL,
+                                               stdout=output, stderr=output, **HIDDEN)
+                finally:
+                    if output is not None:
+                        os.close(output)
                 started = time.monotonic()
             code = process.poll()
             if code == 0:
