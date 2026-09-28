@@ -67,11 +67,43 @@ def find_user_by_email(session: Session, email: str) -> User | None:
 
 
 def authenticate_user(session: Session, email: str, password: str) -> User | None:
-    user = find_user_by_email(session, email)
+    from sqlalchemy import func
+
+    # Serialize login/rehash with password changes so an old-password login cannot
+    # create a new session after another transaction has revoked existing sessions.
+    user = session.scalar(select(User).where(func.lower(User.email) == email.strip().lower())
+                          .with_for_update().execution_options(populate_existing=True))
     if user is None or not user.is_active:
         security.hash_password(password)  # equalize timing for unknown users
         return None
-    return user if security.verify_password(password, user.password_hash) else None
+    if not security.verify_password(password, user.password_hash):
+        return None
+    if security.password_needs_upgrade(user.password_hash):
+        user.password_hash = security.hash_password(password)
+        session.flush()
+    return user
+
+
+def change_password(session: Session, user_id: uuid.UUID, web_session_id: uuid.UUID,
+                    current: str, replacement: str) -> User:
+    user = session.scalar(select(User).where(User.id == user_id).with_for_update()
+                          .execution_options(populate_existing=True))
+    ws = session.scalar(select(WebSession).where(WebSession.id == web_session_id)
+                        .execution_options(populate_existing=True))
+    if (user is None or not user.is_active or ws is None or ws.user_id != user_id
+            or ws.revoked_at is not None or ws.expires_at <= now()):
+        raise PermissionDenied("your session has ended; sign in again")
+    if len(current) > 256 or not security.verify_password(current, user.password_hash):
+        raise IdentityError("the current password is not correct")
+    if not security.valid_password(replacement):
+        raise IdentityError("password must be 12-256 characters")
+    if current == replacement:
+        raise IdentityError("choose a different password")
+    user.password_hash = security.hash_password(replacement)
+    session.execute(update(WebSession).where(WebSession.user_id == user_id,
+                                            WebSession.revoked_at.is_(None)).values(revoked_at=now()))
+    session.flush()
+    return user
 
 
 def create_team(session: Session, slug: str, name: str, owner: User) -> Team:

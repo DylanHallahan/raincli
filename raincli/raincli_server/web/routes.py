@@ -44,6 +44,7 @@ CONNECTION_LABELS = {
 }
 NOTICES = {
     "signed-in": "Signed in.",
+    "password-changed": "Password changed. Other browser sessions have been signed out. Agent credentials still work.",
     "joined": "Welcome aboard. You have joined the team.",
     "sent": "Message stored on the server.",
     "duplicate": "That message was already stored; nothing was sent twice.",
@@ -253,7 +254,7 @@ def login(
 
     if limiter.blocked(ip, email):
         return fail(429, "Too many sign-in attempts. Wait a few minutes and try again.")
-    user = identity.authenticate_user(db, email, password[:256]) if email and password else None
+    user = identity.authenticate_user(db, email, password) if email and password and len(password) <= 256 else None
     if user is None:
         limiter.failure(ip, email)
         return fail(400, "That email and password combination is not correct.")
@@ -273,6 +274,43 @@ def logout(request: Request, csrf_token: str = Form(""), db: Session = Depends(g
     response = redirect(request, "/")
     auth.end_session(db, viewer, response, _settings(request))
     db.commit()
+    return response
+
+
+# Account --------------------------------------------------------------------------
+
+@router.get("/app/account", response_class=HTMLResponse)
+def account(request: Request, db: Session = Depends(get_db)):
+    return render(request, "app/account.html", viewer=app_viewer(request, db))
+
+
+@router.post("/app/account/password")
+def account_password(
+    request: Request, csrf_token: str = Form(""), current_password: str = Form(""),
+    password: str = Form(""), password_confirm: str = Form(""), db: Session = Depends(get_db),
+):
+    viewer = app_viewer(request, db, csrf_token)
+    limiter: auth.LoginLimiter = request.app.state.web_login_limiter
+    ip, email = _client_ip(request), viewer.user.email
+
+    def fail(status: int, message: str):
+        return render(request, "app/account.html", viewer=viewer, status=status, error=message)
+
+    if limiter.blocked(ip, email):
+        return fail(429, "Too many attempts. Wait a few minutes and try again.")
+    if password != password_confirm:
+        return fail(400, "The two new passwords do not match.")
+    try:
+        user = identity.change_password(db, viewer.user.id, viewer.web_session.id,
+                                        current_password, password)
+    except identity.IdentityError as exc:
+        db.rollback()
+        limiter.failure(ip, email)
+        return fail(400, str(exc).capitalize() + ".")
+    response = redirect(request, "/app/account?notice=password-changed")
+    auth.start_session(db, user, response, _settings(request))
+    db.commit()
+    limiter.success(ip, email)
     return response
 
 

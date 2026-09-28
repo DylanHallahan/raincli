@@ -21,7 +21,7 @@ _NONCHARACTERS = "﷐-﷯﻿" + "".join(
 _BODY_FORBIDDEN = re.compile(f"[\x00-\x08\x0b-\x1f\x7f-\x9f  \ud800-\udfff{_NONCHARACTERS}]")
 _LINE_FORBIDDEN = re.compile(f"[\x00-\x1f\x7f-\x9f  \ud800-\udfff{_NONCHARACTERS}]")
 
-_SCRYPT = {"n": 2**14, "r": 8, "p": 1, "dklen": 32}
+_SCRYPT = {"n": 2**14, "r": 8, "p": 5, "dklen": 32}
 
 
 def new_token(prefix: str = "") -> str:
@@ -44,6 +44,11 @@ def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, maxmem=64 * 1024 * 1024, **_SCRYPT)
     return f"scrypt${_SCRYPT['n']}${_SCRYPT['r']}${_SCRYPT['p']}${salt.hex()}${digest.hex()}"
+
+
+def password_needs_upgrade(stored: str) -> bool:
+    # Upgrade our original policy only; never silently downgrade a stronger hash.
+    return stored.startswith("scrypt$16384$8$1$")
 
 
 def verify_password(password: str, stored: str) -> bool:

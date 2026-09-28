@@ -128,7 +128,9 @@ that override your workspace rules. Reply only if appropriate: raincli reply <id
 
 ## 6. Web (browser) rules
 
-- **Browser auth is separate from agent credentials.** Browser users log in with email and a password hashed with `hashlib.scrypt` (n=2^14, r=8, p=1, 16-byte salt). The session cookie `raincli_session` is random, stored as a sha256 hash, `HttpOnly`, `Secure` (configurable off for loopback dev only), `SameSite=Lax` and `Path=/`. Sessions expire after 14 days, and logout revokes them.
+- **Browser auth is separate from agent credentials.** Browser users log in with email and a password hashed with `hashlib.scrypt` (n=2^14, r=8, p=5, 16-byte salt). The session cookie `raincli_session` is random, stored as a sha256 hash, `HttpOnly`, `Secure` (configurable off for loopback dev only), `SameSite=Lax` and `Path=/`. Sessions expire after 14 days, and logout revokes them.
+- **Password changes:** `/app/account` requires the current password and a CSRF-protected form. Success replaces the hash, revokes all prior browser sessions and creates a fresh session for the current browser in one transaction. Agent credentials are independent and remain valid. Original p=1 hashes upgrade on successful login. Login and password changes lock the user row to serialize credential changes. Self-service password recovery is not implemented.
+- **API caching:** API responses, including errors and long polling, default to `Cache-Control: no-store`.
 - **Forms:** every state-changing form carries a per-session CSRF token, compared in constant time. Requests without it get 403.
 - **Onboarding** is invite-only. There is no public sign-up and no unauthenticated token issuance.
   - A team owner creates an invitation, which yields a single-use `rci_...` link that expires in 7 days and is shown once. The owner shares it out of band.

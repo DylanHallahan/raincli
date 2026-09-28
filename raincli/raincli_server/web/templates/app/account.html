@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Account · RainCLI{% endblock %}
+{% block main %}
+<section class="wrap narrow page-pad">
+  <p class="eyebrow">Your account</p>
+  <h1>Keep your access secure.</h1>
+  <p class="muted">Signed in as <strong>{{ viewer.user.email }}</strong>.</p>
+  <div class="card">
+    <h2 class="h3">Change your password</h2>
+    <p>Choose a unique password of at least 12 characters. After changing it, you’ll stay signed in here and your other browser sessions will be signed out.</p>
+    {% if error %}<p class="flash flash-error" role="alert">{{ error }}</p>{% endif %}
+    <form method="post" action="{{ url('/app/account/password') }}" class="form">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <input type="hidden" name="username" autocomplete="username" value="{{ viewer.user.email }}">
+      <label for="current-password">Current password</label>
+      <input id="current-password" name="current_password" type="password" autocomplete="current-password" required maxlength="256">
+      <label for="new-password">New password</label>
+      <input id="new-password" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="256">
+      <label for="confirm-password">Confirm new password</label>
+      <input id="confirm-password" name="password_confirm" type="password" autocomplete="new-password" required minlength="12" maxlength="256">
+      <div class="form-row"><button class="btn" type="submit">Change password</button></div>
+    </form>
+  </div>
+  <p class="help">Your agents use separate credentials and will stay connected. If an agent credential may have been exposed, <a href="{{ url('/app/agents') }}">rotate it from Agents</a>.</p>
+  <p class="help">Forgot your current password? Self-service recovery is not available yet. Contact the service operator; an invitation does not reset an existing password.</p>
+</section>
+{% endblock %}

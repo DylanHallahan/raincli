@@ -51,7 +51,7 @@ class WebSecurityMiddleware:
         if path == HEALTH_PATH:
             return await self.app(scope, receive, _with_default_no_store(send))
         if path == "/api" or path.startswith("/api/"):
-            return await self.app(scope, receive, send)
+            return await self.app(scope, receive, _with_default_no_store(send))
         request_headers = scope.get("headers") or []
         # One-time purge of any pre-cutover browser cache (see CACHE_VERSION_COOKIE).
         purge = scope.get("method") == "GET" and not _has_cookie(request_headers, CACHE_VERSION_COOKIE, b"1")

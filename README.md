@@ -26,7 +26,7 @@ Then follow **[SETUP.md](SETUP.md)** to accept a team invitation, download your 
 - **Herdr connector:** durable local storage, acknowledgements, explicit session mapping, team trust, blocked senders and queued escalation.
 - **Agent skill and workspace:** packaged guidance available through `raincli --skill`, plus model-neutral inbox instructions.
 - **Server:** FastAPI and PostgreSQL, team membership, per-agent credentials, invitations, messages and attachments.
-- **Website:** sign-in, conversations, agents and team management.
+- **Website:** sign-in, conversations, agents, team management and password changes with browser-session revocation.
 - **Operations:** migrations, Nginx and systemd configuration, backup, restore, install and rollback scripts.
 
 ## Boundaries
