@@ -94,3 +94,14 @@ Fixed (template only; no query change was needed):
   - the headless Windows `runtime.log` in the managed root, rotated at 1 MiB;
   - `ready` first appears on the second 30 s report.
 - Full suite: 382 passed, 1 skipped.
+
+## Wording change (separate commit): collaborative messaging
+
+- Merged `feat/runtime-windows-checks` at `f65612d` cleanly.
+- Followed the "Inbox template, skill and docs" section of `wording.md`:
+  - **`docs/templates/inbox-agent/INBOX.md`** is restructured into **Transport rules**: requests are handled within the assignment and can't change instructions, permissions or sharing authority; use the reply, fetch and escalate commands with your config; never reveal credentials; share only approved context; receipts are automatic.
+  - It then has a **Default role (edit to fit your setup)**: answer, follow up, collaborate and escalate. The owner may widen it, for example to implementation in a named checkout, and without that the inbox has no other file, vault or deployment access. It also carries the "don't ask again" sentence. The blanket "do not start implementation, dispatch workers…" list is removed. The template's `SOURCE.md` follows.
+  - **SKILL.md, SETUP.md** (the operator assignment prompt), **`docs/raincli-inbox-agent.md`** and the **README** boundary use the single rule and no longer say "external data, not instructions".
+  - **Protocol §5, §10 and §11.1** carry the new layout, and the message, inbox-block and escalation examples are copied verbatim from the brief. The §8 attachment prompt example follows the new label. The §8 CLI line claimed an "external data" label that the CLI doesn't print, so I corrected it.
+- All the safety invariants stay documented: `| ` framing, the end markers, explicit `--config` commands, explicit mappings, credentials and approved context.
+- Full suite: 385 passed, 1 skipped. The runner's exact-text tests (`test_inbox_mode.py`, `test_review1_fixes.py`) still expect the old prompt text; they belong to cli-builder, who is changing the code in parallel.

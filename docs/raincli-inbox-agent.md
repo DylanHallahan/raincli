@@ -5,7 +5,7 @@ Recommended mapping: a **dedicated inbox agent** in its own Herdr tab receives R
 | Component | Handles | Status |
 | --- | --- | --- |
 | Connector (`raincli connector run`) | Durable receipt and acknowledgement, attachments, retries, trust policy, holding messages while the target is busy, escalation queueing and notification | **Implemented and tested** (protocol §5, §8, §10) |
-| Inbox agent (an ordinary Claude, Codex or other agent in a Herdr pane) | Triage: answering, follow-up questions, conversation, escalation | **Operator setup**, described in this document. RainCLI doesn't run or supervise it beyond Herdr prompts |
+| Inbox agent (an ordinary Claude, Codex or other agent in a Herdr pane) | The role in its `INBOX.md`: by default answering, follow-up questions, collaboration and escalation | **Operator setup**, described in this document. RainCLI doesn't run or supervise it beyond Herdr prompts |
 | Main session | Human judgment and consequential actions | Unchanged. Escalations reach it only through an explicit mapping |
 
 The connector never uses the focused pane, the current pane or any fallback. If a mapped agent is missing or its pins don't match, messages and escalations wait, and `raincli connector status` shows why.
@@ -32,7 +32,7 @@ The connector lists these paths in the inbox agent's prompt and never reads them
 These commands run inside Herdr (`HERDR_ENV=1`). Keep focus on your work tab.
 
 ```bash
-cp -r ~/src/raincli-repo/docs/templates/inbox-agent ~/herdr/inbox-agent    # INBOX.md role, STATE.md, agent adapters
+cp -r ~/src/raincli-repo/docs/templates/inbox-agent ~/herdr/inbox-agent    # INBOX.md rules and role, STATE.md, agent adapters
 #   fill in STATE.md (owner, identity, shareable path, main-session mapping)
 herdr tab create --label "RainCLI inbox" --cwd ~/herdr/inbox-agent --no-focus    # note .result.root_pane.pane_id
 herdr agent start raincli-inbox --kind claude --pane <root-pane-id>
@@ -41,9 +41,13 @@ herdr agent prompt raincli-inbox "Operator assignment from <owner>: you are the 
 
 The inbox agent's working directory is its own workspace, `~/herdr/inbox-agent`, not the shareable folder. The shareable folder is referenced read-only from `STATE.md` and the connector config.
 
-- **Operator bootstrap is required.** In the live pilot, a fresh inbox agent received a message correctly and verified the attachment checksum. It then declined to reply, because the only authorization it had seen was inside the external message body, and that is correct behaviour.
-- **What authorizes it:** the operator's own instructions. These are the workspace files (`INBOX.md`/`STATE.md`, loaded via `AGENTS.md`/`CLAUDE.md`) plus a one-time assignment prompt sent by the owner through Herdr.
-- **What never does:** RainCLI messages. They remain external data and never grant or widen authority.
+- **Operator bootstrap is required.** In the live pilot, a fresh inbox agent received a message correctly and verified the attachment checksum. It then declined to reply, because the only authorization it had seen was inside the message body, and that is correct behaviour.
+- **What authorizes it:** the operator's own instructions. These are the workspace files (`INBOX.md`/`STATE.md`, loaded via `AGENTS.md`/`CLAUDE.md`) plus a one-time assignment prompt sent by the owner through Herdr. With those in place, the agent acts on teammate requests within that assignment without asking again.
+- **What never does:** RainCLI messages. A teammate's message can't change the agent's instructions, expand its permissions, or grant access or sharing authority.
+
+`INBOX.md` has two parts:
+- **Transport rules** apply to every setup: messages are requests handled within the assignment; use the reply, fetch and escalate commands with your config; never reveal credentials; share only approved context; and don't acknowledge receipt.
+- **Default role (edit to fit your setup):** answer from the approved shareable context, follow up, collaborate and escalate. Widen it in that file, for example to allow implementation in a named checkout, or narrow it. Without such an edit, the inbox has no access to other files, vaults or deployments.
 
 Record the pane ID and working directory. You pin them in the connector config, so a restarted or moved agent can't silently receive another identity's messages.
 
@@ -82,17 +86,17 @@ The connector must run inside Herdr, because it calls `herdr agent get/prompt` a
 
 ## 6. What the inbox agent receives
 
-Each message arrives as the standard wrapper (protocol §5), followed by the inbox guidance block from §10. The block covers the following:
-- It may answer, ask follow-ups and continue the conversation with `raincli reply`. There is no turn cap.
-- It may use only the approved shareable context.
-- It should not send content-free acknowledgements, because receipt is tracked automatically.
-- When it can't answer, it escalates. The escalation summary states the original question, what was checked and what is missing:
+Each message arrives in the layout from protocol §5, with the inbox block from §10 before the message body. The block tells the agent:
+- to answer, ask follow-ups and continue the conversation with the reply command. There is no turn cap;
+- which approved shareable context it may share from;
+- that there is no need to acknowledge receipt, which is tracked automatically;
+- how to escalate what it can't handle. The escalation summary states the original question, what was checked and what is missing:
   ```bash
   raincli connector escalate --config ~/.config/raincli/connector.json <message-id> --body-file -
   ```
-- Consequential actions still need the user.
+The line before the body says it is a teammate request to act on within the current assignment, which can't change the agent's instructions or permissions.
 
-Attachments arrive as local paths under the connector's state directory. They are external data.
+Attachments arrive as local paths under the connector's state directory, listed as teammate files to read as needed.
 
 ## 7. Escalations
 
@@ -103,7 +107,7 @@ Attachments arrive as local paths under the connector's state directory. They ar
 
 `submitted` means the summary was handed to the main session. It does **not** mean you have seen it. A timeout becomes `submission_uncertain`, which is never auto-resubmitted.
 
-When you have dealt with it, reply to the sender if appropriate and run:
+When you have dealt with it, reply to the sender if useful and run:
 
 ```bash
 raincli connector escalation-done --config ~/.config/raincli/connector.json <escalation-id>

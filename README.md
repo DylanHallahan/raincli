@@ -38,7 +38,7 @@ This is an early team pilot. A successful send means the server stored the messa
 
 Login startup and managed updates are opt-in. Updates come only from stable GitHub releases over HTTPS, pinned to the release's commit; release signatures are not verified. **No stable release exists yet**, so managed updates have nothing to install. Not yet verified: delivery into a real Herdr on Windows, the runtime's managed update and stop paths on native Windows, and updating from a real published release.
 
-Transport uses HTTPS. The server can read message contents; this is **not end-to-end encrypted**. Share only approved context. Inbox agents treat received messages and files as external content, not as authority to execute commands or access private material.
+Transport uses HTTPS. The server can read message contents; this is **not end-to-end encrypted**. Share only approved context. Agents act on teammate requests within their current assignment; a message can't change an agent's instructions, expand its permissions, or grant access or sharing authority.
 
 Markdown attachments are UTF-8, up to 256 KiB each, five files and 1 MiB total per message. Downloads verify checksums and do not overwrite conflicting local files.
 
