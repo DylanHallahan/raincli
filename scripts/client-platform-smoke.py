@@ -160,8 +160,18 @@ def main():
                 pass
             else:
                 raise AssertionError("junction accepted beneath attachment base")
+            (shareable / "child").mkdir()
+            linked_conf = json.loads(conf.read_text(encoding="utf-8"))
+            linked_conf["shareable_context"] = [str(junction / "child")]
+            atomic_write_json(conf, linked_conf)
+            try:
+                load_connector_config(conf)
+            except ConfigError:
+                pass
+            else:
+                raise AssertionError("junction ancestor accepted for shareable context")
             junction.rmdir()
-            passed("Windows junction refused under managed attachment path")
+            passed("Windows junction refused under attachment path and above shareable context")
         link = root / "linked.md"
         try:
             link.symlink_to(report)

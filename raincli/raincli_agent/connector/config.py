@@ -99,9 +99,26 @@ def _shareable_context(data):
             raise ConfigError(f"connector config: shareable_context {p!r} is a symlink")
         if not stat.S_ISDIR(st.st_mode):
             raise ConfigError(f"connector config: shareable_context {p!r} is not a directory")
-        if os.path.normcase(os.path.realpath(p)) != os.path.normcase(os.path.normpath(p)):
-            raise ConfigError(f"connector config: shareable_context {p!r} goes through a symlink")
-        out.append(os.path.normpath(p))
+        if os.name == "nt":
+            # realpath also expands legitimate Windows 8.3 names (RUNNER~1).
+            # Inspect each ancestor rather than treating any spelling change
+            # as a link. Keep the supplied path until all ancestors are checked.
+            probe = p
+            try:
+                while True:
+                    if is_link(os.lstat(probe)):
+                        raise ConfigError(f"connector config: shareable_context {p!r} goes through a symlink or junction")
+                    parent = os.path.dirname(probe)
+                    if parent == probe:
+                        break
+                    probe = parent
+            except OSError:
+                raise ConfigError(f"connector config: cannot inspect shareable_context {p!r}") from None
+            out.append(os.path.realpath(p))
+        else:
+            if os.path.realpath(p) != os.path.normpath(p):
+                raise ConfigError(f"connector config: shareable_context {p!r} goes through a symlink")
+            out.append(os.path.normpath(p))
     return tuple(out)
 
 
