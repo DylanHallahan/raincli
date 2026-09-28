@@ -143,6 +143,7 @@ class Connector:
         self._sleep = sleep
         self._clock = clock
         self.started = False
+        self.stop_requested = lambda: False  # set by a supervisor (runtime mode)
 
     def log(self, text):
         self._log("raincli connector: " + escape_line(text))
@@ -348,6 +349,8 @@ class Connector:
                 if ready_reason:
                     self._hold(record, ready_reason, ready_detail)
                     continue
+                if self.stop_requested():
+                    break  # never start a submission once asked to stop; it stays queued
                 chosen = (record["id"], self._begin_submit(record))
                 submitted = True
         if chosen is None:
@@ -440,6 +443,8 @@ class Connector:
                 if ready_reason:
                     self._hold_escalation(esc, ready_reason, ready_detail)
                     continue
+                if self.stop_requested():
+                    break  # never start a submission once asked to stop; it stays pending
                 chosen = (esc["id"], self._begin_escalation(esc))
                 ready_reason, ready_detail = "busy", "another escalation was submitted this iteration"
         if chosen is None:
@@ -504,16 +509,23 @@ class Connector:
         while not stop_requested() and self._clock() < deadline:
             self._sleep(min(0.25, max(0.0, deadline - self._clock())))
 
-    def run_forever(self, max_iterations=None, stop_requested=None):
-        """Loop until interrupted, or until ``stop_requested()`` is true between
-        iterations. A stop never interrupts a submission in progress."""
+    def run_forever(self, max_iterations=None, stop_requested=None, max_wait=None):
+        """Loop until interrupted, or until ``stop_requested()`` is true.
+
+        Once a stop is requested no new submission starts, while one already in
+        progress completes. ``max_wait`` caps the long poll so a stop is noticed
+        promptly."""
         failures, iterations = 0, 0
+        if stop_requested is not None:
+            self.stop_requested = stop_requested
         self.start()
         while max_iterations is None or iterations < max_iterations:
             if stop_requested is not None and stop_requested():
                 return
             iterations += 1
             pending_wait = self.next_wait()
+            if max_wait is not None:
+                pending_wait = min(pending_wait, max_wait)
             try:
                 self.run_once(wait=pending_wait)
                 failures = 0

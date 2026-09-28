@@ -391,14 +391,15 @@ def cmd_watch(args):
 
 # -- connector commands ----------------------------------------------------
 
-def _connector_parts(args, need_api=True):
+def _connector_parts(args, need_api=True, loaded=None):
+    """``loaded`` is an already bound (config, agent config) pair, used as is."""
     from .connector.config import default_state_dir, load_connector_config
     from .connector.queue import Queue
 
-    cfg = load_connector_config(args.connector_config)
+    cfg = loaded[0] if loaded else load_connector_config(args.connector_config)
     api = identity = None
     if need_api or not cfg.state_dir:
-        agent_cfg = load_config(cfg.agent_config or args.agent_config or default_config_path())
+        agent_cfg = loaded[1] if loaded else load_config(cfg.agent_config or args.agent_config or default_config_path())
         api = ApiClient.from_config(agent_cfg)
     state_dir = cfg.state_dir
     if not state_dir:
@@ -413,19 +414,22 @@ def cmd_connector_run(args, herdr=None):
     from .connector.runner import Connector
 
     ready = getattr(args, "runtime_ready", None)
-    stop_requested = None
+    stop_requested = max_wait = loaded = None
     if ready:
-        # Supervised by `raincli runtime`: bind readiness to the exact config
-        # bytes and server-confirmed handle, and stop on the supervisor's request.
-        from .runtime.service import fingerprint, load_bound
-        binding = load_bound(os.path.abspath(args.connector_config))[2]
+        # Supervised by `raincli runtime`: run exactly the config loaded and bound
+        # here (readiness names its bytes and the server-confirmed handle), and
+        # stop on the supervisor's request.
+        from .runtime.service import SUPERVISED_POLL_WAIT, fingerprint, load_bound
+        cfg, agent_cfg, binding = load_bound(os.path.abspath(args.connector_config))
+        loaded, max_wait = (cfg, agent_cfg), SUPERVISED_POLL_WAIT
         stop_file = ready + ".stop"
         terminated = []
         stop_requested = lambda: bool(terminated) or os.path.exists(stop_file)
-        # SIGTERM also finishes the current iteration (an in-flight submission
-        # completes) instead of killing the connector mid-delivery.
-        signal.signal(signal.SIGTERM, lambda *_: terminated.append(True))
-    cfg, api, identity, queue = _connector_parts(args)
+        # SIGTERM and Ctrl-C finish the current iteration (an in-flight submission
+        # completes, no new one starts) instead of interrupting a delivery.
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: terminated.append(True))
+    cfg, api, identity, queue = _connector_parts(args, loaded=loaded)
     queue.acquire_run_lock()
     try:
         herdr = herdr or HerdrCli(cfg.herdr_bin, cfg.herdr_timeout)
@@ -442,7 +446,7 @@ def cmd_connector_run(args, herdr=None):
             connector.run_once(wait=0)
         else:
             try:
-                connector.run_forever(stop_requested=stop_requested)
+                connector.run_forever(stop_requested=stop_requested, max_wait=max_wait)
             except KeyboardInterrupt:
                 pass
             connector.log("stopped")

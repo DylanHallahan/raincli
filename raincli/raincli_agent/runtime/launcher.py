@@ -16,9 +16,23 @@ import subprocess
 import sys
 import time
 
-GRACEFUL_STOP = 60  # the runtime allows each connector poll_wait + 10 s, in parallel
+GRACEFUL_STOP = 120  # the runtime needs <= 100 s (service.py stop budget), connectors in parallel
 # Started at logon by pythonw.exe there is no console: do not open one per child.
 HIDDEN = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" and sys.stdout is None else {}
+
+
+def runtime_output(root):
+    """Where the runtime's own output goes. With a console it is inherited; under
+    pythonw.exe there is none, so errors go to a private, size-capped runtime.log."""
+    if not HIDDEN:
+        return None
+    path = root / "runtime.log"
+    try:
+        if path.stat().st_size > 1024 * 1024:
+            os.replace(path, root / "runtime.log.1")
+    except OSError:
+        pass
+    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
 
 
 def exit_status(code):
@@ -71,7 +85,11 @@ def stop_runtime(process, python, config):
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)],
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **HIDDEN)
     else:
-        process.kill()
+        # The runtime leads its own process group: take its connectors with it.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     process.wait(timeout=10)
 
 
@@ -109,7 +127,17 @@ def main():
                     time.sleep(1)
                     continue
                 current = (pointer, python)
-                process = subprocess.Popen([str(python), "-m", "raincli_agent", *args], stdin=subprocess.DEVNULL, **HIDDEN)
+                output = runtime_output(root)
+                try:
+                    # POSIX: a separate process group, so a terminal Ctrl-C reaches only
+                    # this launcher (which stops the runtime gracefully) and a last-resort
+                    # kill can include the connectors.
+                    process = subprocess.Popen([str(python), "-m", "raincli_agent", *args], stdin=subprocess.DEVNULL,
+                                               stdout=output, stderr=output, start_new_session=os.name != "nt",
+                                               **HIDDEN)
+                finally:
+                    if output is not None:
+                        os.close(output)
                 started = time.monotonic()
             code = process.poll()
             if code == 0:

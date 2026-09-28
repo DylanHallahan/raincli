@@ -212,3 +212,129 @@ def test_launcher_reexecutes_itself_after_a_launcher_update(tmp_path):
     finally:
         if process.poll() is None:
             process.kill()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell stand-in for the Windows venv redirector")
+def test_readiness_through_an_interpreter_redirector(tmp_path, monkeypatch):
+    """Windows venv python.exe starts the real interpreter as a child with another
+    pid. Readiness must still be confirmed, and the stop must stay graceful."""
+    from .fake_server import FakeApi
+    redirector = tmp_path / "python"
+    raincli = Path(__file__).resolve().parents[2]
+    # Deliberately not exec: the interpreter runs as a child of this wrapper.
+    redirector.write_text(f'#!/bin/sh\nPYTHONPATH="{raincli}" "{sys.executable}" "$@"\nexit $?\n')
+    redirector.chmod(0o755)
+    monkeypatch.setattr(service.sys, "executable", str(redirector))
+    with FakeApi() as server:
+        write_config(tmp_path / "agent.json", server.url, server.state.add_agent("runtime-test"))
+        atomic_write_json(tmp_path / "connector.json", {"agent_config": "agent.json", "herdr_agent": "inbox",
+                                                        "herdr_bin": "intentionally-missing-herdr",
+                                                        "state_dir": "queue", "poll_wait": 1})
+        cfg, identity, binding = load_bound(str(tmp_path / "connector.json"))
+        ensure_private_dir(tmp_path / "state")
+        worker = Worker(str(tmp_path / "connector.json"), cfg, identity, tmp_path / "state", binding)
+        try:
+            deadline = time.monotonic() + 30
+            report = worker.tick(time.monotonic())
+            while report["status"] != "unknown" and time.monotonic() < deadline:
+                time.sleep(0.2)
+                report = worker.tick(time.monotonic())
+            # "unknown" = the connector confirmed readiness and only Herdr is unavailable.
+            assert report["status"] == "unknown", worker.log_path.read_text()
+            record = __import__("json").loads(worker.ready_path.read_text())
+            assert record["pid"] != worker.process.pid  # the redirector's pid differs
+            process = worker.process
+        finally:
+            worker.retire()
+        assert process.returncode == 0  # stopped via the stop file, not killed
+        assert server.state.presence["runtime-test"] == "offline"
+
+
+FAKE_HERDR = r'''#!{python}
+import json, os, sys, time
+here = os.path.dirname(os.path.abspath(__file__))
+cmd = sys.argv[1:3]
+if cmd == ["agent", "get"]:
+    print(json.dumps({{"id": "1", "result": {{"type": "agent", "agent": {{
+        "agent": "claude", "agent_status": "idle", "pane_id": "w1:p1", "cwd": "/work", "focused": False}}}}}}))
+elif cmd == ["agent", "prompt"]:
+    open(os.path.join(here, "prompt-started"), "w").close()
+    time.sleep(float(open(os.path.join(here, "prompt-seconds")).read()))
+    open(os.path.join(here, "prompt-finished"), "w").close()
+    print(json.dumps({{"id": "2", "result": {{"type": "agent_prompt"}}}}))
+else:
+    sys.exit(2)
+'''
+
+
+@pytest.fixture
+def supervised(tmp_path, monkeypatch, fake_api):
+    """A Worker supervising a real connector child with default poll_wait and
+    prompt_timeout, a fake herdr executable and the FakeApi relay."""
+    import stat
+    herdr = tmp_path / "bin/herdr"
+    herdr.parent.mkdir()
+    herdr.write_text(FAKE_HERDR.format(python=sys.executable))
+    herdr.chmod(herdr.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[2]))
+    write_config(tmp_path / "bob.json", fake_api.url, fake_api.bob)
+    atomic_write_json(tmp_path / "connector.json", {"agent_config": "bob.json", "herdr_agent": "inbox",
+                                                    "herdr_bin": str(herdr), "state_dir": "queue",
+                                                    "trusted_senders": ["alice"]})
+    cfg, identity, binding = load_bound(str(tmp_path / "connector.json"))
+    assert (cfg.poll_wait, cfg.prompt_timeout) == (25, 30)  # the defaults
+    ensure_private_dir(tmp_path / "state")
+    worker = Worker(str(tmp_path / "connector.json"), cfg, identity, tmp_path / "state", binding)
+    deadline = time.monotonic() + 30
+    while worker.tick(time.monotonic())["status"] != "ready":
+        assert time.monotonic() < deadline, worker.log_path.read_text()
+        time.sleep(0.2)
+    worker.dir = herdr.parent
+    yield worker
+    worker.retire()
+
+
+def records(worker):
+    from raincli_agent.connector.queue import Queue
+    return Queue(worker.cfg.state_dir).all()
+
+
+def test_no_submission_starts_after_a_stop_during_the_long_poll(fake_api, supervised):
+    """R2-H1 repro 2: the stop comes while the connector idles in its long poll and
+    a message arrives afterwards. It must stay queued, not be submitted and killed."""
+    (supervised.dir / "prompt-seconds").write_text("40")
+    process = supervised.process
+    stopper = threading.Thread(target=supervised.stop)
+    started = time.monotonic()
+    stopper.start()
+    time.sleep(1)
+    send(fake_api, fake_api.alice, "bob", "arrives after the stop request")
+    stopper.join(timeout=supervised.stop_budget() + 15)
+    assert not stopper.is_alive()
+    assert process.returncode == 0  # exited on the stop file, not killed
+    assert time.monotonic() - started < 15  # within one poll slice, not after a 25 s long poll
+    assert not (supervised.dir / "prompt-started").exists()
+    assert all(r["state"] in ("received", "held") for r in records(supervised))
+
+
+def test_a_submission_in_progress_at_stop_completes(fake_api, supervised):
+    (supervised.dir / "prompt-seconds").write_text("6")
+    process = supervised.process
+    send(fake_api, fake_api.alice, "bob", "in flight when the stop comes")
+    deadline = time.monotonic() + 30
+    while not (supervised.dir / "prompt-started").exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.1)
+    supervised.stop()
+    assert process.returncode == 0 and (supervised.dir / "prompt-finished").exists()
+    assert [r["state"] for r in records(supervised)] == ["submitted"]
+
+
+def test_runtime_rejects_prompt_timeouts_beyond_the_stop_budget(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    with pytest.raises(ConfigError, match="prompt_timeout <= 60"):
+        mapping(tmp_path / "a", prompt_timeout=61)
+    cfg, identity, binding = mapping(tmp_path / "b", prompt_timeout=60)
+    worker = Worker(str(tmp_path / "b/connector.json"), cfg, identity, tmp_path, binding)
+    assert worker.stop_budget() == 5 + 60 + service.STOP_MARGIN == 80

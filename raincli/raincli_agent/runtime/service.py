@@ -21,6 +21,15 @@ from ..errors import ConfigError
 from ..fsutil import atomic_write_json, ensure_private_dir, read_private_file
 
 LOG_LIMIT = 1024 * 1024  # per connector log; one rotated generation is kept
+# Graceful-stop budget. A supervised connector long-polls in slices of at most
+# SUPERVISED_POLL_WAIT and starts no submission once asked to stop, so it exits
+# within one slice plus one in-flight prompt. Capping prompt_timeout bounds that:
+# per connector <= 5 + 60 + 15 = 80 s; the runtime adds an in-flight tick and an
+# offline publish (<= 100 s). The launcher (120 s) and the systemd unit (150 s)
+# allow more.
+SUPERVISED_POLL_WAIT = 5
+MAX_PROMPT_TIMEOUT = 60
+STOP_MARGIN = 15
 
 
 def file_sha256(path):
@@ -44,6 +53,9 @@ def load_bound(config_path):
     """Load one connector mapping and bind it to the bytes it was loaded from."""
     config_sha = file_sha256(config_path)
     cfg = load_connector_config(config_path)
+    if cfg.prompt_timeout > MAX_PROMPT_TIMEOUT:
+        raise ConfigError(f"runtime connectors need prompt_timeout <= {MAX_PROMPT_TIMEOUT} s, "
+                          "so a stop can let an in-flight delivery finish")
     if not cfg.agent_config:
         raise ConfigError("each runtime connector must name its agent_config explicitly")
     agent_sha = file_sha256(cfg.agent_config)
@@ -114,6 +126,23 @@ def availability(cfg, herdr, running):
     return "busy" if info.status == "working" else "unknown"
 
 
+def kill_tree(process):
+    """Last resort. On Windows include descendants: a venv python.exe redirector
+    would otherwise die alone and leave the interpreter holding the queue lock."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    else:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            process.kill()
+    process.wait(timeout=10)
+
+
 class Worker:
     """Supervises one connector child for one exact, loaded mapping.
 
@@ -135,10 +164,19 @@ class Worker:
         self.retired = False
         self.report = {"connector": path, "status": "offline", "reported": False}
         self.state = state
-        self.ready_path = state / ("ready-" + uuid.uuid4().hex + ".json")
-        self.stop_path = Path(str(self.ready_path) + ".stop")
+        self._new_handshake()
         self.log_path = state / ("connector-" + hashlib.sha256(path.encode()).hexdigest()[:12] + ".log")
         self.owner_fd = None  # per-queue lock: one runtime per connector, whatever its state_dir
+
+    def _new_handshake(self):
+        # A fresh path per spawn: only the child started with it can confirm
+        # readiness. Pids cannot be compared, because on Windows a venv's
+        # python.exe is a redirector whose pid differs from the interpreter's.
+        self.ready_path = self.state / ("ready-" + uuid.uuid4().hex + ".json")
+        self.stop_path = Path(str(self.ready_path) + ".stop")
+
+    def stop_budget(self):
+        return min(self.cfg.poll_wait, SUPERVISED_POLL_WAIT) + self.cfg.prompt_timeout + STOP_MARGIN
 
     def changed(self):
         return fingerprint(self.path, self.cfg.agent_config) != self.binding
@@ -183,6 +221,7 @@ class Worker:
                 os.replace(self.log_path, str(self.log_path) + ".1")
         except FileNotFoundError:
             pass
+        self._new_handshake()
         log = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             return subprocess.Popen([sys.executable, "-m", "raincli_agent", "connector", "run", "--config", self.path, "--runtime-ready", str(self.ready_path)],
@@ -196,8 +235,8 @@ class Worker:
             record = json.loads(read_private_file(self.ready_path))
         except (ConfigError, ValueError, UnicodeDecodeError):
             return False
-        return (self.handle is not None and isinstance(record, dict)
-                and record == {"pid": self.process.pid, "handle": self.handle, **self.binding})
+        return (self.handle is not None and isinstance(record, dict) and isinstance(record.get("pid"), int)
+                and {k: v for k, v in record.items() if k != "pid"} == {"handle": self.handle, **self.binding})
 
     def tick(self, now):
         if self.retired or self.changed():
@@ -252,14 +291,9 @@ class Worker:
             # queue lock; terminate only if it does not exit in time.
             try:
                 atomic_write_json(self.stop_path, {"pid": self.process.pid})
-                self.process.wait(timeout=self.cfg.poll_wait + 10)
+                self.process.wait(timeout=self.stop_budget())
             except (OSError, subprocess.TimeoutExpired):
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait(timeout=5)
+                kill_tree(self.process)
         self.process = None
         self.ready_path.unlink(missing_ok=True)
         self.stop_path.unlink(missing_ok=True)
