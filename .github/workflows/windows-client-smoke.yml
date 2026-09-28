@@ -22,3 +22,7 @@ jobs:
         env:
           PYTHONUTF8: '1'
         run: python scripts/client-platform-smoke.py
+      - name: Native Windows runtime smoke (disposable state, registry key and staged client)
+        env:
+          PYTHONUTF8: '1'
+        run: python scripts/runtime-platform-smoke.py

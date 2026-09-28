@@ -48,7 +48,14 @@ def main():
             # First tick correctly reports offline until the child confirms it
             # authenticated and acquired the queue. Next tick sees unavailable Herdr.
             wait_for(lambda: server.state.presence.get("runtime-test") == "unknown")
-            report = json.loads((state / "status.json").read_text())
+            def published_report():
+                try:
+                    value = json.loads((state / "status.json").read_text(encoding="utf-8"))
+                except (FileNotFoundError, json.JSONDecodeError):
+                    return None
+                entries = value.get("connectors", [])
+                return value if entries and entries[0].get("status") == "unknown" else None
+            report = wait_for(published_report)
             assert report["connectors"][0]["reported"]
             assert report["connectors"][0]["process_running"]
             duplicate = subprocess.run([sys.executable, "-m", "raincli_agent", "runtime", "run", "--config", str(config), "--once"],
@@ -73,15 +80,30 @@ def main():
             import winreg
             from raincli_agent.runtime import startup
             # Exercise real HKCU APIs, isolated from the actual Run key.
+            original_key = startup.REGISTRY_KEY
+            original_root = updates.default_root
             startup.REGISTRY_KEY = r"Software\RainCLI-test-" + root.name
+            updates.default_root = lambda: root / "startup-managed"
             try:
                 startup.install(config)
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, startup.REGISTRY_KEY) as key:
                     value, kind = winreg.QueryValueEx(key, startup.REGISTRY_VALUE)
                     assert kind == winreg.REG_SZ and "runtime" in value and str(config) in value
                 startup.remove()
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, startup.REGISTRY_KEY) as key:
+                    try:
+                        winreg.QueryValueEx(key, startup.REGISTRY_VALUE)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise AssertionError("Windows logon value remains after removal")
             finally:
-                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, startup.REGISTRY_KEY)
+                try:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, startup.REGISTRY_KEY)
+                except FileNotFoundError:
+                    pass
+                startup.REGISTRY_KEY = original_key
+                updates.default_root = original_root
             print("PASS: Windows login entry install/remove using an isolated test registry key", flush=True)
         else:
             unit = root / "raincli-runtime.service"
@@ -110,12 +132,42 @@ def main():
             assert result.stdout.strip() == "raincli " + __version__
             assert updates.configure(managed, automatic=True)["automatic"] is True
             updates.configure(managed, automatic=False)
-            assert updates.install(managed, {**release, "commit": "b" * 40})["status"] == "installed"
-            assert updates.read_pointer(managed)["previous"]["commit"] == "a" * 40
-            updates.configure(managed, rollback=True)
-            assert updates.read_pointer(managed)["commit"] == "a" * 40
-            assert updates.read_pointer(managed)["automatic"] is False
-            print("PASS: real staged venv installation, managed launcher, opt-in updates and rollback", flush=True)
+            # Exercise the installed launcher and both installed environments as
+            # real processes, including queue ownership across two handoffs.
+            managed_process = subprocess.Popen([sys.executable, str(launcher), "runtime", "run", "--config", str(config)])
+            try:
+                first = wait_for(published_report)
+                assert updates.install(managed, {**release, "commit": "b" * 40})["status"] == "installed"
+                assert updates.read_pointer(managed)["previous"]["commit"] == "a" * 40
+
+                def replacement(previous):
+                    report = published_report()
+                    if not report or report["instance"] == previous["instance"]:
+                        return None
+                    assert report["pid"] != previous["pid"]
+                    assert report["connectors"][0]["child_pid"] != previous["connectors"][0]["child_pid"]
+                    assert report["connectors"][0]["reported"]
+                    return report
+
+                second = wait_for(lambda: replacement(first), timeout=75)
+                updates.configure(managed, rollback=True)
+                assert updates.read_pointer(managed)["commit"] == "a" * 40
+                assert updates.read_pointer(managed)["automatic"] is False
+                wait_for(lambda: replacement(second), timeout=75)
+                request_stop(config)
+                assert managed_process.wait(timeout=45) == 0
+                assert server.state.presence["runtime-test"] == "offline"
+                q.acquire_run_lock()
+                q.release_run_lock()
+            finally:
+                if managed_process.poll() is None:
+                    try:
+                        request_stop(config)
+                        managed_process.wait(timeout=45)
+                    except Exception:
+                        managed_process.kill()
+                        managed_process.wait(timeout=10)
+            print("PASS: staged venv installation, live managed update/rollback handoff, opt-in updates and released queue", flush=True)
         finally:
             updates.fetch = original_fetch
     print("Runtime smoke passed. Fake relay, unavailable Herdr; no production messages, login restart or GitHub release publication tested.")
