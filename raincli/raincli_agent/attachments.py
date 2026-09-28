@@ -13,7 +13,8 @@ import re
 import stat
 
 from .errors import EXIT_CONFLICT, RainError
-from .fsutil import fsync_dir, makedirs_durable
+from .fsutil import (fsync_dir, makedirs_durable, mkdir_private, create_private,
+                     open_read_nofollow, is_link)
 from .text import escape_line
 
 MAX_BYTES = 256 * 1024
@@ -80,7 +81,7 @@ def load_for_send(paths):
         try:
             # O_NOFOLLOW: a symlinked source (say report.md -> ~/.ssh/id_ed25519)
             # is refused instead of silently uploading its target.
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+            fd = open_read_nofollow(path)
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise AttachmentError(
@@ -142,12 +143,12 @@ def prepare_dir(base, *components):
             raise AttachmentError(f"refusing directory component {escape_line(name)!r}")
         path = os.path.join(current, name)
         try:
-            os.mkdir(path, 0o700)
+            mkdir_private(path, 0o700)
             fsync_dir(current)
         except FileExistsError:
             pass
         st = os.lstat(path)
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        if is_link(st) or not stat.S_ISDIR(st.st_mode):
             raise AttachmentError(f"{escape_line(path)} is a symlink or not a directory; refusing it")
         current = path
     return current
@@ -161,9 +162,9 @@ def existing_matches(target, sha):
         st = os.lstat(target)
     except FileNotFoundError:
         return None
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+    if is_link(st) or not stat.S_ISREG(st.st_mode):
         raise AttachmentConflict(f"{escape_line(target)} exists and is not a regular file; left untouched")
-    with open(target, "rb") as fh:
+    with os.fdopen(open_read_nofollow(target), "rb") as fh:
         if sha256_hex(fh.read()) == sha:
             return True
     raise AttachmentConflict(f"{escape_line(target)} exists with different content; left untouched")
@@ -179,7 +180,7 @@ def write_exclusive(directory, name, data, sha, mode=0o600):
     if existing_matches(target, sha):
         return "present"
     tmp = os.path.join(directory, f".{name}.{os.getpid()}.{os.urandom(4).hex()}.part")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    fd = create_private(tmp, mode)
     try:
         try:
             view = memoryview(data)

@@ -7,6 +7,7 @@ import stat
 from dataclasses import dataclass, field
 
 from ..errors import ConfigError
+from ..fsutil import is_link
 
 HANDLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 # Herdr's agent-name grammar. Pane ids such as "w9:p1" are deliberately not
@@ -94,11 +95,11 @@ def _shareable_context(data):
             st = os.lstat(p)
         except OSError:
             raise ConfigError(f"connector config: shareable_context {p!r} does not exist") from None
-        if stat.S_ISLNK(st.st_mode):
+        if is_link(st):
             raise ConfigError(f"connector config: shareable_context {p!r} is a symlink")
         if not stat.S_ISDIR(st.st_mode):
             raise ConfigError(f"connector config: shareable_context {p!r} is not a directory")
-        if os.path.realpath(p) != os.path.normpath(p):
+        if os.path.normcase(os.path.realpath(p)) != os.path.normcase(os.path.normpath(p)):
             raise ConfigError(f"connector config: shareable_context {p!r} goes through a symlink")
         out.append(os.path.normpath(p))
     return tuple(out)

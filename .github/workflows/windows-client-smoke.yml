@@ -1,0 +1,24 @@
+name: Manual Windows client smoke
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-client:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install client only
+        run: python -m pip install --no-deps ./raincli
+      - name: Native Windows client smoke (disposable fake relay and Herdr)
+        env:
+          PYTHONUTF8: '1'
+        run: python scripts/client-platform-smoke.py

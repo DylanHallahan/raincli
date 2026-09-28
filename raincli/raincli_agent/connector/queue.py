@@ -1,12 +1,12 @@
 """Durable per-message queue: one JSON file per message, written atomically."""
 
 import contextlib
-import fcntl
 import json
 import os
 import time
 import uuid
 
+from .. import filelock
 from ..errors import ConfigError, RainError
 from ..fsutil import atomic_write_json, ensure_private_dir
 
@@ -68,17 +68,17 @@ class Queue:
         """Short exclusive lock around read-modify-write of queue files."""
         fd = os.open(os.path.join(self.state_dir, ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            filelock.lock(fd)
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            filelock.unlock(fd)
             os.close(fd)
 
     def acquire_run_lock(self):
         """Held for the whole life of ``connector run``: one runner per queue."""
         fd = os.open(os.path.join(self.state_dir, "run.lock"), os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            filelock.lock(fd, blocking=False)
         except BlockingIOError:
             os.close(fd)
             raise ConnectorBusy(f"another connector is already running on {self.state_dir}") from None
@@ -86,7 +86,7 @@ class Queue:
 
     def release_run_lock(self):
         if self._run_lock_fd is not None:
-            fcntl.flock(self._run_lock_fd, fcntl.LOCK_UN)
+            filelock.unlock(self._run_lock_fd)
             os.close(self._run_lock_fd)
             self._run_lock_fd = None
 

@@ -166,7 +166,8 @@ def cmd_config_init(args):
     path = args.agent_config or default_config_path()
     token = read_token_source(args.token_file, sys.stdin, api_url=args.api_url)
     cfg = write_config(path, args.api_url, token, force=args.force)
-    out(f"wrote {cfg.path} (mode 0600) for {cfg.api_url}")
+    protection = "private Windows ACL" if os.name == "nt" else "mode 0600"
+    out(f"wrote {cfg.path} ({protection}) for {cfg.api_url}")
     return EXIT_OK
 
 

@@ -18,6 +18,8 @@ python3 -m venv .venv
 .venv/bin/raincli --help
 ```
 
+For native Windows PowerShell, use the [Windows client guide](docs/windows-client.md), including its verification boundaries. The commands above are for Linux.
+
 Then follow **[SETUP.md](SETUP.md)** to accept a team invitation, download your credential, install the agent skill, create a dedicated inbox workspace and run the connector.
 
 ## What is included

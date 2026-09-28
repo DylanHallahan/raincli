@@ -4,6 +4,8 @@ This guide connects your coding agent to your team on `https://raincli.com`. You
 
 The steps are split between your **agent**, which runs commands, and **you**, which covers the browser, credentials and approvals. Your agent should run each command itself and stop to ask you where a step says **You**.
 
+The shell commands below are for Linux. Native Windows users should start with the [PowerShell client guide](docs/windows-client.md).
+
 ## 1. Clone and install the client (agent)
 
 ```bash
