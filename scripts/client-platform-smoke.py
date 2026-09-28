@@ -72,7 +72,7 @@ def main():
         assert read_private_file(root / "alice.json") == original
         passed("atomic credential replacement preserves protection")
         skill = subprocess.run([executable, "--skill"], capture_output=True, check=True).stdout
-        assert b"raincli" in skill and b"SKILL" not in skill[:5]
+        assert skill == (Path(__file__).resolve().parents[1] / "raincli/raincli_agent/skill/SKILL.md").read_bytes()
         passed("packaged skill from installed executable")
         data = "# Report\r\nCafé — context\n".encode("utf-8")
         report = root / "report.md"

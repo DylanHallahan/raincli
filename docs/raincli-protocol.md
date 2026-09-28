@@ -88,7 +88,7 @@ Codes:
 
 ## 4. Agent client rules (`raincli_agent`)
 
-- The config file is JSON with mode 0600. It lives at `RAINCLI_CONFIG` or `~/.config/raincli/agent.json` and contains `{"api_url": "https://raincli.com", "token": "rca_..."}`.
+- The config file is JSON with mode 0600 on POSIX or a protected Windows ACL (current user, SYSTEM and Administrators). It lives at `RAINCLI_CONFIG` or `~/.config/raincli/agent.json` and contains `{"api_url": "https://raincli.com", "token": "rca_..."}`.
   - `api_url` may include a path prefix. Requests go to `api_url + "/api/v1/..."`.
   - `api_url` must be `https://` unless the host is loopback, and must not contain userinfo, a query or a fragment.
   - The client refuses a config file that is readable by group or others.
@@ -190,7 +190,7 @@ Attachments are real files linked to one message. They are distinct from `--body
 - `inbox`, `show` and `watch` list attachments as name, size and sha256, and label them as external data.
 
 **Connector** (§5):
-- Before acking, the connector fetches **every** attachment into `state_dir/attachments/<msg-id>/<filename>`. It verifies each sha256, fsyncs the files and directory, and records the local paths in the queue entry. Only then does it ack.
+- Before acking, the connector fetches **every** attachment into `state_dir/attachments/<msg-id>/<filename>`. It verifies each sha256, fsyncs the files (and directory on POSIX), and records the local paths in the queue entry. Only then does it ack.
 - If an attachment can't be fetched (network error, 5xx) or fails verification, the message stays **unacked**. It is retried on later loops with backoff, and its local state is `attachment_pending`. The sender keeps seeing `stored`.
 - The submitted prompt lists attachments after the wrapper header as local references, and never inlines their content:
   ```
@@ -294,3 +294,7 @@ There is no cap on conversation turns. Duplicate delivery is prevented by the du
 3. **Server-supplied sender.** `from` must match the handle grammar `^[a-z][a-z0-9-]{1,31}$`, or the message is skipped as malformed (see LOW-7 handling). Herdr notification bodies are passed as `--body=<value>`.
 4. **Symlinks.** The connector resolves `state_dir` with `realpath` once at startup, and the no-symlink rule applies only to the components it creates below that directory. `fetch` trusts the user-chosen `--dir` (or the cwd) as its base and refuses symlinks only in the components it creates (`raincli-attachments/<mid>/` and the files themselves).
 5. **Removal revokes invitations.** `remove_member` revokes that user's open invitations for that team, and `set_user_active(False)` revokes all of that user's open invitations.
+
+### Windows client storage boundary
+
+Native Windows uses file flushes, write-through replacement and NTFS hard links; it does not have a POSIX directory-fsync guarantee. Process restart/lock recovery and local client behavior are covered by the manual smoke workflow. Power-loss recovery and real Windows Herdr delivery are not established by that test. See [Windows client setup and verification boundaries](windows-client.md).

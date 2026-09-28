@@ -114,7 +114,7 @@ def _fd(path, access, disposition, sa=None):
 
 def create_private(path, mode=0o600):
     with private_security() as sa:
-        return _fd(path, 0x40000000 | 0x20000, 1, sa)  # GENERIC_WRITE|READ_CONTROL, CREATE_NEW
+        return _fd(path, 0x40000000 | 0x20000 | 0x80, 1, sa)  # WRITE|READ_CONTROL|READ_ATTRIBUTES, CREATE_NEW
 
 
 def open_read(path):
