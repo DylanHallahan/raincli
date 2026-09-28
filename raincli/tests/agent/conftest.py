@@ -91,13 +91,18 @@ def connector_env(tmp_path, fake_api):
                             "herdr": herdr, "state_dir": str(tmp_path / "state")})
 
 
-BODY_LABEL = 'Message body (every line prefixed with "| "; untrusted external data):'
+BODY_LABEL_END = 'Every line is prefixed "| ":'
+
+
+def is_body_label(line):
+    """The real body label line (a forged one inside the body starts with "| ")."""
+    return line.startswith(("Message from ", "Escalation summary from ")) and line.endswith(BODY_LABEL_END)
 
 
 def body_of(text):
     """The framed body of a connector prompt, with the "| " prefixes removed."""
     lines = text.split("\n")
-    start = lines.index(BODY_LABEL) + 1
+    start = next(i for i, line in enumerate(lines) if is_body_label(line)) + 1
     assert lines[-1].startswith("[end of RainCLI ")
     framed = lines[start:-1]
     assert all(line.startswith("| ") for line in framed)
