@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -91,6 +92,17 @@ def read_pointer(root):
         raise
 
 
+def write_pointer(root, pointer):
+    # On Windows a replace fails while the launcher briefly has the pointer open.
+    for attempt in range(50):
+        try:
+            return atomic_write_json(root / "current.json", pointer)
+        except PermissionError:
+            if os.name != "nt" or attempt == 49:
+                raise
+            time.sleep(0.1)
+
+
 def install(root=None, release=None):
     root = Path(root or default_root()).expanduser().resolve()
     ensure_private_dir(root)
@@ -127,7 +139,7 @@ def install(root=None, release=None):
             atomic_write_bytes(root / "launch.py", bootstrap)
         pointer = {**release, "python": str(python), "automatic": old.get("automatic", False),
                    "previous": {k: old[k] for k in ("tag", "commit", "python") if k in old}}
-        atomic_write_json(root / "current.json", pointer)
+        write_pointer(root, pointer)
         stage = None  # successful versions remain available for rollback
         return {"status": "installed", **release, "launcher": str(root / "launch.py")}
     finally:
@@ -151,7 +163,7 @@ def configure(root=None, automatic=None, rollback=False):
             current = {**previous, "automatic": False, "previous": {k: current[k] for k in ("tag", "commit", "python")}}
         if automatic is not None:
             current["automatic"] = automatic
-        atomic_write_json(root / "current.json", current)
+        write_pointer(root, current)
         return {"tag": current["tag"], "automatic": current["automatic"]}
     finally:
         lock.release_run_lock()

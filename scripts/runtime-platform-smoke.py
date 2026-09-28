@@ -88,7 +88,13 @@ def main():
                 startup.install(config)
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, startup.REGISTRY_KEY) as key:
                     value, kind = winreg.QueryValueEx(key, startup.REGISTRY_VALUE)
-                    assert kind == winreg.REG_SZ and "runtime" in value and str(config) in value
+                # The product stores the resolved long path; the runner's TEMP may
+                # be an 8.3 short path (RUNNER~1), so compare against config.resolve().
+                expected = startup.windows_command_line(startup.command(config))
+                resolved = '"' + str(config.resolve()) + '"'
+                # The value holds paths and fixed words only, never a credential.
+                assert kind == winreg.REG_SZ and value == expected and resolved in value and " \"runtime\" \"run\" " in value, (
+                    f"Run value kind={kind} (REG_SZ={winreg.REG_SZ}) value={value!r} expected={expected!r} config={resolved}")
                 startup.remove()
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, startup.REGISTRY_KEY) as key:
                     try:

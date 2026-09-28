@@ -495,10 +495,23 @@ class Connector:
                    or any(e["state"] == q.ESC_PENDING for e in self.queue.escalations()))
         return 0 if pending else self.config.poll_wait
 
-    def run_forever(self, max_iterations=None):
+    def _pause(self, delay, stop_requested):
+        """Sleep, returning early once a supervisor asks the connector to stop."""
+        if stop_requested is None:
+            self._sleep(delay)
+            return
+        deadline = self._clock() + delay
+        while not stop_requested() and self._clock() < deadline:
+            self._sleep(min(0.25, max(0.0, deadline - self._clock())))
+
+    def run_forever(self, max_iterations=None, stop_requested=None):
+        """Loop until interrupted, or until ``stop_requested()`` is true between
+        iterations. A stop never interrupts a submission in progress."""
         failures, iterations = 0, 0
         self.start()
         while max_iterations is None or iterations < max_iterations:
+            if stop_requested is not None and stop_requested():
+                return
             iterations += 1
             pending_wait = self.next_wait()
             try:
@@ -510,7 +523,7 @@ class Connector:
                 failures += 1
                 delay = random.uniform(0, min(60.0, 2.0 ** failures))
                 self.log(f"iteration failed ({exc}); retrying in {delay:.1f}s")
-                self._sleep(delay)
+                self._pause(delay, stop_requested)
                 continue
             if pending_wait == 0:
-                self._sleep(self.config.recheck_interval)
+                self._pause(self.config.recheck_interval, stop_requested)
