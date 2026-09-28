@@ -432,7 +432,7 @@ def cmd_connector_run(args, herdr=None):
     cfg, api, identity, queue = _connector_parts(args, loaded=loaded)
     queue.acquire_run_lock()
     try:
-        herdr = herdr or HerdrCli(cfg.herdr_bin, cfg.herdr_timeout)
+        herdr = herdr or HerdrCli(cfg.herdr_bin, cfg.herdr_timeout, own_session=bool(ready))
         connector = Connector(cfg, api, herdr, queue, identity=identity,
                               agent_config_path=cfg.agent_config or args.agent_config or default_config_path())
         connector.log(f"serving {cfg.herdr_agent} from {queue.state_dir}")

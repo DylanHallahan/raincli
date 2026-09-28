@@ -43,7 +43,7 @@
 1. **Config edits while the runtime runs:** editing a connector config, its agent config (for example a token rotation) or `runtime.json` stops that connector gracefully and marks the old identity offline. The mapping is revalidated before anything more is published. An invalid edit leaves the connector offline, with `"error": "config_invalid"` in `runtime status`, until it is fixed. A `state_dir` change still needs a runtime restart.
 2. **Presence is published only after `/me` succeeds** for that connector's credential. Until then, `runtime status` shows the error type and nothing is published.
 3. **Graceful stop:** stop, update, rollback, config retirement, `systemctl --user stop` and Ctrl-C let a delivery already in progress finish. No new delivery starts after a stop; messages that arrive meanwhile stay queued for the next start. A stop takes up to `min(poll_wait, 5) + prompt_timeout + 15` s per connector (in parallel), usually under 5 s when idle. **Runtime connectors must have `prompt_timeout` ≤ 60 s** (it's rejected at runtime load). Supervised connectors long-poll in slices of at most 5 s.
-4. **Stop and status:**
+4. **Stop and status** (an invalid live edit also records a short `"error_reason"`, such as the `prompt_timeout` limit; it names paths and limits only):
    - `runtime stop` now prints `{"status": "not_running"}` when no runtime is live, instead of claiming `stop_requested`;
    - `runtime status` shows `"status": "starting" | "running" | "stopped"`;
    - it may carry `"error": "config_invalid"` or, per connector, `"connector_owned_by_another_runtime"` or `"config_changed"`.
@@ -144,4 +144,32 @@ The smoke's cleanup now kills whole process trees on Windows.
 - `runtime/launcher.py`: `GRACEFUL_STOP` 120, a new session and killpg.
 - `runtime/startup.py`: `TimeoutStopSec` 150.
 - `runtime/updates.py`: launcher sync before the pointer.
+- Tests: three new tests in `test_runtime_handoff.py`.
+
+## Review round 3 (of 10518a5): remaining lows
+
+Context: review 3 rated 10518a5 **ready with caveats**, and native Windows run 36494703687 passed on 3.11 and 3.14.
+
+| ID | Status | Resolution | Test |
+|---|---|---|---|
+| **R3-L1** (= R2-L2): Ctrl-C on an unmanaged foreground `runtime run` interrupts the Herdr prompt | **Fixed (POSIX only)** | A supervised connector (`--runtime-ready`) runs its `herdr` subprocesses with `start_new_session=True` (`HerdrCli(own_session=True)`). A terminal SIGINT therefore reaches the connector, which treats it as its stop flag, but not the prompt in flight. The delivery finishes as `submitted` and the connector exits 0. **Windows spawn behaviour is unchanged:** `own_session` is forced off when `os.name == "nt"`. A console Ctrl-C there stays a documented limit (the managed/logon path has no console). Standalone `connector run` is unchanged. | `test_ctrl_c_on_a_foreground_runtime_lets_the_prompt_finish`: SIGINT to the whole group during a 4 s fake prompt gives rc 0, `prompt-finished` and `submitted`. It **fails without the fix.** |
+| **R3-L2**: handshake files leak after a crash | **Fixed** | `service.clean_handshakes(state)` runs at runtime start, after the state dir's run lock is acquired and before any Worker exists. It removes only regular files named exactly `ready-<32 hex>.json` or `ready-<32 hex>.json.stop` in that private dir, without following symlinks. | `test_startup_removes_leaked_handshake_files_only` (leaked files removed; `ready-notes.json`, logs and status kept) |
+| **R3-L3**: `config_invalid` without a reason | **Fixed** | `Supervisor.refresh` keeps the `ConfigError` message as `error_reason` in `status.json`. These messages carry paths and limits only; token-shaped text is redacted anyway, and the reason is capped at 300 characters. The reason clears once the config is valid. | `test_invalid_live_edit_records_a_secret_free_reason` |
+| **R3-L4**: smoke diagnostics list every `raincli` process | **Fixed** | The process listing (PowerShell `Win32_Process` or `ps`) is filtered to command lines that contain the smoke's own temporary root, in both its given and resolved spelling (case-insensitive on Windows). | Manual check: a process under the smoke root was listed, and an unrelated `…/raincli/…` process was not. |
+| **Observation:** a stop during a config retirement can run retirements one after another | Not changed | Needs a config edit and a stop within the same window. The launcher's fallback is now tree-wide, so the worst case is a forced stop, not an orphan. Documented as a limit. | — |
+
+**Verification:** full suite `382 passed, 1 skipped`; Linux runtime smoke exit 0.
+
+**Windows-affecting code changed: YES (small).**
+- `service.run` now calls `clean_handshakes` at startup on every platform.
+- `status.json` gains `error_reason`.
+- The smoke's failure-only process listing changed its PowerShell filter.
+- The Herdr session change is a no-op on Windows.
+- A rerun is advisable for completeness; the risk is low.
+
+**Delta since 10518a5:**
+- `connector/herdr.py`: `own_session`.
+- `cli.py`: passes `own_session` in runtime mode.
+- `runtime/service.py`: `clean_handshakes` and `error_reason`.
+- `scripts/runtime-platform-smoke.py`: the process filter.
 - Tests: three new tests in `test_runtime_handoff.py`.

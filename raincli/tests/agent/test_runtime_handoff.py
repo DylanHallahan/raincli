@@ -338,3 +338,79 @@ def test_runtime_rejects_prompt_timeouts_beyond_the_stop_budget(tmp_path):
     cfg, identity, binding = mapping(tmp_path / "b", prompt_timeout=60)
     worker = Worker(str(tmp_path / "b/connector.json"), cfg, identity, tmp_path, binding)
     assert worker.stop_budget() == 5 + 60 + service.STOP_MARGIN == 80
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal process groups")
+def test_ctrl_c_on_a_foreground_runtime_lets_the_prompt_finish(tmp_path, monkeypatch, fake_api):
+    """R3-L1: a terminal Ctrl-C reaches the whole foreground process group. The
+    supervised connector stops after the delivery, and Herdr's prompt, in its own
+    session, is not interrupted."""
+    import signal
+    import stat
+    herdr = tmp_path / "bin/herdr"
+    herdr.parent.mkdir()
+    herdr.write_text(FAKE_HERDR.format(python=sys.executable))
+    herdr.chmod(herdr.stat().st_mode | stat.S_IEXEC)
+    (herdr.parent / "prompt-seconds").write_text("4")
+    write_config(tmp_path / "bob.json", fake_api.url, fake_api.bob)
+    atomic_write_json(tmp_path / "connector.json", {"agent_config": "bob.json", "herdr_agent": "inbox",
+                                                    "herdr_bin": str(herdr), "state_dir": "queue",
+                                                    "trusted_senders": ["alice"], "poll_wait": 1})
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])}
+    ready = tmp_path / "ready-handshake.json"
+    # A new session stands in for the terminal's foreground process group.
+    child = subprocess.Popen([sys.executable, "-m", "raincli_agent", "connector", "run", "--config",
+                              str(tmp_path / "connector.json"), "--runtime-ready", str(ready)],
+                             env=env, start_new_session=True, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists():
+            assert time.monotonic() < deadline and child.poll() is None, child.stderr.read()
+            time.sleep(0.1)
+        send(fake_api, fake_api.alice, "bob", "in flight at Ctrl-C")
+        while not (herdr.parent / "prompt-started").exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        os.killpg(child.pid, signal.SIGINT)
+        assert child.wait(timeout=30) == 0
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+    assert (herdr.parent / "prompt-finished").exists()
+    from raincli_agent.connector.queue import Queue
+    assert [r["state"] for r in Queue(str(tmp_path / "queue")).all()] == ["submitted"]
+
+
+def test_startup_removes_leaked_handshake_files_only(tmp_path, monkeypatch):
+    """R3-L2: handshake files left by a crashed runtime are removed at startup,
+    under the state lock; nothing else in the private state dir is touched."""
+    mapping(tmp_path)
+    config = tmp_path / "runtime.json"
+    atomic_write_json(config, {"connectors": ["connector.json"], "state_dir": "state"})
+    state = tmp_path / "state"
+    ensure_private_dir(state)
+    leaked = [state / ("ready-" + "a" * 32 + ".json"), state / ("ready-" + "b" * 32 + ".json.stop")]
+    kept = [state / "ready-notes.json", state / ("connector-" + "c" * 12 + ".log"), state / "status.json"]
+    for path in leaked + kept:
+        path.write_text("{}")
+    monkeypatch.setattr(Worker, "tick", lambda self, now: {"connector": self.path, "status": "offline"})
+    monkeypatch.setattr(Worker, "stop", lambda self: None)
+    service.run(config, once=True)
+    assert not any(p.exists() for p in leaked)
+    assert all(p.exists() for p in kept)
+
+
+def test_invalid_live_edit_records_a_secret_free_reason(tmp_path, monkeypatch):
+    """R3-L3: runtime status says why a live edit was refused."""
+    import concurrent.futures
+    cfg, identity, binding = mapping(tmp_path)
+    ensure_private_dir(tmp_path / "state")
+    atomic_write_json(tmp_path / "runtime.json", {"connectors": ["connector.json"], "state_dir": "state"})
+    path, state, configs = load_runtime(tmp_path / "runtime.json")
+    supervisor = service.Supervisor(path, state, configs, service.file_sha256(path))
+    atomic_write_json(tmp_path / "connector.json", {"agent_config": "agent.json", "herdr_agent": "inbox",
+                                                    "state_dir": "queue", "prompt_timeout": 90})
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        supervisor.refresh(pool)
+    assert supervisor.error == "config_invalid"
+    assert "prompt_timeout <= 60" in supervisor.reason and "rca_" not in supervisor.reason

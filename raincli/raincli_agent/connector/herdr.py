@@ -7,6 +7,7 @@ way to address the focused or current pane: every call names its target.
 """
 
 import json
+import os
 import subprocess
 import threading
 from dataclasses import dataclass, field, replace
@@ -88,14 +89,18 @@ def _is_not_found(code, message):
 class HerdrCli(HerdrBoundary):
     """Real boundary: ``herdr agent get`` and ``herdr agent prompt``."""
 
-    def __init__(self, binary="herdr", timeout=10.0):
+    def __init__(self, binary="herdr", timeout=10.0, own_session=False):
         self.binary = binary
         self.timeout = timeout
+        # POSIX only: keep a terminal Ctrl-C from reaching a prompt in flight; the
+        # supervised connector finishes it and then stops. Windows is unchanged.
+        self.own_session = own_session and os.name != "nt"
 
     def _run(self, argv, timeout):
         try:
             return subprocess.run([self.binary, *argv], capture_output=True, text=True,
-                                  timeout=timeout, shell=False, stdin=subprocess.DEVNULL)
+                                  timeout=timeout, shell=False, stdin=subprocess.DEVNULL,
+                                  start_new_session=self.own_session)
         except subprocess.TimeoutExpired:
             raise HerdrTimeout(f"herdr {argv[0]} {argv[1]} timed out after {timeout}s") from None
         except OSError as exc:

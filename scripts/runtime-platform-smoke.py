@@ -46,7 +46,12 @@ def show(label, path, limit=6000):
 
 
 def diagnose(label, config, state, managed=None, logs=()):
-    """Print local runtime evidence on failure: paths, statuses, logs, processes."""
+    """Print local runtime evidence on failure: paths, statuses, logs, processes.
+
+    Only processes whose command line names this smoke's temporary root are
+    listed, so unrelated sessions on the machine are never printed."""
+    root = config.parent
+    markers = {str(root), str(root.resolve())}
     print(f"===== DIAGNOSTICS ({label}) =====", flush=True)
     try:
         print("runtime status:", scrub(json.dumps(status(config), indent=2)), flush=True)
@@ -63,14 +68,16 @@ def diagnose(label, config, state, managed=None, logs=()):
         show("process output", path)
     if os.name == "nt":
         listing = ["powershell", "-NoProfile", "-Command",
-                   "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'raincli' } | "
+                   "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | "
                    "ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }"]
     else:
         listing = ["ps", "-eo", "pid,ppid,args"]
     try:
         output = subprocess.run(listing, capture_output=True, text=True, timeout=30).stdout
-        print("--- processes (pid ppid command) ---", flush=True)
-        print(scrub("\n".join(line for line in output.splitlines() if "raincli" in line)), flush=True)
+        fold = str.casefold if os.name == "nt" else str
+        ours = [line for line in output.splitlines() if any(fold(m) in fold(line) for m in markers)]
+        print("--- processes started by this smoke (pid ppid command) ---", flush=True)
+        print(scrub("\n".join(ours)), flush=True)
     except Exception as exc:
         print("process listing unavailable:", type(exc).__name__, flush=True)
     print("===== END DIAGNOSTICS =====", flush=True)
