@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -310,7 +311,7 @@ class Supervisor:
         self.path, self.state = path, state
         self.workers = [Worker(p, cfg, identity, state, binding) for p, cfg, identity, binding in configs]
         self.seen = (runtime_sha, tuple(w.binding for w in self.workers))
-        self.error = None
+        self.error = self.reason = None
 
     def _snapshot(self):
         return file_sha256(self.path), tuple(fingerprint(w.path, w.cfg.agent_config) for w in self.workers)
@@ -328,10 +329,12 @@ class Supervisor:
             _, state, configs = load_runtime(self.path)
             if state != self.state:
                 raise ConfigError("runtime state_dir changes require a restart")
-        except ConfigError:
+        except ConfigError as exc:
             # Changed mappings stay retired (offline, unpublished) until a
-            # further edit makes the whole runtime config valid again.
+            # further edit makes the whole runtime config valid again. Config
+            # errors name paths and limits only; redact token-shaped text anyway.
             self.seen, self.error = snapshot, "config_invalid"
+            self.reason = re.sub(r"rca_[A-Za-z0-9_-]+", "rca_<redacted>", str(exc))[:300]
             return
         current = {w.path: w for w in self.workers if not w.retired}
         workers = []
@@ -343,8 +346,22 @@ class Supervisor:
                 worker = Worker(p, cfg, identity, state, binding)
             workers.append(worker)
         list(pool.map(lambda w: w.retire(), current.values()))  # removed from the runtime config
-        self.workers, self.error = workers, None
+        self.workers, self.error, self.reason = workers, None, None
         self.seen = (snapshot[0], tuple(w.binding for w in workers))
+
+
+HANDSHAKE = re.compile(r"ready-[0-9a-f]{32}\.json(\.stop)?")
+
+
+def clean_handshakes(state):
+    """Remove handshake files left by a crashed runtime. Called while holding the
+    state directory's run lock, before any worker exists, so none is live."""
+    for entry in os.scandir(state):
+        if HANDSHAKE.fullmatch(entry.name) and entry.is_file(follow_symlinks=False):
+            try:
+                os.unlink(entry.path)
+            except FileNotFoundError:
+                pass
 
 
 def stop_requested(state, instance):
@@ -370,11 +387,12 @@ def run(path, once=False):
         data = {"pid": os.getpid(), "instance": instance, "updated_at": time.time(), "status": status,
                 "connectors": connectors}
         if supervisor is not None and supervisor.error:
-            data["error"] = supervisor.error
+            data["error"], data["error_reason"] = supervisor.error, supervisor.reason
         atomic_write_json(state / "status.json", data)
     try:
         for sig in (signal.SIGINT, signal.SIGTERM):
             previous[sig] = signal.signal(sig, lambda *_: stop.set())
+        clean_handshakes(state)
         # Publish this instance before any slow first tick, so a stop request
         # made during startup targets it rather than a previous run.
         record("starting", [])
