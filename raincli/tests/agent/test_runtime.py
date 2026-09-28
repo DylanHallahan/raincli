@@ -37,7 +37,7 @@ def test_presence_respects_explicit_pins_and_readiness():
 
 def test_worker_waits_for_authenticated_queue_owner(tmp_path):
     identity = write_config(tmp_path / "agent.json", "http://127.0.0.1:1", "rca_" + "a" * 43)
-    atomic_write_json(tmp_path / "connector.json", {"agent_config": "agent.json", "herdr_agent": "inbox"})
+    atomic_write_json(tmp_path / "connector.json", {"agent_config": "agent.json", "herdr_agent": "inbox", "state_dir": "queue"})
     cfg, identity, binding = load_bound(str(tmp_path / "connector.json"))
     worker = Worker(str(tmp_path / "connector.json"), cfg, identity, tmp_path, binding)
     worker.herdr = FakeHerdr()
@@ -93,7 +93,7 @@ def test_config_edit_never_republishes_old_readiness_under_new_mapping(tmp_path,
         write_config(tmp_path / "alpha.json", server.url, server.state.add_agent("alpha"))
         write_config(tmp_path / "beta.json", server.url, server.state.add_agent("beta"))
         connector = tmp_path / "connector.json"
-        atomic_write_json(connector, {"agent_config": "alpha.json", "herdr_agent": "inbox", "poll_wait": 1})
+        atomic_write_json(connector, {"agent_config": "alpha.json", "herdr_agent": "inbox", "poll_wait": 1, "state_dir": "queue"})
         atomic_write_json(tmp_path / "runtime.json", {"connectors": ["connector.json"], "state_dir": "state"})
         path, state, configs = load_runtime(tmp_path / "runtime.json")
         ensure_private_dir(state)
@@ -112,7 +112,7 @@ def test_config_edit_never_republishes_old_readiness_under_new_mapping(tmp_path,
             assert server.state.presence == {"alpha": "ready"}
 
             # Remap the same connector file to another credential and Herdr agent.
-            atomic_write_json(connector, {"agent_config": "beta.json", "herdr_agent": "other", "poll_wait": 1})
+            atomic_write_json(connector, {"agent_config": "beta.json", "herdr_agent": "other", "poll_wait": 1, "state_dir": "queue"})
             report = old.tick(3)
             assert report == {"connector": old.path, "status": "offline", "reported": False,
                               "process_running": False, "child_pid": None, "error": "config_changed"}
@@ -254,6 +254,7 @@ def test_linux_startup_restarts_only_when_unit_or_config_changes(tmp_path, monke
     active.write_text("0")
     first = unit.read_text()
     assert "config-sha256: " in first and "rca_" not in first
+    assert "KillMode=mixed" in first and "network-online" not in first
 
     startup.install(config)  # nothing changed: the running service is left alone
     assert calls() == [f"--user enable {name}", f"--user is-active --quiet {name}"]

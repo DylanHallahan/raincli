@@ -420,9 +420,11 @@ def cmd_connector_run(args, herdr=None):
         from .runtime.service import fingerprint, load_bound
         binding = load_bound(os.path.abspath(args.connector_config))[2]
         stop_file = ready + ".stop"
-        stop_requested = lambda: os.path.exists(stop_file)
-        if os.name != "nt":
-            signal.signal(signal.SIGTERM, signal.default_int_handler)
+        terminated = []
+        stop_requested = lambda: bool(terminated) or os.path.exists(stop_file)
+        # SIGTERM also finishes the current iteration (an in-flight submission
+        # completes) instead of killing the connector mid-delivery.
+        signal.signal(signal.SIGTERM, lambda *_: terminated.append(True))
     cfg, api, identity, queue = _connector_parts(args)
     queue.acquire_run_lock()
     try:
@@ -622,7 +624,13 @@ def build_parser():
     stop = runtime_sub.add_parser("stop", help="request graceful runtime shutdown")
     stop.add_argument("--config", required=True)
     stop.set_defaults(func=cmd_runtime_stop)
-    update = runtime_sub.add_parser("update", help="check or stage an official stable release")
+    update = runtime_sub.add_parser(
+        "update", help="check or stage an official stable release",
+        description="Check, install, roll back or toggle automatic installation of official stable releases "
+                    "from the canonical GitHub repository (https only). --install copies the client from the "
+                    "commit-verified release archive into a new environment (no pip or package index), never "
+                    "downgrades, keeps the previous environment for --rollback, and installs that release's "
+                    "launcher; a running launcher switches to it at the next version change.")
     update.add_argument("--root", help="managed installation directory")
     operation = update.add_mutually_exclusive_group()
     operation.add_argument("--install", action="store_true")

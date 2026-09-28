@@ -11,13 +11,16 @@ import threading
 import time
 import uuid
 
+from .. import filelock
 from ..api import ApiClient
 from ..config import load_config
-from ..connector.config import load_connector_config
+from ..connector.config import default_state_dir, load_connector_config
 from ..connector.herdr import HerdrCli, HerdrError, READY_STATUSES
 from ..connector.queue import Queue
 from ..errors import ConfigError
-from ..fsutil import atomic_write_json, read_private_file
+from ..fsutil import atomic_write_json, ensure_private_dir, read_private_file
+
+LOG_LIMIT = 1024 * 1024  # per connector log; one rotated generation is kept
 
 
 def file_sha256(path):
@@ -84,7 +87,7 @@ def load_runtime(path):
         identities.add(key)
         if cfg.state_dir:
             canonical = os.path.normcase(os.path.realpath(cfg.state_dir))
-            if canonical in states:
+            if canonical in states or canonical == os.path.normcase(os.path.realpath(state)):
                 raise ConfigError("runtime connectors must have distinct queue state directories")
             states.add(canonical)
         configs.append((config_path, cfg, identity, binding))
@@ -134,6 +137,8 @@ class Worker:
         self.state = state
         self.ready_path = state / ("ready-" + uuid.uuid4().hex + ".json")
         self.stop_path = Path(str(self.ready_path) + ".stop")
+        self.log_path = state / ("connector-" + hashlib.sha256(path.encode()).hexdigest()[:12] + ".log")
+        self.owner_fd = None  # per-queue lock: one runtime per connector, whatever its state_dir
 
     def changed(self):
         return fingerprint(self.path, self.cfg.agent_config) != self.binding
@@ -148,10 +153,48 @@ class Worker:
                        "process_running": False, "child_pid": None, "error": "config_changed"}
         return dict(self.report)
 
+    def _claim(self):
+        """Own the connector's queue directory across runtimes, so two runtime
+        configs naming one connector cannot both publish for its credential."""
+        if self.owner_fd is not None:
+            return True
+        directory = self.cfg.state_dir or default_state_dir(self.handle)
+        ensure_private_dir(directory)
+        fd = os.open(os.path.join(directory, "runtime-owner.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            filelock.lock(fd, blocking=False)
+        except BlockingIOError:
+            os.close(fd)
+            return False
+        self.owner_fd = fd
+        return True
+
+    def _release(self):
+        if self.owner_fd is not None:
+            filelock.unlock(self.owner_fd)
+            os.close(self.owner_fd)
+            self.owner_fd = None
+
+    def _spawn(self):
+        # Connector output (escaped log lines, no credentials) goes to a
+        # private, size-capped log in the runtime state directory.
+        try:
+            if self.log_path.stat().st_size > LOG_LIMIT:
+                os.replace(self.log_path, str(self.log_path) + ".1")
+        except FileNotFoundError:
+            pass
+        log = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            return subprocess.Popen([sys.executable, "-m", "raincli_agent", "connector", "run", "--config", self.path, "--runtime-ready", str(self.ready_path)],
+                                    stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        finally:
+            os.close(log)
+
     def _confirmed_ready(self):
         try:
             record = json.loads(read_private_file(self.ready_path))
-        except (ConfigError, ValueError):
+        except (ConfigError, ValueError, UnicodeDecodeError):
             return False
         return (self.handle is not None and isinstance(record, dict)
                 and record == {"pid": self.process.pid, "handle": self.handle, **self.binding})
@@ -166,23 +209,28 @@ class Worker:
             self.process = None
             self.ready_path.unlink(missing_ok=True)
             self.stop_path.unlink(missing_ok=True)
-        if self.process is None and now >= self.next_start:
-            # Child output is redirected by the supervisor to its local log.
-            try:
-                self.process = subprocess.Popen([sys.executable, "-m", "raincli_agent", "connector", "run", "--config", self.path, "--runtime-ready", str(self.ready_path)],
-                                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                self.started = now
-            except OSError:
-                self.next_start = now + 30
         self.report = {"connector": self.path, "status": "offline", "reported": False}
         if self.handle is None:
             try:
                 self.handle = self.api.me()["agent"]["handle"]
             except Exception as exc:
-                # Nothing is published until the server confirms this credential.
+                # Nothing is started or published until the server confirms this credential.
                 self.report["error"] = type(exc).__name__
                 return dict(self.report)
+        try:
+            claimed = self._claim()
+        except OSError as exc:
+            self.report["error"] = type(exc).__name__
+            return dict(self.report)
+        if not claimed:
+            self.report["error"] = "connector_owned_by_another_runtime"
+            return dict(self.report)
+        if self.process is None and now >= self.next_start:
+            try:
+                self.process = self._spawn()
+                self.started = now
+            except OSError:
+                self.next_start = now + 30
         running = self.process is not None and self.process.poll() is None
         state = availability(self.cfg, self.herdr, running and self._confirmed_ready())
         self.report.update(status=state, process_running=running, child_pid=self.process.pid if running else None)
@@ -215,6 +263,7 @@ class Worker:
         self.process = None
         self.ready_path.unlink(missing_ok=True)
         self.stop_path.unlink(missing_ok=True)
+        self._release()
         if self.handle is not None:
             try:
                 self.api.publish_presence("offline")
@@ -264,6 +313,14 @@ class Supervisor:
         self.seen = (snapshot[0], tuple(w.binding for w in workers))
 
 
+def stop_requested(state, instance):
+    try:
+        request = json.loads(read_private_file(state / "stop.json"))
+    except (ConfigError, ValueError, UnicodeDecodeError):
+        return False
+    return isinstance(request, dict) and request.get("instance") == instance
+
+
 def run(path, once=False):
     path = Path(path).expanduser().resolve()
     runtime_sha = file_sha256(path)
@@ -274,30 +331,38 @@ def run(path, once=False):
     previous = {}
     supervisor = None
     instance = uuid.uuid4().hex
+
+    def record(status, connectors):
+        data = {"pid": os.getpid(), "instance": instance, "updated_at": time.time(), "status": status,
+                "connectors": connectors}
+        if supervisor is not None and supervisor.error:
+            data["error"] = supervisor.error
+        atomic_write_json(state / "status.json", data)
     try:
         for sig in (signal.SIGINT, signal.SIGTERM):
             previous[sig] = signal.signal(sig, lambda *_: stop.set())
+        # Publish this instance before any slow first tick, so a stop request
+        # made during startup targets it rather than a previous run.
+        record("starting", [])
         supervisor = Supervisor(path, state, configs, runtime_sha)
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
             while not stop.is_set():
                 supervisor.refresh(pool)
-                reports = list(pool.map(lambda w: w.tick(time.monotonic()), supervisor.workers))
-                record = {"pid": os.getpid(), "instance": instance, "updated_at": time.time(), "connectors": reports}
-                if supervisor.error:
-                    record["error"] = supervisor.error
-                atomic_write_json(state / "status.json", record)
+                futures = [pool.submit(w.tick, time.monotonic()) for w in supervisor.workers]
+                while concurrent.futures.wait(futures, timeout=1).not_done:
+                    if stop_requested(state, instance):
+                        stop.set()  # honoured as soon as the in-flight ticks return
+                if stop_requested(state, instance):
+                    stop.set()
+                record("running", [f.result() for f in futures])
                 if once:
                     break
                 for _ in range(30):
-                    if stop.wait(1):
+                    if stop.is_set() or stop.wait(1):
                         break
-                    try:
-                        request = json.loads(read_private_file(state / "stop.json"))
-                        if request.get("instance") == instance:
-                            stop.set()
-                            break
-                    except (ConfigError, ValueError):
-                        pass
+                    if stop_requested(state, instance):
+                        stop.set()
+                        break
                     if supervisor.changed():
                         break
     finally:
@@ -306,8 +371,7 @@ def run(path, once=False):
             list(pool.map(lambda w: w.retire(), workers))
         for sig, handler in previous.items():
             signal.signal(sig, handler)
-        atomic_write_json(state / "status.json", {"pid": os.getpid(), "instance": instance,
-                          "updated_at": time.time(), "status": "stopped", "connectors": []})
+        record("stopped", [])
         queue.release_run_lock()
 
 
@@ -315,7 +379,9 @@ def status(path):
     state = _read_runtime(path)[-1]
     try:
         data = json.loads(read_private_file(state / "status.json", "runtime status"))
-    except ConfigError:
+    except (ConfigError, ValueError, UnicodeDecodeError):
+        return {"status": "not_observed"}
+    if not isinstance(data, dict) or not isinstance(data.get("updated_at"), (int, float)):
         return {"status": "not_observed"}
     data["stale"] = time.time() - data["updated_at"] > 120
     return data
@@ -324,8 +390,11 @@ def status(path):
 def request_stop(path):
     # Only the state directory is needed: stopping must work while a mapping is invalid.
     state = _read_runtime(path)[-1]
-    data = json.loads(read_private_file(state / "status.json", "runtime status"))
-    if data.get("status") == "stopped":
+    try:
+        data = json.loads(read_private_file(state / "status.json", "runtime status"))
+    except (ConfigError, ValueError, UnicodeDecodeError):
+        return {"status": "not_running"}
+    if not isinstance(data, dict) or data.get("status") == "stopped" or not isinstance(data.get("instance"), str):
         return {"status": "not_running"}
     atomic_write_json(state / "stop.json", {"instance": data["instance"]})
     return {"status": "stop_requested"}

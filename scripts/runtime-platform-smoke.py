@@ -119,14 +119,18 @@ def main():
         # Use precisely this checkout as a synthetic release archive. Network
         # release lookup is excluded; venv creation and installation are real.
         files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=ROOT, text=True).splitlines()
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
-            for name in files:
-                path = ROOT / name
-                if path.is_file():
-                    archive.write(path, "release/" + name)
+
+        def archive_for(url, limit):
+            # Like GitHub's codeload archive: one root named after the commit.
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name in files:
+                    path = ROOT / name
+                    if path.is_file():
+                        archive.write(path, "raincli-" + url.rsplit("/", 1)[1] + "/" + name)
+            return buf.getvalue()
         original_fetch = updates.fetch
-        updates.fetch = lambda *_: buf.getvalue()
+        updates.fetch = archive_for
         managed = root / "managed"
         try:
             release = {"tag": "v" + __version__, "commit": "a" * 40}

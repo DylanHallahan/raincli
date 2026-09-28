@@ -82,8 +82,10 @@ def main():
     if args[:2] != ["runtime", "run"]:
         return passthrough(python, args)
     config = args[args.index("--config") + 1] if "--config" in args[:-1] else None
+    own = Path(__file__).read_bytes()
     stopped = False
-    process = None
+    process = updater = None
+    failures, started, next_start = 0, 0.0, 0.0
 
     def stop(*_):
         nonlocal stopped
@@ -97,36 +99,67 @@ def main():
             try:
                 pointer, python = read_pointer(root)
             except (OSError, ValueError, KeyError, RuntimeError):
-                if process is None:
+                if process is None and current is None:
                     raise
                 # Keep the running version during a transient or bad pointer write.
                 time.sleep(1)
                 continue
             if process is None:
+                if time.monotonic() < next_start:
+                    time.sleep(1)
+                    continue
                 current = (pointer, python)
                 process = subprocess.Popen([str(python), "-m", "raincli_agent", *args], stdin=subprocess.DEVNULL, **HIDDEN)
+                started = time.monotonic()
             code = process.poll()
+            if code == 0:
+                process = None
+                return 0  # stopped on request
             if code is not None:
-                return exit_status(code)
+                # Crashed: restart with bounded backoff. Windows logon startup has
+                # no service manager to do this.
+                failures = 0 if time.monotonic() - started > 600 else failures + 1
+                next_start = time.monotonic() + min(300, 2 ** min(failures, 8))
+                process = None
+                continue
             if (pointer["commit"], python) != (current[0]["commit"], current[1]):
                 # Switch only after the old runtime has fully exited.
                 stop_runtime(process, current[1], config)
                 process = None
+                if Path(__file__).read_bytes() != own:
+                    return relaunch(args)  # the new release shipped a new launcher
                 continue
-            if pointer.get("automatic") and time.monotonic() - last_update >= 21600:
+            if updater is not None and updater.poll() is not None:
+                updater = None
+            if updater is None and pointer.get("automatic") and time.monotonic() - last_update >= 21600:
                 last_update = time.monotonic()
+                # Run the check without blocking this loop, so a stop is handled promptly.
                 with open(root / "update.log", "wb") as log:
-                    try:
-                        subprocess.run([str(python), "-m", "raincli_agent", "runtime", "update", "--install", "--root", str(root)],
-                                       stdout=log, stderr=log, stdin=subprocess.DEVNULL, timeout=420, **HIDDEN)
-                    except subprocess.TimeoutExpired:
-                        pass
+                    updater = subprocess.Popen([str(python), "-m", "raincli_agent", "runtime", "update", "--install", "--root", str(root)],
+                                               stdout=log, stderr=log, stdin=subprocess.DEVNULL, **HIDDEN)
+                updater_started = time.monotonic()
+            if updater is not None and time.monotonic() - updater_started > 420:
+                updater.kill()  # the pointer is replaced atomically, never half-written
+                updater.wait(timeout=10)
+                updater = None
             time.sleep(1)
         return 0
     finally:
+        if updater is not None and updater.poll() is None:
+            updater.kill()
+            updater.wait(timeout=10)
         if process is not None:
             stop_runtime(process, current[1], config)
 
+
+def relaunch(args):
+    argv = [sys.executable, str(Path(__file__).resolve()), *args]
+    sys.stdout and sys.stdout.flush()
+    if os.name == "nt":
+        # Windows exec creates a new process anyway; start it detached from us.
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, **HIDDEN)
+        return 0
+    os.execv(sys.executable, argv)
 
 if __name__ == "__main__":
     sys.exit(main())

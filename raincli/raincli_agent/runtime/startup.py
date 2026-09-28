@@ -62,9 +62,11 @@ def systemd_unit(config, digest=None):
     # installed under ~/.local/bin is found after user login.
     path = systemd_quote("PATH=" + os.environ.get("PATH", "/usr/bin:/bin")).replace("$$", "$")
     stamp = f"# config-sha256: {digest}\n" if digest else ""
-    return ("[Unit]\nDescription=RainCLI mapped agent runtime\nAfter=network-online.target\n\n"
+    # KillMode=mixed: SIGTERM goes to the launcher/runtime only, which stops
+    # each connector between iterations; stragglers get SIGKILL at the timeout.
+    return ("[Unit]\nDescription=RainCLI mapped agent runtime\n\n"
             "[Service]\nType=simple\n" + f"ExecStart={argv}\nEnvironment={path}\n"
-            "Restart=on-failure\nRestartSec=10\nTimeoutStopSec=90\n" + stamp + "\n[Install]\nWantedBy=default.target\n")
+            "Restart=on-failure\nRestartSec=10\nKillMode=mixed\nTimeoutStopSec=90\n" + stamp + "\n[Install]\nWantedBy=default.target\n")
 
 
 def systemctl(*args, check=True):
@@ -115,7 +117,7 @@ def remove():
         return "Removed Windows logon startup; an already running runtime continues until stopped."
     if sys.platform != "linux":
         raise ConfigError("startup removal supports Linux and Windows")
-    systemctl("disable", "--now", NAME)
+    systemctl("disable", "--now", NAME, check=False)  # tolerate an already removed unit
     (Path.home() / ".config/systemd/user" / NAME).unlink(missing_ok=True)
     systemctl("daemon-reload")
     return "Stopped and removed the Linux user service."
