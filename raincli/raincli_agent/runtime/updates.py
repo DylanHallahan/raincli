@@ -199,9 +199,11 @@ def install(root=None, release=None):
                        check=True, capture_output=True, timeout=15)
         pointer = {**release, "python": str(python), "automatic": old.get("automatic", False),
                    "previous": {k: old[k] for k in ("tag", "commit", "python") if k in old}}
+        # Launcher first: a running launcher checks for its own update right after
+        # it sees the new pointer and stops the old runtime.
+        sync_launcher(root, python)
         write_pointer(root, pointer)
         stage = None  # successful versions remain available for rollback
-        sync_launcher(root, python)
         return {"status": "installed", **release, "launcher": str(root / "launch.py")}
     finally:
         if stage is not None:
@@ -224,9 +226,9 @@ def configure(root=None, automatic=None, rollback=False):
             current = {**previous, "automatic": False, "previous": {k: current[k] for k in ("tag", "commit", "python")}}
         if automatic is not None:
             current["automatic"] = automatic
-        write_pointer(root, current)
         if rollback:
-            sync_launcher(root, current["python"])
+            sync_launcher(root, current["python"])  # before the pointer, as in install
+        write_pointer(root, current)
         return {"tag": current["tag"], "automatic": current["automatic"]}
     finally:
         lock.release_run_lock()

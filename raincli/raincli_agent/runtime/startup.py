@@ -66,7 +66,7 @@ def systemd_unit(config, digest=None):
     # each connector between iterations; stragglers get SIGKILL at the timeout.
     return ("[Unit]\nDescription=RainCLI mapped agent runtime\n\n"
             "[Service]\nType=simple\n" + f"ExecStart={argv}\nEnvironment={path}\n"
-            "Restart=on-failure\nRestartSec=10\nKillMode=mixed\nTimeoutStopSec=90\n" + stamp + "\n[Install]\nWantedBy=default.target\n")
+            "Restart=on-failure\nRestartSec=10\nKillMode=mixed\nTimeoutStopSec=150\n" + stamp + "\n[Install]\nWantedBy=default.target\n")
 
 
 def systemctl(*args, check=True):

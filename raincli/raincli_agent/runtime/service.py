@@ -21,6 +21,15 @@ from ..errors import ConfigError
 from ..fsutil import atomic_write_json, ensure_private_dir, read_private_file
 
 LOG_LIMIT = 1024 * 1024  # per connector log; one rotated generation is kept
+# Graceful-stop budget. A supervised connector long-polls in slices of at most
+# SUPERVISED_POLL_WAIT and starts no submission once asked to stop, so it exits
+# within one slice plus one in-flight prompt. Capping prompt_timeout bounds that:
+# per connector <= 5 + 60 + 15 = 80 s; the runtime adds an in-flight tick and an
+# offline publish (<= 100 s). The launcher (120 s) and the systemd unit (150 s)
+# allow more.
+SUPERVISED_POLL_WAIT = 5
+MAX_PROMPT_TIMEOUT = 60
+STOP_MARGIN = 15
 
 
 def file_sha256(path):
@@ -44,6 +53,9 @@ def load_bound(config_path):
     """Load one connector mapping and bind it to the bytes it was loaded from."""
     config_sha = file_sha256(config_path)
     cfg = load_connector_config(config_path)
+    if cfg.prompt_timeout > MAX_PROMPT_TIMEOUT:
+        raise ConfigError(f"runtime connectors need prompt_timeout <= {MAX_PROMPT_TIMEOUT} s, "
+                          "so a stop can let an in-flight delivery finish")
     if not cfg.agent_config:
         raise ConfigError("each runtime connector must name its agent_config explicitly")
     agent_sha = file_sha256(cfg.agent_config)
@@ -163,6 +175,9 @@ class Worker:
         self.ready_path = self.state / ("ready-" + uuid.uuid4().hex + ".json")
         self.stop_path = Path(str(self.ready_path) + ".stop")
 
+    def stop_budget(self):
+        return min(self.cfg.poll_wait, SUPERVISED_POLL_WAIT) + self.cfg.prompt_timeout + STOP_MARGIN
+
     def changed(self):
         return fingerprint(self.path, self.cfg.agent_config) != self.binding
 
@@ -276,7 +291,7 @@ class Worker:
             # queue lock; terminate only if it does not exit in time.
             try:
                 atomic_write_json(self.stop_path, {"pid": self.process.pid})
-                self.process.wait(timeout=self.cfg.poll_wait + 10)
+                self.process.wait(timeout=self.stop_budget())
             except (OSError, subprocess.TimeoutExpired):
                 kill_tree(self.process)
         self.process = None
