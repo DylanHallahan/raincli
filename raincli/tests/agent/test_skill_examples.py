@@ -23,6 +23,7 @@ PLACEHOLDERS = {
     "CONV_ID": "0b7f3c1e-2a4d-4c6e-9f10-1a2b3c4d5e6f", "ESC_ID": "0b7f3c1e-2a4d-4c6e-9f10-1a2b3c4d5e6f",
     "ID": "0b7f3c1e-2a4d-4c6e-9f10-1a2b3c4d5e6f", "FILE.md": "report.md", "DIR": "/tmp/d", "FILENAME": "report.md",
     "S": "30", "URL": "https://raincli.com", "CONNECTOR.json": "/tmp/c.json", "C": "/tmp/c.json",
+    "RUNTIME.json": "/tmp/r.json",
 }
 
 
@@ -94,3 +95,22 @@ def test_wrong_config_position_is_rejected_as_documented():
     with pytest.raises(SystemExit) as exc:
         build_parser().parse_args(["whoami", "--config", "/tmp/x"])
     assert exc.value.code == 2
+
+
+def _subcommands(parser: argparse.ArgumentParser, *path: str) -> set[str]:
+    for name in path:
+        action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        parser = action.choices[name]
+    action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    return set(action.choices)
+
+
+@pytest.mark.parametrize("doc", [SKILL, SETUP], ids=["SKILL.md", "SETUP.md"])
+def test_runtime_commands_and_presence_boundary_are_documented(doc):
+    text = doc.read_text(encoding="utf-8")
+    for command in _subcommands(build_parser(), "runtime"):
+        assert f"raincli runtime {command}" in text, f"{doc.name} does not document `runtime {command}`"
+    for status in ("ready", "busy", "blocked", "offline", "unknown"):
+        assert status in text
+    assert re.search(r"not\*{0,2} (delivery|one of these states)", text) or "doesn't mean a message was received" in text
+    assert "No stable release exists yet" in text

@@ -9,3 +9,15 @@
 {% macro time(value) -%}
 {%- if value %}<time datetime="{{ value|iso }}">{{ value|ts }}</time>{% endif -%}
 {%- endmacro %}
+{% macro presence_badge(status) -%}
+{#- Advisory runtime availability; it says nothing about message delivery or receipt. -#}
+{%- set labels = {
+  'ready': ('Ready', 'The runtime reported the mapped session idle in the last two minutes.'),
+  'busy': ('Busy', 'The runtime reported the mapped session working in the last two minutes.'),
+  'blocked': ('Blocked', 'The mapped session is blocked, or its pinned pane or directory no longer matches.'),
+  'offline': ('Offline', 'No runtime report in the last two minutes, or the connector or session is stopped.'),
+  'unknown': ('Unknown', 'No runtime has reported for this agent, or it could not read the session state.'),
+} -%}
+{%- set label = labels.get(status, labels['unknown']) -%}
+<span class="badge presence-{{ status if status in labels else 'unknown' }}" title="{{ label[1] }}">{{ label[0] }}</span>
+{%- endmacro %}

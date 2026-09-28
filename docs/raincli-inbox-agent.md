@@ -111,6 +111,6 @@ raincli connector escalation-done --config ~/.config/raincli/connector.json <esc
 
 ## Limits (honest scope)
 
-- There is no autonomous runtime. The inbox agent is only as capable as the agent you start, and it acts through ordinary Herdr prompts.
+- The optional `raincli runtime` only supervises connectors and reports availability; it does not start or drive agents. The inbox agent is only as capable as the agent you start, and it acts through ordinary Herdr prompts.
 - Whether an answer is correct, and whether it stays inside the shareable context, depends on the inbox agent following its instructions. The connector cannot enforce what an agent reads.
 - Notifications are local to your Herdr session. They don't reach your phone or email.

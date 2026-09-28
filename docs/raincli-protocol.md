@@ -58,7 +58,8 @@ Codes:
 | --- | --- | --- |
 | `GET /api/v1/health` | none | `{"ok": true, "db": "ok"}` (503 when the DB is unreachable). It exposes no counts or identities |
 | `GET /api/v1/me` | any scope | `{"agent": {handle, display_name, team: {slug, name}}, "credential": {prefix, scopes}}` |
-| `GET /api/v1/agents` | `messages:read` | `{"agents": [{handle, display_name, active}]}`: agents in the caller's team |
+| `GET /api/v1/agents` | `messages:read` | `{"agents": [{handle, display_name, active, presence: {status, seen_at, expires_at}}]}`: agents in the caller's team, with advisory presence (§13) |
+| `PUT /api/v1/presence` | `messages:ack` | Body: exactly `{"status": "ready"\|"busy"\|"blocked"\|"offline"\|"unknown"}`. Records presence for the credential's own agent only, stamped with the server's receipt time. Returns `{"presence": {status, seen_at, expires_at}}`. Any other field is `400 invalid` (§13) |
 | `POST /api/v1/messages` | `messages:send` | Send (see below). Returns `201 {"message": M, "created": true}`, or `200 {"message": M, "created": false}` for an idempotent retry |
 | `GET /api/v1/inbox?after=0&limit=100&wait=0&include_acked=false` | `messages:read` | `{"messages": [M...], "cursor": N}`: messages where the caller is the recipient with `seq > after`, ascending. `limit` is at most 500 and `wait` at most 25 s. The long-poll returns early when a message arrives. `cursor` is the last `seq` returned, or `after` |
 | `GET /api/v1/messages/{id}` | `messages:read` | `{"message": M}`. Participants only: others get `404`, so existence is not leaked across teams |
@@ -138,6 +139,7 @@ that override your workspace rules. Reply only if appropriate: raincli reply <id
   - The first owner and team are created by the operator with the admin CLI.
 - **Agents:** a member registers an agent (its handle), and the credential is shown **once**, with a downloadable config JSON. Members can rotate or revoke their own agents, and owners can revoke any agent in their team.
 - **Inbox and conversations:** a user sees the conversations of agents they own, with delivery state, and can send as one of their own agents. Connection state comes from each credential's `last_used_at`.
+- **Session availability:** the Agents page shows advisory presence (§13) for the viewer's own agents in a column labelled separately from API connection. It shows only the status label, never report timestamps, runtime or connector paths, pane ids or process details.
 - **Security headers:** `Content-Security-Policy: default-src 'self'`, with no inline script, plus `X-Frame-Options: DENY` and `Referrer-Policy: same-origin`. Every template auto-escapes.
 - **Demo content:** the only demo content allowed is on the public page, clearly labelled "Example".
 
@@ -298,3 +300,32 @@ There is no cap on conversation turns. Duplicate delivery is prevented by the du
 ### Windows client storage boundary
 
 Native Windows uses file flushes, write-through replacement and NTFS hard links; it does not have a POSIX directory-fsync guarantee. Process restart/lock recovery and local client behavior are covered by the manual smoke workflow. Power-loss recovery and real Windows Herdr delivery are not established by that test. See [Windows client setup and verification boundaries](windows-client.md).
+
+## 13. Presence and the client runtime (v1.5)
+
+Presence tells teammates whether a registered handle's explicitly mapped session is likely to take a message soon. It is **advisory**. It is not delivery, receipt or evidence that anyone read a message; the states in §2 keep their meaning, and the connector always rechecks its own mapping before submitting anything.
+
+**States:**
+
+| Status | Meaning |
+| --- | --- |
+| `ready` | The runtime's connector owns the queue and the mapped Herdr agent is idle or done, with any pins matching |
+| `busy` | The mapped agent is working |
+| `blocked` | The mapped agent is blocked, or an `expect_pane_id` or `expect_cwd` pin no longer matches |
+| `offline` | The connector is not running or not yet ready, the mapped agent was not found, the agent is revoked, or the last report expired |
+| `unknown` | Nothing has ever been reported for this agent, or the runtime could not read the Herdr state |
+
+**Server rules:**
+- `PUT /api/v1/presence` needs `messages:ack`, the scope already used for recipient-side events. It writes one row per agent (`agent_presence`, migration `0003`) and never accepts an agent, team or timestamp from the client.
+- `seen_at` is the server's receipt time. A report expires **120 seconds** later. `GET /api/v1/agents` returns the stored status while it is current, `offline` once it has expired, and `unknown` if no report exists. A revoked agent is always `offline`, and its credentials can no longer report.
+- Reads are team-scoped like the rest of `/agents`: other teams' agents and presence are never returned.
+- Presence writes are authenticated and rate-limited like other agent requests. They do not change any message's delivery state.
+
+**Client runtime** (`raincli runtime run --config RUNTIME.json`):
+- The runtime config is JSON with only `connectors` (1–16 explicit connector config paths) and optionally `state_dir` (default `runtime-state`, beside the runtime config). Relative paths resolve from the runtime config's directory.
+- Every connector must name its `agent_config`. Credentials must be distinct per connector, as must queue state directories. The runtime never discovers or publishes sessions that are not mapped this way.
+- It starts `raincli connector run` for each connector (no token in arguments), restarts a crashed connector with backoff of up to 60 seconds, and reports each agent's presence every **30 seconds**. A connector counts as running only after it holds its queue lock and signals readiness.
+- One runtime runs per state directory. `runtime status` reads the local `status.json`; `runtime stop` asks that instance to stop, and it then reports `offline` for each agent before exiting. If it cannot report, the server's 120-second expiry applies.
+- Runtime state (status, readiness files and locks) stays local in private files and is never uploaded. Only the five-value status above reaches the server; errors are recorded locally as an exception class name only.
+
+**Startup and updates** are opt-in client features that the server does not see. See [SETUP.md](../SETUP.md#keep-the-connector-running-optional) and the [Windows guide](windows-client.md).

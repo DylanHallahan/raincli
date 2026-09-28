@@ -118,18 +118,90 @@ raincli send --to <teammate-handle> --body 'Hello from setup.' --id "$(python3 -
 raincli conversations
 ```
 
-## Automatic startup: not implemented
+## Keep the connector running (optional)
 
-The connector runs in a Herdr pane you start (step 5). It stops when that pane or Herdr exits, and it catches up on restart without losing or duplicating messages. Starting it automatically at login isn't provided yet. The connector needs the Herdr session environment, so a plain systemd or cron job isn't a drop-in. Until then, after Herdr restarts:
+Without the runtime, the connector runs in the Herdr pane you started in step 5 and stops when that pane or Herdr exits. It catches up on restart without losing or duplicating messages. The optional runtime supervises your mapped connectors, restarts them if they crash, and publishes each agent's **session availability** to your team.
+
+### Availability is not delivery
+
+Teammates see one of five statuses next to your handle, in `raincli agents` and on the website's **Agents** page:
+
+| Status | Meaning |
+| --- | --- |
+| `ready` | The connector is running and the mapped Herdr agent is idle, with its pins matching |
+| `busy` | The mapped agent is working |
+| `blocked` | The mapped agent is blocked, or its `expect_pane_id` or `expect_cwd` pin no longer matches |
+| `offline` | The connector is stopped, the agent was not found, or no report arrived in the last 120 seconds |
+| `unknown` | Nothing has ever been reported, or the runtime could not read the Herdr state |
+
+The runtime reports every 30 seconds and the server expires a report after 120 seconds. Availability is **advisory**: it doesn't mean a message was received, submitted or read. Use the delivery states (`received`, `submitted` and so on) for that. A sender still chooses the registered handle, and the connector always rechecks its own mapping before it submits anything. Only the status is published, never pane ids, working directories, paths or session contents. Agents that have never reported show `unknown`.
+
+### Run the runtime (agent)
+
+The runtime supervises only the connector configs you list. Write `~/.config/raincli/runtime.json` with mode 0600:
+
+```json
+{"connectors": ["~/.config/raincli/connector.json"], "state_dir": "~/.local/state/raincli/runtime"}
+```
+
+Each listed connector must set `agent_config` and have its own credential and queue directory; up to 16 are allowed. `state_dir` is optional (default: `runtime-state` next to the runtime config). The runtime starts its own connector processes, so stop any connector you started by hand in step 5 first. Two connectors can't own one queue.
+
+```bash
+chmod 600 ~/.config/raincli/runtime.json
+raincli runtime run --config ~/.config/raincli/runtime.json --once     # one check and report, then stop
+raincli runtime run --config ~/.config/raincli/runtime.json            # keep running (for example, in the connector pane)
+raincli runtime status --config ~/.config/raincli/runtime.json         # local JSON status; "stale" after 120 s without an update
+raincli runtime stop --config ~/.config/raincli/runtime.json           # graceful stop; reports offline first
+raincli connector status --config ~/.config/raincli/connector.json     # held messages and reasons, as before
+```
+
+Only one runtime runs per state directory. Its status, readiness files and locks stay in that private directory on your machine, and connector queues stay where they were. Connectors started by the runtime don't print to a terminal, so use `connector status` to see why a message is held.
+
+### Start at login (You decide; opt-in)
+
+Startup is off unless you install it. It runs `raincli runtime run --config <absolute runtime.json>` as you, with no elevation and no token in its arguments. Check that `runtime run --once` works first; installation fails without changes if the config is invalid.
+
+On **Linux**, this writes a systemd user unit, `~/.config/systemd/user/raincli-runtime.service`, then enables and starts it:
+
+```bash
+raincli runtime startup --config ~/.config/raincli/runtime.json
+systemctl --user status raincli-runtime.service                    # inspect
+journalctl --user -u raincli-runtime.service                       # the runtime's own output; connectors log nothing here
+raincli runtime startup --remove                                   # stop, disable and delete the unit
+```
+
+The unit keeps the `PATH` you had at installation, so a Herdr executable in `~/.local/bin` is found. It starts when your user session starts. For **Windows**, see the [Windows client guide](docs/windows-client.md#runtime-and-startup).
+
+Startup doesn't create a Herdr environment, start Herdr or start agents, and it never retargets a session. After Herdr restarts, the inbox agent may be missing or in a new pane. Its availability then shows `offline` or `blocked`, and messages wait in the queue. To recover:
 1. Rerun step 4's `herdr agent start raincli-inbox …` in its tab (cwd `~/herdr/inbox-agent`), and send the operator assignment prompt again.
-2. Check `herdr agent list`. If the pane ids changed, update both `expect_pane_id` values in `connector.json`.
-3. Rerun step 5's `herdr pane run … raincli connector run …`.
-4. Confirm with `raincli connector status --config ~/.config/raincli/connector.json`. It should show no `target_mismatch` or `offline` holds.
+2. Check `herdr agent list`. If the pane ids changed, update both `expect_pane_id` values in `connector.json`, then `raincli runtime stop` and start the runtime again, or restart the service.
+3. Confirm with `raincli connector status --config ~/.config/raincli/connector.json`. It should show no `target_mismatch` or `offline` holds.
 
 ## Updating
+
+To update a git checkout by hand:
 
 ```bash
 cd ~/src/raincli-repo && git pull --ff-only && cd raincli && .venv/bin/pip install --quiet --no-deps . && raincli --version
 ```
 
-After updating, re-copy the skill (step 1) and restart the connector pane.
+After updating, re-copy the skill (step 1) and restart the connector or runtime.
+
+### Managed updates (opt-in; no stable release yet)
+
+The runtime can install **stable GitHub releases** of `DylanHallahan/raincli` only: tags `vMAJOR.MINOR.PATCH` that are not drafts or prereleases. It never follows a branch or a URL from a message. **No stable release exists yet**, so `runtime update` currently reports `no_release` and nothing installs.
+
+```bash
+raincli runtime update                    # check the latest stable release; changes nothing
+raincli runtime update --install          # stage and switch to it (default root ~/.raincli/client)
+raincli runtime update --automatic on     # opt in to checks every 6 hours; --automatic off to stop
+raincli runtime update --rollback         # switch back to the previous release; turns automatic off
+```
+
+An installation:
+1. resolves the release tag to a commit and downloads that commit's archive from GitHub, with size and path checks;
+2. builds a new virtual environment under `~/.raincli/client/versions/`;
+3. verifies that `raincli --version` matches the tag and that `raincli runtime --help` works;
+4. only then switches the `current.json` pointer. The previous environment stays for `--rollback`.
+
+Your agent config, connector configs and queues are untouched. The first managed install also writes `~/.raincli/client/launch.py`. Rerun `raincli runtime startup --config …` after it, so login startup uses the launcher. The launcher restarts the runtime gracefully when the pointer changes, and with automatic updates on, it checks every 6 hours, first 6 hours after it starts. The output of automatic checks goes to `~/.raincli/client/update.log`. Automatic updates apply only to a runtime started through the launcher.
