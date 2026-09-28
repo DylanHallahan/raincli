@@ -357,6 +357,50 @@ def test_connection_state_from_last_used(client, world, session):
     assert "Idle" in client.get("/app/agents").text
 
 
+def _availability_cell(html: str, handle: str) -> str:
+    row = re.search(rf'<span class="handle">{handle}</span>.*?</tr>', html, re.S)
+    assert row, f"no agents row for {handle}"
+    cell = re.search(r'<td data-label="Session availability">(.*?)</td>', row.group(0), re.S)
+    assert cell, f"no availability cell for {handle}"
+    return cell.group(1)
+
+
+def test_session_availability_column_expires_and_stays_separate_from_delivery(client, world, session, app):
+    from fastapi.testclient import TestClient
+
+    from raincli_server import presence
+    from raincli_server.models import AgentPresence
+
+    login(client)
+    page = client.get("/app/agents").text
+    assert "Session availability" in page and "does not show that a message was delivered or read" in page
+    assert ">Unknown<" in _availability_cell(page, "alice-agent")  # never reported
+
+    presence.publish(session, world["agents"]["alice"], {"status": "busy"})
+    presence.publish(session, world["agents"]["bob"], {"status": "ready"})
+    session.commit()
+    page = client.get("/app/agents").text
+    cell = _availability_cell(page, "alice-agent")
+    assert ">Busy<" in cell and "presence-busy" in cell
+    assert "bob-agent" not in page  # only the viewer's own agents are listed
+    row = session.get(AgentPresence, world["agents"]["alice"].id)
+    assert row.seen_at.isoformat() not in page  # no report timestamps or runtime details
+
+    row.seen_at -= timedelta(seconds=presence.TTL_SECONDS)
+    session.commit()
+    assert ">Offline<" in _availability_cell(client.get("/app/agents").text, "alice-agent")
+
+    presence.publish(session, world["agents"]["alice"], {"status": "ready"})
+    identity.revoke_agent(session, world["agents"]["alice"])
+    session.commit()
+    assert ">Offline<" in _availability_cell(client.get("/app/agents").text, "alice-agent")
+
+    with TestClient(app) as bob:
+        login(bob, email="bob@example.test")
+        page = bob.get("/app/agents").text
+        assert ">Ready<" in _availability_cell(page, "bob-agent") and "alice-agent" not in page
+
+
 def test_member_cannot_manage_others_agents_but_owner_can_revoke(client, world, session, app):
     from fastapi.testclient import TestClient
 

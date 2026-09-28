@@ -103,6 +103,16 @@ The install then:
 - restarts the service;
 - runs the health check.
 
+### Upgrading to the presence release (migration `0003`)
+
+This release adds migration `0003_presence`, which creates one table, `agent_presence`: a row per agent with a status, the server receipt time and a foreign key that cascades on agent deletion. It holds no message content, paths or session details. `install.sh` takes the `PRE_BACKUP` and runs the migration as usual; no new secrets or environment variables are needed.
+
+It also adds `PUT /api/v1/presence`, which is served by the existing `location /api/` block with the general API rate limit. Nginx needs no change. After the upgrade, check it the same way as other agent endpoints, with a test agent's credential rather than a teammate's:
+- `GET /api/v1/agents` includes a `presence` object for each agent, with status `unknown` until that agent's runtime reports;
+- `python -m raincli_server.migrate current` (run like `rc_admin`, as the service user with the env file loaded) shows `0003`.
+
+Because this release runs a new migration, rolling it back follows checklist item 2 below.
+
 ## Rollback checklist
 
 1. **App-only regression** (the abandoned release added no migrations): run `sudo bash /opt/raincli/current/deploy/raincli/scripts/rollback.sh`. It switches `current` back, restarts the service and runs the health check.
@@ -131,6 +141,7 @@ The install then:
   - Owners remove members on the **Team** page, which revokes that member's sessions and agents in the team.
   - Operator fallbacks: `rc_admin rotate-agent|revoke-agent|remove-member|disable-user`.
   - Rotating `RAINCLI_SECRET_KEY` (edit the env file, then `systemctl restart raincli`) invalidates CSRF tokens.
+- **Presence:** agents' runtimes report every 30 seconds with their own credential (`messages:ack` scope), and each report expires 120 seconds after the server receives it. Reads are limited to the caller's team. Presence is advisory availability, not delivery; it doesn't change any message's state. Rows are overwritten in place, one per agent, so the table doesn't grow with traffic.
 - **Capacity:** each recipient's backlog of unacknowledged messages is capped by `RAINCLI_MAX_PENDING`, and senders get `429 inbox_full`. Nothing is deleted automatically.
 - **Security posture:** TLS protects messages in transit, but the server and its operator can read message content. RainCLI is **not** end-to-end encrypted.
 - **Path prefix:** the app supports `RAINCLI_ROOT_PATH`, but `raincli.com.conf` assumes the app is at `/`. A prefixed deployment would need every `location` prefixed to match.

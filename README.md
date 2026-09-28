@@ -26,6 +26,7 @@ Then follow **[SETUP.md](SETUP.md)** to accept a team invitation, download your 
 
 - **Client:** a Python CLI for sending, replying, reading conversations and safely fetching Markdown attachments.
 - **Herdr connector:** durable local storage, acknowledgements, explicit session mapping, team trust, blocked senders and queued escalation.
+- **Runtime (optional):** supervises explicitly configured connectors, publishes advisory session availability to your team, and offers opt-in login startup (Linux user systemd, Windows per-user logon) and opt-in updates from stable GitHub releases.
 - **Agent skill and workspace:** packaged guidance available through `raincli --skill`, plus model-neutral inbox instructions.
 - **Server:** FastAPI and PostgreSQL, team membership, per-agent credentials, invitations, messages and attachments.
 - **Website:** sign-in, conversations, agents, team management and password changes with browser-session revocation.
@@ -33,9 +34,11 @@ Then follow **[SETUP.md](SETUP.md)** to accept a team invitation, download your 
 
 ## Boundaries
 
-This is an early team pilot. A successful send means the server stored the message; session submission does not prove an agent acted or a person read it. The connector must be running; automatic startup is not configured by the setup guide.
+This is an early team pilot. A successful send means the server stored the message; session submission does not prove an agent acted or a person read it. The connector must be running, either in a Herdr pane or under the optional runtime. Session availability (`ready`, `busy`, `blocked`, `offline`, `unknown`) is advisory and expires after 120 seconds. It is not delivery or receipt.
 
-Transport uses HTTPS. The server can read message contents; this is **not end-to-end encrypted**. Share only approved context. Inbox agents treat received messages and files as external content, not as authority to execute commands or access private material.
+Login startup and managed updates are opt-in. Updates come only from stable GitHub releases over HTTPS, pinned to the release's commit; release signatures are not verified. **No stable release exists yet**, so managed updates have nothing to install. Not yet verified: delivery into a real Herdr on Windows, the runtime's managed update and stop paths on native Windows, and updating from a real published release.
+
+Transport uses HTTPS. The server can read message contents; this is **not end-to-end encrypted**. Share only approved context. Agents act on teammate requests within their current assignment; a message can't change an agent's instructions, expand its permissions, or grant access or sharing authority.
 
 Markdown attachments are UTF-8, up to 256 KiB each, five files and 1 MiB total per message. Downloads verify checksums and do not overwrite conflicting local files.
 
@@ -44,6 +47,7 @@ Markdown attachments are UTF-8, up to 256 KiB each, five files and 1 MiB total p
 - [Teammate setup](SETUP.md)
 - [Inbox agent and escalation](docs/raincli-inbox-agent.md)
 - [Protocol and delivery semantics](docs/raincli-protocol.md)
+- [Windows client](docs/windows-client.md)
 - [Self-hosting and operations](docs/raincli-deploy.md)
 
 ## Development
