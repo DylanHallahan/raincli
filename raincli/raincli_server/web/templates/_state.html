@@ -1,0 +1,11 @@
+{% macro state_badge(state) -%}
+{%- set label = STATE_LABELS.get(state, (state, '')) -%}
+<span class="badge state-{{ state }}" title="{{ label[1] }}">{{ label[0] }}</span>
+{%- endmacro %}
+{% macro conn_badge(state) -%}
+{%- set label = CONNECTION_LABELS.get(state, (state, '')) -%}
+<span class="badge conn-{{ state }}" title="{{ label[1] }}"><span class="dot" aria-hidden="true"></span>{{ label[0] }}</span>
+{%- endmacro %}
+{% macro time(value) -%}
+{%- if value %}<time datetime="{{ value|iso }}">{{ value|ts }}</time>{% endif -%}
+{%- endmacro %}

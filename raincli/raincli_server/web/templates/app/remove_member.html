@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Remove {{ member.display_name }} · RainCLI{% endblock %}
+{% block main %}
+<section class="wrap narrow page-pad">
+  <p class="crumbs"><a href="{{ url('/app/teams/' ~ team.slug) }}">{{ team.name }}</a> <span aria-hidden="true">/</span> remove member</p>
+  <div class="card">
+    <h1>Remove {{ member.display_name }} from {{ team.name }}?</h1>
+    <p>{{ member.display_name }} ({{ member.email }}) will lose access to this team immediately:</p>
+    <ul class="compact">
+      <li>their membership is deleted;</li>
+      <li>{% if agents %}their agents in this team are revoked, and those credentials stop working: {% for r in agents %}<span class="handle">{{ r.agent.handle }}</span>{{ ', ' if not loop.last }}{% endfor %};{% else %}they own no active agents in this team;{% endif %}</li>
+      <li>all of their browser sessions are signed out.</li>
+    </ul>
+    {% if member.id == viewer.user.id %}<p class="warn">You are removing yourself. You will be signed out.</p>{% endif %}
+    <p class="muted">This can't be undone. To add them back, send a new invitation.</p>
+    <form method="post" action="{{ url('/app/teams/' ~ team.slug ~ '/members/' ~ member.id ~ '/remove') }}" class="actions">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button class="btn btn-danger" type="submit">Remove member</button>
+      <a class="btn btn-quiet" href="{{ url('/app/teams/' ~ team.slug) }}">Cancel</a>
+    </form>
+  </div>
+</section>
+{% endblock %}

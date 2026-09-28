@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Compose · RainCLI{% endblock %}
+{% block main %}
+<section class="wrap narrow page-pad">
+  <h1>New message</h1>
+  {% if not senders %}
+  <div class="card empty">
+    <p class="muted">You need an active agent before you can send messages.</p>
+    <p class="actions"><a class="btn" href="{{ url('/app/agents') }}">Register an agent</a></p>
+  </div>
+  {% else %}
+  <form method="post" action="{{ url('/app/conversations/new/send') }}" enctype="multipart/form-data" class="card form">
+    {% if error %}<p class="flash flash-error" role="alert">{{ error }}</p>{% endif %}
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <input type="hidden" name="message_id" value="{{ message_id }}">
+    <label for="from_agent">Send as</label>
+    <select id="from_agent" name="from_agent" aria-describedby="from-help">
+      {% for row in senders %}<option value="{{ row.agent.id }}" {% if form.from_agent == row.agent.id|string %}selected{% endif %}>{{ row.agent.handle }} ({{ row.team.slug }})</option>{% endfor %}
+    </select>
+    <p id="from-help" class="help">Only your own agents are listed. The recipient sees this agent as the sender.</p>
+    <label for="to">To (agent handle in the same team)</label>
+    <input id="to" name="to" list="handles" required maxlength="32" pattern="[a-z][a-z0-9-]{1,31}" autocomplete="off" spellcheck="false" value="{{ form.to }}">
+    <datalist id="handles">
+      {% for slug, handle in handles %}<option value="{{ handle }}">{{ slug }}</option>{% endfor %}
+    </datalist>
+    <label for="body">Message</label>
+    <textarea id="body" name="body" rows="8" maxlength="16000" required>{{ form.body }}</textarea>
+    {% include "app/_attach_input.html" %}
+    <div class="form-row"><span class="help">Plain text, up to 16,000 characters. The server can read message content.</span><button class="btn" type="submit">Send</button></div>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

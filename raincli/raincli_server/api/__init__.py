@@ -1,0 +1,350 @@
+"""Agent API (/api/v1). Owned by the API builder; see docs/raincli-protocol.md §3.
+
+The API is a sub-application mounted at ``/api/v1`` so its error envelope,
+body-size limit and exception handlers never touch web routes. ``GET
+/api/v1/health`` stays on the parent app (defined in ``app.py``) and is matched
+before the mount.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import threading
+import time
+from collections import deque
+from typing import Callable
+
+from fastapi import FastAPI, Query, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
+from sqlalchemy import select
+from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message as ASGIMessage, Receive, Scope, Send
+
+from raincli_server import identity, messaging
+from raincli_server.db import session_scope
+from raincli_server.identity import AgentAuth
+from raincli_server.messaging import MessagingError
+from raincli_server.models import Agent
+
+MAX_BODY_BYTES = 64 * 1024
+MAX_SEND_BODY_BYTES = 2 * 1024 * 1024  # POST /messages carries base64 attachments (protocol §8)
+MAX_WAIT_SECONDS = 25
+POLL_INTERVAL = 0.5
+PREFIX = "/api/v1"
+MAX_SEQ = 2**63 - 1
+
+_STATUS_CODES = {
+    400: "invalid", 401: "unauthorized", 403: "forbidden", 404: "not_found", 405: "method_not_allowed",
+    409: "id_conflict", 413: "too_large", 429: "rate_limited", 503: "unavailable",
+}
+
+
+def error_response(status: int, code: str, message: str, headers: dict | None = None) -> JSONResponse:
+    return JSONResponse({"error": {"code": code, "message": message}}, status_code=status, headers=headers)
+
+
+class ApiError(MessagingError):
+    def __init__(self, status: int, code: str, message: str, headers: dict | None = None):
+        super().__init__(status, code, message)
+        self.headers = headers
+
+
+# Middleware and limits ------------------------------------------------------------
+
+class BodySizeLimit:
+    """Reject request bodies over the limit with 413, by header or while streaming.
+
+    ``POST .../messages`` gets ``send_limit``; every other API request gets ``limit``.
+    """
+
+    def __init__(self, app: ASGIApp, limit: int = MAX_BODY_BYTES, send_limit: int = MAX_SEND_BODY_BYTES):
+        self.app = app
+        self.default_limit = limit
+        self.send_limit = send_limit
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        is_send = scope.get("method") == "POST" and scope.get("path", "").rstrip("/").endswith("/messages")
+        limit = self.send_limit if is_send else self.default_limit
+        too_large = error_response(413, "too_large", f"request body exceeds {limit} bytes")
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    declared = limit + 1
+                if declared > limit:
+                    await too_large(scope, receive, send)
+                    return
+        received = 0
+        started = False
+
+        async def limited_receive() -> ASGIMessage:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    raise _BodyTooLarge
+            return message
+
+        async def tracking_send(message: ASGIMessage) -> None:
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracking_send)
+        except _BodyTooLarge:
+            if not started:
+                await too_large(scope, receive, send)
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+class RateLimiter:
+    """Sliding one-minute window per credential, in process memory (per app instance)."""
+
+    def __init__(self, per_minute: int, clock: Callable[[], float] = time.monotonic):
+        self.per_minute = per_minute
+        self.clock = clock
+        self._hits: dict[object, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def check(self, key: object) -> int | None:
+        """Record a hit; return seconds to wait if the key is over its limit, else None."""
+        now = self.clock()
+        with self._lock:
+            hits = self._hits.setdefault(key, deque())
+            while hits and hits[0] <= now - 60:
+                hits.popleft()
+            if len(hits) >= self.per_minute:
+                return max(1, math.ceil(hits[0] + 60 - now))
+            hits.append(now)
+            if len(self._hits) > 10000:  # drop idle keys so memory stays bounded
+                for k in [k for k, v in self._hits.items() if not v or v[-1] <= now - 60]:
+                    del self._hits[k]
+            return None
+
+
+# Registration ---------------------------------------------------------------------
+
+def register(app: FastAPI) -> None:
+    """Attach agent API routes, error handlers and middleware to ``app``."""
+    api = build_api(app)
+    app.mount(PREFIX, api)
+    app.state.api = api
+
+
+def build_api(parent: FastAPI) -> FastAPI:
+    settings = parent.state.settings
+    api = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    api.state.rate_limiter = RateLimiter(settings.rate_limit_per_min)
+    api.add_middleware(BodySizeLimit, limit=MAX_BODY_BYTES, send_limit=MAX_SEND_BODY_BYTES)
+    limiter: RateLimiter = api.state.rate_limiter
+
+    def sessionmaker():
+        return parent.state.sessionmaker
+
+    # Error envelope --------------------------------------------------------------
+
+    @api.exception_handler(MessagingError)
+    async def _messaging_error(request: Request, exc: MessagingError):
+        return error_response(exc.status, exc.code, exc.message, getattr(exc, "headers", None))
+
+    @api.exception_handler(StarletteHTTPException)
+    async def _http_error(request: Request, exc: StarletteHTTPException):
+        code = _STATUS_CODES.get(exc.status_code, "error")
+        message = "not found" if exc.status_code == 404 else str(exc.detail)
+        return error_response(exc.status_code, code, message, getattr(exc, "headers", None))
+
+    @api.exception_handler(RequestValidationError)
+    async def _validation_error(request: Request, exc: RequestValidationError):
+        fields = sorted({".".join(str(p) for p in e.get("loc", ())[1:]) for e in exc.errors()})
+        return error_response(400, "invalid", "invalid parameters: " + ", ".join(f for f in fields if f))
+
+    @api.exception_handler(OperationalError)
+    @api.exception_handler(InterfaceError)
+    async def _db_error(request: Request, exc: Exception):
+        return error_response(503, "unavailable", "the service is temporarily unavailable; retry later")
+
+    # Auth ------------------------------------------------------------------------
+
+    def authenticate(session: Session, request: Request, scope: str | None, *, count: bool = True) -> AgentAuth:
+        header = request.headers.get("authorization", "")
+        scheme, _, token = header.partition(" ")
+        auth = identity.authenticate_agent(session, token.strip() if scheme.lower() == "bearer" else None,
+                                           touch=count)
+        if auth is None:
+            raise ApiError(401, "unauthorized", "missing, invalid or revoked credential",
+                           {"WWW-Authenticate": "Bearer"})
+        if count:
+            retry = limiter.check(auth.credential.id)
+            if retry is not None:
+                raise ApiError(429, "rate_limited", "too many requests for this credential",
+                               {"Retry-After": str(retry)})
+        if scope is not None and not auth.has_scope(scope):
+            raise ApiError(403, "forbidden", f"credential lacks the {scope} scope")
+        return auth
+
+    def run(request: Request, scope: str | None, work: Callable[[Session, AgentAuth], object], *,
+            counted: bool = True):
+        def _sync():
+            with session_scope(sessionmaker()) as session:
+                auth = authenticate(session, request, scope, count=counted)
+                return work(session, auth)
+        return run_in_threadpool(_sync)
+
+    async def authed_json_body(request: Request, scope: str) -> object:
+        """Authenticate, rate-limit and check scope *before* reading the body (protocol §11.4).
+
+        The caller then runs its work with ``counted=False``, which re-checks the
+        credential (a revocation in between still gives 401) without a second rate-limit hit.
+        """
+        await run(request, scope, lambda session, auth: None)
+        raw = await request.body()
+        try:
+            return json.loads(raw)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            raise ApiError(400, "invalid", "request body must be valid JSON") from None
+
+    def m(session: Session, msg) -> dict:
+        return messaging.message_json(session, msg)
+
+    # Endpoints -------------------------------------------------------------------
+
+    @api.get("/me")
+    async def me(request: Request):
+        def work(session, auth: AgentAuth):
+            return {
+                "agent": {
+                    "handle": auth.agent.handle, "display_name": auth.agent.display_name,
+                    "team": {"slug": auth.team.slug, "name": auth.team.name},
+                },
+                "credential": {"prefix": auth.credential.prefix, "scopes": list(auth.credential.scopes)},
+            }
+        return await run(request, None, work)
+
+    @api.get("/agents")
+    async def agents(request: Request):
+        def work(session, auth: AgentAuth):
+            rows = session.scalars(select(Agent).where(Agent.team_id == auth.team.id).order_by(Agent.handle))
+            return {"agents": [
+                {"handle": a.handle, "display_name": a.display_name, "active": a.revoked_at is None} for a in rows
+            ]}
+        return await run(request, "messages:read", work)
+
+    @api.post("/messages")
+    async def send(request: Request):
+        data = await authed_json_body(request, "messages:send")
+
+        def work(session, auth: AgentAuth):
+            req = messaging.SendRequest.parse(data, auth.agent.handle)
+            msg, created = messaging.send_message(
+                session, auth.agent, id=req.id, to_handle=req.to, body=req.body,
+                conversation_id=req.conversation_id, in_reply_to=req.in_reply_to,
+                max_pending=settings.max_pending, attachments=req.attachments,
+            )
+            return created, {"message": m(session, msg), "created": created}
+        created, body = await run(request, "messages:send", work, counted=False)
+        return JSONResponse(body, status_code=201 if created else 200)
+
+    @api.get("/inbox")
+    async def inbox(
+        request: Request,
+        after: int = Query(0, ge=0, le=MAX_SEQ),
+        limit: int = Query(100, ge=1, le=MAX_SEQ),
+        wait: float = Query(0, ge=0),
+        include_acked: bool = Query(False),
+    ):
+        wait = min(wait, MAX_WAIT_SECONDS)
+        limit = min(limit, messaging.INBOX_LIMIT_MAX)
+        deadline = time.monotonic() + wait
+        first = True
+        while True:
+            def poll(count: bool = first):
+                # Re-authenticate on every poll so revocation ends a long-poll immediately.
+                with session_scope(sessionmaker()) as session:
+                    auth = authenticate(session, request, "messages:read", count=count)
+                    msgs, cursor = messaging.inbox(
+                        session, auth.agent, after=after, limit=limit, include_acked=include_acked)
+                    return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}
+            result = await run_in_threadpool(poll)
+            first = False
+            remaining = deadline - time.monotonic()
+            if result["messages"] or remaining <= 0 or await request.is_disconnected():
+                return result
+            await asyncio.sleep(min(POLL_INTERVAL, remaining))
+
+    @api.get("/messages/{message_id}")
+    async def get_message(request: Request, message_id: str):
+        def work(session, auth: AgentAuth):
+            return {"message": m(session, messaging.get_visible_message(session, auth.agent, message_id))}
+        return await run(request, "messages:read", work)
+
+    @api.post("/messages/{message_id}/ack")
+    async def ack(request: Request, message_id: str):
+        def work(session, auth: AgentAuth):
+            msg, acked = messaging.ack(session, auth.agent, message_id)
+            return {"message": m(session, msg), "acked": acked}
+        return await run(request, "messages:ack", work)
+
+    @api.post("/messages/{message_id}/events")
+    async def events(request: Request, message_id: str):
+        data = await authed_json_body(request, "messages:ack")
+
+        def work(session, auth: AgentAuth):
+            if not isinstance(data, dict) or set(data) - {"state", "detail"} or "state" not in data:
+                raise ApiError(400, "invalid", 'body must be {"state": ..., "detail": ...}')
+            msg = messaging.record_event(session, auth.agent, message_id, data["state"], data.get("detail"))
+            return {"message": m(session, msg)}
+        return await run(request, "messages:ack", work, counted=False)
+
+    @api.get("/conversations")
+    async def conversations(request: Request, limit: int = Query(50, ge=1, le=MAX_SEQ)):
+        def work(session, auth: AgentAuth):
+            return {"conversations": messaging.list_conversations(session, auth.agent, limit=limit)}
+        return await run(request, "messages:read", work)
+
+    @api.get("/conversations/{conversation_id}/messages")
+    async def conversation_messages(
+        request: Request, conversation_id: str,
+        after: int = Query(0, ge=0, le=MAX_SEQ), limit: int = Query(100, ge=1, le=MAX_SEQ),
+    ):
+        def work(session, auth: AgentAuth):
+            msgs, cursor = messaging.conversation_messages(
+                session, auth.agent, conversation_id, after=after, limit=limit)
+            return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}
+        return await run(request, "messages:read", work)
+
+    @api.get("/messages/{message_id}/attachments/{attachment_id}")
+    async def download_attachment(request: Request, message_id: str, attachment_id: str):
+        def work(session, auth: AgentAuth):
+            att = messaging.get_attachment_for_agent(session, auth.agent, message_id, attachment_id)
+            return att.filename, att.sha256, bytes(att.content)
+        filename, sha, content = await run(request, "messages:read", work)
+        return Response(content, media_type=None, headers=attachment_headers(filename, sha, len(content)))
+
+    return api
+
+
+def attachment_headers(filename: str, sha256: str, size: int) -> dict[str, str]:
+    """Download headers of protocol §8. ``filename`` already passed ``valid_attachment_name``."""
+    return {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Content-Type-Options": "nosniff",
+        "X-RainCLI-SHA256": sha256,
+        "Content-Length": str(size),
+        "Cache-Control": "no-store",
+    }

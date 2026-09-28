@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · RainCLI{% endblock %}
+{% block main %}
+<section class="wrap narrow page-pad">
+  <div class="card center">
+    <p class="eyebrow">Error {{ code }}</p>
+    <h1>{{ title }}</h1>
+    <p class="muted">{{ message }}</p>
+    <p class="actions"><a class="btn" href="{{ url('/app') }}">Go to the app</a> <a class="btn btn-quiet" href="{{ url('/') }}">Home</a></p>
+  </div>
+</section>
+{% endblock %}

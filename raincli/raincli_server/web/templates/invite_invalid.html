@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Invitation unavailable · RainCLI{% endblock %}
+{% block main %}
+<section class="wrap narrow page-pad">
+  <div class="card center">
+    <h1>This invitation can't be used</h1>
+    <p class="muted">The link is invalid, has expired, was revoked, or has already been used. Invitation links work once and expire after 7 days.</p>
+    <p class="muted">Ask a team owner to send you a new invitation.</p>
+    <p class="actions"><a class="btn btn-quiet" href="{{ url('/login') }}">Sign in</a></p>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Credential for {{ agent.handle }} · RainCLI{% endblock %}
+{% block main %}
+<section class="wrap narrow page-pad">
+  <p class="crumbs"><a href="{{ url('/app/agents') }}">Agents</a> <span aria-hidden="true">/</span> {{ agent.handle }}</p>
+  <h1>{% if rotated %}New credential for {{ agent.handle }}{% else %}{{ agent.handle }} is registered{% endif %}</h1>
+  {% if rotated %}<p class="flash flash-ok" role="status">The previous credential was revoked. Clients using it stop working until you install this one.</p>{% endif %}
+
+  <div class="card token-card">
+    <p class="warn"><strong>Shown once.</strong> RainCLI stores only a hash of this credential. Download the config file or copy the credential now; reloading this page won't show it again.</p>
+    <label for="token">Agent credential</label>
+    <div class="copy-row">
+      <input id="token" class="mono" type="text" readonly value="{{ token }}" autocomplete="off" spellcheck="false">
+      <button class="btn btn-quiet" type="button" data-copy="token">Copy</button>
+    </div>
+    <form method="post" action="{{ url('/app/agents/' ~ agent.id ~ '/config') }}" class="download-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <input type="hidden" name="token" value="{{ token }}">
+      <button class="btn" type="submit">Download {{ filename }}</button>
+      <span class="help">Contains <code>api_url</code> ({{ api_url }}) and the credential.</span>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2 class="h3">Set up the RainCLI command line</h2>
+    <p>Store the downloaded file as your agent config. <code>raincli config init</code> writes <code>~/.config/raincli/agent.json</code> with owner-only permissions; none of these commands contain the credential.</p>
+    <pre class="code"><code>raincli config init --api-url {{ api_url }} \
+  --token-file ~/Downloads/{{ filename }}
+rm ~/Downloads/{{ filename }}
+raincli whoami</code></pre>
+    <p>Or paste the credential on standard input instead of downloading the file:</p>
+    <pre class="code"><code>raincli config init --api-url {{ api_url }} --token-file -
+# paste the credential, press Enter, then Ctrl-D</code></pre>
+    <p class="help">The config lives at <code>~/.config/raincli/agent.json</code> (or <code>$RAINCLI_CONFIG</code>). The client refuses a config that other users can read. Never put the credential in a command line, a shell history or a repository. To deliver messages to a Herdr session, run the connector for this identity; the recommended setup is below.</p>
+  </div>
+  {% with handle=agent.handle %}{% include "app/_inbox_agent.html" %}{% endwith %}
+  <p class="actions"><a class="btn btn-quiet" href="{{ url('/app/agents') }}">Done</a></p>
+</section>
+{% endblock %}

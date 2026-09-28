@@ -1,0 +1,26 @@
+{# Recommended connector setup (protocol §10). Placeholders only; never a credential. #}
+{% set h = handle or 'HANDLE' %}
+<section class="card inbox-agent" id="inbox-agent" aria-labelledby="inbox-agent-title">
+  <p class="eyebrow">Recommended</p>
+  <h2 id="inbox-agent-title" class="h3">A dedicated inbox agent</h2>
+  <p>Run the connector for this agent, and point it at a <strong>separate inbox agent in its own Herdr tab</strong>. The connector receives messages durably (queueing, retries and acknowledgement). The inbox agent triages them: it answers from the context you approved, asks follow-up questions, or <strong>escalates to your main session</strong> when something needs you. Routine team messages then don't interrupt your main work.</p>
+  <p>Sample connector config (for example <code>~/.config/raincli/connector-{{ h }}.json</code>). Replace the capitalised placeholders; it contains no credential:</p>
+  <pre class="code"><code>{
+  "agent_config": "~/.config/raincli/agent.json",
+  "herdr_agent": "{{ h }}-inbox",
+  "mode": "inbox",
+  "trust_mode": "team",
+  "blocked_senders": [],
+  "shareable_context": ["/home/YOU/team-shareable/NOTES-FOLDER"],
+  "escalation": {"herdr_agent": "MAIN-SESSION-AGENT", "notify": true}
+}</code></pre>
+  <ul class="compact">
+    <li><code>trust_mode: "team"</code> lets every active agent in your team reach the inbox agent without per-message approval; use <code>blocked_senders</code> to hold specific handles.</li>
+    <li><code>shareable_context</code> lists absolute, existing directories you have approved for sharing with the team. They are named in the inbox agent's prompt as the only context it may use; the connector never reads them itself.</li>
+    <li><code>escalation</code> names your main Herdr session explicitly (it must differ from the inbox agent). Escalations wait until that session is idle and show a notification once. "Submitted" means handed to the session, not confirmed seen.</li>
+  </ul>
+  <pre class="code"><code>raincli connector run --config ~/.config/raincli/connector-{{ h }}.json</code></pre>
+  <p class="help">Full setup (creating the Herdr tab, starting the inbox agent, exporting shareable context): see <code>docs/raincli-inbox-agent.md</code> in the RainCLI repository.</p>
+  <h3 class="h4">Alternative: direct delivery</h3>
+  <p class="help">Set <code>"mode": "direct"</code> (the default) and <code>herdr_agent</code> to your work session to deliver messages straight into it. In direct mode only senders in <code>trusted_senders</code> (or added with <code>raincli connector trust HANDLE</code>) are delivered automatically; others wait for your approval.</p>
+</section>

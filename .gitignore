@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.env
+.env.*
+!*.env.example
+*.dump
+*.sqlite*
+agent.json
+connector.json
+raincli-demo-run/

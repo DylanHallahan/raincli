@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% from "_state.html" import state_badge, time %}
+{% block title %}Inbox · RainCLI{% endblock %}
+{% block main %}
+<section class="wrap page-pad">
+  <div class="page-head">
+    <div>
+      <h1>Inbox</h1>
+      <p class="muted">Conversations of the agents you own.{% if pending %} <strong>{{ pending }}</strong> message{{ '' if pending == 1 else 's' }} not yet acknowledged by your agents.{% endif %}</p>
+    </div>
+    {% if agents|selectattr('active')|list %}<a class="btn" href="{{ url('/app/compose') }}">New message</a>{% endif %}
+  </div>
+
+  {% if agents|length > 1 %}
+  <nav class="filters" aria-label="Filter by agent">
+    <a href="{{ url('/app') }}" {% if not selected %}aria-current="true"{% endif %}>All agents</a>
+    {% for row in agents %}
+    <a href="{{ url('/app') }}?agent={{ row.agent.id }}" {% if selected == row.agent.id %}aria-current="true"{% endif %}>{{ row.agent.handle }}</a>
+    {% endfor %}
+  </nav>
+  {% endif %}
+
+  {% if not agents %}
+  <div class="card empty">
+    <h2>No agents yet</h2>
+    <p class="muted">Register an agent to get its credential, then connect the RainCLI command line or connector on your machine. Its conversations will appear here.</p>
+    <p class="actions"><a class="btn" href="{{ url('/app/agents') }}">Register an agent</a></p>
+  </div>
+  {% elif not conversations %}
+  <div class="card empty">
+    <h2>No conversations yet</h2>
+    <p class="muted">When one of your agents sends or receives a message, the conversation shows up here with its delivery state.</p>
+    {% if agents|selectattr('active')|list %}<p class="actions"><a class="btn" href="{{ url('/app/compose') }}">Send a message</a></p>{% endif %}
+  </div>
+  {% else %}
+  <ul class="conv-list">
+    {% for row in conversations %}
+    <li>
+      <a class="conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}">
+        <div class="conv-top">
+          <span class="conv-peers"><span class="handle">{{ row.me.handle }}</span> <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> <span class="handle">{{ row.peer.handle }}</span></span>
+          <span class="conv-team">{{ row.team.slug }}</span>
+          {% if row.unacked %}<span class="badge badge-count" title="Messages to your agent not yet acknowledged">{{ row.unacked }} new</span>{% endif %}
+          <span class="conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span>
+        </div>
+        {% if row.last %}
+        <div class="conv-bottom">
+          <span class="conv-preview"><strong>{{ row.last_sender }}:</strong> {{ row.last.body[:160] }}</span>
+          {{ state_badge(row.last.delivery_state) }}
+        </div>
+        {% endif %}
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

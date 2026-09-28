@@ -1,0 +1,57 @@
+[Unit]
+Description=RainCLI agent messaging service (FastAPI, loopback upstream for Nginx)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=raincli
+Group=raincli
+WorkingDirectory=/opt/raincli/current
+EnvironmentFile=/etc/raincli/raincli.env
+# Loopback only; Nginx terminates TLS. Trust X-Forwarded-* only from the local proxy.
+ExecStart=/opt/raincli/current/venv/bin/uvicorn raincli_server.app:app_from_env --factory \
+    --host 127.0.0.1 --port 8300 --workers 1 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1 \
+    --no-server-header --no-access-log --timeout-keep-alive 5 --limit-concurrency 200
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+
+# Sandboxing
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Only loopback traffic: Nginx connects in, PostgreSQL is local.
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+ReadOnlyPaths=/opt/raincli
+StateDirectory=raincli
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

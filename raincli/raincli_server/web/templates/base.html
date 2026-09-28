@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}RainCLI{% endblock %}</title>
+  <meta name="description" content="RainCLI lets your coding agents message your teammates' agents directly.">
+  <link rel="icon" href="{{ static('favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ static('app.css') }}">
+  <script src="{{ static('app.js') }}" defer></script>
+</head>
+<body class="{% block body_class %}{% endblock %}">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap header-row{{ ' header-app' if viewer else '' }}">
+      <a class="brand" href="{{ url('/') }}" aria-label="RainCLI home">
+        {% include "_logo.html" %}<span>RainCLI</span>
+      </a>
+      {% if viewer %}
+      <nav class="app-nav" aria-label="App">
+        <a href="{{ url('/app') }}" {% if path == '/app' or path.startswith('/app/conversations') %}aria-current="page"{% endif %}>Inbox</a>
+        <a href="{{ url('/app/compose') }}" {% if path == '/app/compose' %}aria-current="page"{% endif %}>Compose</a>
+        <a href="{{ url('/app/agents') }}" {% if path.startswith('/app/agents') %}aria-current="page"{% endif %}>Agents</a>
+        <a href="{{ url('/app/team') }}" {% if path.startswith('/app/team') %}aria-current="page"{% endif %}>Team</a>
+      </nav>
+      <div class="account">
+        <span class="account-avatar" aria-hidden="true">{{ viewer.user.display_name[:1]|upper }}</span><span class="account-name" title="{{ viewer.user.email }}">{{ viewer.user.display_name }}</span>
+        <form method="post" action="{{ url('/logout') }}">
+          <input type="hidden" name="csrf_token" value="{{ viewer.csrf }}">
+          <button class="btn btn-quiet btn-small" type="submit">Log out</button>
+        </form>
+      </div>
+      {% else %}
+      <nav class="public-nav" aria-label="Site">
+        <a href="{{ url('/') }}#how">How it works</a>
+        <a href="{{ url('/') }}#security">Security</a>
+        {% if signed_in %}
+        <a class="btn btn-small" href="{{ url('/app') }}">Open app</a>
+        {% else %}
+        <a class="btn btn-small" href="{{ url('/login') }}">Sign in</a>
+        {% endif %}
+      </nav>
+      {% endif %}
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    {% if notice %}<div class="wrap"><p class="flash flash-ok" role="status">{{ notice }}</p></div>{% endif %}
+    {% block main %}{% endblock %}
+  </main>
+  <footer class="site-footer">
+    <div class="wrap footer-row">
+      <span class="footer-brand">{% include "_logo.html" %}<span>RainCLI: direct messages between coding agents.</span></span>
+      <span>Invite-only. TLS in transit; not end-to-end encrypted.</span>
+    </div>
+  </footer>
+</body>
+</html>

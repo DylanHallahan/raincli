@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% from "_state.html" import conn_badge, time %}
+{% block title %}{{ team.name }} · RainCLI{% endblock %}
+{% block main %}
+<section class="wrap page-pad">
+  <div class="page-head">
+    <div>
+      <h1>{{ team.name }}</h1>
+      <p class="muted">Team <code>{{ team.slug }}</code> · you are {{ 'an owner' if is_owner else 'a member' }}.</p>
+    </div>
+    {% if viewer.teams|length > 1 %}
+    <nav class="filters" aria-label="Teams">
+      {% for t, r in viewer.teams %}<a href="{{ url('/app/teams/' ~ t.slug) }}" {% if t.id == team.id %}aria-current="true"{% endif %}>{{ t.slug }}</a>{% endfor %}
+    </nav>
+    {% endif %}
+  </div>
+  {% if error %}<p class="flash flash-error" role="alert">{{ error[:1]|upper ~ error[1:] }}.</p>{% endif %}
+
+  {% if invite_link %}
+  <div class="card token-card" role="status">
+    <p class="warn"><strong>Shown once.</strong> Send this single-use link to {{ invite_email or 'the person you are inviting' }} over a channel you trust. It expires in 7 days.</p>
+    <label for="invite-link">Invitation link</label>
+    <div class="copy-row">
+      <input id="invite-link" class="mono" type="text" readonly value="{{ invite_link }}" autocomplete="off" spellcheck="false">
+      <button class="btn btn-quiet" type="button" data-copy="invite-link">Copy</button>
+    </div>
+  </div>
+  {% endif %}
+
+  <h2>Members</h2>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Role</th><th scope="col">Joined</th>{% if is_owner %}<th scope="col"><span class="sr-only">Actions</span></th>{% endif %}</tr></thead>
+    <tbody>
+      {% for user, role, joined in members %}
+      <tr><td data-label="Name">{{ user.display_name }}{% if user.id == viewer.user.id %} <span class="muted">(you)</span>{% endif %}</td><td data-label="Email">{{ user.email }}</td><td data-label="Role"><span class="badge role-{{ role }}">{{ role }}</span></td><td data-label="Joined">{{ time(joined) }}</td>{% if is_owner %}<td class="row-actions"><a class="btn btn-danger btn-small" href="{{ url('/app/teams/' ~ team.slug ~ '/members/' ~ user.id ~ '/remove') }}">Remove</a></td>{% endif %}</tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Agents in this team</h2>
+  {% if team_agents %}
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th scope="col">Agent</th><th scope="col">Owner</th><th scope="col">Connection</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+    <tbody>
+      {% for row in team_agents %}
+      <tr {% if not row.active %}class="is-revoked"{% endif %}>
+        <td data-label="Agent"><span class="handle">{{ row.agent.handle }}</span></td>
+        <td data-label="Owner">{{ row.owner.display_name }}</td>
+        <td data-label="Connection">{{ conn_badge(row.connection) }}</td>
+        <td class="row-actions">
+          {% if row.active and row.agent.owner_user_id == viewer.user.id %}
+          <a class="btn btn-quiet btn-small" href="{{ url('/app/agents') }}">Manage</a>
+          {% elif row.active and is_owner %}
+          <form method="post" action="{{ url('/app/teams/' ~ team.slug ~ '/agents/' ~ row.agent.id ~ '/revoke') }}" data-confirm="Revoke {{ row.agent.handle }} (owned by {{ row.owner.display_name }})? Its credentials stop working immediately.">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <button class="btn btn-danger btn-small" type="submit">Revoke</button>
+          </form>
+          {% elif row.active %}
+          <a class="btn btn-quiet btn-small" href="{{ url('/app/compose') }}?to={{ row.agent.handle }}">Message</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">No agents registered in this team yet.</p>
+  {% endif %}
+
+  {% if is_owner %}
+  <h2>Invitations</h2>
+  {% if invitations %}
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th scope="col">For</th><th scope="col">Role</th><th scope="col">Invited by</th><th scope="col">Expires</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+    <tbody>
+      {% for inv, by in invitations %}
+      <tr>
+        <td data-label="For">{{ inv.email or 'Anyone with the link' }}</td>
+        <td data-label="Role">{{ inv.role }}</td>
+        <td data-label="Invited by">{{ by.display_name }}</td>
+        <td data-label="Expires">{{ time(inv.expires_at) }}</td>
+        <td class="row-actions">
+          <form method="post" action="{{ url('/app/teams/' ~ team.slug ~ '/invitations/' ~ inv.id ~ '/revoke') }}" data-confirm="Revoke this invitation? The link stops working.">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <button class="btn btn-danger btn-small" type="submit">Revoke</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">No open invitations.</p>
+  {% endif %}
+
+  <form method="post" action="{{ url('/app/teams/' ~ team.slug ~ '/invitations') }}" class="card form">
+    <h3>Invite someone</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="grid-fields">
+      <div>
+        <label for="inv-email">Email <span class="muted">(optional)</span></label>
+        <input id="inv-email" name="email" type="email" maxlength="254" value="{{ form.email if form else '' }}" aria-describedby="inv-email-help">
+        <p id="inv-email-help" class="help">If set, only this address can accept.</p>
+      </div>
+      <div>
+        <label for="inv-role">Role</label>
+        <select id="inv-role" name="role">
+          <option value="member">Member</option>
+          <option value="owner" {% if form and form.role == 'owner' %}selected{% endif %}>Owner</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row"><span class="help">The link is shown once and works once.</span><button class="btn" type="submit">Create invitation link</button></div>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

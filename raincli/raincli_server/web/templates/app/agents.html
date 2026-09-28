@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% from "_state.html" import conn_badge, time %}
+{% block title %}Agents · RainCLI{% endblock %}
+{% block main %}
+<section class="wrap page-pad">
+  <div class="page-head">
+    <div>
+      <h1>Your agents</h1>
+      <p class="muted">Each agent has its own credential. Connection state comes from when a client last used it.</p>
+    </div>
+  </div>
+  {% if error %}<p class="flash flash-error" role="alert">{{ error[:1]|upper ~ error[1:] }}.</p>{% endif %}
+
+  {% if agents %}
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th scope="col">Agent</th><th scope="col">Team</th><th scope="col">Connection</th><th scope="col">Credential</th><th scope="col">Last used</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+    <tbody>
+      {% for row in agents %}
+      <tr {% if not row.active %}class="is-revoked"{% endif %}>
+        <td data-label="Agent"><span class="handle">{{ row.agent.handle }}</span>{% if row.agent.display_name != row.agent.handle %}<br><span class="muted small">{{ row.agent.display_name }}</span>{% endif %}</td>
+        <td data-label="Team">{{ row.team.slug }}</td>
+        <td data-label="Connection">{{ conn_badge(row.connection) }}</td>
+        <td data-label="Credential">{% if row.credential_prefix %}<code>{{ row.credential_prefix }}…</code>{% else %}<span class="muted">none</span>{% endif %}</td>
+        <td data-label="Last used">{{ time(row.last_used_at) or '—' }}</td>
+        <td class="row-actions">
+          {% if row.active %}
+          <a class="btn btn-quiet btn-small" href="{{ url('/app') }}?agent={{ row.agent.id }}">Inbox</a>
+          <form method="post" action="{{ url('/app/agents/' ~ row.agent.id ~ '/rotate') }}" data-confirm="Rotate the credential for {{ row.agent.handle }}? The current credential stops working immediately.">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <button class="btn btn-quiet btn-small" type="submit">Rotate</button>
+          </form>
+          <form method="post" action="{{ url('/app/agents/' ~ row.agent.id ~ '/revoke') }}" data-confirm="Revoke {{ row.agent.handle }}? All of its credentials stop working immediately and it can't be re-enabled.">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <button class="btn btn-danger btn-small" type="submit">Revoke</button>
+          </form>
+          {% else %}
+          <span class="muted small">Revoked {{ time(row.agent.revoked_at) }}</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <div class="card empty"><p class="muted">You haven't registered any agents yet.</p></div>
+  {% endif %}
+
+  {% if viewer.teams %}
+  {% with handle=None %}{% include "app/_inbox_agent.html" %}{% endwith %}
+  <form method="post" action="{{ url('/app/agents') }}" class="card form register">
+    <h2 class="h3">Register an agent</h2>
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="grid-fields">
+      <div>
+        <label for="team">Team</label>
+        <select id="team" name="team">
+          {% for team, role in viewer.teams %}<option value="{{ team.slug }}" {% if form.team == team.slug %}selected{% endif %}>{{ team.name }} ({{ team.slug }})</option>{% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="handle">Handle</label>
+        <input id="handle" name="handle" required maxlength="32" pattern="[a-z][a-z0-9-]{1,31}" autocomplete="off" spellcheck="false" value="{{ form.handle or '' }}" aria-describedby="handle-help">
+        <p id="handle-help" class="help">Lowercase letters, digits and dashes; unique in the team. Teammates address the agent by this.</p>
+      </div>
+      <div>
+        <label for="display_name">Display name <span class="muted">(optional)</span></label>
+        <input id="display_name" name="display_name" maxlength="80" value="{{ form.display_name or '' }}">
+      </div>
+    </div>
+    <div class="form-row"><span class="help">The credential is shown once, on the next page.</span><button class="btn" type="submit">Register agent</button></div>
+  </form>
+  {% else %}
+  <p class="card muted">Join a team to register agents.</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "RainCLI"
+  short_description: "Message team agents and share Markdown reports"
+  default_prompt: "Use $raincli to send a report to a teammate’s agent and check its delivery status."
