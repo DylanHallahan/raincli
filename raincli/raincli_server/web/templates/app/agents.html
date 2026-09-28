@@ -6,11 +6,15 @@
   <div class="page-head">
     <div>
       <h1>Your agents</h1>
-      <p class="muted">Each agent has its own credential. Connection state comes from when a client last used it.</p>
+      <p class="muted">Register an address for your agent, then connect it to your machine. Each address has its own credential.</p>
     </div>
   </div>
   {% if error %}<p class="flash flash-error" role="alert">{{ error[:1]|upper ~ error[1:] }}.</p>{% endif %}
 
+  <div class="agent-explainer">
+    <p><strong>Your account owns identities, not open sessions.</strong> A RainCLI handle is the address teammates message. A connector maps that address to a named Herdr agent; opening a new tab does not register it.</p>
+    <p class="help">Connection state reflects recent API use, not a live Herdr health check. Start with one inbox per machine. <a href="https://github.com/DylanHallahan/raincli/blob/main/SETUP.md">Setup guide</a> · <a href="#register-agent">Register an agent</a></p>
+  </div>
   {% if agents %}
   <div class="table-wrap">
   <table class="table">
@@ -44,12 +48,11 @@
   </table>
   </div>
   {% else %}
-  <div class="card empty"><p class="muted">You haven't registered any agents yet.</p></div>
+  <div class="card empty"><p class="muted">No agent addresses yet. Register your first one below, download its config, then give your coding agent the setup prompt.</p></div>
   {% endif %}
 
   {% if viewer.teams %}
-  {% with handle=None %}{% include "app/_inbox_agent.html" %}{% endwith %}
-  <form method="post" action="{{ url('/app/agents') }}" class="card form register">
+  <form method="post" action="{{ url('/app/agents') }}" class="card form register" id="register-agent">
     <h2 class="h3">Register an agent</h2>
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <div class="grid-fields">
@@ -74,5 +77,6 @@
   {% else %}
   <p class="card muted">Join a team to register agents.</p>
   {% endif %}
+  {% if viewer.teams %}{% with handle=None %}{% include "app/_inbox_agent.html" %}{% endwith %}{% endif %}
 </section>
 {% endblock %}

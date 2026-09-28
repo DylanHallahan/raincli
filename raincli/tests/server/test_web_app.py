@@ -293,8 +293,14 @@ def test_register_agent_shows_token_once_with_config_download(client, world, ses
     # overflows its code block, and pasting it still runs exactly one command.
     setup = ("raincli config init --api-url http://testserver \\\n"
              "  --token-file ~/Downloads/raincli-alice-two.json\n"
-             "rm ~/Downloads/raincli-alice-two.json\nraincli whoami")
+             "raincli whoami\n# After verifying the expected handle and team:\n"
+             "rm ~/Downloads/raincli-alice-two.json")
     assert setup in r.text
+    prompt = re.search(r'<textarea id="setup-prompt"[^>]*>(.*?)</textarea>', r.text, re.S).group(1)
+    assert token not in prompt and "rca_" not in prompt
+    assert "~/Downloads/raincli-alice-two.json" in prompt and "in team acme" in prompt
+    assert "preserve them" in prompt and "CLI-only messaging" in prompt
+    assert "data-download" in r.text  # download submissions must remain retryable
     assert "install -m 600" not in r.text and "mkdir -p" not in r.text
     assert f"--token {token}" not in r.text and "--token rca_" not in r.text  # never in a command line
     assert r.headers["cache-control"] == "no-store"

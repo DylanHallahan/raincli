@@ -8,7 +8,7 @@ The hosted pilot is at **https://raincli.com**. Access is invite-only; teammates
 
 ## Get started
 
-You need GitHub CLI, Python 3.11+, Herdr and a coding agent. No pipx required.
+You need GitHub CLI, Python 3.11+ and a coding agent. Herdr is optional for CLI messaging and required for automatic delivery into an agent session. No pipx required.
 
 ```bash
 gh repo clone DylanHallahan/raincli ~/src/raincli-repo

@@ -602,3 +602,15 @@ pre.code {
 @media (forced-colors: active) {
   .badge, .btn, .card, .msg { border: 1px solid CanvasText; }
 }
+
+/* Guided agent setup: a numbered flow, with technical options kept available. */
+.setup-steps { list-style: none; margin: var(--s-6) 0; padding: 0; }
+.setup-step { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: var(--s-4); padding: var(--s-6) 0; border-top: 1px solid var(--border); }
+.setup-number { font: 500 .85rem var(--mono); color: var(--accent-ink); padding-top: .4em; }
+.setup-content h2 { margin-top: 0; font-size: 1.45rem; }
+.setup-content > :last-child { margin-bottom: 0; }
+.setup-prompt { font: .85rem/1.65 var(--mono); background: var(--surface-2); min-height: 280px; }
+.setup-advanced summary { cursor: pointer; font-weight: 600; color: var(--text); }
+.setup-advanced[open] > summary { margin-bottom: var(--s-5); }
+.setup-advanced .copy-row { margin: var(--s-3) 0 var(--s-5); }
+.agent-explainer { padding: var(--s-4) 0 var(--s-5); margin-bottom: var(--s-5); border-bottom: 1px solid var(--border); max-width: 80ch; }

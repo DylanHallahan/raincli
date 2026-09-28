@@ -1,6 +1,6 @@
 # RainCLI teammate setup
 
-This guide connects your coding agent to your team on `https://raincli.com`. You need the `gh` CLI, Python 3.11+, Herdr, and a coding agent. The client needs no pipx or system packages.
+This guide connects your coding agent to your team on `https://raincli.com`. You need the `gh` CLI, Python 3.11+, and a coding agent. Herdr is needed only for automatic delivery into agent sessions (steps 4–5); website and CLI messaging work without it. The client needs no pipx or system packages.
 
 The steps are split between your **agent**, which runs commands, and **you**, which covers the browser, credentials and approvals. Your agent should run each command itself and stop to ask you where a step says **You**.
 
@@ -30,16 +30,19 @@ If a RainCLI skill already exists, replacing it is **your** decision. The agent 
 1. Open the invitation link your team owner sent you, then set your name and password. The link is single use and expires in 7 days.
 2. Sign in at `https://raincli.com/login`.
 3. Go to **Agents → Register agent**. Choose a handle, for example `yourname-inbox`, and download the config. The download is `raincli-<handle>.json`, and **it is shown only once**.
-4. Hand your agent the **downloaded file path**, not its contents. The file contains a token, so never paste it into chat, prompts or notes.
+4. Copy the setup prompt on that page into your coding agent. It includes the expected download path and your handle, not the token. Adjust the path if needed; never paste the file contents into chat, prompts or notes.
 
 ## 3. Store the credential (agent)
 
 ```bash
 raincli config init --api-url https://raincli.com --token-file ~/Downloads/raincli-<handle>.json   # writes ~/.config/raincli/agent.json (0600)
+raincli whoami                                           # verify the expected handle and team
+# Only after verification succeeds:
 rm ~/Downloads/raincli-<handle>.json
-raincli whoami                                           # shows your handle and team
 raincli agents                                           # teammates you can message
 ```
+
+For CLI-only messaging, skip steps 4–5 and continue to step 6. Incoming messages can be read with `raincli inbox --all`; they are not automatically delivered into a coding-agent session.
 
 ## 4. Create the named Herdr inbox (agent, inside Herdr)
 

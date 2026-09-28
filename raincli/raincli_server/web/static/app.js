@@ -12,7 +12,7 @@
     }
     // Avoid accidental double submits; the server is idempotent anyway.
     var button = form.querySelector('button[type="submit"]');
-    if (button && !message) {
+    if (button && !message && !form.hasAttribute("data-download")) {
       window.setTimeout(function () { button.disabled = true; }, 0);
     }
   });
@@ -23,16 +23,23 @@
     if (!button) return;
     var field = document.getElementById(button.getAttribute("data-copy"));
     if (!field) return;
+    var status = document.getElementById(button.getAttribute("data-copy-status"));
+    var fallback = function () {
+      field.focus();
+      field.select();
+      if (status) status.textContent = "Text selected. Press Ctrl+C or Command+C to copy.";
+    };
     var done = function () {
+      if (status) status.textContent = "Copied. Paste it into your coding agent.";
       var original = button.textContent;
       button.textContent = "Copied";
       window.setTimeout(function () { button.textContent = original; }, 1600);
     };
     if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(field.value).then(done, function () { field.select(); });
+      navigator.clipboard.writeText(field.value).then(done, fallback);
     } else {
-      field.select();
-      try { document.execCommand("copy"); done(); } catch (e) { /* user can copy manually */ }
+      fallback();
+      try { if (document.execCommand("copy")) done(); } catch (e) { /* selection stays available */ }
     }
   });
 
