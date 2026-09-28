@@ -1,0 +1,214 @@
+"""Graceful stop, update handoff and updater hardening (review-1 H3, H4, M2-M6, L2-L4)."""
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+import zipfile
+
+import pytest
+
+from raincli_agent import __version__
+from raincli_agent.config import write_config
+from raincli_agent.errors import ConfigError
+from raincli_agent.fsutil import atomic_write_json, ensure_private_dir
+from raincli_agent.runtime import service, updates
+from raincli_agent.runtime.launcher import __file__ as LAUNCHER
+from raincli_agent.runtime.service import Worker, load_bound, load_runtime
+
+from .conftest import send
+from .test_runtime import fake_managed_root
+
+
+def mapping(tmp_path, **extra):
+    write_config(tmp_path / "agent.json", "http://127.0.0.1:1", "rca_" + "a" * 43)
+    atomic_write_json(tmp_path / "connector.json",
+                      {"agent_config": "agent.json", "herdr_agent": "inbox", "state_dir": "queue", **extra})
+    return load_bound(str(tmp_path / "connector.json"))
+
+
+def test_stop_request_lets_in_flight_submission_finish(fake_api, connector_env):
+    """H3: a supervisor stop never turns a delivery into submission_uncertain."""
+    send(fake_api, fake_api.alice, "bob", "hello")
+    connector = connector_env.connector()
+    stop = []
+    original = connector_env.herdr.prompt
+
+    def prompt(name, text, timeout):
+        stop.append(True)  # the stop arrives mid-submission
+        return original(name, text, timeout)
+    connector_env.herdr.prompt = prompt
+    connector.run_forever(stop_requested=lambda: bool(stop))
+    [record] = connector.queue.all()
+    assert record["state"] == "submitted"
+
+
+def test_stop_during_slow_first_tick_is_not_lost(tmp_path, monkeypatch):
+    """H4: the instance is published before the first tick, and a stop request
+    made during that tick ends the runtime as soon as the tick returns."""
+    mapping(tmp_path)
+    config = tmp_path / "runtime.json"
+    atomic_write_json(config, {"connectors": ["connector.json"], "state_dir": "state"})
+    ensure_private_dir(tmp_path / "state")
+    atomic_write_json(tmp_path / "state/status.json", {"instance": "previous-run", "status": "stopped", "updated_at": 0})
+    ticking = threading.Event()
+
+    def slow_tick(self, now):
+        ticking.set()
+        time.sleep(1.5)
+        return {"connector": self.path, "status": "offline", "reported": False}
+    monkeypatch.setattr(Worker, "tick", slow_tick)
+    monkeypatch.setattr(Worker, "stop", lambda self: None)
+    monkeypatch.setattr(service.signal, "signal", lambda *a: None)  # not the main thread
+    runner = threading.Thread(target=service.run, args=(config,))
+    runner.start()
+    assert ticking.wait(10)
+    assert service.status(config)["status"] == "starting"
+    assert service.request_stop(config) == {"status": "stop_requested"}
+    started = time.monotonic()
+    runner.join(timeout=10)
+    assert not runner.is_alive() and time.monotonic() - started < 5
+    assert service.status(config)["status"] == "stopped"
+
+
+def test_local_state_files_of_the_wrong_shape_are_ignored(tmp_path):
+    atomic_write_json(tmp_path / "runtime.json", {"connectors": ["c.json"], "state_dir": "state"})
+    ensure_private_dir(tmp_path / "state")
+    atomic_write_json(tmp_path / "state/status.json", ["not", "a", "record"])
+    assert service.status(tmp_path / "runtime.json") == {"status": "not_observed"}
+    assert service.request_stop(tmp_path / "runtime.json") == {"status": "not_running"}
+    atomic_write_json(tmp_path / "state/stop.json", ["x"])
+    assert not service.stop_requested(tmp_path / "state", "x")
+
+
+def test_one_runtime_owns_a_connector_and_state_dirs_may_not_overlap(tmp_path):
+    cfg, identity, binding = mapping(tmp_path)
+    first, second = (Worker(str(tmp_path / "connector.json"), cfg, identity, tmp_path / name, binding)
+                     for name in ("state-a", "state-b"))
+    for worker in (first, second):
+        worker.handle = "inbox-agent"
+    assert first._claim() and not second._claim()
+    first._release()
+    assert second._claim()
+    second._release()
+    atomic_write_json(tmp_path / "runtime.json", {"connectors": ["connector.json"], "state_dir": "queue"})
+    with pytest.raises(ConfigError, match="distinct queue state"):
+        load_runtime(tmp_path / "runtime.json")
+
+
+def test_connector_output_goes_to_a_private_rotated_log(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[2]))  # the child imports this checkout
+    cfg, identity, binding = mapping(tmp_path)
+    worker = Worker(str(tmp_path / "connector.json"), cfg, identity, tmp_path, binding)
+    worker.log_path.write_bytes(b"x" * (service.LOG_LIMIT + 1))
+    atomic_write_json(tmp_path / "connector.json", {"agent_config": "missing.json", "herdr_agent": "inbox"})
+    process = worker._spawn()  # a real child that fails on the edited config
+    assert process.wait(timeout=30) != 0
+    assert Path(str(worker.log_path) + ".1").stat().st_size == service.LOG_LIMIT + 1
+    text = worker.log_path.read_text()
+    assert "rca_" not in text and "missing.json" in text
+    if os.name != "nt":
+        assert worker.log_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_update_requests_stay_on_https_github_hosts():
+    for url in ("http://api.github.com/x", "https://example.com/x", "https://codeload.github.com:8443/x",
+                "https://api.github.com.evil.test/x"):
+        with pytest.raises(ConfigError):
+            updates.check_url(url)
+    updates.check_url("https://codeload.github.com/DylanHallahan/raincli/zip/" + "a" * 40)
+    handler = updates._Redirects()
+    request = urllib.request.Request("https://api.github.com/repos/x")
+    for target in ("http://codeload.github.com/x", "https://objects.example.net/x"):
+        with pytest.raises(ConfigError):
+            handler.redirect_request(request, None, 302, "Found", {}, target)
+    assert handler.redirect_request(request, None, 302, "Found", {}, "https://codeload.github.com/x") is not None
+
+
+def test_network_failures_are_reported_without_traceback(monkeypatch):
+    def fail(*a, **kw):
+        raise urllib.error.URLError("offline")
+    monkeypatch.setattr(updates._OPENER, "open", fail)
+    with pytest.raises(ConfigError, match="offline"):
+        updates.fetch(updates.API + "/releases/latest", 10)
+
+
+def release_archive(commit, root_name=None, launcher_text=None):
+    """A codeload-like archive holding this checkout's client package."""
+    package = Path(__file__).resolve().parents[2] / "raincli_agent"
+    root = root_name or "raincli-" + commit
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        for path in package.rglob("*"):
+            if path.is_file() and "__pycache__" not in path.parts:
+                data = path.read_bytes()
+                if launcher_text is not None and path == Path(LAUNCHER).resolve():
+                    data = launcher_text.encode()
+                archive.writestr(f"{root}/raincli/raincli_agent/{path.relative_to(package).as_posix()}", data)
+    return buf.getvalue()
+
+
+def test_install_copies_verified_client_without_pip_and_syncs_launcher(tmp_path, monkeypatch):
+    new_launcher = Path(LAUNCHER).read_text() + "\n# release marker\n"
+    monkeypatch.setattr(updates, "fetch", lambda url, limit: release_archive(url.rsplit("/", 1)[1], launcher_text=new_launcher))
+    ran = []
+    real_run = subprocess.run
+
+    def run(argv, *a, **kw):
+        ran.append([str(x) for x in argv])
+        return real_run(argv, *a, **kw)
+    monkeypatch.setattr(updates.subprocess, "run", run)
+    (tmp_path / "launch.py").write_text("# an older launcher\n")
+    assert updates.install(tmp_path, {"tag": "v" + __version__, "commit": "c" * 40})["status"] == "installed"
+    assert not any(argv[1:3] == ["-m", "pip"] for argv in ran)  # no build backend or index
+    assert any("--without-pip" in argv for argv in ran)
+    assert (tmp_path / "launch.py").read_text() == new_launcher
+    pointer = updates.read_pointer(tmp_path)
+    version = real_run([pointer["python"], "-m", "raincli_agent", "--version"], capture_output=True, text=True)
+    assert version.stdout.strip() == "raincli " + __version__
+
+    # An archive whose root does not name the resolved commit is refused.
+    monkeypatch.setattr(updates, "fetch", lambda url, limit: release_archive("d" * 40, root_name="raincli-" + "e" * 40))
+    with pytest.raises(ConfigError, match="resolved commit"):
+        updates.install(tmp_path, {"tag": "v" + __version__, "commit": "d" * 40})
+    assert updates.read_pointer(tmp_path) == pointer
+
+    # "latest" never downgrades or follows a moved tag automatically.
+    monkeypatch.setattr(updates, "latest", lambda: {"tag": "v0.0.1", "commit": "f" * 40})
+    assert updates.install(tmp_path)["status"] == "not_newer"
+    assert updates.read_pointer(tmp_path) == pointer
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell stand-in for the managed interpreter")
+def test_launcher_restarts_a_crashed_runtime(tmp_path):
+    runs = tmp_path / "runs"
+    root = fake_managed_root(tmp_path, f'echo run >> "{runs}"\n'
+                                       f'[ $(wc -l < "{runs}") -ge 2 ] && exit 0\nexit 1\n')
+    result = subprocess.run([sys.executable, str(root / "launch.py"), "runtime", "run", "--config", "x.json"],
+                            capture_output=True, timeout=30)
+    assert result.returncode == 0 and runs.read_text() == "run\nrun\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX exec")
+def test_launcher_reexecutes_itself_after_a_launcher_update(tmp_path):
+    marker = tmp_path / "relaunched"
+    root = fake_managed_root(tmp_path, 'trap "exit 0" TERM\nwhile :; do sleep 0.1; done\n')
+    process = subprocess.Popen([sys.executable, str(root / "launch.py"), "runtime", "run", "--config", "x.json"])
+    try:
+        time.sleep(1.5)
+        second = root / "versions/v2/bin/python"
+        second.parent.mkdir(parents=True)
+        second.write_text(f'#!/bin/sh\necho "$@" > "{marker}"\nexit 0\n')
+        second.chmod(0o755)
+        # The new release ships a new launcher: it must take over at the switch.
+        (root / "launch.py").write_text((root / "launch.py").read_text() + "\n# v2\n")
+        atomic_write_json(root / "current.json", {"tag": "v2.0.0", "commit": "b" * 40, "python": str(second)})
+        assert process.wait(timeout=30) == 0
+        assert marker.read_text().split() == ["-m", "raincli_agent", "runtime", "run", "--config", "x.json"]
+    finally:
+        if process.poll() is None:
+            process.kill()

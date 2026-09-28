@@ -1,9 +1,10 @@
 """Advisory team presence, authenticated to the publishing agent identity."""
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
+from . import identity
 from .messaging import MessagingError
 from .models import AgentPresence
 
@@ -14,7 +15,7 @@ STATES = {"ready", "busy", "blocked", "offline", "unknown"}
 def publish(session, agent, data):
     if not isinstance(data, dict) or set(data) != {"status"} or not isinstance(data.get("status"), str) or data["status"] not in STATES:
         raise MessagingError(400, "invalid", "presence requires only a valid status")
-    now = datetime.now(timezone.utc)
+    now = identity.now()  # the server clock shared with the web view
     values = dict(agent_id=agent.id, status=data["status"], seen_at=now)
     session.execute(insert(AgentPresence).values(**values).on_conflict_do_update(
         index_elements=[AgentPresence.agent_id], set_={"status": data["status"], "seen_at": now}))
@@ -26,7 +27,7 @@ def directory(session, agents):
     ids = [a.id for a in agents]
     rows = session.scalars(select(AgentPresence).where(AgentPresence.agent_id.in_(ids))) if ids else []
     by_id = {r.agent_id: r for r in rows}
-    now = datetime.now(timezone.utc)
+    now = identity.now()  # the server clock shared with the web view
     out = []
     for agent in agents:
         row = by_id.get(agent.id)
