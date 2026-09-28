@@ -61,7 +61,8 @@ The command stored in the registry is limited to 260 characters. If installation
 **Managed updates** use `$HOME\.raincli\client` and the same `raincli runtime update` commands, checks and integrity limit as on Linux ([SETUP.md](../SETUP.md#managed-updates-opt-in-no-stable-release-yet)). **No stable release exists yet**, so nothing installs. The managed environment has no `raincli.exe`; use `py -3 "$HOME\.raincli\client\launch.py" …`. After the first managed install, run `runtime startup --config …` again so logon startup uses the launcher.
 
 Windows-specific behaviour:
-- The launcher stops the runtime by repeating `runtime stop` for up to 60 seconds, then uses `taskkill /T /F` as a last resort so no connector keeps the queue lock.
+- The launcher stops the runtime by repeating `runtime stop` for up to 120 seconds, then uses `taskkill /T /F` as a last resort so no connector keeps the queue lock. A runtime normally needs at most 100 seconds; no new delivery starts after the stop, and queued messages stay durable.
+- Started at logon through `pythonw.exe`, the runtime has no console. The launcher then writes its output to a private `$HOME\.raincli\client\runtime.log`, rotated to `runtime.log.1` once it passes 1 MiB when the runtime starts. Check it if availability never appears.
 - It restarts a crashed runtime with backoff, but if the launcher itself is killed, nothing restarts it until the next logon. Connectors can then outlive it until logoff, because no Job object is used.
 - Replacing the version pointer retries while the launcher has the file open.
 

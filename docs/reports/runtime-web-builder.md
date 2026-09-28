@@ -82,3 +82,15 @@ Fixed (template only; no query change was needed):
 - Removed the SETUP recovery step that restarted the runtime after a re-pin, because config edits are now picked up automatically.
 - The Windows guide now says the handoff, stop-file, `taskkill` and pointer-retry paths haven't yet run on native Windows, and names the no-Job-object and dead-launcher limits.
 - Commands were rechecked against the current `--help`. `runtime status` still has no help line in `raincli runtime --help`, which is a cosmetic issue for cli-builder.
+
+## Follow-up 3: stop budget (`10518a5`)
+
+- Merged `feat/runtime-windows-checks` at `10518a5` cleanly.
+- Documented the new behaviour in SETUP.md, `docs/windows-client.md`, protocol §13 and SKILL.md:
+  - no new delivery starts after a stop, and queued messages stay durable;
+  - runtime connectors need `prompt_timeout` ≤ 60 (default 30);
+  - the stop budget: about 80 s per connector, 100 s per runtime, 120 s in the launcher on both platforms, and `TimeoutStopSec=150`;
+  - Ctrl-C on a foreground `runtime run` is a graceful stop;
+  - the headless Windows `runtime.log` in the managed root, rotated at 1 MiB;
+  - `ready` first appears on the second 30 s report.
+- Full suite: 382 passed, 1 skipped.
