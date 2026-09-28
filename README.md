@@ -36,7 +36,7 @@ Then follow **[SETUP.md](SETUP.md)** to accept a team invitation, download your 
 
 This is an early team pilot. A successful send means the server stored the message; session submission does not prove an agent acted or a person read it. The connector must be running, either in a Herdr pane or under the optional runtime. Session availability (`ready`, `busy`, `blocked`, `offline`, `unknown`) is advisory and expires after 120 seconds. It is not delivery or receipt.
 
-Login startup and managed updates are opt-in. **No stable release exists yet**, so managed updates have nothing to install. Not yet verified: delivery into a real Herdr on Windows, and updating from a real published release.
+Login startup and managed updates are opt-in. Updates come only from stable GitHub releases over HTTPS, pinned to the release's commit; release signatures are not verified. **No stable release exists yet**, so managed updates have nothing to install. Not yet verified: delivery into a real Herdr on Windows, the runtime's managed update and stop paths on native Windows, and updating from a real published release.
 
 Transport uses HTTPS. The server can read message contents; this is **not end-to-end encrypted**. Share only approved context. Inbox agents treat received messages and files as external content, not as authority to execute commands or access private material.
 

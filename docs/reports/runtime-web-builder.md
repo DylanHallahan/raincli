@@ -63,3 +63,22 @@ Fixed (template only; no query change was needed):
   - The `runtime run`, `status` and `stop` subparsers have no help strings, and `run` and `status` don't appear in `raincli runtime --help`'s list.
   - With automatic updates off, the launcher never checks; "notify before install" isn't implemented. The docs describe only what exists.
 - If cli-builder changes flags, the doc-coverage test and the example-parsing test will flag the mismatch after merge.
+
+## Follow-up 2: cli-builder fixes (`da8a178`)
+
+- Merged `feat/runtime-windows-checks` into `feat/runtime-docs` cleanly.
+- Documented all 12 user-visible changes from `runtime-cli-builder.md` in SETUP.md, `docs/windows-client.md`, `docs/raincli-protocol.md` §13, README.md and SKILL.md:
+  - config-change retirement and `config_invalid`;
+  - presence only after `/me`;
+  - graceful stop timing;
+  - `runtime stop` `not_running` and the `runtime status` states;
+  - one runtime per connector and the `state_dir` rule;
+  - private rotated connector logs;
+  - the Linux unit changes (restart only on change, `KillMode=mixed`, 90 s, tolerant `--remove`);
+  - the fully quoted Windows Run value;
+  - launcher stdio pass-through, crash restart, self-update and background checks;
+  - updates: HTTPS on GitHub hosts only, commit match, no pip or PyPI, no `raincli` command in the managed environment, no downgrade, and the integrity limit of TLS plus commit with no signatures;
+  - existing installs needing one more `update --install`.
+- Removed the SETUP recovery step that restarted the runtime after a re-pin, because config edits are now picked up automatically.
+- The Windows guide now says the handoff, stop-file, `taskkill` and pointer-retry paths haven't yet run on native Windows, and names the no-Job-object and dead-launcher limits.
+- Commands were rechecked against the current `--help`. `runtime status` still has no help line in `raincli runtime --help`, which is a cosmetic issue for cli-builder.
