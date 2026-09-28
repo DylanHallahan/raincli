@@ -1,3 +1,3 @@
-"""RainCLI agent CLI and Herdr connector (stdlib only). Owned by the connector builder."""
+"""RainCLI agent CLI and Herdr connector (stdlib only)."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

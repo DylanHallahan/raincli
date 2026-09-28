@@ -30,7 +30,8 @@ def test_rotated_and_revoked_credentials(client, world, session):
     revoked = send(client, world["tokens"]["alice"], "bob-agent")
     assert revoked.status_code == unknown.status_code == 400 and revoked.json() == unknown.json()
     agents = client.get("/api/v1/agents", headers=auth(world["tokens"]["alice"])).json()["agents"]
-    assert {"handle": "bob-agent", "display_name": "bob-agent", "active": False} in agents
+    assert {"handle": "bob-agent", "display_name": "bob-agent", "active": False,
+            "presence": {"status": "offline", "seen_at": None, "expires_at": None}} in agents
 
 
 def test_missing_scope(client, world, session):

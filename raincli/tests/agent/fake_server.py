@@ -43,6 +43,7 @@ class FakeState:
         self.tokens = {}  # token -> agent id
         self.messages = {}  # id -> internal record
         self.conversations = {}  # id -> {"pair": frozenset, "team": slug}
+        self.presence = {}
         self.events = []  # (message id, state, detail)
         self.seq = 0
         self.max_pending = 1000
@@ -356,6 +357,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return 200, {"agent": {"handle": caller["handle"], "display_name": caller["display_name"],
                                        "team": {"slug": caller["team"], "name": st.teams[caller["team"]]}},
                              "credential": {"prefix": auth[7:15], "scopes": ["messages:read", "messages:send", "messages:ack"]}}
+            if method == "PUT" and route == "/presence":
+                if not isinstance(body, dict) or set(body) != {"status"} or body["status"] not in {"ready", "busy", "blocked", "unknown", "offline"}:
+                    raise ApiFail(400, "invalid")
+                st.presence[caller["handle"]] = body["status"]
+                return 200, {"presence": {"status": body["status"], "expires_at": "test-expiry"}}
             if method == "GET" and route == "/agents":
                 return 200, {"agents": [{"handle": a["handle"], "display_name": a["display_name"],
                                          "active": a["active"]}
@@ -385,6 +391,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._handle("GET")
+
+    def do_PUT(self):
+        self._handle("PUT")
 
     def do_POST(self):
         self._handle("POST")

@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message as ASGIMessage, Receive, Scope, Send
 
-from raincli_server import identity, messaging
+from raincli_server import identity, messaging, presence
 from raincli_server.db import session_scope
 from raincli_server.identity import AgentAuth
 from raincli_server.messaging import MessagingError
@@ -239,10 +239,15 @@ def build_api(parent: FastAPI) -> FastAPI:
     async def agents(request: Request):
         def work(session, auth: AgentAuth):
             rows = session.scalars(select(Agent).where(Agent.team_id == auth.team.id).order_by(Agent.handle))
-            return {"agents": [
-                {"handle": a.handle, "display_name": a.display_name, "active": a.revoked_at is None} for a in rows
-            ]}
+            return {"agents": presence.directory(session, list(rows))}
         return await run(request, "messages:read", work)
+
+    @api.put("/presence")
+    async def update_presence(request: Request):
+        data = await authed_json_body(request, "messages:ack")
+        return await run(request, "messages:ack",
+                         lambda session, auth: {"presence": presence.publish(session, auth.agent, data)},
+                         counted=False)
 
     @api.post("/messages")
     async def send(request: Request):

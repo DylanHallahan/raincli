@@ -78,6 +78,9 @@ class ApiClient:
     def __repr__(self):
         return f"ApiClient(api_url={self.api_url!r})"
 
+    def publish_presence(self, status):
+        return self.request("PUT", "/presence", body={"status": status})[1]["presence"]
+
     # -- transport -------------------------------------------------------
 
     def _url(self, path, query=None):

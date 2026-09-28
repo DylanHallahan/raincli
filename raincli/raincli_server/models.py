@@ -107,6 +107,15 @@ class Agent(Base):
     __table_args__ = (UniqueConstraint("team_id", "handle", name="uq_agents_team_handle"),)
 
 
+class AgentPresence(Base):
+    __tablename__ = "agent_presence"
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (CheckConstraint("status IN ('ready','busy','blocked','offline','unknown')",
+                                     name="ck_agent_presence_status"),)
+
+
 class AgentCredential(Base):
     __tablename__ = "agent_credentials"
     id: Mapped[uuid.UUID] = _uuid()

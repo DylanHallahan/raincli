@@ -21,6 +21,7 @@ from raincli_server import identity, messaging, security
 from raincli_server.models import (
     Agent,
     AgentCredential,
+    AgentPresence,
     Attachment,
     Conversation,
     DeliveryEvent,
@@ -54,6 +55,18 @@ class AgentRow:
     credential_prefix: str | None
     last_used_at: datetime | None
     credentials_active: int
+    presence: AgentPresence | None = None
+
+    @property
+    def runtime_status(self) -> str:
+        from raincli_server.presence import TTL_SECONDS
+        if not self.active:
+            return "offline"
+        if self.presence is None:
+            return "unknown"
+        if identity.now() - self.presence.seen_at >= timedelta(seconds=TTL_SECONDS):
+            return "offline"
+        return self.presence.status
 
     @property
     def active(self) -> bool:
@@ -79,9 +92,10 @@ def _agent_rows(db: Session, where) -> list[AgentRow]:
     active = select(func.count()).select_from(AgentCredential).where(live)
     rows = db.execute(
         select(
-            Agent, Team, User, prefix.scalar_subquery(), last_used.scalar_subquery(), active.scalar_subquery(),
+            Agent, Team, User, prefix.scalar_subquery(), last_used.scalar_subquery(), active.scalar_subquery(), AgentPresence,
         )
         .join(Team, Team.id == Agent.team_id).join(User, User.id == Agent.owner_user_id)
+        .outerjoin(AgentPresence, AgentPresence.agent_id == Agent.id)
         .where(where).order_by(Agent.revoked_at.is_not(None), Team.name, Agent.handle)
     )
     return [AgentRow(*row) for row in rows]

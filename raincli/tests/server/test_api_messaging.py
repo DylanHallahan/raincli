@@ -260,5 +260,7 @@ def test_me_and_agents(client, world):
     assert me["credential"]["prefix"] == world["tokens"]["alice"][:12]
     assert sorted(me["credential"]["scopes"]) == ["messages:ack", "messages:read", "messages:send"]
     agents = client.get("/api/v1/agents", headers=auth(world["tokens"]["alice"])).json()["agents"]
-    assert agents == [{"handle": "alice-agent", "display_name": "alice-agent", "active": True},
-                      {"handle": "bob-agent", "display_name": "bob-agent", "active": True}]
+    assert agents == [{"handle": "alice-agent", "display_name": "alice-agent", "active": True,
+                       "presence": {"status": "unknown", "seen_at": None, "expires_at": None}},
+                      {"handle": "bob-agent", "display_name": "bob-agent", "active": True,
+                       "presence": {"status": "unknown", "seen_at": None, "expires_at": None}}]

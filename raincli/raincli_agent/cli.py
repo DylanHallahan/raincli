@@ -191,7 +191,9 @@ def cmd_agents(args):
         return EXIT_OK
     for a in agents:
         flag = "" if a.get("active", True) else "  (inactive)"
-        out(f"{escape_line(a['handle'])}  {escape_line(a.get('display_name') or '')}{flag}")
+        presence = a.get("presence") or {}
+        status = f"  [{escape_line(str(presence.get('status', 'unknown')))}]" if presence else ""
+        out(f"{escape_line(a['handle'])}  {escape_line(a.get('display_name') or '')}{flag}{status}")
     return EXIT_OK
 
 
@@ -416,6 +418,10 @@ def cmd_connector_run(args, herdr=None):
         connector = Connector(cfg, api, herdr, queue, identity=identity,
                               agent_config_path=cfg.agent_config or args.agent_config or default_config_path())
         connector.log(f"serving {cfg.herdr_agent} from {queue.state_dir}")
+        if getattr(args, "runtime_ready", None):
+            from .fsutil import atomic_write_json
+            connector.start()
+            atomic_write_json(args.runtime_ready, {"pid": os.getpid()})
         if args.once:
             connector.run_once(wait=0)
         else:
@@ -536,6 +542,44 @@ def _connector_op(args, action):
     return EXIT_OK
 
 
+def cmd_runtime_run(args):
+    from .runtime.service import run
+    run(args.config, args.once)
+    return EXIT_OK
+
+
+def cmd_runtime_startup(args):
+    from .runtime.startup import install, remove
+    if not args.remove and not args.config:
+        raise UsageError("runtime startup requires --config or --remove")
+    out(remove() if args.remove else install(args.config))
+    return EXIT_OK
+
+
+def cmd_runtime_stop(args):
+    from .runtime.service import request_stop
+    out_json(request_stop(args.config))
+    return EXIT_OK
+
+
+def cmd_runtime_update(args):
+    from .runtime import updates
+    if args.rollback or args.automatic is not None:
+        result = updates.configure(args.root, automatic=None if args.automatic is None else args.automatic == "on", rollback=args.rollback)
+    elif args.install:
+        result = updates.install(args.root)
+    else:
+        result = updates.latest() or {"status": "no_release"}
+    out_json(result)
+    return EXIT_OK
+
+
+def cmd_runtime_status(args):
+    from .runtime.service import status
+    out_json(status(args.config))
+    return EXIT_OK
+
+
 # -- parser ----------------------------------------------------------------
 
 def build_parser():
@@ -545,6 +589,32 @@ def build_parser():
     p.add_argument("--config", dest="agent_config", metavar="PATH",
                    help="agent config file (default: $RAINCLI_CONFIG or ~/.config/raincli/agent.json)")
     sub = p.add_subparsers(dest="command", required=True, parser_class=_Parser)
+
+    runtime = sub.add_parser("runtime", help="supervise mapped connectors and report presence")
+    runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
+    run = runtime_sub.add_parser("run")
+    run.add_argument("--config", required=True)
+    run.add_argument("--once", action="store_true")
+    run.set_defaults(func=cmd_runtime_run)
+    status = runtime_sub.add_parser("status")
+    status.add_argument("--config", required=True)
+    status.set_defaults(func=cmd_runtime_status)
+
+    stop = runtime_sub.add_parser("stop", help="request graceful runtime shutdown")
+    stop.add_argument("--config", required=True)
+    stop.set_defaults(func=cmd_runtime_stop)
+    update = runtime_sub.add_parser("update", help="check or stage an official stable release")
+    update.add_argument("--root", help="managed installation directory")
+    operation = update.add_mutually_exclusive_group()
+    operation.add_argument("--install", action="store_true")
+    operation.add_argument("--rollback", action="store_true")
+    operation.add_argument("--automatic", choices=("on", "off"))
+    update.set_defaults(func=cmd_runtime_update)
+
+    startup = runtime_sub.add_parser("startup", help="opt-in user login startup")
+    startup.add_argument("--config")
+    startup.add_argument("--remove", action="store_true")
+    startup.set_defaults(func=cmd_runtime_startup)
 
     cfg = sub.add_parser("config", help="manage the agent config")
     cfg_sub = cfg.add_subparsers(dest="config_command", required=True, parser_class=_Parser)
@@ -631,10 +701,10 @@ def build_parser():
         sp.set_defaults(func=func)
         return sp
 
-    conn_parser("run", "run the connector loop: receive, store, ack, then deliver to the mapped "
-                "Herdr agent (and escalations to the main session in inbox mode)",
-                cmd_connector_run).add_argument(
-        "--once", action="store_true", help="run one iteration and exit")
+    conn_run = conn_parser("run", "run the connector loop: receive, store, ack, then deliver to the mapped "
+                          "Herdr agent (and escalations to the main session in inbox mode)", cmd_connector_run)
+    conn_run.add_argument("--once", action="store_true", help="run one iteration and exit")
+    conn_run.add_argument("--runtime-ready", help=argparse.SUPPRESS)
     with_json(conn_parser("status", "show the mode, policy, queued messages and escalations",
                           cmd_connector_status))
     for action, help_text, metavar in (
