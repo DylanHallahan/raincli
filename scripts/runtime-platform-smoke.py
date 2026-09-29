@@ -144,6 +144,20 @@ def main():
                     process.wait(timeout=30)
                 except Exception:
                     kill_tree(process)
+        # R4-M1: an atomic replace while another handle holds the file (a plain
+        # reader, or the share-DELETE state reader) must succeed once it is released.
+        import threading
+        from raincli_agent.fsutil import open_read_nofollow
+        probe = root / "sharing-probe.json"
+        atomic_write_json(probe, {"n": 0})
+        for n, hold in enumerate((lambda p: open(p, "rb"), lambda p: os.fdopen(open_read_nofollow(p), "rb")), 1):
+            handle = hold(probe)
+            releaser = threading.Timer(0.3, handle.close)
+            releaser.start()
+            atomic_write_json(probe, {"n": n})
+            releaser.join()
+            assert json.loads(read_private_file(probe)) == {"n": n}
+        print("PASS: atomic replace and private reads ride out a concurrently held file", flush=True)
         if os.name == "nt":
             import winreg
             from raincli_agent.runtime import startup

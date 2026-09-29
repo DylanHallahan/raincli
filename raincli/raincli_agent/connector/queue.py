@@ -8,7 +8,7 @@ import uuid
 
 from .. import filelock
 from ..errors import ConfigError, RainError
-from ..fsutil import atomic_write_json, ensure_private_dir
+from ..fsutil import atomic_write_json, ensure_private_dir, read_state_bytes
 
 # Local states. "held" carries a hold_reason; "submitting" is only ever seen
 # on disk if the process died mid-submission, and becomes submission_uncertain.
@@ -98,10 +98,13 @@ class Queue:
     def exists(self, message_id):
         return os.path.exists(self.path(message_id))
 
+    @staticmethod
+    def _load_json(path):
+        return json.loads(read_state_bytes(path).decode("utf-8"))
+
     def load(self, message_id):
         try:
-            with open(self.path(message_id), encoding="utf-8") as fh:
-                return json.load(fh)
+            return self._load_json(self.path(message_id))
         except FileNotFoundError:
             return None
 
@@ -120,8 +123,7 @@ class Queue:
         records = []
         for name in os.listdir(self.messages_dir):
             if name.endswith(".json") and not name.startswith("."):
-                with open(os.path.join(self.messages_dir, name), encoding="utf-8") as fh:
-                    records.append(json.load(fh))
+                records.append(self._load_json(os.path.join(self.messages_dir, name)))
         records.sort(key=lambda r: (r.get("seq") or 0, r["id"]))
         return records
 
@@ -132,8 +134,7 @@ class Queue:
 
     def load_escalation(self, esc_id):
         try:
-            with open(self.escalation_path(esc_id), encoding="utf-8") as fh:
-                return json.load(fh)
+            return self._load_json(self.escalation_path(esc_id))
         except FileNotFoundError:
             return None
 
@@ -145,8 +146,7 @@ class Queue:
         records = []
         for name in os.listdir(self.escalations_dir):
             if name.endswith(".json") and not name.startswith("."):
-                with open(os.path.join(self.escalations_dir, name), encoding="utf-8") as fh:
-                    records.append(json.load(fh))
+                records.append(self._load_json(os.path.join(self.escalations_dir, name)))
         records.sort(key=lambda r: (r.get("created_at", ""), r["id"]))
         return records
 
@@ -166,8 +166,7 @@ class Queue:
 
     def _read_json(self, name, default):
         try:
-            with open(os.path.join(self.state_dir, name), encoding="utf-8") as fh:
-                return json.load(fh)
+            return self._load_json(os.path.join(self.state_dir, name))
         except FileNotFoundError:
             return default
         except ValueError:

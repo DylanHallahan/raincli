@@ -113,3 +113,59 @@ def test_pointer_write_uses_the_shared_retry(tmp_path, monkeypatch, windows_retr
     monkeypatch.setattr(fsutil.os, "replace", replace)
     updates.write_pointer(tmp_path, {"tag": "v1.0.0"})
     assert updates.read_pointer(tmp_path) == {"tag": "v1.0.0"} and len(replace.calls) == 4
+
+
+def test_queue_reads_share_delete_and_ride_out_a_replace(tmp_path, monkeypatch, windows_retry):
+    """R4-M1 hazard 1: `connector status` reading records while the connector saves."""
+    from raincli_agent.connector.queue import Queue
+    queue = Queue(str(tmp_path / "q"))
+    queue.save({"id": "00000000-0000-4000-8000-000000000001", "seq": 1, "state": "submitted"})
+    opener = failing(fsutil.open_read_nofollow, 2)  # the share-DELETE reader on Windows
+    monkeypatch.setattr(fsutil, "open_read_nofollow", opener)
+    assert [r["state"] for r in queue.all()] == ["submitted"]
+    assert len(opener.calls) == 3
+
+
+def test_connector_status_reads_under_the_queue_lock(connector_env, monkeypatch):
+    from raincli_agent.cli import main
+    from raincli_agent.connector.queue import Queue
+    held = []
+    real_lock = Queue.lock
+
+    def lock(self):
+        held.append(True)
+        return real_lock(self)
+    monkeypatch.setattr(Queue, "lock", lock)
+    real_all = Queue.all
+    monkeypatch.setattr(Queue, "all", lambda self: (held or pytest.fail("read without the lock")) and real_all(self))
+    assert main(["connector", "status", "--config", connector_env.make()]) == 0
+
+
+def test_log_rotation_and_open_are_best_effort(tmp_path, monkeypatch):
+    """R4-M1 hazard 5: a reader holding the connector log must not block a start."""
+    from .test_runtime import FakeProcess
+    cfg, identity, binding = mapping(tmp_path)
+    worker = Worker(str(tmp_path / "connector.json"), cfg, identity, tmp_path, binding)
+    worker.log_path.write_bytes(b"x" * (service.LOG_LIMIT + 1))
+    monkeypatch.setattr(service.os, "replace", failing(service.os.replace, 10 ** 6))
+    real_open = service.os.open
+    monkeypatch.setattr(service.os, "open", lambda path, *a: (_ for _ in ()).throw(PermissionError(13, "in use"))
+                        if str(path) == str(worker.log_path) else real_open(path, *a))
+    monkeypatch.setattr(service.subprocess, "Popen", FakeProcess)
+    assert worker._spawn().pid  # started, output discarded this time
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="native Windows file sharing")
+def test_native_replace_while_a_reader_holds_the_file(tmp_path):
+    import threading
+    import time
+    atomic_write_json(tmp_path / "status.json", {"n": 0})
+    for hold in (lambda p: open(p, "rb"), lambda p: fsutil.open_read_nofollow(p)):
+        handle = hold(tmp_path / "status.json")
+        closer = threading.Timer(0.3, lambda: handle.close() if hasattr(handle, "close") else __import__("os").close(handle))
+        closer.start()
+        started = time.monotonic()
+        atomic_write_json(tmp_path / "status.json", {"n": 1})
+        closer.join()
+        assert time.monotonic() - started < fsutil.RETRY_ATTEMPTS * 0.1 + 1
+        assert json.loads(read_private_file(tmp_path / "status.json")) == {"n": 1}

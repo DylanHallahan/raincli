@@ -216,13 +216,18 @@ class Worker:
     def _spawn(self):
         # Connector output (escaped log lines, no credentials) goes to a
         # private, size-capped log in the runtime state directory.
+        # Best-effort: on Windows a reader holding the log open (an editor, a tail)
+        # blocks rotation or opening; that must never keep a connector from starting.
         try:
             if self.log_path.stat().st_size > LOG_LIMIT:
                 os.replace(self.log_path, str(self.log_path) + ".1")
-        except FileNotFoundError:
+        except OSError:
             pass
         self._new_handshake()
-        log = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            log = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        except OSError:
+            log = os.open(os.devnull, os.O_WRONLY)
         try:
             return subprocess.Popen([sys.executable, "-m", "raincli_agent", "connector", "run", "--config", self.path, "--runtime-ready", str(self.ready_path)],
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log,

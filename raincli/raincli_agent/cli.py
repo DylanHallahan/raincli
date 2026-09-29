@@ -457,8 +457,9 @@ def cmd_connector_run(args, herdr=None):
 
 def cmd_connector_status(args):
     cfg, _api, _identity, queue = _connector_parts(args, need_api=False)
-    records = queue.all()
-    escalations = queue.escalations()
+    with queue.lock():  # a consistent snapshot; never mid-save of a record
+        records = queue.all()
+        escalations = queue.escalations()
     trusted = sorted(set(cfg.trusted_senders) | set(queue.trusted()))
     esc_target = cfg.escalation.herdr_agent if cfg.escalation else None
     if args.json:

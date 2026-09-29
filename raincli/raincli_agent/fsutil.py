@@ -38,6 +38,25 @@ def read_file_bytes(path):
     return retry_sharing(read)
 
 
+def read_state_bytes(path):
+    """Read one of our own state files (queue records, cursor). On Windows the
+    handle shares DELETE, so it never blocks the writer's atomic replace, and a
+    read that lands mid-replace is retried. POSIX reads are unchanged."""
+    if not RETRY_PERMISSION_ERRORS:  # POSIX
+        with open(path, "rb") as fh:
+            return fh.read()
+    fd = retry_sharing(lambda: open_read_nofollow(path))
+    try:
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+
+
 def is_link(st):
     return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & 0x400)
 
