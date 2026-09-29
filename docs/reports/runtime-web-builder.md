@@ -105,3 +105,12 @@ Fixed (template only; no query change was needed):
   - **Protocol §5, §10 and §11.1** carry the new layout, and the message, inbox-block and escalation examples are copied verbatim from the brief. The §8 attachment prompt example follows the new label. The §8 CLI line claimed an "external data" label that the CLI doesn't print, so I corrected it.
 - All the safety invariants stay documented: `| ` framing, the end markers, explicit `--config` commands, explicit mappings, credentials and approved context.
 - Full suite: 385 passed, 1 skipped. The runner's exact-text tests (`test_inbox_mode.py`, `test_review1_fixes.py`) still expect the old prompt text; they belong to cli-builder, who is changing the code in parallel.
+
+## Review round 4 follow-ups
+
+- Merged `feat/runtime-presence` at `1a3f26f` cleanly.
+- **R4-L1, website:** in `home.html`, the card "Data, not commands" is now "Requests, not new authority". The copy now reads: a teammate's message is a request the agent acts on within its current assignment; nothing runs automatically; a message can't change the agent's instructions or permissions. Markup and classes are unchanged. Not touched and outside this item:
+  - the CLI's `UNTRUSTED_LABEL` (cli-builder);
+  - `app/conversation.html`'s `aria-label="Attachments (external data)"`, a screen-reader label on the human web view.
+- **R4-L3:** the Windows guide now gives both start forms: `raincli runtime run --config <runtime.json>`, and for a managed install `pythonw "%USERPROFILE%\.raincli\client\launch.py" runtime run --config <runtime.json>`. It adds the PowerShell spelling and a pointer to `runtime.log`. Checked against `raincli runtime run --help` (`--config CONFIG [--once]`).
+- Web and skill tests: 63 passed.
