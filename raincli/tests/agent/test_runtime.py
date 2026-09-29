@@ -329,3 +329,20 @@ def test_systemd_escaping():
     assert systemd_quote('/a %h $HOME "x"') == '"/a %%h $$HOME \\"x\\""'
     with pytest.raises(ConfigError):
         systemd_quote("bad\npath")
+
+
+def test_every_runtime_command_and_flag_is_documented():
+    """R4-L2: `raincli runtime --help` lists every subcommand, each with a
+    description, and every option has help text."""
+    import argparse
+    from raincli_agent.cli import build_parser
+    [runtime] = [a for a in build_parser()._subparsers._group_actions[0].choices.items() if a[0] == "runtime"]
+    [subs] = [a for a in runtime[1]._actions if isinstance(a, argparse._SubParsersAction)]
+    listed = {choice.dest for choice in subs._choices_actions}
+    assert listed == {"run", "status", "stop", "update", "startup"}
+    assert all(choice.help for choice in subs._choices_actions)
+    for name, parser in subs.choices.items():
+        assert parser.description, name
+        for action in parser._actions:
+            if action.option_strings and action.dest != "help":
+                assert action.help, (name, action.option_strings)

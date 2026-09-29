@@ -7,8 +7,54 @@ see docs/windows-client.md for the supported storage and recovery boundary.
 import json
 import os
 import stat
+import time
 
 from .errors import ConfigError
+
+
+# Windows: replacing a file another process has open, or opening one while it is
+# being replaced, fails transiently with ERROR_ACCESS_DENIED/ERROR_SHARING_VIOLATION
+# (PermissionError). Retry briefly; a persistent error is still raised. POSIX has
+# no such race, so it never retries.
+RETRY_PERMISSION_ERRORS = os.name == "nt"
+RETRY_ATTEMPTS = 20  # about 1.5 s in total
+
+
+def retry_sharing(action):
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            return action()
+        except PermissionError:
+            if not RETRY_PERMISSION_ERRORS or attempt == RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(min(0.1, 0.005 * 2 ** attempt))
+
+
+def read_file_bytes(path):
+    """Read a whole file, tolerating a concurrent replace on Windows."""
+    def read():
+        with open(path, "rb") as fh:
+            return fh.read()
+    return retry_sharing(read)
+
+
+def read_state_bytes(path):
+    """Read one of our own state files (queue records, cursor). On Windows the
+    handle shares DELETE, so it never blocks the writer's atomic replace, and a
+    read that lands mid-replace is retried. POSIX reads are unchanged."""
+    if not RETRY_PERMISSION_ERRORS:  # POSIX
+        with open(path, "rb") as fh:
+            return fh.read()
+    fd = retry_sharing(lambda: open_read_nofollow(path))
+    try:
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
 
 
 def is_link(st):
@@ -97,9 +143,9 @@ def atomic_write_bytes(path, data, mode=0o600):
             os.close(fd)
         if os.name == "nt":
             from . import _winfiles
-            _winfiles.replace(tmp, path)
+            retry_sharing(lambda: _winfiles.replace(tmp, path))
         else:
-            os.replace(tmp, path)
+            retry_sharing(lambda: os.replace(tmp, path))
     except BaseException:
         try:
             os.unlink(tmp)
@@ -116,7 +162,7 @@ def atomic_write_json(path, obj, mode=0o600):
 def read_private_file(path, what="file"):
     """Read a file that must be owned by us and not accessible to group/others."""
     try:
-        fd = open_read_nofollow(path)
+        fd = retry_sharing(lambda: open_read_nofollow(path))
     except FileNotFoundError:
         raise ConfigError(f"{what} not found: {path}") from None
     except OSError as exc:

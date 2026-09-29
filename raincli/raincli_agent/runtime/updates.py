@@ -7,7 +7,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -129,14 +128,9 @@ def read_pointer(root):
 
 
 def write_pointer(root, pointer):
-    # On Windows a replace fails while the launcher briefly has the pointer open.
-    for attempt in range(50):
-        try:
-            return atomic_write_json(root / "current.json", pointer)
-        except PermissionError:
-            if os.name != "nt" or attempt == 49:
-                raise
-            time.sleep(0.1)
+    # atomic_write_json retries a Windows sharing violation while the launcher
+    # briefly has the pointer open.
+    atomic_write_json(root / "current.json", pointer)
 
 
 def sync_launcher(root, python):
