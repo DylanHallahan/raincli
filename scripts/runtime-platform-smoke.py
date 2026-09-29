@@ -16,7 +16,8 @@ from fake_server import FakeApi
 from raincli_agent import __version__
 from raincli_agent.config import write_config
 from raincli_agent.connector.queue import Queue
-from raincli_agent.fsutil import atomic_write_json
+from raincli_agent.errors import ConfigError
+from raincli_agent.fsutil import atomic_write_json, read_file_bytes, read_private_file
 from raincli_agent.runtime import updates
 from raincli_agent.runtime.service import request_stop, status
 from raincli_agent.runtime.startup import systemd_unit
@@ -39,7 +40,7 @@ def scrub(text):
 
 def show(label, path, limit=6000):
     try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        text = read_file_bytes(path).decode("utf-8", errors="replace")
     except OSError as exc:
         text = f"<unreadable: {type(exc).__name__}>"
     print(f"--- {label}: {path} ---\n{scrub(text[-limit:])}", flush=True)
@@ -113,8 +114,10 @@ def main():
             wait_for(lambda: server.state.presence.get("runtime-test") == "unknown")
             def published_report():
                 try:
-                    value = json.loads((state / "status.json").read_text(encoding="utf-8"))
-                except (FileNotFoundError, json.JSONDecodeError):
+                    # The product's reader: retries a Windows sharing violation
+                    # while the runtime replaces status.json.
+                    value = json.loads(read_private_file(state / "status.json", "runtime status"))
+                except (ConfigError, ValueError):
                     return None
                 entries = value.get("connectors", [])
                 return value if entries and entries[0].get("status") == "unknown" else None

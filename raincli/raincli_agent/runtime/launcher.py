@@ -40,8 +40,20 @@ def exit_status(code):
     return 128 - code if code < 0 else code
 
 
+def read_text(path):
+    # Standalone copy of fsutil.retry_sharing: on Windows, reading while the
+    # updater replaces the file fails transiently with PermissionError.
+    for attempt in range(20):
+        try:
+            return path.read_text(encoding="utf-8")
+        except PermissionError:
+            if os.name != "nt" or attempt == 19:
+                raise
+            time.sleep(min(0.1, 0.005 * 2 ** attempt))
+
+
 def read_pointer(root):
-    pointer = json.loads((root / "current.json").read_text(encoding="utf-8"))
+    pointer = json.loads(read_text(root / "current.json"))
     python = Path(pointer["python"]).absolute()
     if not python.parent.resolve().is_relative_to(root / "versions") or not python.is_file():
         raise RuntimeError("managed Python path is invalid")

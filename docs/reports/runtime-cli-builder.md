@@ -199,3 +199,34 @@ Context: review 3 rated 10518a5 **ready with caveats**, and native Windows run 3
 **Scope:**
 - The packaged `SKILL.md`, `SETUP.md`, the inbox template and the protocol docs belong to the web-builder part of the brief and are not changed here.
 - **Windows-affecting: no.** This is prompt text only, with no change to spawning or platform code.
+
+## Windows sharing-violation race (final run 36497120052 on 1a3f26f)
+
+**Result:** 3.14 passed. 3.11 failed at `runtime-platform-smoke.py:116`, where `(state/'status.json').read_text()` raised `PermissionError` while the runtime was running.
+
+**Cause:** on Windows, replacing a file that another process has open fails with `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION` (a `PermissionError`), and so does opening one mid-replace. The race hit the smoke's plain `read_text` (which also blocks the runtime's replace, since it opens without delete sharing). It is a product issue too: the runtime's atomic writes (status, handshake, stop, pointer) and its readers (`runtime status`, handshake and stop checks, config hashing, the launcher's pointer read) can all hit it.
+
+**Fix (branch fast-forwarded to 1a3f26f first):**
+- **`fsutil.retry_sharing`:** a bounded retry, 20 attempts with 5 ms→100 ms backoff (about 1.5 s in total), **only on Windows** (`RETRY_PERMISSION_ERRORS = os.name == "nt"`). A persistent error is re-raised, and `atomic_write_bytes` still removes its temp file.
+  - `atomic_write_bytes`: retries the replace (`_winfiles.replace` on Windows, `os.replace` on POSIX; the retry is a no-op on POSIX).
+  - `read_private_file`: retries the open, then maps the error to `ConfigError` as before.
+  - The new `read_file_bytes` reads plain files with retry. `service.file_sha256` uses it, so a config replaced by an editor no longer looks "changed" and needlessly retires a connector.
+- **`updates.write_pointer`:** its private 50×0.1 s loop is replaced by the shared retry, so the two no longer stack.
+- **Launcher** (standalone; it can't import `fsutil`): `read_text` is a local copy of the same bounded, Windows-only retry for `current.json`.
+- **Supervisor:** a failed `status.json` write (`OSError`) no longer crashes `runtime run`. Status is advisory and is rewritten on the next tick, and the `finally` still stops the connectors and releases the state lock.
+- **Smoke:** reads `status.json` through `read_private_file`, the product's reader, and reads diagnostics through `read_file_bytes`.
+
+**Tests:** `tests/agent/test_windows_sharing.py` (8 tests) turns the Windows retry flag on and makes `os.replace`, `open_read_nofollow` or `open` raise `PermissionError` for the first N attempts. The tests cover:
+- the write succeeds, with no temp file left;
+- a persistent replace error is raised after exactly `RETRY_ATTEMPTS`, and the temp file is cleaned up;
+- reads, including config hashing, ride out the violation;
+- a persistent read error is still reported as `ConfigError`;
+- **POSIX never retries** (one attempt, the error is raised);
+- the supervisor survives persistently failing status writes and still records `stopped`;
+- the pointer write uses the shared retry.
+
+The launcher's local retry is not unit-tested: it is gated on `os.name == "nt"`, and faking that would disturb `pathlib`. It is exercised by the Windows smoke.
+
+**Verification:** full suite `393 passed, 1 skipped`; Linux runtime smoke exit 0.
+
+**Windows-affecting: yes.** This is a Windows fix, and a rerun on 3.11 and 3.14 is needed.

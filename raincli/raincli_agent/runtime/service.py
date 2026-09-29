@@ -19,7 +19,7 @@ from ..connector.config import default_state_dir, load_connector_config
 from ..connector.herdr import HerdrCli, HerdrError, READY_STATUSES
 from ..connector.queue import Queue
 from ..errors import ConfigError
-from ..fsutil import atomic_write_json, ensure_private_dir, read_private_file
+from ..fsutil import atomic_write_json, ensure_private_dir, read_file_bytes, read_private_file
 
 LOG_LIMIT = 1024 * 1024  # per connector log; one rotated generation is kept
 # Graceful-stop budget. A supervised connector long-polls in slices of at most
@@ -35,8 +35,7 @@ STOP_MARGIN = 15
 
 def file_sha256(path):
     try:
-        with open(path, "rb") as fh:
-            return hashlib.sha256(fh.read()).hexdigest()
+        return hashlib.sha256(read_file_bytes(path)).hexdigest()
     except OSError:
         return None
 
@@ -388,7 +387,10 @@ def run(path, once=False):
                 "connectors": connectors}
         if supervisor is not None and supervisor.error:
             data["error"], data["error_reason"] = supervisor.error, supervisor.reason
-        atomic_write_json(state / "status.json", data)
+        try:
+            atomic_write_json(state / "status.json", data)
+        except OSError:
+            pass  # status is advisory: never stop supervising over it; the next tick rewrites it
     try:
         for sig in (signal.SIGINT, signal.SIGTERM):
             previous[sig] = signal.signal(sig, lambda *_: stop.set())
