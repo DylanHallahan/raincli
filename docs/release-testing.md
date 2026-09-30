@@ -38,6 +38,10 @@ The updater has no source override. It fetches only stable releases of the canon
    A local run lists your own coding-agent processes through the process scan, but reports them only to the throwaway server, which is deleted at the end.
 4. Record the job's `PASS` lines and run URL in the release notes.
 
+## Releases used
+
+`v0.3.0` is the first target-aware release. `v0.3.1` is a docs-only release: it changes only this note and the version number, and exists to test a real pushed upgrade and an explicit downgrade.
+
 ## Before the releases exist
 The script stops after enrolment with:
 
