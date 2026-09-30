@@ -159,6 +159,32 @@ def atomic_write_json(path, obj, mode=0o600):
     atomic_write_bytes(path, (json.dumps(obj, indent=2, sort_keys=True) + "\n").encode(), mode)
 
 
+SYSTEM_SID = "S-1-5-18"
+ADMINISTRATORS_SID = "S-1-5-32-544"
+
+
+def windows_acl_problem(owner, aces, me):
+    """Why a Windows owner and DACL make a private file untrusted, or None.
+
+    ``aces`` is ``[(ace type, ace flags, sid)]`` (None for no DACL at all). The
+    owner must be exactly the current user: files RainCLI writes set it
+    explicitly, including for administrators, whose objects otherwise default to
+    BUILTIN\\Administrators. Only the user, SYSTEM and Administrators may be granted
+    access; deny and inherit-only entries grant nothing."""
+    if owner != me:
+        return "credential is not owned by the current Windows user"
+    if aces is None:
+        return "credential has an unrestricted Windows ACL"
+    trusted = {me, SYSTEM_SID, ADMINISTRATORS_SID}
+    for kind, flags, sid in aces:
+        if flags & 8 or kind == 1:  # INHERIT_ONLY, or ACCESS_DENIED
+            continue
+        if kind != 0 or sid not in trusted:
+            return ("credential ACL grants access outside this user, SYSTEM and Administrators; "
+                    "re-import with config init")
+    return None
+
+
 def read_private_file(path, what="file"):
     """Read a file that must be owned by us and not accessible to group/others."""
     try:
