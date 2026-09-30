@@ -51,7 +51,9 @@ def launcher_prefix():
     entry = shutil.which("raincli")
     if entry:
         return [str(Path(entry).absolute())], "raincli entry point"
-    return [sys.executable, "-m", "raincli_agent"], "this interpreter (no managed launcher or raincli on PATH)"
+    # Never a (possibly versioned) interpreter path: it would break at the next update.
+    raise ConfigError("no stable raincli command: install the managed client (SETUP.md) or put the "
+                      "raincli entry point on PATH, then run hooks install again")
 
 
 def handler(kind, event, prefix, state_dir):
@@ -129,9 +131,8 @@ def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_s
     if kind not in EVENTS:
         raise ConfigError("hooks install supports --claude or --codex")
     state_dir = os.path.abspath(state_dir)
-    path = config_path(kind, home)
-    if path.is_symlink():
-        path = Path(os.path.realpath(path))  # edit a dotfile-managed target in place
+    link = config_path(kind, home)
+    path = Path(os.path.realpath(link)) if link.is_symlink() else link  # edit a dotfile-managed target in place
     result = {"agent": kind, "config": str(path)}
     if kind == "codex" and not remove:
         supported, evidence = probe()
@@ -155,7 +156,7 @@ def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_s
     if new == data:
         result["status"] = "unchanged"
     else:
-        backup = write(path, raw, new)
+        backup = write(path, raw, new, backup_dir=link.parent)
         result["status"] = "removed" if remove else "installed"
         if backup is not None:
             result["backup"] = str(backup)
@@ -164,19 +165,33 @@ def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_s
     return result
 
 
-def write(path, raw, data):
-    """Atomic write keeping the file's mode; returns the 0600 backup, if any."""
+KEEP_BACKUPS = 3
+
+
+def write(path, raw, data, backup_dir=None):
+    """Atomic write keeping the file's mode; returns the 0600 backup, if any.
+
+    The backup goes beside the agent's own config path (not into a symlink's
+    target, which may be a dotfiles repository), and only the newest few are kept."""
     text = (json.dumps(data, indent=2) + "\n").encode("utf-8")
     mode, backup = 0o600, None
     if raw is not None:
         mode = stat.S_IMODE(os.stat(path).st_mode)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup = path.with_name(f"{path.name}.raincli-backup-{stamp}")
+        directory = Path(backup_dir or path.parent)
+        prefix = f"{path.name}.raincli-backup-"
+        backup = directory / f"{prefix}{stamp}"
         n = 1
         while backup.exists():
-            backup = path.with_name(f"{path.name}.raincli-backup-{stamp}-{n}")
+            backup = directory / f"{prefix}{stamp}-{n}"
             n += 1
         atomic_write_bytes(str(backup), raw, 0o600)
+        old = sorted((p for p in directory.glob(prefix + "*") if p.is_file()), key=lambda p: p.stat().st_mtime)
+        for stale in old[:-KEEP_BACKUPS]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_bytes(str(path), text, mode)

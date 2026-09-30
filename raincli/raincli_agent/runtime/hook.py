@@ -122,13 +122,19 @@ def handle(agent_type, event, name, state_dir, stdin, stdout, now=None):
         return "ended"
     record = {"key": key, "type": agent_type, "name": session_name(name, payload, agent_type), "status": status,
               "updated_at": time.time() if now is None else now}
-    pid = agent_pid(agent_type) if current is None or not current.get("pid") else current["pid"]
+    if current is not None and current.get("pid"):
+        pid, start = current["pid"], current.get("pid_start")
+    else:
+        pid = agent_pid(agent_type)
+        start = sessions.process_start(pid) if pid else None
     if pid:
         record["pid"] = pid  # local only: never reported
+        if start is not None:
+            record["pid_start"] = start
     sessions.write_record(state_dir, record)
     if agent_type != "claude" or event not in CLAIM_EVENTS:
         return "recorded"
-    texts, ids = sessions.claim(state_dir, key, now=record["updated_at"])
+    texts, ids = sessions.claim(state_dir, key)
     if not ids:
         return "recorded"
     output = {"hookSpecificOutput": {"hookEventName": event,

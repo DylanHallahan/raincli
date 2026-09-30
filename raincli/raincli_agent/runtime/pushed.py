@@ -18,6 +18,7 @@ from . import updates
 
 BACKOFF_START = 300  # 5 min, doubling up to 6 h: network and download failures only
 BACKOFF_MAX = 6 * 3600
+SWITCH_TIMEOUT = 900  # an installed version the launcher has not switched to within this is retried
 ERROR_RE = re.compile(r"^[a-z0-9_.:-]{1,64}$")
 STATES = ("current", "updating", "failed", "rolled_back")
 
@@ -59,6 +60,7 @@ class PushedUpdates:
         self.install = install or (lambda release: updates.install(self.root, release))
         self.log = log or (lambda text: print("raincli runtime: " + text, file=sys.stderr, flush=True))
         self.thread = None
+        self.launcher_checked = False
         self.lock = threading.Lock()
         self.data = {"state": "current", "error": None}
         if self.managed():
@@ -113,11 +115,22 @@ class PushedUpdates:
         self._save(**changes)
 
     def started(self):
-        """The first supervision tick of this version completed: an update to it succeeded."""
+        """A supervision tick of this version completed: an update to it succeeded,
+        and this version's launcher may now replace the one that supervised it."""
         target = self.data.get("target") or {}
         if (self.data.get("state") == "updating" and target.get("version")
                 and updates.version_key(target["version"]) == updates.version_key(__version__)):
             self._save(state="current", error=None, failures=0, blocked=None)
+        if not self.launcher_checked and self.managed() and self.data.get("state") != "updating":
+            self.launcher_checked = True
+            try:
+                result = updates.adopt_launcher(self.root, self.python)
+            except Exception as exc:  # noqa: BLE001 - advisory; the old launcher keeps working
+                result = "error:" + type(exc).__name__
+            if result == "adopted":
+                self.log("adopted this version's launcher")
+            elif result == "candidate_failed":
+                self.log("this version's launcher failed its check; keeping the current launcher")
 
     # -- the decision -------------------------------------------------------------
 
@@ -142,6 +155,13 @@ class PushedUpdates:
             return  # reported as update_mode manual; a manual `runtime update --install` still works
         if self.data.get("blocked") == key:
             return  # failed verification or rolled back: wait for a new set_at or version
+        if self.data.get("state") == "updating" and self.data.get("target") == key:
+            # Installed and waiting for the launcher's switch: never install again,
+            # which could report current and skip the new version's probation.
+            if self.clock() - self.data.get("updating_since", self.clock()) < SWITCH_TIMEOUT:
+                return
+            self._fail("switch_timeout", network=True, target=key)
+            return
         if wanted < updates.MIN_TARGET:
             self._save(state="failed", error="target_below_minimum", target=key, blocked=key)
             return
@@ -152,29 +172,33 @@ class PushedUpdates:
             return  # backing off after a network failure for this same target
         if self.data.get("target") != key:
             self._save(failures=0, next_try_at=0)  # a changed target is tried at once
-        self._save(state="updating", error=None, target=key, blocked=None, **{"from": __version__})
+        self._save(state="updating", error=None, target=key, blocked=None, updating_since=self.clock(),
+                   **{"from": __version__})
         self.log(f"installing pushed client version {key['version']}")
         self.thread = threading.Thread(target=self._run, args=(key,), daemon=True)
         self.thread.start()
 
     def _run(self, key):
+        """Install in the background. Only a verification failure (or a rollback,
+        recorded by the launcher) blocks a target; anything transient backs off
+        (14.7 M9, review 1 finding 6)."""
         try:
             release = self.resolve(key["version"])
             result = self.install(release)
+        except updates.VerificationError:
+            self._fail("verification_failed", target=key)
         except updates.ReleaseNotFound:
             self._fail("release_not_found", network=True, target=key)
         except updates.NetworkError:
             self._fail("network", network=True, target=key)
-        except updates.VerificationError:
-            self._fail("verification_failed", target=key)
-        except (ConfigError, OSError, ValueError) as exc:
-            self._fail("install_failed:" + type(exc).__name__, target=key)
-        except Exception as exc:  # noqa: BLE001 - a subprocess or archive failure
-            self._fail("install_failed:" + type(exc).__name__, target=key)
+        except Exception as exc:  # noqa: BLE001 - busy lock, disk full, timeouts, bad JSON: transient
+            self._fail("install_failed:" + type(exc).__name__, network=True, target=key)
         else:
-            if result.get("status") == "installed":
-                # The launcher sees the new pointer and hands over; the new
-                # version reports current after its first tick.
+            if result.get("status") == "installed" or (
+                    result.get("status") == "current"
+                    and updates.version_key(key["version"]) != updates.version_key(__version__)):
+                # The pointer names the target; the launcher switches to it and the
+                # new version reports current after its first tick (on probation).
                 self.log(f"installed {key['version']}; the launcher switches to it")
             else:
                 self._save(state="current", error=None, failures=0)

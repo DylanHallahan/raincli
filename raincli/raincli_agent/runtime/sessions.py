@@ -30,8 +30,11 @@ SALT = "machine-salt"
 SESSIONS = "sessions"
 TYPES = ("claude", "codex", "gemini", "cursor", "opencode", "other")
 HOOK_TYPES = ("claude", "codex")
-STALE_AFTER = 600  # a record this old without an end event counts as offline
-DROP_AFTER = 3600  # and is dropped after an hour
+# Records without a determinable process (14.9): offline after 10 minutes without
+# an event, dropped after an hour. A record whose local process is alive stays
+# live however long it is idle; one whose process has exited is gone.
+STALE_AFTER = 600
+DROP_AFTER = 3600
 KEY_RE = re.compile(r"^[0-9a-f]{32}$")
 RECORD_RE = re.compile(r"^[0-9a-f]{32}\.json$")
 INBOX_FILE_RE = re.compile(r"^[0-9a-f-]{36}\.md$")
@@ -41,8 +44,10 @@ INBOX_FILE_RE = re.compile(r"^[0-9a-f-]{36}\.md$")
 CLAIM_CAP_BYTES = 32 * 1024
 CLAIM_CAP_CHARS = 10000
 SEPARATOR = "\n\n"
-# A claimed file without a receipt older than this is submission_uncertain; a
-# younger one may belong to a hook that is still running (it exits within ~2 s).
+# A claimed file still without a receipt this long after the connector first saw
+# it claimed is submission_uncertain. The hook exits within about 2 s, so by then
+# it has finished (or died); counting from the connector's own observation keeps
+# this independent of file timestamps (review 1, finding 8).
 CLAIM_GRACE = 30
 
 
@@ -93,6 +98,8 @@ def agent_key(salt, source_id):
 # -- names -------------------------------------------------------------------
 
 _UNSAFE = {"Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn"}
+# A credential-shaped string never leaves the machine (the server rejects it too).
+TOKEN_RE = re.compile(r"rc[ai]_[A-Za-z0-9_-]{20,}")
 
 
 def normalize_name(name, fallback):
@@ -101,6 +108,7 @@ def normalize_name(name, fallback):
     if not isinstance(name, str):
         name = ""
     cleaned = "".join("_" if unicodedata.category(ch) in _UNSAFE or ch in "  " else ch for ch in name)
+    cleaned = TOKEN_RE.sub("[redacted]", cleaned)
     cleaned = " ".join(cleaned.split())[:64].strip()
     return cleaned or fallback
 
@@ -179,6 +187,33 @@ def valid_record(data):
             and isinstance(data.get("updated_at"), (int, float)) and not isinstance(data.get("updated_at"), bool))
 
 
+def process_start(pid):
+    """The kernel start time of ``pid`` (Linux), to tell a live process from a reused pid."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            return int(fh.read().rsplit(b")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def process_state(record):
+    """``alive``, ``dead``, or None when the record names no determinable process."""
+    pid = record.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1 or os.name == "nt":
+        return None
+    if record.get("pid_start") is not None and os.path.isdir("/proc"):
+        return "alive" if process_start(pid) == record["pid_start"] else "dead"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except PermissionError:
+        return "alive"
+    except OSError:
+        return None
+    return "alive"
+
+
 def remove_record(state_dir, key):
     try:
         os.unlink(record_path(state_dir, key))
@@ -204,12 +239,13 @@ def read_sessions(state_dir, now=None, drop=True):
         record = load_record(state_dir, entry.name[:-5])
         if record is None or record["key"] != entry.name[:-5]:
             continue
+        liveness = process_state(record)
         age = now - record["updated_at"]
-        if age > DROP_AFTER:
+        if liveness == "dead" or (liveness is None and age > DROP_AFTER):
             if drop:
                 remove_record(state_dir, record["key"])
             continue
-        if age > STALE_AFTER:
+        if liveness is None and age > STALE_AFTER:
             record["status"] = "offline"
         out.append(record)
     out.sort(key=lambda r: (r["type"], r["name"], r["key"]))
@@ -217,7 +253,8 @@ def read_sessions(state_dir, now=None, drop=True):
 
 
 def live_sessions(state_dir, agent_type, name, now=None):
-    """The live (not stale) hook sessions of this type and name."""
+    """The live hook sessions of this type and name: process alive, or (with no
+    determinable process) an event within the last 10 minutes."""
     return [r for r in read_sessions(state_dir, now, drop=False)
             if r["type"] == agent_type and r["name"] == name and r["status"] != "offline"]
 
@@ -243,19 +280,15 @@ def hand_over(state_dir, key, message_id, text):
     atomic_write_bytes(_inbox_file(state_dir, key, message_id), text.encode("utf-8"))
 
 
-def handover_state(state_dir, key, message_id, now=None):
-    """``pending``, ``claiming`` (a hook may still be running), ``submitted`` or ``uncertain``."""
-    now = time.time() if now is None else now
+def handover_state(state_dir, key, message_id):
+    """``pending``, ``claimed`` (no receipt yet), ``submitted`` or ``missing``."""
     if os.path.lexists(_inbox_file(state_dir, key, message_id)):
         return "pending"
-    claimed = _inbox_file(state_dir, key, message_id, ".claimed")
-    try:
-        claimed_at = os.lstat(claimed).st_mtime
-    except FileNotFoundError:
-        return "uncertain"  # neither pending nor claimed: never re-emitted
     if os.path.lexists(_inbox_file(state_dir, key, message_id, ".receipt")):
         return "submitted"
-    return "claiming" if now - claimed_at < CLAIM_GRACE else "uncertain"
+    if os.path.lexists(_inbox_file(state_dir, key, message_id, ".claimed")):
+        return "claimed"
+    return "missing"
 
 
 def reclaim(state_dir, key, message_id):
@@ -302,7 +335,7 @@ def _read_regular(path, limit):
         os.close(fd)
 
 
-def claim(state_dir, key, now=None):
+def claim(state_dir, key):
     """Claim pending framed messages, oldest first, within the per-turn bound.
 
     Returns ``(texts, ids)``. The caller emits the texts and then calls
@@ -331,19 +364,23 @@ def claim(state_dir, key, now=None):
             os.rename(pending, claimed)
         except FileNotFoundError:
             continue  # reclaimed by the connector
-        data = _read_regular(claimed, CLAIM_CAP_BYTES)
+        try:
+            data = _read_regular(claimed, CLAIM_CAP_BYTES)
+        except FileNotFoundError:
+            continue  # settled by the connector after its grace period: not ours any more
         try:
             text = data.decode("utf-8") if data is not None else None
         except UnicodeDecodeError:
             text = None
         extra = context_chars(text) + (context_chars(SEPARATOR) if texts else 0) if text is not None else 0
         if text is None or total_chars + extra > CLAIM_CAP_CHARS:
-            os.rename(claimed, pending)  # not this turn; nothing was emitted
+            try:
+                os.rename(claimed, pending)  # not this turn; nothing was emitted
+            except FileNotFoundError:
+                pass
             if text is None:
                 continue
             break
-        stamp = time.time() if now is None else now
-        os.utime(claimed, (stamp, stamp))  # the claim time, for the connector's grace period
         texts.append(text)
         ids.append(name[:-3])
         total_bytes += size
@@ -353,4 +390,5 @@ def claim(state_dir, key, now=None):
 
 def write_receipts(state_dir, key, ids):
     for message_id in ids:
-        atomic_write_json(_inbox_file(state_dir, key, message_id, ".receipt"), {"claimed_at": time.time()})
+        if os.path.lexists(_inbox_file(state_dir, key, message_id, ".claimed")):
+            atomic_write_json(_inbox_file(state_dir, key, message_id, ".receipt"), {"claimed_at": time.time()})

@@ -83,7 +83,8 @@ def hook_entries(salt, state_dir, inbox, now=None):
         is_inbox = len(live) == 1 and record is live[0]
         out.append({"key": record["key"], "name": sessions.normalize_name(record["name"], record["type"]),
                     "type": record["type"], "status": record["status"], "role": "inbox" if is_inbox else None,
-                    "reachability": "next-turn" if is_inbox else None, "source": "hook"})
+                    "reachability": "next-turn" if is_inbox else None, "source": "hook",
+                    "_pid": record["pid"] if isinstance(record.get("pid"), int) else None})
     if want and not live:
         out.append(entry(salt, "hook-inbox:%s:%s" % want, want[1], want[0], "offline", "hook",
                          "inbox", "next-turn"))
@@ -92,17 +93,16 @@ def hook_entries(salt, state_dir, inbox, now=None):
 
 # -- process scan ------------------------------------------------------------------
 
-def _parent(pid):
-    with open(f"/proc/{pid}/stat", "rb") as fh:
+def _read_stat_parent(proc, pid):
+    with open(f"{proc}/{pid}/stat", "rb") as fh:
         return int(fh.read().rsplit(b")", 1)[1].split()[1])
 
 
-def _exe(pid):
-    return os.path.basename(os.readlink(f"/proc/{pid}/exe"))
-
-
 def linux_processes(proc="/proc"):
-    """Same-uid processes as {pid: (exe basename, parent pid, cwd basename)}."""
+    """Same-uid processes as {pid: (exe basename, parent pid, comm)}.
+
+    Only the executable's basename and the kernel's short process name (comm)
+    are read; the command line never is (14.7 M5)."""
     uid = os.getuid()
     out = {}
     for name in os.listdir(proc):
@@ -112,12 +112,28 @@ def linux_processes(proc="/proc"):
         try:
             if os.stat(f"{proc}/{name}").st_uid != uid:
                 continue
-            exe = _exe(pid)
-            parent = _parent(pid)
+            parent = _read_stat_parent(proc, pid)
         except (OSError, ValueError, IndexError):
             continue
-        out[pid] = (exe, parent, None)
+        try:
+            exe = os.path.basename(os.readlink(f"{proc}/{name}/exe"))
+        except OSError:
+            exe = ""
+        try:
+            with open(f"{proc}/{name}/comm", "rb") as fh:
+                comm = fh.read(64).decode("utf-8", "replace").strip()
+        except OSError:
+            comm = ""
+        out[pid] = (exe, parent, comm)
     return out
+
+
+def kind_of(entry):
+    """The agent type of a process: its executable basename, or its comm. A native
+    Claude Code install runs ``…/versions/<n>`` but is named ``claude``; a Node
+    agent that sets its process title shows it in comm (review 1, finding 10)."""
+    exe, _parent, comm = (tuple(entry) + (None, None))[:3]
+    return BY_EXECUTABLE.get(exe) or BY_EXECUTABLE.get(comm or "")
 
 
 def _cwd_name(pid):
@@ -127,8 +143,19 @@ def _cwd_name(pid):
         return ""
 
 
+def herdr_descendant(pid, processes):
+    ancestor = processes.get(pid, (None, None))[1]
+    for _ in range(32):
+        if ancestor not in processes:
+            return False
+        if processes[ancestor][0] in ("herdr", "herdr.exe") or processes[ancestor][2:3] == ("herdr",):
+            return True
+        ancestor = processes[ancestor][1]
+    return False
+
+
 def linux_scan(salt, claimed_pids, herdr_ok, processes=None, cwd_name=_cwd_name):
-    """Known agent executables not already reported by a hook record or Herdr.
+    """Known agent processes not already reported by a hook record or Herdr.
 
     A process under a ``herdr`` server process runs in a Herdr pane, and when
     Herdr could be read Herdr reports it. Child processes of an agent of the same
@@ -136,22 +163,20 @@ def linux_scan(salt, claimed_pids, herdr_ok, processes=None, cwd_name=_cwd_name)
     processes = linux_processes() if processes is None else processes
     out = []
     for pid in sorted(processes):
-        exe, parent, _ = processes[pid]
-        kind = BY_EXECUTABLE.get(exe)
+        kind = kind_of(processes[pid])
         if kind is None or pid in claimed_pids:
             continue
-        if parent in processes and BY_EXECUTABLE.get(processes[parent][0]) == kind:
+        parent = processes[pid][1]
+        if parent in processes and kind_of(processes[parent]) == kind:
             continue
-        ancestor, in_herdr, owned = parent, False, False
+        ancestor, owned = parent, False
         for _ in range(32):
             if ancestor not in processes:
                 break
             if ancestor in claimed_pids:
                 owned = True
-            if processes[ancestor][0] in ("herdr", "herdr.exe"):
-                in_herdr = True
             ancestor = processes[ancestor][1]
-        if owned or (in_herdr and herdr_ok):
+        if owned or (herdr_ok and herdr_descendant(pid, processes)):
             continue
         out.append(entry(salt, f"scan:{kind}:{pid}", cwd_name(pid) or kind, kind, "unknown", "scan"))
     return out
@@ -160,7 +185,9 @@ def linux_scan(salt, claimed_pids, herdr_ok, processes=None, cwd_name=_cwd_name)
 def windows_scan(salt, claimed_pids, run=subprocess.run):
     """Type-only: tasklist image names for this user's processes; the name is the type."""
     user = os.environ.get("USERNAME", "")
-    argv = ["tasklist", "/FO", "CSV", "/NH"] + (["/FI", f"USERNAME eq {user}"] if user else [])
+    if not user:
+        return []  # never list other users' processes
+    argv = ["tasklist", "/FO", "CSV", "/NH", "/FI", f"USERNAME eq {user}"]
     try:
         proc = run(argv, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -177,10 +204,10 @@ def windows_scan(salt, claimed_pids, run=subprocess.run):
     return out
 
 
-def scan(salt, claimed_pids, herdr_ok):
+def scan(salt, claimed_pids, herdr_ok, processes=None):
     try:
         if sys.platform.startswith("linux"):
-            return linux_scan(salt, claimed_pids, herdr_ok)
+            return linux_scan(salt, claimed_pids, herdr_ok, processes)
         if os.name == "nt":
             return windows_scan(salt, claimed_pids)
     except OSError:
@@ -207,10 +234,42 @@ def normalize(entries):
     return ([inbox] if inbox else []) + out[:MAX_AGENTS - (1 if inbox else 0)]
 
 
+def without_duplicates(hooked, scanned, herdr_ok, processes, inbox):
+    """One listing per session (review 1, finding 11).
+
+    * A hook record whose process runs in a Herdr pane is Herdr's to list, while
+      Herdr is readable (unless it is the mapped next-turn inbox).
+    * Where hook records carry no process id (Windows), each live hook record of a
+      type accounts for one scanned process of that type."""
+    if processes and herdr_ok:
+        hooked = [h for h in hooked if h["role"] == "inbox" or not (
+            isinstance(h.get("_pid"), int) and herdr_descendant(h["_pid"], processes))]
+    unmatched = {}
+    for h in hooked if os.name == "nt" else ():
+        if h.get("_pid") is None and h["status"] != "offline":
+            unmatched[h["type"]] = unmatched.get(h["type"], 0) + 1
+    kept = []
+    for item in scanned:
+        if unmatched.get(item["type"]):
+            unmatched[item["type"]] -= 1
+            continue
+        kept.append(item)
+    return hooked, kept
+
+
 def discover(state_dir, salt, herdr, inbox, now=None, include_scan=True):
     """The directory for one report. ``inbox`` is ("herdr", name),
     ("hook", type, name) or None (list sessions without marking an inbox)."""
     hooked, pids = hook_entries(salt, state_dir, inbox, now)
     herdr_found, herdr_ok = herdr_entries(salt, herdr, inbox) if herdr is not None else ([], False)
-    scanned = scan(salt, pids, herdr_ok) if include_scan else []
+    processes = None
+    if sys.platform.startswith("linux"):
+        try:
+            processes = linux_processes()
+        except OSError:
+            processes = None
+    scanned = scan(salt, pids, herdr_ok, processes) if include_scan else []
+    hooked, scanned = without_duplicates(hooked, scanned, herdr_ok, processes, inbox)
+    for h in hooked:
+        h.pop("_pid", None)  # local only: never reported
     return normalize(herdr_found + hooked + scanned)

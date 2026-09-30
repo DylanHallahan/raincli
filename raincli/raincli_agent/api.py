@@ -60,6 +60,17 @@ def _parse_retry_after(value):
         return None
 
 
+def encode_body(body):
+    """UTF-8 JSON without ``\\u`` escapes: a maximal presence report (100 agents,
+    64-character names) stays well under the body limit (review 1, finding 9).
+    Text that UTF-8 cannot carry (a lone surrogate) falls back to escapes, which
+    the server then rejects as invalid rather than as oversized."""
+    try:
+        return json.dumps(body, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(body).encode()
+
+
 class ApiClient:
     def __init__(self, api_url, token, *, timeout=DEFAULT_TIMEOUT, max_attempts=MAX_ATTEMPTS,
                  sleep=time.sleep, rng=None):
@@ -145,7 +156,7 @@ class ApiClient:
 
     def request(self, method, path, *, body=None, query=None, auth=True, timeout=None, raw=False):
         url = self._url(path, query)
-        data = None if body is None else json.dumps(body).encode()
+        data = None if body is None else encode_body(body)
         timeout = self.timeout if timeout is None else timeout
         attempt = 0
         while True:
