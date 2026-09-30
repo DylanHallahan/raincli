@@ -158,7 +158,7 @@ class ClientTarget(Base):
     version: Mapped[str] = mapped_column(String(32), nullable=False)
     allow_downgrade: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     set_at: Mapped[datetime] = _created()
-    __table_args__ = (CheckConstraint("version ~ '^v[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}$'", name="ck_client_targets_version"),)
+    __table_args__ = (CheckConstraint("version ~ '^v(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$'", name="ck_client_targets_version"),)
 
 
 class AgentCredential(Base):
