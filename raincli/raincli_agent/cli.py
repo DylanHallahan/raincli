@@ -43,7 +43,13 @@ modes (connector config "mode"):
                     escalates to the main session with `connector escalate`;
                     trust_mode defaults to "team". Recommended.
 trust_mode: "list" (trusted_senders / `connector trust`; others need approval) or
-"team" (every agent of this team auto-delivers). blocked_senders are always held."""
+"team" (every agent of this team auto-delivers). blocked_senders are always held.
+target: "herdr_agent" (a Herdr agent name; delivery is instant) or, instead,
+"inbox": {"hook": "claude", "name": NAME}, a Claude Code session outside Herdr
+reporting through `raincli hooks install --claude`. That delivery is next-turn:
+it waits until the session is next started or prompted, needs `raincli runtime
+run`, and holds messages offline (no such live session) or target_ambiguous
+(more than one); there is never a fallback."""
 
 CONNECTOR_HELP = """\
 The connector durably receives this agent's messages, acks them, and delivers
@@ -191,6 +197,7 @@ def cmd_whoami(args):
 
 
 def cmd_agents(args):
+    """Machines (registered handles) and the agent sessions each one reports (14.2)."""
     agents = client(args).agents()
     if args.json:
         out_json({"agents": agents})
@@ -199,7 +206,22 @@ def cmd_agents(args):
         flag = "" if a.get("active", True) else "  (inactive)"
         presence = a.get("presence") or {}
         status = f"  [{escape_line(str(presence.get('status', 'unknown')))}]" if presence else ""
-        out(f"{escape_line(a['handle'])}  {escape_line(a.get('display_name') or '')}{flag}{status}")
+        machine = a.get("machine") or {}
+        client_info = ""
+        if machine:
+            state = str(machine.get("update_state") or "")
+            error = f" ({machine['error']})" if machine.get("error") else ""
+            client_info = (f"  raincli {escape_line(str(machine.get('client_version') or '?'))}"
+                           f" {escape_line(str(machine.get('update_mode') or ''))}"
+                           f" {escape_line(state)}{escape_line(error)}")
+        out(f"{escape_line(a['handle'])}  {escape_line(a.get('display_name') or '')}{flag}{status}{client_info}")
+        sessions = sorted(a.get("agents") or [], key=lambda s: (s.get("role") != "inbox", str(s.get("name"))))
+        for s in sessions:
+            role = "inbox" if s.get("role") == "inbox" else "     "
+            reach = f"  ({escape_line(str(s['reachability']))})" if s.get("reachability") else ""
+            out(f"  {role}  {escape_line(str(s.get('name', '')))}  {escape_line(str(s.get('type', '')))}"
+                f"  {escape_line(str(s.get('status', '')))}{reach}"
+                + ("  (detected, status unknown)" if s.get("source") == "scan" else ""))
     return EXIT_OK
 
 
@@ -438,9 +460,12 @@ def cmd_connector_run(args, herdr=None):
     queue.acquire_run_lock()
     try:
         herdr = herdr or HerdrCli(cfg.herdr_bin, cfg.herdr_timeout, own_session=bool(ready))
+        # Supervised: the readiness file lives in the runtime state directory,
+        # which also holds the hook sessions a next-turn inbox is delivered to.
         connector = Connector(cfg, api, herdr, queue, identity=identity,
-                              agent_config_path=cfg.agent_config or args.agent_config or default_config_path())
-        connector.log(f"serving {cfg.herdr_agent} from {queue.state_dir}")
+                              agent_config_path=cfg.agent_config or args.agent_config or default_config_path(),
+                              sessions_state=os.path.dirname(os.path.abspath(ready)) if ready else None)
+        connector.log(f"serving {cfg.target_label} from {queue.state_dir}")
         if ready:
             from .fsutil import atomic_write_json
             connector.start()
@@ -468,7 +493,9 @@ def cmd_connector_status(args):
     trusted = sorted(set(cfg.trusted_senders) | set(queue.trusted()))
     esc_target = cfg.escalation.herdr_agent if cfg.escalation else None
     if args.json:
-        out_json({"state_dir": queue.state_dir, "herdr_agent": cfg.herdr_agent, "mode": cfg.mode,
+        out_json({"state_dir": queue.state_dir, "herdr_agent": cfg.herdr_agent or None,
+                  "inbox": ({"hook": cfg.inbox_hook[0], "name": cfg.inbox_hook[1], "reachability": "next-turn"}
+                            if cfg.inbox_hook else None), "mode": cfg.mode,
                   "trust_mode": cfg.trust_mode, "trusted_senders": trusted,
                   "blocked_senders": list(cfg.blocked_senders),
                   "shareable_context": list(cfg.shareable_context), "escalation_target": esc_target,
@@ -483,7 +510,7 @@ def cmd_connector_status(args):
                                                             "notified_at")}
                                   for e in escalations]})
         return EXIT_OK
-    out(f"target: {escape_line(cfg.herdr_agent)}  mode: {cfg.mode}  trust: {cfg.trust_mode}"
+    out(f"target: {escape_line(cfg.target_label)}  mode: {cfg.mode}  trust: {cfg.trust_mode}"
         f"  state_dir: {escape_line(queue.state_dir)}")
     if cfg.trust_mode == "team":
         out("trusted senders: every agent in this team (trust_mode team)")
@@ -491,6 +518,8 @@ def cmd_connector_status(args):
         out("trusted senders: " + (escape_line(", ".join(trusted)) if trusted else "(none)"))
     if cfg.blocked_senders:
         out("blocked senders: " + escape_line(", ".join(cfg.blocked_senders)))
+    if cfg.inbox_hook:
+        out("delivery: next-turn (waits until the session is next started or prompted)")
     if cfg.mode == "inbox":
         out("shareable context: " + (escape_line(", ".join(cfg.shareable_context)) or "none configured"))
         out("escalation target: " + (escape_line(esc_target) if esc_target else "(not configured)"))
@@ -503,7 +532,7 @@ def cmd_connector_status(args):
             f"  acked={'yes' if r.get('acked') else 'no'}  reported={escape_line(reported)}")
         if r["state"] == "held" and r.get("hold_detail"):
             out(f"    {escape_line(r['hold_detail'])}")
-        elif r["state"] in ("attachment_pending", "submission_uncertain") and r.get("detail"):
+        elif r["state"] in ("attachment_pending", "submission_uncertain", "handed_over") and r.get("detail"):
             out(f"    {escape_line(r['detail'])}")
     if escalations:
         out("escalations:")
@@ -591,14 +620,57 @@ def cmd_runtime_stop(args):
 
 def cmd_runtime_update(args):
     from .runtime import updates
-    if args.rollback or args.automatic is not None:
-        result = updates.configure(args.root, automatic=None if args.automatic is None else args.automatic == "on", rollback=args.rollback)
+    mode = "manual" if args.manual or args.automatic == "off" else "automatic" if args.automatic else None
+    if args.rollback or mode is not None:
+        result = updates.configure(args.root, mode=mode, rollback=args.rollback)
     elif args.install:
         result = updates.install(args.root)
     else:
         result = updates.latest() or {"status": "no_release"}
     out_json(result)
     return EXIT_OK
+
+
+def cmd_hooks_install(args):
+    from .runtime import hooks_install
+    kind = "claude" if args.claude else "codex"
+    state_dir = hooks_install.state_dir_from_runtime(args.config)
+    out_json(hooks_install.install(kind, state_dir, remove=args.remove))
+    return EXIT_OK
+
+
+def run_hook(argv):
+    """``raincli hook <claude|codex> <event> [--name NAME] --state-dir DIR``.
+
+    Parsed by hand: a hook must never exit 2 (a usage error) or write to stderr,
+    whatever arguments an agent config holds. It always exits 0."""
+    from .runtime import hook
+    rest, options = [], {}
+    items = list(argv)
+    while items:
+        item = items.pop(0)
+        if item in ("--name", "--state-dir") and items:
+            options[item] = items.pop(0)
+        elif item.startswith(("--name=", "--state-dir=")):
+            name, value = item.split("=", 1)
+            options[name] = value
+        else:
+            rest.append(item)
+    if len(rest) != 2 or not options.get("--state-dir"):
+        return 0
+    return hook.main(rest[0], rest[1], options.get("--name"), options["--state-dir"])
+
+
+HOOK_HELP = """\
+usage: raincli hook {claude,codex} EVENT [--name NAME] --state-dir DIR
+
+Agent hook installed by `raincli hooks install`. Reads the agent's hook JSON on
+stdin (at most 1 MiB), records this session's status for the runtime's agent
+directory under DIR/sessions/, and for Claude Code SessionStart/UserPromptSubmit
+emits pending next-turn inbox messages as additional context. It never uses the
+network, always exits 0 within about 2 s, and logs only error codes to
+DIR/hook.log. The name is --name, else $RAINCLI_AGENT_NAME, else the basename of
+the session's project directory."""
 
 
 def cmd_runtime_status(args):
@@ -646,20 +718,29 @@ def build_parser():
     stop.set_defaults(func=cmd_runtime_stop)
     update = runtime_sub.add_parser(
         "update", help="check or stage an official stable release",
-        description="Check, install, roll back or toggle automatic installation of official stable releases "
-                    "from the canonical GitHub repository (https only). --install copies the client from the "
-                    "commit-verified release archive into a new environment (no pip or package index), never "
-                    "downgrades, keeps the previous environment for --rollback, and installs that release's "
-                    "launcher; a running launcher switches to it at the next version change.")
+        description="Check, install or roll back official stable releases from the canonical GitHub "
+                    "repository (https only), or choose the update mode. In automatic mode (the default for "
+                    "managed installs) the runtime installs the version your team's operator sets as soon as "
+                    "it sees it: the server names only a version, never a source. Downgrades need the "
+                    "operator's --allow-downgrade. --install copies the client from the commit-verified "
+                    "release archive into a new environment (no pip or package index), keeps the previous "
+                    "environment for --rollback, and installs that release's launcher; a running launcher "
+                    "switches to it and restores the previous version if the new one fails its first start. "
+                    "Releases are not signed: trust rests on HTTPS to GitHub and the tag's commit.")
     update.add_argument("--root", metavar="DIR", help="managed installation directory (default: ~/.raincli/client)")
     operation = update.add_mutually_exclusive_group()
+    operation.add_argument("--check", action="store_true",
+                           help="only report the latest stable release (the default without a flag)")
     operation.add_argument("--install", action="store_true",
-                           help="stage, verify and switch to the latest stable release if it is newer "
-                                "(without a flag: only report the latest release)")
+                           help="stage, verify and switch to the latest stable release if it is newer")
     operation.add_argument("--rollback", action="store_true",
-                           help="switch back to the previous installed environment and turn automatic installs off")
-    operation.add_argument("--automatic", choices=("on", "off"),
-                           help="let the managed launcher check for and install stable releases every six hours")
+                           help="switch back to the previous installed environment and set update mode manual")
+    operation.add_argument("--automatic", nargs="?", const="on", choices=("on", "off"),
+                           help="install the client version your team's operator sets, as soon as the runtime "
+                                "sees it (the default for managed installs; persisted)")
+    operation.add_argument("--manual", action="store_true",
+                           help="opt out of pushed updates on this machine (persisted); "
+                                "--check and --install still work")
     update.set_defaults(func=cmd_runtime_update)
 
     startup = runtime_sub.add_parser(
@@ -672,6 +753,29 @@ def build_parser():
     startup.add_argument("--remove", action="store_true",
                          help="remove the login startup entry (Linux: also stop the service)")
     startup.set_defaults(func=cmd_runtime_startup)
+
+    hooks = sub.add_parser("hooks", help="install agent hooks for the machine's agent directory")
+    hooks_sub = hooks.add_subparsers(dest="hooks_command", required=True, parser_class=_Parser)
+    hooks_install = hooks_sub.add_parser(
+        "install", help="add (or --remove) the raincli hooks in Claude Code or Codex user config",
+        description="Add RainCLI's session hooks to ~/.claude/settings.json (--claude) or ~/.codex/hooks.json "
+                    "(--codex), so the runtime lists those sessions by name and status, and a Claude Code "
+                    "session can be a next-turn inbox. Idempotent; writes a 0600 backup first and touches only "
+                    "entries marked raincli. The hook command uses the managed launcher (or the raincli entry "
+                    "point) and the runtime's state_dir. Codex hooks are installed only when the installed "
+                    "Codex reports its hooks feature enabled; otherwise Codex sessions stay scan-only, and "
+                    "Codex asks you to review new hooks before they run.")
+    which = hooks_install.add_mutually_exclusive_group(required=True)
+    which.add_argument("--claude", action="store_true", help="Claude Code (~/.claude/settings.json)")
+    which.add_argument("--codex", action="store_true", help="Codex (~/.codex/hooks.json)")
+    hooks_install.add_argument("--config", required=True, metavar="PATH",
+                               help="runtime config whose state_dir the hooks write to")
+    hooks_install.add_argument("--remove", action="store_true", help="remove only the raincli-marked hooks")
+    hooks_install.set_defaults(func=cmd_hooks_install)
+    hook = sub.add_parser("hook", help="agent hook entry point (installed by `raincli hooks install`)",
+                          description=HOOK_HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
+                          add_help=True)
+    hook.set_defaults(func=lambda a: EXIT_OK)
 
     cfg = sub.add_parser("config", help="manage the agent config")
     cfg_sub = cfg.add_subparsers(dest="config_command", required=True, parser_class=_Parser)
@@ -688,7 +792,8 @@ def build_parser():
         return sp
 
     with_json(sub.add_parser("whoami", help="show this agent's identity")).set_defaults(func=cmd_whoami)
-    with_json(sub.add_parser("agents", help="list agents in the team")).set_defaults(func=cmd_agents)
+    with_json(sub.add_parser("agents", help="list the team's machines and the agent sessions each reports "
+                                        "(inbox marked; client version and update state)")).set_defaults(func=cmd_agents)
 
     def body_args(sp):
         g = sp.add_mutually_exclusive_group(required=True)
@@ -786,6 +891,9 @@ def build_parser():
 
 
 def main(argv=None, *, herdr=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["hook"] and not {"-h", "--help"} & set(argv):
+        return run_hook(argv[1:])
     args = build_parser().parse_args(argv)
     try:
         if args.func is cmd_connector_run:

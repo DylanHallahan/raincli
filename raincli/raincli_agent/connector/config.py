@@ -18,7 +18,11 @@ KEYS = {"agent_config", "herdr_agent", "expect_pane_id", "expect_cwd", "state_di
         "trusted_senders", "poll_wait", "recheck_interval", "prompt_timeout",
         "herdr_bin", "herdr_timeout",
         # protocol section 10 (inbox-agent mode)
-        "mode", "trust_mode", "blocked_senders", "shareable_context", "escalation"}
+        "mode", "trust_mode", "blocked_senders", "shareable_context", "escalation",
+        # protocol section 14.4 (next-turn inbox through a Claude Code hook session)
+        "inbox"}
+INBOX_KEYS = {"hook", "name"}
+INBOX_HOOK_TYPES = ("claude",)
 ESCALATION_KEYS = {"herdr_agent", "expect_pane_id", "expect_cwd", "notify"}
 MODES = ("direct", "inbox")
 TRUST_MODES = ("list", "team")
@@ -34,7 +38,7 @@ class EscalationTarget:
 
 @dataclass(frozen=True)
 class ConnectorConfig:
-    herdr_agent: str
+    herdr_agent: str = ""  # "" when the inbox is a hook session (inbox_hook)
     agent_config: str = ""  # path to the agent's own credential config; "" = default
     expect_pane_id: str = ""
     expect_cwd: str = ""
@@ -50,7 +54,12 @@ class ConnectorConfig:
     blocked_senders: tuple = field(default_factory=tuple)
     shareable_context: tuple = field(default_factory=tuple)
     escalation: EscalationTarget = None
+    inbox_hook: tuple = None  # (type, session name) for a next-turn inbox, else None
     path: str = ""
+
+    @property
+    def target_label(self):
+        return self.herdr_agent or "%s hook session %s" % self.inbox_hook
 
 
 def default_state_dir(handle):
@@ -135,7 +144,7 @@ def _escalation(data, inbox):
     if not isinstance(name, str) or not HERDR_NAME_RE.match(name):
         raise ConfigError("connector config: escalation.herdr_agent must be a Herdr agent name "
                           "(^[a-z][a-z0-9_-]{0,31}$), not a pane id")
-    if name == inbox["herdr_agent"]:
+    if inbox["herdr_agent"] and name == inbox["herdr_agent"]:
         raise ConfigError("connector config: escalation.herdr_agent must differ from the inbox herdr_agent")
     pane = _string(esc, "expect_pane_id")
     if pane and pane == inbox["expect_pane_id"]:
@@ -147,6 +156,22 @@ def _escalation(data, inbox):
     if not isinstance(notify, bool):
         raise ConfigError("connector config: escalation.notify must be true or false")
     return EscalationTarget(herdr_agent=name, expect_pane_id=pane, expect_cwd=cwd, notify=notify)
+
+
+def _inbox_hook(data):
+    inbox = data.get("inbox")
+    if inbox is None:
+        return None
+    if not isinstance(inbox, dict) or set(inbox) != INBOX_KEYS:
+        raise ConfigError('connector config: inbox must be {"hook": "claude", "name": "<session name>"}')
+    if inbox["hook"] not in INBOX_HOOK_TYPES:
+        raise ConfigError('connector config: inbox.hook must be "claude"')
+    name = inbox["name"]
+    from ..runtime.sessions import normalize_name
+    if not isinstance(name, str) or not 1 <= len(name) <= 64 or normalize_name(name, "") != name:
+        raise ConfigError("connector config: inbox.name must be a session name (1-64 printable characters, "
+                          "no leading, trailing or repeated spaces)")
+    return (inbox["hook"], name)
 
 
 def load_connector_config(path):
@@ -165,8 +190,15 @@ def load_connector_config(path):
     if "token" in data or "api_url" in data:
         raise ConfigError("connector config: put credentials in the agent config (agent_config)")
 
+    inbox_hook = _inbox_hook(data)
     herdr_agent = data.get("herdr_agent")
-    if not isinstance(herdr_agent, str) or not HERDR_NAME_RE.match(herdr_agent):
+    if inbox_hook is not None:
+        if herdr_agent is not None:
+            raise ConfigError("connector config: inbox and herdr_agent are mutually exclusive")
+        if data.get("expect_pane_id") or data.get("expect_cwd"):
+            raise ConfigError("connector config: expect_pane_id and expect_cwd apply to herdr_agent only")
+        herdr_agent = ""
+    elif not isinstance(herdr_agent, str) or not HERDR_NAME_RE.match(herdr_agent):
         raise ConfigError("connector config: herdr_agent must be a Herdr agent name "
                           "(^[a-z][a-z0-9_-]{0,31}$), not a pane id")
     trusted = _handles(data, "trusted_senders")
@@ -199,6 +231,7 @@ def load_connector_config(path):
         blocked_senders=_handles(data, "blocked_senders"),
         shareable_context=_shareable_context(data),
         escalation=escalation,
+        inbox_hook=inbox_hook,
         poll_wait=int(_number(data, "poll_wait", 25, 0, 25)),
         recheck_interval=float(_number(data, "recheck_interval", 5, 0.05, 300)),
         prompt_timeout=float(_number(data, "prompt_timeout", 30, 1, 600)),

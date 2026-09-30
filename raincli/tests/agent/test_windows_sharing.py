@@ -92,7 +92,7 @@ def test_status_write_failures_never_stop_the_supervisor(tmp_path, monkeypatch):
     mapping(tmp_path)
     config = tmp_path / "runtime.json"
     atomic_write_json(config, {"connectors": ["connector.json"], "state_dir": "state"})
-    monkeypatch.setattr(Worker, "tick", lambda self, now: {"connector": self.path, "status": "offline"})
+    monkeypatch.setattr(Worker, "tick", lambda self, now, *_: {"connector": self.path, "status": "offline"})
     monkeypatch.setattr(Worker, "stop", lambda self: None)
     real = service.atomic_write_json
     writes = []

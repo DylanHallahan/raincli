@@ -57,7 +57,7 @@ def test_stop_during_slow_first_tick_is_not_lost(tmp_path, monkeypatch):
     atomic_write_json(tmp_path / "state/status.json", {"instance": "previous-run", "status": "stopped", "updated_at": 0})
     ticking = threading.Event()
 
-    def slow_tick(self, now):
+    def slow_tick(self, now, agents=None, client=None):
         ticking.set()
         time.sleep(1.5)
         return {"connector": self.path, "status": "offline", "reported": False}
@@ -393,7 +393,7 @@ def test_startup_removes_leaked_handshake_files_only(tmp_path, monkeypatch):
     kept = [state / "ready-notes.json", state / ("connector-" + "c" * 12 + ".log"), state / "status.json"]
     for path in leaked + kept:
         path.write_text("{}")
-    monkeypatch.setattr(Worker, "tick", lambda self, now: {"connector": self.path, "status": "offline"})
+    monkeypatch.setattr(Worker, "tick", lambda self, now, *_: {"connector": self.path, "status": "offline"})
     monkeypatch.setattr(Worker, "stop", lambda self: None)
     service.run(config, once=True)
     assert not any(p.exists() for p in leaked)

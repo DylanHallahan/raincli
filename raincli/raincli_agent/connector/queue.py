@@ -18,9 +18,12 @@ HELD = "held"
 SUBMITTING = "submitting"
 SUBMITTED = "submitted"
 UNCERTAIN = "submission_uncertain"
+# Next-turn inbox (protocol 14.7 H1): the framed file is written for the hook to
+# emit on the session's next turn; settles as submitted or submission_uncertain.
+HANDED_OVER = "handed_over"
 REJECTED = "rejected"
 DISMISSED = "dismissed"
-STATES = (ATTACHMENT_PENDING, RECEIVED, HELD, SUBMITTING, SUBMITTED, UNCERTAIN, REJECTED, DISMISSED)
+STATES = (ATTACHMENT_PENDING, RECEIVED, HELD, SUBMITTING, HANDED_OVER, SUBMITTED, UNCERTAIN, REJECTED, DISMISSED)
 PENDING = (RECEIVED, HELD)
 
 # Escalation states (protocol section 10). Escalations are local only: the
