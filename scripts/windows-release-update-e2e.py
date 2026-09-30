@@ -39,6 +39,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "raincli"
 sys.path.insert(0, str(PKG))
 from raincli_agent.runtime import updates  # noqa: E402  (the checkout's real updater)
+from raincli_agent.config import write_config  # noqa: E402  (what `raincli config init` writes with)
+from raincli_agent.fsutil import atomic_write_json  # noqa: E402  (the client's private-file writer)
 
 TEAM, HANDLE, EMAIL = "release-e2e", "e2e-machine", "release-e2e@example.invalid"
 WAIT = 900  # seconds per phase: download, staged install, graceful handover, two reports
@@ -299,7 +301,7 @@ class Client:
         self.root = work / "managed"
         self.home = work / "home"
         self.state = work / "runtime-state"
-        self.agent = work / "agent.json"
+        self.agent = work / "config" / "agent.json"  # its dir is created by the client (write_config)
         self.config = work / "runtime.json"
         self.launch_log = work / "launcher.log"
         self.launcher = None
@@ -378,9 +380,10 @@ class Client:
 
 
 def _write_private(path, data):
-    path.write_text(json.dumps(data, indent=2) + "\n")
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o600)
+    # Through the client's own private-file writer, as the product does. On Windows a plain write by an
+    # administrator makes the file owned by the Administrators group, which the client rightly refuses
+    # ("credential is not owned by the current Windows user").
+    atomic_write_json(path, data, mode=0o600)
 
 
 def directory_entry(server, token):
@@ -436,8 +439,14 @@ def run(args, work, stack):
     server.admin("create-user", "--email", EMAIL, "--name", "Release E2E", input=password + "\n")
     server.admin("create-team", "--slug", TEAM, "--name", "Release E2E", "--owner", EMAIL)
     client = Client(work / "client", server)
-    server.admin("register-agent", "--team", TEAM, "--owner", EMAIL, "--handle", HANDLE, "--out", str(client.agent))
-    token = SECRETS.add(json.loads(client.agent.read_text())["token"])
+    # raincli-admin writes a server-side file; a user imports it with `raincli config init`, i.e.
+    # write_config. Do the same so the client config gets the client's ownership and protection.
+    staged = work / "admin-agent.json"
+    server.admin("register-agent", "--team", TEAM, "--owner", EMAIL, "--handle", HANDLE, "--out", str(staged))
+    issued = json.loads(staged.read_text())
+    token = SECRETS.add(issued["token"])
+    write_config(str(client.agent), issued["api_url"], token)
+    staged.unlink()
     say(f"PASS: disposable user, team {TEAM} and machine {HANDLE} enrolled with raincli-admin")
 
     first = client.install(args.from_version)
