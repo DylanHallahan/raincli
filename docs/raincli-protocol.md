@@ -367,7 +367,7 @@ A **machine** is a registered handle with **one machine credential**. The runtim
   - At most one agent may carry `role: "inbox"`.
   - `reachability` must be `instant` or `next-turn` for the inbox, and null for every other agent.
   - `source: "scan"` requires `status: "unknown"`.
-- **Client fields:** `client.version` matches `^\d{1,4}\.\d{1,4}\.\d{1,4}$`. `update_state` and `update_mode` come from the sets above.
+- **Client fields:** `client.version` matches `^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`. `update_state` and `update_mode` come from the sets above.
 - **Never sent or stored:** paths, cwd, prompts, titles, transcripts, pane ids or process ids.
 - **Reply:** `{"presence": {…as §13…}, "target": {"version": "vX.Y.Z", "allow_downgrade": bool} | null}`. The target is the team's current `client_targets` row, if one exists. It holds a **version only, never a URL, repository or host**.
 
@@ -454,3 +454,68 @@ The connector config may map the inbox to a hook session instead of Herdr: `"inb
 - The website's "Add a machine" replaces "Register an agent". It uses the same backend: one handle and one credential per machine.
 - Existing handles become machines as soon as their runtime sends `agents`. Nothing is migrated by force.
 - The setup guide makes the managed install, the launcher and automatic updates the default path, and covers the hooks and the inbox choice (Herdr `instant` or Claude Code hook `next-turn`).
+
+### 14.7 Contract amendments after review 0 (binding; they override §14.1–14.6 where they conflict)
+
+**Next-turn states and restarts (review 0 H1).**
+- A next-turn message whose framed file has been written is in the local state **`handed_over`**, not `submitting`.
+- On connector start, it reconciles from the files: a pending `<id>.md` → stays `handed_over`; `<id>.md.claimed` with a receipt → `submitted`; claimed without a receipt, or the file missing → `submission_uncertain`, never re-emitted.
+- Herdr delivery keeps the §5 states.
+
+**Update-mode persistence (H2).**
+- The pointer stores `update_mode` (`automatic`/`manual`) and `update_mode_chosen`. The legacy `automatic` key is **always written false**, so pre-0.3 launchers never pull on their own.
+- An automatic rollback (`rolled_back`) never changes the update mode. Only an explicit `runtime update --manual` or `--rollback` sets `manual`.
+- The runtime refuses a target **below `v0.3.0`**, the first target-aware version, and `set-client-version` rejects it.
+
+**Hook locations and keys (H3).**
+- The installed hook command embeds `--state-dir <absolute runtime state_dir>`.
+- The per-machine salt is `<state_dir>/machine-salt`: 32 random bytes, mode 0600, created by the runtime. The hook only reads it; if it is absent, the hook does nothing and exits 0.
+- **Key** = lowercase hex of `HMAC-SHA256(salt, source_id)`, truncated to 32 characters. `source_id` is `"herdr:" + agent name`, `"<type>:" + hook session_id`, or `"scan:<type>:" + pid`.
+
+**Client-side normalization, all-or-nothing server (H4).** The server rejects the **whole** report on any invalid entry (400). The client must therefore normalize before sending:
+- **Names:** replace forbidden characters, trim, truncate to 64 code points, and fall back to the type when empty.
+- **Keys:** remove duplicates, keeping the first entry.
+- **Size:** cap the report at 100 agents, keeping the inbox first.
+
+**Privacy (M5).**
+- `client.error` must match `^[a-z0-9_.:-]{1,64}$` (a code or exception class name), validated on both sides.
+- Hook logs record only an error code, never stdin fields (`prompt`, `cwd` or `transcript_path`).
+- The Linux scan reads only processes with the **same uid** and matches the **executable basename only**. The cmdline is never stored or logged.
+
+**Claim bound (M6).**
+- A turn claims pending files oldest first while the cumulative size stays ≤ **32 KiB**, and always takes at least one file if that file fits.
+- A single framed message over the cap is held with the reason `too_large_for_hook` and never emitted.
+- The builder verifies Claude Code's actual additional-context limit, and uses the lower value if it is below 32 KiB.
+
+**Directory safety (M7).**
+- `sessions/` and `<key>.inbox/` are mode 0700, owner-checked, with no symlinks.
+- The hook emits only regular files named `^[0-9a-f-]{36}\.md$` within the cap.
+- When a mapped session ends or goes stale with pending files, the connector reclaims them by atomic rename (a race-safe arbitration with the hook's claim) and holds them as `offline`.
+
+**Hook install safety (M8).**
+- The command uses the **stable managed launcher** path, or the stable `raincli` entry point for unmanaged installs, never a versioned venv interpreter.
+- The command sets the agent's explicit hook `timeout` (≤ 5 s). It must be non-blocking even if the interpreter is missing: it never exits 2 and never prints to stderr in a way that fails the agent.
+- Config edits:
+  - are refused if the existing config fails to parse;
+  - are written atomically, preserving the file's mode;
+  - leave a 0600 backup;
+  - `--remove` touches only entries marked `raincli`.
+- Codex hook support is detected by a documented version gate or feature probe, and recorded in `hooks install` output.
+
+**No retry loop after rollback (M9).**
+- After `rolled_back` (or a verification failure) for a target, the same target is **not retried until the target row changes** (a new `set_at` or version).
+- Backoff (5 min doubling to 6 h) applies only to download or network failures.
+- The server upsert sets `set_at = now()` explicitly.
+
+**Scan deduplication (M10).**
+- Session records keep a local-only `pid`, never sent.
+- A scan entry is reported only for a pid that no Herdr agent (matched through its pane's process tree, when it can be determined) and no hook record already claims.
+
+**Body details (L11).**
+- Unknown keys are rejected at every level, nested objects included.
+- When `client` is present, `version`, `update_mode` and `update_state` are required, and `error` is optional or null.
+- Versions compare as numeric tuples after stripping a leading `v`.
+- An omitted `client` leaves the stored columns unchanged. An omitted `agents` leaves the directory unchanged.
+- The graceful-stop `offline` report sends `"agents": []`.
+
+**Schema (L12).** `CHECK ((role IS NULL) = (reachability IS NULL))` is enforced.

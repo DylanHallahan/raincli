@@ -32,7 +32,8 @@ def upgrade():
         sa.CheckConstraint("role IS NULL OR role = 'inbox'", name="ck_machine_agents_role"),
         sa.CheckConstraint("reachability IS NULL OR (role = 'inbox' AND reachability IN ('instant','next-turn'))",
                            name="ck_machine_agents_reachability"),
-        sa.CheckConstraint("source IN ('herdr','hook','scan')", name="ck_machine_agents_source"))
+        sa.CheckConstraint("source IN ('herdr','hook','scan')", name="ck_machine_agents_source"),
+        sa.CheckConstraint("(role IS NULL) = (reachability IS NULL)", name="ck_machine_agents_inbox_reachability"))
     op.create_index("uq_machine_agents_one_inbox", "machine_agents", ["agent_id"], unique=True,
                     postgresql_where=sa.text("role = 'inbox'"))
     op.create_table("client_targets",

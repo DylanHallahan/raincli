@@ -112,7 +112,7 @@ class AgentPresence(Base):
     agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    # Machine client report (protocol §14.3); null for clients older than v0.3.0.
+    # Machine client report (protocol §14.1); null for clients older than v0.3.0.
     client_version: Mapped[str | None] = mapped_column(String(32))
     update_mode: Mapped[str | None] = mapped_column(String(16))
     update_state: Mapped[str | None] = mapped_column(String(16))
@@ -126,7 +126,7 @@ class AgentPresence(Base):
 
 
 class MachineAgent(Base):
-    """One agent session published by a machine's runtime (protocol §14.2). Snapshot-replaced."""
+    """One agent session published by a machine's runtime (protocol §14.1). Snapshot-replaced."""
 
     __tablename__ = "machine_agents"
     agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True)
@@ -145,12 +145,13 @@ class MachineAgent(Base):
         CheckConstraint("reachability IS NULL OR (role = 'inbox' AND reachability IN ('instant','next-turn'))",
                         name="ck_machine_agents_reachability"),
         CheckConstraint("source IN ('herdr','hook','scan')", name="ck_machine_agents_source"),
+        CheckConstraint("(role IS NULL) = (reachability IS NULL)", name="ck_machine_agents_inbox_reachability"),
         Index("uq_machine_agents_one_inbox", "agent_id", unique=True, postgresql_where="role = 'inbox'"),
     )
 
 
 class ClientTarget(Base):
-    """Operator-set client version for a team (protocol §14.4). Names a version, never a source."""
+    """Operator-set client version for a team (protocol §14.5). Names a version, never a source."""
 
     __tablename__ = "client_targets"
     team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True)
