@@ -6,6 +6,7 @@ the machine's coding-agent sessions and the client's version; neither says anyth
 about message delivery.
 """
 import re
+import unicodedata
 from datetime import timedelta
 
 from sqlalchemy import delete, select
@@ -28,17 +29,24 @@ REACHABILITY = ("instant", "next-turn")
 AGENT_FIELDS = {"key", "name", "type", "status", "role", "reachability", "source"}
 AGENT_REQUIRED = {"key", "name", "type", "status", "source"}
 
-# [0-9], not \d: Python's \d also matches non-ASCII digits (protocol §14.7).
-CLIENT_VERSION_RE = re.compile(r"^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$")
-TARGET_VERSION_RE = re.compile(r"^v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$")
+# ASCII digits without leading zeros (protocol §14.7, §14.9); \d would also match non-ASCII digits.
+_PART = r"(0|[1-9][0-9]{0,3})"
+CLIENT_VERSION_RE = re.compile(rf"^{_PART}\.{_PART}\.{_PART}$")
+TARGET_VERSION_RE = re.compile(rf"^v{_PART}\.{_PART}\.{_PART}$")
 MIN_TARGET = (0, 3, 0)  # the first target-aware client (protocol §14.7)
 UPDATE_MODES = ("automatic", "manual")
 UPDATE_STATES = ("current", "updating", "failed", "rolled_back")
 CLIENT_FIELDS = {"version", "update_mode", "update_state", "error"}
 CLIENT_REQUIRED = {"version", "update_mode", "update_state"}
 CLIENT_ERROR_RE = re.compile(r"^[a-z0-9_.:-]{1,64}$")  # a code or exception class name only
-# A path separator or a RainCLI token prefix in a name means the client leaked something.
-_LEAK_RE = re.compile(r"[/\\]|rc[ai]_")
+# Names are ordinary display names: slashes, dots and emoji are fine. Only a RainCLI
+# token-shaped string is treated as a leak (review 1, finding 1).
+TOKEN_RE = re.compile(r"rc[ai]_[A-Za-z0-9_-]{20,}")
+# Control, format (bidi and zero-width), line/paragraph separator and surrogate code points.
+# The client normalizer replaces these and more (unassigned and private use), so a
+# normalized name always passes; unassigned code points are not rejected here, because
+# the server's Unicode version may be older than the client's.
+_NAME_FORBIDDEN_CATEGORIES = {"Cc", "Cf", "Zl", "Zp", "Cs"}
 
 
 def _invalid(message: str) -> MessagingError:
@@ -65,8 +73,9 @@ def _parse_agents(value) -> list[dict]:
         if key in keys:
             raise _invalid(f"{where}.key is repeated; keys are unique within a report")
         keys.add(key)
-        if not (security.valid_display_name(name) and len(name) <= AGENT_NAME_MAX) or _LEAK_RE.search(name):
-            raise _invalid(f"{where}.name must be a 1-{AGENT_NAME_MAX} character name without paths")
+        if not valid_agent_name(name):
+            raise _invalid(f"{where}.name must be a 1-{AGENT_NAME_MAX} character display name "
+                           "without control, bidi or zero-width characters or tokens")
         if not _is_str(item["type"], AGENT_TYPES):
             raise _invalid(f"{where}.type must be one of {', '.join(AGENT_TYPES)}")
         if not _is_str(item["status"], AGENT_STATES):
@@ -91,11 +100,18 @@ def _parse_agents(value) -> list[dict]:
     return out
 
 
+def valid_agent_name(name) -> bool:
+    """A display-name-valid name of at most 64 code points (protocol §14.1, §14.7 H4)."""
+    return (security.valid_display_name(name) and len(name) <= AGENT_NAME_MAX
+            and not any(unicodedata.category(ch) in _NAME_FORBIDDEN_CATEGORIES for ch in name)
+            and not TOKEN_RE.search(name))
+
+
 def _parse_client(value) -> dict:
     if not isinstance(value, dict) or not CLIENT_REQUIRED <= set(value) or set(value) - CLIENT_FIELDS:
         raise _invalid("client must have exactly version, update_mode, update_state and optionally error")
     if not _is_str(value["version"]) or not CLIENT_VERSION_RE.fullmatch(value["version"]):
-        raise _invalid("client.version must look like 1.2.3")
+        raise _invalid("client.version must look like 1.2.3, without leading zeros")
     if not _is_str(value["update_mode"], UPDATE_MODES):
         raise _invalid("client.update_mode must be automatic or manual")
     if not _is_str(value["update_state"], UPDATE_STATES):

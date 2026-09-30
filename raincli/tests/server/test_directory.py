@@ -75,7 +75,7 @@ def test_rejected_report_changes_nothing(client, world, session):
     token = world["tokens"]["alice"]
     put(client, token, {"status": "ready", "client": CLIENT, "agents": [INBOX]})
     bad = {"status": "busy", "client": {**CLIENT, "version": "0.4.0"},
-           "agents": [agent(key="e" * 32, name="fine"), agent(key="f" * 32, name="/home/alice/secret")]}
+           "agents": [agent(key="e" * 32, name="fine"), agent(key="f" * 32, name="\u202egnp.exe")]}
     assert err(put(client, token, bad)) == "invalid"
     session.expire_all()
     row = session.get(AgentPresence, world["agents"]["alice"].id)
@@ -89,8 +89,11 @@ def test_rejected_report_changes_nothing(client, world, session):
     [agent(key="a" * 65)],
     [agent(), agent(name="dup")],                                  # keys unique within a report
     [agent(name="")], [agent(name="   ")], [agent(name="x" * 65)],
-    [agent(name="/home/alice/project")], [agent(name="C:\\Users\\alice")], [agent(name="line\nbreak")],
-    [agent(name="rca_abcdefgh")],
+    [agent(name="line\nbreak")], [agent(name="tab\there")],
+    [agent(name="rca_" + "A" * 43)], [agent(name="token rci_abcdefghijklmnopqrst-_")],  # token-shaped
+    [agent(name="\u202egnp.exe")], [agent(name="a\u2066b")], [agent(name="\u200fx")],  # bidi controls
+    [agent(name="zero\u200bwidth")], [agent(name="a\u200db")], [agent(name="\ufeffbom")],  # zero-width
+    [agent(name="soft\u00adhyphen")], [agent(name="line\u2028sep")],
     [agent(type="vim")], [agent(status="ready")], [agent(source="ps")],
     [agent(role="main")],
     [agent(role="inbox")],                                         # the inbox needs a reachability
@@ -111,7 +114,8 @@ def test_invalid_agents_are_rejected_whole(client, world, agents):
 
 @pytest.mark.parametrize("client_block", [
     {**CLIENT, "version": "v0.3.0"}, {**CLIENT, "version": "0.3"}, {**CLIENT, "version": "٠.٣.٠"},
-    {**CLIENT, "version": "12345.0.0"}, {**CLIENT, "update_mode": "auto"}, {**CLIENT, "update_state": "ok"},
+    {**CLIENT, "version": "12345.0.0"}, {**CLIENT, "version": "0.03.0"}, {**CLIENT, "version": "00.3.0"},
+    {**CLIENT, "version": "0.3.00"}, {**CLIENT, "update_mode": "auto"}, {**CLIENT, "update_state": "ok"},
     {**CLIENT, "error": "Download failed: /home/alice/x"}, {**CLIENT, "error": "HTTPError"},
     {**CLIENT, "error": "x" * 65}, {**CLIENT, "error": ""}, {**CLIENT, "url": "https://evil.test"},
     {"version": "0.3.0", "update_mode": "automatic"}, "0.3.0", None,
@@ -197,7 +201,7 @@ def test_database_enforces_directory_invariants(session, world):
 def test_version_tuple_compares_numerically():
     assert presence.version_tuple("v0.10.0") > presence.version_tuple("0.9.9")
     assert presence.version_tuple("v0.3.0") == presence.version_tuple("0.3.0") == presence.MIN_TARGET
-    for bad in ("v0.3", "x0.3.0", "v٠.3.0", "vv0.3.0"):
+    for bad in ("v0.3", "x0.3.0", "v٠.3.0", "vv0.3.0", "v0.03.0", "v01.0.0"):
         with pytest.raises(ValueError):
             presence.version_tuple(bad)
 
@@ -249,7 +253,7 @@ def test_set_client_version_and_clear(database_url, client, world, session):
 
 @pytest.mark.parametrize("argv", [
     ["v0.2.0"], ["v0.2.9"], ["0.1.0"],                                    # below the first target-aware version
-    ["latest"], ["v0.3"], ["v0.3.0-rc1"], ["https://example.test/v0.3.0"], ["v٠.3.0"],
+    ["latest"], ["v0.3"], ["v0.03.0"], ["v0.4.00"], ["v00.3.0"], ["0.3.01"], ["v0.3.0-rc1"], ["https://example.test/v0.3.0"], ["v٠.3.0"],
     ["--clear", "--allow-downgrade"],
 ])
 def test_set_client_version_rejects(database_url, world, session, argv):
@@ -284,3 +288,51 @@ def test_client_status_lists_machines(database_url, client, world, session):
     identity.revoke_agent(session, world["agents"]["bob"])
     session.commit()
     assert "bob-agent" not in run(database_url, "client-status", "--team", "acme")[1]
+
+
+@pytest.mark.parametrize("name", [
+    "team/api", "C:\\Users\\alice", "orca_tools", "merci_bot", "circa_2024", "rca_short",
+    "my.project.v2", "..", "~", "🚀 launch", "東京-agent", "naïve café", "🙂" * 64, "a" * 64,
+])
+def test_ordinary_names_are_accepted(client, world, name):
+    r = put(client, world["tokens"]["alice"], {"status": "ready", "agents": [agent(name=name)]})
+    assert r.status_code == 200, r.text
+    assert entry(client, world["tokens"]["bob"], "alice-agent")["agents"][0]["name"] == name
+
+
+def test_client_normalized_names_always_pass():
+    """Whatever the client's normalizer produces, the server accepts (review 1, finding 1)."""
+    from raincli_agent.runtime.sessions import normalize_name
+
+    raw = ["/home/u/orca_tools", "team/api", "‮gnp.exe", "zero\u200bwidth", "👨‍👩‍👧 family",
+           "line\nbreak\ttab", "\x00\x1f", "   ", "x" * 200, "C:\\Users\\bob\\proj", "\ud800", "\ue000pua",
+           "\u2028\u2029", "a\u00a0b", "🙂" * 80]
+    for value in raw:
+        name = normalize_name(value, "claude")
+        assert presence.valid_agent_name(name), (value, name)
+    assert not presence.valid_agent_name("\ud800")  # a lone surrogate can't even travel as UTF-8
+
+
+def test_contract_maximal_report_fits_the_body_limit(client, world):
+    """100 agents with 64 astral-plane names, as Python's json.dumps escapes them (review 1, finding 9)."""
+    import json
+
+    agents = [agent(key=f"{i:064d}", name="😀" * 64, type="opencode", status="unknown", source="scan")
+              for i in range(presence.MAX_AGENTS)]
+    agents[0].update(role="inbox", reachability="next-turn", source="hook")
+    body = {"status": "blocked", "agents": agents, "client": {
+        "version": "9999.9999.9999", "update_mode": "automatic", "update_state": "rolled_back", "error": "e" * 64}}
+    raw = json.dumps(body).encode()
+    assert 90_000 < len(raw) < 128 * 1024 * 3 // 4  # at least a quarter of the limit to spare
+    r = client.put("/api/v1/presence", headers={**auth(world["tokens"]["alice"]), "Content-Type": "application/json"},
+                   content=raw)
+    assert r.status_code == 200, r.text
+    assert len(entry(client, world["tokens"]["bob"], "alice-agent")["agents"]) == presence.MAX_AGENTS
+    # The larger limit applies to PUT /presence only.
+    big = b'{"status": "ready", "pad": "' + b"x" * (128 * 1024) + b'"}'
+    r = client.put("/api/v1/presence", headers={**auth(world["tokens"]["alice"]), "Content-Type": "application/json"},
+                   content=big)
+    assert r.status_code == 413
+    r = client.post("/api/v1/messages/00000000-0000-4000-8000-000000000000/events", headers={
+        **auth(world["tokens"]["alice"]), "Content-Type": "application/json"}, content=b"x" * (70 * 1024))
+    assert r.status_code == 413

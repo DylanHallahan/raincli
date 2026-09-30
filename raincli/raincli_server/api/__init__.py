@@ -34,6 +34,9 @@ from raincli_server.models import Agent
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_SEND_BODY_BYTES = 2 * 1024 * 1024  # POST /messages carries base64 attachments (protocol §8)
+# PUT /presence: a contract-maximal report (100 agents with 64 astral-plane names, which Python's
+# default json.dumps escapes to 12 bytes each, plus the client block) is about 95 KB (protocol §14.1).
+MAX_PRESENCE_BODY_BYTES = 128 * 1024
 MAX_WAIT_SECONDS = 25
 POLL_INTERVAL = 0.5
 PREFIX = "/api/v1"
@@ -60,20 +63,30 @@ class ApiError(MessagingError):
 class BodySizeLimit:
     """Reject request bodies over the limit with 413, by header or while streaming.
 
-    ``POST .../messages`` gets ``send_limit``; every other API request gets ``limit``.
+    ``POST .../messages`` gets ``send_limit``, ``PUT .../presence`` gets ``presence_limit``;
+    every other API request gets ``limit``.
     """
 
-    def __init__(self, app: ASGIApp, limit: int = MAX_BODY_BYTES, send_limit: int = MAX_SEND_BODY_BYTES):
+    def __init__(self, app: ASGIApp, limit: int = MAX_BODY_BYTES, send_limit: int = MAX_SEND_BODY_BYTES,
+                 presence_limit: int = MAX_PRESENCE_BODY_BYTES):
         self.app = app
         self.default_limit = limit
         self.send_limit = send_limit
+        self.presence_limit = presence_limit
+
+    def limit_for(self, scope: Scope) -> int:
+        method, path = scope.get("method"), scope.get("path", "").rstrip("/")
+        if method == "POST" and path.endswith("/messages"):
+            return self.send_limit
+        if method == "PUT" and path.endswith("/presence"):
+            return self.presence_limit
+        return self.default_limit
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        is_send = scope.get("method") == "POST" and scope.get("path", "").rstrip("/").endswith("/messages")
-        limit = self.send_limit if is_send else self.default_limit
+        limit = self.limit_for(scope)
         too_large = error_response(413, "too_large", f"request body exceeds {limit} bytes")
         for name, value in scope.get("headers", []):
             if name == b"content-length":
@@ -150,7 +163,8 @@ def build_api(parent: FastAPI) -> FastAPI:
     settings = parent.state.settings
     api = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     api.state.rate_limiter = RateLimiter(settings.rate_limit_per_min)
-    api.add_middleware(BodySizeLimit, limit=MAX_BODY_BYTES, send_limit=MAX_SEND_BODY_BYTES)
+    api.add_middleware(BodySizeLimit, limit=MAX_BODY_BYTES, send_limit=MAX_SEND_BODY_BYTES,
+                       presence_limit=MAX_PRESENCE_BODY_BYTES)
     limiter: RateLimiter = api.state.rate_limiter
 
     def sessionmaker():

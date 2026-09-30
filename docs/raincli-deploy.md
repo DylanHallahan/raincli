@@ -19,7 +19,7 @@ Internet ─HTTPS─▶ Nginx (raincli.com, existing TLS cert) ─HTTP 127.0.0.1
 | Service | `raincli.service` runs as user `raincli`: loopback only, sandboxed, no access log, and IP traffic restricted to localhost. |
 | Secrets | `/etc/raincli/raincli.env`, owned `root:raincli` with mode 0640, inside `/etc/raincli` (`root:raincli`, 0750). Its format is `deploy/raincli/raincli.env.example`. |
 | Backups | `/var/backups/raincli`, mode 0700. The daily timer keeps 14 backups. `pre-*` backups are taken before each release's first migration and the last 5 are kept. Each release records its rollback backup in `releases/<release>/PRE_BACKUP`. |
-| Nginx | `deploy/raincli/nginx/raincli-http.conf` (http context: rate-limit zones and upstream) and `raincli.com.conf` (server blocks). It sets a 64 KiB body limit, or 2 MiB on the two upload endpoints, plus per-IP rate limits and long-poll timeouts. Invitation URLs are never logged, HSTS is on and `server_tokens` is off. It works with Nginx ≥ 1.18. |
+| Nginx | `deploy/raincli/nginx/raincli-http.conf` (http context: rate-limit zones and upstream) and `raincli.com.conf` (server blocks). It sets a 64 KiB body limit, 128 KiB on `/api/v1/presence`, or 2 MiB on the two upload endpoints, plus per-IP rate limits and long-poll timeouts. Invitation URLs are never logged, HSTS is on and `server_tokens` is off. It works with Nginx ≥ 1.18. |
 
 ## Prerequisites (confirm on the host)
 
@@ -107,7 +107,7 @@ The install then:
 
 This release adds migration `0003_presence`, which creates one table, `agent_presence`: a row per agent with a status, the server receipt time and a foreign key that cascades on agent deletion. It holds no message content, paths or session details. `install.sh` takes the `PRE_BACKUP` and runs the migration as usual; no new secrets or environment variables are needed.
 
-It also adds `PUT /api/v1/presence`, which is served by the existing `location /api/` block with the general API rate limit. Nginx needs no change. After the upgrade, check it the same way as other agent endpoints, with a test agent's credential rather than a teammate's:
+It also adds `PUT /api/v1/presence`, which is served by the existing `location /api/` block with the general API rate limit. Nginx needs no change for this release (the directory release below adds a presence location). After the upgrade, check it the same way as other agent endpoints, with a test agent's credential rather than a teammate's:
 - `GET /api/v1/agents` includes a `presence` object for each agent, with status `unknown` until that agent's runtime reports;
 - `python -m raincli_server.migrate current` (run like `rc_admin`, as the service user with the env file loaded) shows `0003`.
 
@@ -120,7 +120,9 @@ This release adds migration `0004_agent_directory`:
 - a `machine_agents` table: up to 100 rows per handle, each with an opaque key, name, type, status, the inbox role and reachability, the discovery source and the server receipt time. A handle's rows are **replaced as a whole** by each report that carries an agent list, so the table doesn't grow with traffic. Check constraints and a partial unique index allow at most one inbox per handle, and reachability only on the inbox;
 - a `client_targets` table: at most one row per team, holding a version tag, the downgrade flag and `set_at`.
 
-None of these hold paths, working directories, prompts, titles, transcripts, pane ids or process ids; the server rejects any report that tries to send them. `install.sh` takes the `PRE_BACKUP` and migrates as usual. No new secrets, environment variables or Nginx changes are needed. A report is normally a few KiB; 100 agents with 64-character ASCII names stay under 30 KiB, inside the 64 KiB API body limit.
+None of these hold paths, working directories, prompts, titles, transcripts, pane ids or process ids; the server rejects any report that tries to send them. `install.sh` takes the `PRE_BACKUP` and migrates as usual. No new secrets or environment variables are needed.
+
+**Nginx changes.** Presence reports get their own body limit: a report is normally a few KiB, but a contract-maximal one (100 agents whose 64-character names are emoji, which JSON escapes to 12 bytes each, plus the client block) is about 95 KB. The app accepts up to **128 KiB** on `PUT /api/v1/presence` and keeps 64 KiB for every other API request. `raincli.com.conf` adds a matching `location = /api/v1/presence` with `client_max_body_size 128k`. Reinstall it as in step 5 of the first deployment, then run `sudo nginx -t && sudo systemctl reload nginx`. Without it, Nginx answers 413 to large reports before they reach the app.
 
 After the upgrade, check with a test machine's credential:
 - `PUT /api/v1/presence` with only `{"status": …}` (a v0.2.0 client) still returns 200, now with `"target": null`;

@@ -107,7 +107,8 @@ Instead of `herdr_agent`, the connector config names a hook session. The two are
 - **Delivery waits until the session is next used.** The connector writes each fully framed message (the same text as for Herdr) to a private file, and the message's local state is `handed_over`. The sender sees it as `held` with the reason `next_turn`. At the session's next `SessionStart` or `UserPromptSubmit`, the hook claims the waiting files, oldest first, and adds them to that turn as context. The connector then marks them `submitted`. Nothing is delivered while the session sits unused.
 - **Per-turn bound:** about **10,000 characters** per turn (Claude Code's limit on a hook's additional context), always at least one message if it fits; the rest waits for the next turn. A single message over the bound is held as `too_large_for_hook`.
 - **Status:** the session reports `blocked` when it asks for input, and **stays `blocked` until its next prompt or stop**, because there are no per-tool hooks.
-- **No fallback:** with no live session of that name, messages are held `offline`; with more than one, `target_ambiguous`. If the session ends with messages still waiting, the connector takes them back and holds them `offline`.
+- **Idle is fine:** a session stays live, and stays the handover target, while its Claude Code process is running, however long it is idle. The directory shows it `idle`.
+- **No fallback:** with no live session of that name, messages are held `offline`; with more than one, `target_ambiguous`. If the session ends (or its process exits) with messages still waiting, the connector takes them back and holds them `offline`.
 - **After a crash:** a message claimed without a receipt becomes `submission_uncertain` and is never handed over again automatically.
 - **Escalation** targets are Herdr agents. Without Herdr, omit `escalation`; the inbox agent then tells the sender what it can't answer.
 
@@ -144,6 +145,6 @@ raincli connector escalation-done --config ~/.config/raincli/connector.json <esc
 
 ## Limits (honest scope)
 
-- `raincli runtime` supervises connectors and reports availability and the machine's agent list; it does not start or drive agents. The inbox agent is only as capable as the agent you start, and it acts through ordinary Herdr prompts.
+- `raincli runtime` supervises connectors and reports availability and the machine's agent list; it does not start or drive agents. The inbox agent is only as capable as the agent you start. It receives messages through ordinary Herdr prompts, or, for a Claude Code inbox, as additional context at its next turn.
 - Whether an answer is correct, and whether it stays inside the shareable context, depends on the inbox agent following its instructions. The connector cannot enforce what an agent reads.
 - Notifications are local to your Herdr session. They don't reach your phone or email.
