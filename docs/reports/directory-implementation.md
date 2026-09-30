@@ -1,6 +1,8 @@
 # Machine agent directory and pushed updates: implementation report
 
-**Status: review-ready.** The work is on branch `feat/agent-directory`, based on `main` `5d42d29` (v0.2.0). The code verified and reviewed below is at **`ae700f5`**; this report is committed on top of it and changes no code.
+**Status: delivered and verified with real releases.** v0.3.0 and v0.3.1 are released, and the server is deployed with migration `0004`. The earlier review-ready note follows.
+
+**Originally review-ready.** The work is on branch `feat/agent-directory`, based on `main` `5d42d29` (v0.2.0). The code verified and reviewed below is at **`ae700f5`**; this report is committed on top of it and changes no code.
 
 The main agent owns the merge to `main`, the v0.3.0 release, deployment, the webserver migration and the real two-release test. None of these has been done.
 
@@ -90,3 +92,17 @@ The approved brief is "RainCLI agent directory and pushed updates", with the des
 
 ## Workers and reports
 The builders were cli-builder (client and runtime) and web-builder (server, website, docs and the release workflow), with an independent reviewer. The worker and review reports stay outside the repository, under `~/Projects/.worktrees/runtime-reports/`: `directory-{design,client,server,review-0..5}.md`.
+
+## Real two-release verification (after the release)
+- **Webserver (production, run by the main agent):** v0.3.1 was pushed with `set-client-version` and installed in 46 s. A downgrade without the flag was refused with `downgrade_not_allowed`. With `--allow-downgrade` the machine went back to v0.3.0 in 57 s. The target was then cleared and re-set to v0.3.1.
+- **Native Windows:** manual workflow `windows-release-update`, run **36768619852** from `fix/windows-release-e2e` at `d28fc50`, **PASSED**:
+  1. the real v0.3.0 installed managed through the launcher;
+  2. the runtime reported to the throwaway in-job server;
+  3. the pushed v0.3.1 became current, checked through the pointer, interpreter, status and server directory;
+  4. a downgrade without the flag was refused;
+  5. a downgrade with `--allow-downgrade` went back to v0.3.0;
+  6. the target was cleared.
+- **Harness fixes, script only, not the product:**
+  - the throwaway cluster moved outside Python 3.13+'s owner-only `mkdtemp` ACL;
+  - `pg_ctl` output no longer goes to a pipe, which `postgres` had inherited and kept open;
+  - client files are written through the client's own writers, because on an administrator runner plain writes are owned by the Administrators group.
