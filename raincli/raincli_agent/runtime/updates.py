@@ -380,11 +380,13 @@ def update_mode(root=None):
 
 
 def adopt_launcher(root, python, base_python=None):
-    """Adopt the running version's launcher once that version has proven itself.
+    """Adopt a version's launcher only after it passes the real ``runtime run``
+    path against stub runtimes in a private scratch root (launcher_check).
 
-    The candidate is compiled and run (``--version`` through the pointer) before
-    it replaces ``launch.py``, so a broken launcher is never installed; the one
-    in use keeps supervising and can still roll back (review 1, finding 2)."""
+    A broken launcher is never installed, so the one in use keeps supervising
+    and can still roll back (review 1 finding 2, review 3 M1). The caller holds
+    the update lock."""
+    from . import launcher_check
     root = Path(root)
     source = Path(python).parents[2] / "launch.py"
     if not source.is_file():
@@ -395,30 +397,26 @@ def adopt_launcher(root, python, base_python=None):
             return "current"
     except FileNotFoundError:
         pass
-    candidate = root / ".launch.candidate.py"
     try:
-        compile(data, str(source), "exec")
-        atomic_write_bytes(candidate, data)
-        isolated = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")}
-        base = base_python or getattr(sys, "_base_executable", sys.executable)
-        result = subprocess.run([str(base), str(candidate), "--version"], capture_output=True, text=True,
-                                timeout=30, env=isolated, stdin=subprocess.DEVNULL)
-        if result.returncode != 0 or not result.stdout.startswith("raincli "):
-            return "candidate_failed"
-        # The `runtime run` branch too, against a stub runtime (review 2, O3).
-        result = subprocess.run([str(base), str(candidate), "--self-check"], capture_output=True, text=True,
-                                timeout=60, env=isolated, stdin=subprocess.DEVNULL)
-        if result.returncode != 0 or "self-check ok" not in result.stdout:
-            return "candidate_failed"
-        atomic_write_bytes(root / "launch.py", data)
-        return "adopted"
-    except (OSError, SyntaxError, subprocess.SubprocessError, ValueError):
+        problem = launcher_check.check(data, root, base_python)
+    except (OSError, SyntaxError, ValueError, subprocess.SubprocessError):
         return "candidate_failed"
+    if problem is not None:
+        return "candidate_failed"
+    atomic_write_bytes(root / "launch.py", data)
+    return "adopted"
+
+
+def adopt_launcher_locked(root, python):
+    """``adopt_launcher`` under the update lock, without waiting; None when busy."""
+    try:
+        lock = lock_root(root, blocking=False)
+    except ConnectorBusy:
+        return None
+    try:
+        return adopt_launcher(root, python)
     finally:
-        try:
-            candidate.unlink()
-        except OSError:
-            pass
+        lock.release_run_lock()
 
 
 # -- pushed-update state (read by the runtime and the launcher) -----------------

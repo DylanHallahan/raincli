@@ -124,11 +124,13 @@ class PushedUpdates:
                 and updates.version_key(target["version"]) == updates.version_key(__version__)):
             self._save(state="current", error=None, failures=0, blocked=None)
         if not self.launcher_checked and self.managed() and self.data.get("state") == "current":
-            self.launcher_checked = True
             try:
-                result = updates.adopt_launcher(self.root, self.python)
+                result = updates.adopt_launcher_locked(self.root, self.python)
             except Exception as exc:  # noqa: BLE001 - advisory; the old launcher keeps working
                 result = "error:" + type(exc).__name__
+            if result is None:
+                return  # the update lock is busy: try again on a later tick
+            self.launcher_checked = True
             if result == "adopted":
                 self.log("adopted this version's launcher")
             elif result == "candidate_failed":

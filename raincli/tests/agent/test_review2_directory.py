@@ -26,6 +26,14 @@ LINUX = pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.wh
 POSIX = pytest.mark.skipif(os.name == "nt", reason="POSIX")
 
 
+@pytest.fixture(autouse=True)
+def no_agent_in_process(monkeypatch):
+    """In-process hook calls must not find the Claude Code session running this suite
+    (review 3, L3). Tests with real agent processes run the hook in a subprocess."""
+    from raincli_agent.runtime import hook
+    monkeypatch.setattr(hook, "agent_pid", lambda agent_type: None)
+
+
 @pytest.fixture
 def state(tmp_path):
     directory = tmp_path / "runtime-state"
@@ -196,9 +204,6 @@ def test_launcher_broken_only_in_runtime_run_is_not_adopted(tmp_path):
     before = (root / "launch.py").read_bytes()
     assert updates.adopt_launcher(root, pointer["python"], base_python=sys.executable) == "candidate_failed"
     assert (root / "launch.py").read_bytes() == before
-    result = subprocess.run([sys.executable, str(root / "launch.py"), "--self-check"], capture_output=True,
-                            text=True, timeout=60)
-    assert result.returncode == 0 and "self-check ok" in result.stdout  # the kept launcher passes
 
 
 @POSIX

@@ -374,29 +374,9 @@ def supervise(root, args, config, command, own=None, probation_enabled=True):
             stop_runtime(process, current[1], config)
 
 
-def self_check(root):
-    """Exercise the ``runtime run`` branch against a stub runtime, without touching
-    any state: read the pointer, start the stub through the real loop, see it exit,
-    and stop a second stub gracefully. A candidate launcher must pass this before
-    it is adopted (review 2, O3)."""
-    read_pointer(root)
-    stub = [sys.executable, "-c", "raise SystemExit(0)"]
-    code = supervise(root, ["runtime", "run"], None, lambda python: stub, probation_enabled=False)
-    if code != 0:
-        return 1
-    if os.name != "nt":  # Windows stops a runtime through its config, which a stub lacks
-        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
-                                   stdin=subprocess.DEVNULL, start_new_session=True)
-        stop_runtime(sleeper, sys.executable, None)
-    print("raincli launcher self-check ok")
-    return 0
-
-
 def main():
     root = Path(__file__).resolve().parent
     args = sys.argv[1:]
-    if args == ["--self-check"]:
-        return self_check(root)
     _, python = read_pointer(root)
     if args[:2] != ["runtime", "run"]:
         return passthrough(python, args)
