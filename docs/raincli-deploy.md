@@ -148,7 +148,7 @@ rc_admin client-status --team pilot                                # the target,
 - Machines act on the target at their next report (within about 30 seconds), and only when their install is managed and set to automatic.
 - `client-status` prints tab-separated lines: `target` and the target (or `none`), a header, then `handle`, `version`, `update_mode`, `update_state`, `error` and the last report time. `-` means the handle's client hasn't reported a version (older than v0.3.0, or never run); `never` means no report at all. It never shows keys, agent names or paths.
 
-Publish the release on GitHub before setting it as a target. A target with no matching stable release shows up as `failed` in `client-status`, and the previous version keeps running.
+Publish the release on GitHub before setting it as a target. To check a newly published pair of releases end to end, on Windows and Linux, against a throwaway server, see [release-testing.md](release-testing.md). A target with no matching stable release shows up as `failed` in `client-status`, and the previous version keeps running.
 
 ## Webserver client migration (release venv → managed install)
 

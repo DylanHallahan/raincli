@@ -1,0 +1,43 @@
+name: Manual Windows real-release update
+# Installs a published stable release through the real managed updater, pushes an
+# upgrade (and optionally a downgrade) from a throwaway server started inside this
+# job, and checks the handover. No secrets, no production server, no pilot team:
+# every credential is created in the job's temporary directory. See
+# docs/release-testing.md. Manual only.
+on:
+  workflow_dispatch:
+    inputs:
+      from_version:
+        description: Release to install first (managed), vX.Y.Z >= v0.3.0
+        required: true
+        default: v0.3.0
+      to_version:
+        description: Release to push, newer than from_version
+        required: true
+        default: v0.3.1
+      downgrade:
+        description: Then push from_version back (refused, then allowed with --allow-downgrade)
+        type: boolean
+        default: true
+permissions:
+  contents: read
+jobs:
+  release-update:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+      - name: Real release install, pushed update and downgrade against a throwaway server
+        env:
+          PYTHONUTF8: '1'
+          # Inputs reach the script as data, never as shell text; it validates the tags.
+          FROM_VERSION: ${{ inputs.from_version }}
+          TO_VERSION: ${{ inputs.to_version }}
+          DOWNGRADE: ${{ inputs.downgrade }}
+        # The image's PostgreSQL (PGBIN) runs as a fresh initdb cluster on a random loopback port.
+        run: python scripts/windows-release-update-e2e.py
