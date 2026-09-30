@@ -2,10 +2,10 @@
 {% block title %}Set up {{ agent.handle }} · RainCLI{% endblock %}
 {% block main %}
 <section class="wrap narrow page-pad">
-  <p class="crumbs"><a href="{{ url('/app/agents') }}">Agents</a> <span aria-hidden="true">/</span> {{ agent.handle }}</p>
-  <p class="eyebrow">Your agent’s address is ready</p>
-  <h1>{% if rotated %}New credential for {{ agent.handle }}{% else %}{{ agent.handle }} is registered{% endif %}</h1>
-  <p class="muted">Teammates in {{ team.name }} can address <strong class="handle">{{ agent.handle }}</strong>. Connect it to your machine next. Registration does not start an agent or connect a Herdr session.</p>
+  <p class="crumbs"><a href="{{ url('/app/agents') }}">Machines</a> <span aria-hidden="true">/</span> {{ agent.handle }}</p>
+  <p class="eyebrow">Your machine’s address is ready</p>
+  <h1>{% if rotated %}New credential for {{ agent.handle }}{% else %}{{ agent.handle }} is added{% endif %}</h1>
+  <p class="muted">Teammates in {{ team.name }} can address <strong class="handle">{{ agent.handle }}</strong>. Set up the machine next: its runtime lists the machine's coding agents on your Machines page and delivers messages to the one inbox agent you choose. Adding a machine does not start an agent or connect a session.</p>
   {% if rotated %}<p class="flash flash-ok" role="status">The previous credential was revoked. Clients using it stop working until you install this one.</p>{% endif %}
 
   <ol class="setup-steps">
@@ -13,27 +13,27 @@
       <span class="setup-number" aria-hidden="true">01</span>
       <div class="setup-content">
         <h2>Download your config</h2>
-        <p>This file lets your agent send and receive as <strong>{{ agent.handle }}</strong>. It is separate from your login password.</p>
+        <p>This file holds the <strong>machine credential</strong>: one credential for the whole machine, used to send, receive and report as <strong>{{ agent.handle }}</strong>. It is separate from your login password.</p>
         <form method="post" action="{{ url('/app/agents/' ~ agent.id ~ '/config') }}" class="download-form" data-download>
           <input type="hidden" name="csrf_token" value="{{ csrf }}">
           <input type="hidden" name="token" value="{{ token }}">
           <button class="btn" type="submit">Download {{ filename }}</button>
         </form>
-        <p class="help"><strong>Save it before leaving.</strong> The credential is shown only on this page. If you lose it, rotate it from Agents to get a replacement.</p>
+        <p class="help"><strong>Save it before leaving.</strong> The credential is shown only on this page. If you lose it, rotate it from Machines to get a replacement.</p>
       </div>
     </li>
     <li class="setup-step">
       <span class="setup-number" aria-hidden="true">02</span>
       <div class="setup-content">
         <h2>Let your coding agent handle setup</h2>
-        <p>Copy this prompt into Codex or Claude Code on the machine you want to connect. Update the download path if your browser saved the file elsewhere. The prompt contains no credential.</p>
+        <p>Copy this prompt into Codex or Claude Code on the machine you're adding. Update the download path if your browser saved the file elsewhere. The prompt contains no credential.</p>
         <label class="sr-only" for="setup-prompt">Setup prompt for your coding agent</label>
-        <textarea id="setup-prompt" class="setup-prompt" readonly rows="10" spellcheck="false">Help me set up RainCLI using https://github.com/DylanHallahan/raincli/blob/main/SETUP.md.
-My API URL is {{ api_url }} and my registered handle is {{ agent.handle }} in team {{ team.slug }}.
-My downloaded credential file is ~/Downloads/{{ filename }}. Read the file locally; never print its contents or put its token in chat, commands, or notes.
-Check for an existing installation and identity first; preserve them and ask before replacing or changing any session mapping. Install the CLI and its skill, import the downloaded config with raincli config init, and verify my handle and team with raincli whoami before deleting the downloaded copy.
-Ask whether I want a dedicated Herdr inbox or CLI-only messaging. For Herdr, follow the guide to create the inbox workspace and connector, and ask me which context may be shared and which main session should receive escalations. Do not assume an open session is registered or connected.
-Show me the verified setup status and ask which teammate to use for a test message.</textarea>
+        <textarea id="setup-prompt" class="setup-prompt" readonly rows="10" spellcheck="false">Help me set up RainCLI on this machine using https://github.com/DylanHallahan/raincli/blob/main/SETUP.md.
+My API URL is {{ api_url }} and this machine's handle is {{ agent.handle }} in team {{ team.slug }}.
+My downloaded machine credential file is ~/Downloads/{{ filename }}. Read the file locally; never print its contents or put its token in chat, commands, or notes.
+Check for an existing installation and identity first; preserve them and ask before replacing or changing any session mapping. Follow the guide's default path: the managed install with the launcher and automatic updates, and the RainCLI skill. Import the downloaded config with raincli config init and verify my handle and team with raincli whoami before deleting the downloaded copy.
+Ask me which agent should be this machine's inbox: a Herdr agent (instant delivery), a Claude Code session through hooks (next-turn delivery, which waits until that session is next used), or CLI-only messaging. Ask before installing agent hooks, and ask me which context may be shared and which main session should receive escalations. Do not assume an open session is registered or connected.
+Start the runtime at login, then show me the verified setup status and ask which teammate to use for a test message.</textarea>
         <div class="form-row">
           <button class="btn btn-quiet" type="button" data-copy="setup-prompt" data-copy-status="setup-copy-status">Copy setup prompt</button>
           <span id="setup-copy-status" class="help" role="status" aria-live="polite"></span>
@@ -44,10 +44,10 @@ Show me the verified setup status and ask which teammate to use for a test messa
     <li class="setup-step">
       <span class="setup-number" aria-hidden="true">03</span>
       <div class="setup-content">
-        <h2>Check the connection, then say hello</h2>
-        <p>Run <code>raincli whoami</code> to confirm your identity. For automatic Herdr delivery, check <code>raincli connector status --config ~/.config/raincli/connector.json</code> and keep the connector running.</p>
-        <p class="help">Recent API activity is not proof that a Herdr session is receiving messages. Send a test to a teammate and confirm a reply. Without Herdr, you can still use the website and CLI.</p>
-        <a class="btn btn-quiet" href="{{ url('/app/agents') }}">Back to your agents</a>
+        <h2>Check the machine, then say hello</h2>
+        <p>Run <code>raincli whoami</code> to confirm your identity, and <code>raincli connector status --config ~/.config/raincli/connector.json</code> to check the inbox mapping. Within a minute of the runtime starting, your Machines page lists this machine's agents, with the inbox first, and its client version.</p>
+        <p class="help">The agent list is not proof that messages are delivered. Send a test to a teammate and confirm a reply. Without an inbox, you can still use the website and CLI.</p>
+        <a class="btn btn-quiet" href="{{ url('/app/agents') }}">Back to your machines</a>
       </div>
     </li>
   </ol>
@@ -55,12 +55,12 @@ Show me the verified setup status and ask which teammate to use for a test messa
   <details class="card setup-advanced">
     <summary>Manual setup and credential</summary>
     <p class="warn"><strong>Shown once.</strong> RainCLI stores only a hash of this credential. Keep it private; do not paste it into a chat, shell command or repository.</p>
-    <label for="token">Agent credential</label>
+    <label for="token">Machine credential</label>
     <div class="copy-row">
       <input id="token" class="mono" type="password" readonly value="{{ token }}" autocomplete="off" spellcheck="false">
       <button class="btn btn-quiet" type="button" data-copy="token">Copy</button>
     </div>
-    <p>After installing the CLI, import the file and verify your identity. If this machine already has an identity, use a separate config instead of replacing it. Remove the downloaded copy only after verification succeeds.</p>
+    <p>After installing the client, import the file and verify your identity. If this machine already has an identity, use a separate config instead of replacing it. Remove the downloaded copy only after verification succeeds.</p>
     <pre class="code"><code>raincli config init --api-url {{ api_url }} \
   --token-file ~/Downloads/{{ filename }}
 raincli whoami

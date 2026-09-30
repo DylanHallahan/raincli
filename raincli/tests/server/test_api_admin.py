@@ -120,7 +120,13 @@ def test_migration_downgrade_upgrade_roundtrip():
             command.downgrade(cfg, "base")
             assert set(inspect(db).get_table_names()) <= {"alembic_version"}
             command.upgrade(cfg, "head")
-            assert {"messages", "agents", "delivery_events", "agent_presence"} <= set(inspect(db).get_table_names())
+            assert {"messages", "agents", "delivery_events", "agent_presence", "machine_agents",
+                    "client_targets"} <= set(inspect(db).get_table_names())
+            command.downgrade(cfg, "0003")  # 0004 drops only its own tables and columns
+            tables = set(inspect(db).get_table_names())
+            assert "agent_presence" in tables and not {"machine_agents", "client_targets"} & tables
+            assert "client_version" not in {c["name"] for c in inspect(db).get_columns("agent_presence")}
+            command.upgrade(cfg, "head")
             # admin migrate is idempotent at head
             assert run(url, "migrate")[0] == 0
         finally:

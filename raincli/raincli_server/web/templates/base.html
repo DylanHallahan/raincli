@@ -21,7 +21,7 @@
       <nav class="app-nav" aria-label="App">
         <a href="{{ url('/app') }}" {% if path == '/app' or path.startswith('/app/conversations') %}aria-current="page"{% endif %}>Inbox</a>
         <a href="{{ url('/app/compose') }}" {% if path == '/app/compose' %}aria-current="page"{% endif %}>Compose</a>
-        <a href="{{ url('/app/agents') }}" {% if path.startswith('/app/agents') %}aria-current="page"{% endif %}>Agents</a>
+        <a href="{{ url('/app/agents') }}" {% if path.startswith('/app/agents') %}aria-current="page"{% endif %}>Machines</a>
         <a href="{{ url('/app/account') }}" {% if path.startswith('/app/account') %}aria-current="page"{% endif %}>Account</a>
         <a href="{{ url('/app/team') }}" {% if path.startswith('/app/team') %}aria-current="page"{% endif %}>Team</a>
       </nav>

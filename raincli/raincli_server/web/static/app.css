@@ -408,6 +408,16 @@ pre.code {
 .inbox-agent { border-left: 4px solid var(--accent); }
 .inbox-agent > p, .inbox-agent li { max-width: 78ch; }
 .inbox-agent .h4 { margin: var(--s-5) 0 var(--s-2); }
+.machine { margin-bottom: var(--s-6); }
+.machine .table-wrap { margin-bottom: var(--s-3); }
+.machine-sessions th:first-child { width: 1%; }
+.machine-empty { margin: 0 0 var(--s-3); }
+.role-inbox { background: var(--accent-soft); color: var(--accent-ink); }
+.session-working, .update-updating, .reach-instant { background: var(--info-bg); color: var(--info); }
+.session-idle, .update-current { background: var(--ok-bg); color: var(--ok); }
+.session-blocked, .update-rolled_back, .reach-next-turn { background: var(--warn-bg); color: var(--warn); }
+.update-failed { background: var(--danger-bg); color: var(--danger); }
+.client-version { font-family: var(--mono); font-size: .85em; white-space: nowrap; }
 
 /* Public page ------------------------------------------------------------------------ */
 .public .site-footer { margin-top: 0; }
