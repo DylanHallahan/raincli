@@ -69,7 +69,7 @@ Main owns merging to `main`, releases and deployment. None of them has happened.
 - **Unsupervised crash:** a crashed runtime is restarted by the managed launcher. A dead launcher is not restarted until the next login or service start.
 
 ## Notes for main
-- `docs/reports/runtime-cli-builder.md` and `runtime-web-builder.md` are internal worker logs. You may prefer to drop them before merging to `main`.
+- The internal worker logs were removed before merging to `main`. They remain in branch history at `0cd548b`.
 - The reviews are at `~/Projects/.worktrees/runtime-reports/runtime-review-{1,2,3,4,4b}.md`.
 - **Suggested next steps (main's authority):**
   1. review and merge `feat/runtime-presence`;
