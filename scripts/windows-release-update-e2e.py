@@ -405,8 +405,17 @@ def run(args, work, stack):
         database = ThrowawayDatabase(admin_url, server)
         say("database: a throwaway database on RAINCLI_TEST_DATABASE_URL")
     else:
-        (work / "pg").mkdir()
-        database = Cluster(work / "pg")
+        # The cluster lives OUTSIDE the mkdtemp work dir. Since Python 3.13, mkdtemp's 0o700 applies a
+        # restrictive ACL on Windows (owner-only; for an administrator the owner is the Administrators
+        # group), and initdb/postgres re-run themselves with a restricted token in which Administrators
+        # is deny-only, so they could not open their own files there ("initdb: could not open file
+        # ...\pg\pwfile"). A plain mkdir inherits the user's TEMP ACL, which is already private to the
+        # runner user. The pwfile exists only for the initdb call.
+        pg = Path(tempfile.gettempdir()) / f"raincli-rel-pg-{secrets.token_hex(6)}"
+        pg.mkdir()
+        (work / "pg-path").write_text(str(pg))  # lets diagnose() find the cluster log
+        stack.callback(shutil.rmtree, pg, True)  # registered before database.stop, so it runs after it
+        database = Cluster(pg)
         say("database: a fresh initdb cluster on loopback")
     url = SECRETS.add(database.start())
     stack.callback(database.stop)
@@ -484,7 +493,9 @@ def diagnose(work):
         say(f"--- {path.relative_to(work)} ---\n{tail(path, 4000)}")
     for path in sorted((client / "managed/versions").glob("*")):
         say(f"managed version dir: {path.name}")
-    for path in (work / "server/server.log", work / "pg/postgres.log"):
+    pg_path = work / "pg-path"
+    pg_log = Path(pg_path.read_text()) / "postgres.log" if pg_path.exists() else work / "pg/postgres.log"
+    for path in (work / "server/server.log", pg_log):
         if path.exists():
             say(f"--- {path.relative_to(work)} ---\n{tail(path, 4000)}")
     say("===== END DIAGNOSTICS =====")
