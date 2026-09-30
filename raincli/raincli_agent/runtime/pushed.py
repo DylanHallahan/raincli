@@ -118,10 +118,12 @@ class PushedUpdates:
         """A supervision tick of this version completed: an update to it succeeded,
         and this version's launcher may now replace the one that supervised it."""
         target = self.data.get("target") or {}
-        if (self.data.get("state") == "updating" and target.get("version")
+        waiting = self.data.get("state") == "updating" or (self.data.get("state") == "failed"
+                                                           and self.data.get("error") == "switch_timeout")
+        if (waiting and target.get("version")
                 and updates.version_key(target["version"]) == updates.version_key(__version__)):
             self._save(state="current", error=None, failures=0, blocked=None)
-        if not self.launcher_checked and self.managed() and self.data.get("state") != "updating":
+        if not self.launcher_checked and self.managed() and self.data.get("state") == "current":
             self.launcher_checked = True
             try:
                 result = updates.adopt_launcher(self.root, self.python)

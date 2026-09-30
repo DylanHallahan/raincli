@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-from . import sessions
+from . import procinfo, sessions
 
 STDIN_LIMIT = 1024 * 1024
 DEADLINE = 2.0
@@ -21,8 +21,6 @@ EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "Notification", "Permissio
 CLAIM_EVENTS = ("SessionStart", "UserPromptSubmit")
 # Notification types that mean the session waits for its user (Claude Code 2.1.x).
 NEEDS_INPUT = ("permission_prompt", "elicitation_dialog")
-# Executable basenames of the agent process that runs the hook (Linux /proc).
-EXECUTABLES = {"claude": ("claude", "claude.exe"), "codex": ("codex", "codex.exe")}
 
 
 def status_for(event, payload, current):
@@ -50,28 +48,9 @@ def session_name(override, payload, agent_type):
 
 
 def agent_pid(agent_type):
-    """The agent process behind this hook (local only, for scan deduplication).
-
-    Walks up from the parent through shells and the managed launcher."""
-    if not sys.platform.startswith("linux"):
-        return None
-    names = EXECUTABLES.get(agent_type, ())
-    pid = os.getppid()
-    for _ in range(8):
-        if pid <= 1:
-            return None
-        try:
-            exe = os.path.basename(os.readlink(f"/proc/{pid}/exe"))
-        except OSError:
-            exe = ""
-        if exe in names:
-            return pid
-        try:
-            with open(f"/proc/{pid}/stat", "rb") as fh:
-                pid = int(fh.read().rsplit(b")", 1)[1].split()[1])
-        except (OSError, ValueError, IndexError):
-            return None
-    return None
+    """The agent process behind this hook (local only, for liveness and scan
+    deduplication): Linux /proc, a Windows snapshot, or ps on macOS."""
+    return procinfo.agent_pid(agent_type)
 
 
 def log_code(state_dir, code):
@@ -122,15 +101,23 @@ def handle(agent_type, event, name, state_dir, stdin, stdout, now=None):
         return "ended"
     record = {"key": key, "type": agent_type, "name": session_name(name, payload, agent_type), "status": status,
               "updated_at": time.time() if now is None else now}
-    if current is not None and current.get("pid"):
-        pid, start = current["pid"], current.get("pid_start")
+    # A resumed session (claude --resume) keeps its session id but runs in a new
+    # process: reuse the recorded one only while it is alive (review 2, O2).
+    if current is not None and sessions.process_state(current) == "alive":
+        for field in ("pid", "pid_start", "pid_ns"):
+            if current.get(field) is not None:
+                record[field] = current[field]
     else:
-        pid = agent_pid(agent_type)
-        start = sessions.process_start(pid) if pid else None
-    if pid:
-        record["pid"] = pid  # local only: never reported
-        if start is not None:
-            record["pid_start"] = start
+        try:
+            pid = agent_pid(agent_type)
+            start = sessions.process_start(pid) if pid else None
+        except Exception:  # noqa: BLE001 - liveness is best effort; the record is written anyway
+            pid = start = None
+        if pid and start is not None:
+            record.update(pid=pid, pid_start=start)  # local only: never reported
+            namespace = procinfo.pid_namespace()
+            if namespace:
+                record["pid_ns"] = namespace
     sessions.write_record(state_dir, record)
     if agent_type != "claude" or event not in CLAIM_EVENTS:
         return "recorded"

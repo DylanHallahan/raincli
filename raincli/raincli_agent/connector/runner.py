@@ -428,7 +428,12 @@ class Connector:
             if self._clock() - seen < sessions.CLAIM_GRACE:
                 return False
             q.Queue.transition(record, q.UNCERTAIN, detail="claimed by the hook without a receipt; not re-emitted")
-        elif key != target_key:
+        else:  # pending
+            if record.pop("claim_seen_at", None) is not None:
+                # Put back by a hook: a later claim starts a fresh grace (review 2, O7).
+                self.queue.save(record)
+            if key == target_key:
+                return False  # still pending for the live session
             # The session ended, its process exited, or it is no longer the only
             # one: take the file back unless the hook claims it first (the rename
             # arbitrates).
@@ -436,8 +441,6 @@ class Connector:
                 return False
             q.Queue.transition(record, q.HELD, reason=reason)
             record["hold_detail"] = detail or "the session ended before its next turn; reclaimed"
-        else:
-            return False  # still pending for the live session
         sessions.settle(self.sessions_state, key, mid)
         record.pop("claim_seen_at", None)
         if record["state"] == q.HELD:

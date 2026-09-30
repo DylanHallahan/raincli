@@ -92,7 +92,8 @@ def read_salt(state_dir):
 
 def agent_key(salt, source_id):
     """Lowercase hex HMAC-SHA256(salt, source_id), truncated to 32 characters (14.7 H3)."""
-    return hmac.new(salt, source_id.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    # surrogatepass: a lone surrogate in a Herdr name still yields a stable key (review 2, O13).
+    return hmac.new(salt, source_id.encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()[:32]
 
 
 # -- names -------------------------------------------------------------------
@@ -188,30 +189,15 @@ def valid_record(data):
 
 
 def process_start(pid):
-    """The kernel start time of ``pid`` (Linux), to tell a live process from a reused pid."""
-    try:
-        with open(f"/proc/{pid}/stat", "rb") as fh:
-            return int(fh.read().rsplit(b")", 1)[1].split()[19])
-    except (OSError, ValueError, IndexError):
-        return None
+    """The start time identifying a live ``pid``, to tell it from a reused pid."""
+    from .procinfo import process_start as start
+    return start(pid)
 
 
 def process_state(record):
     """``alive``, ``dead``, or None when the record names no determinable process."""
-    pid = record.get("pid")
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1 or os.name == "nt":
-        return None
-    if record.get("pid_start") is not None and os.path.isdir("/proc"):
-        return "alive" if process_start(pid) == record["pid_start"] else "dead"
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return "dead"
-    except PermissionError:
-        return "alive"
-    except OSError:
-        return None
-    return "alive"
+    from .procinfo import process_state as state
+    return state(record)
 
 
 def remove_record(state_dir, key):
