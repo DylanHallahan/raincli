@@ -85,7 +85,7 @@ Codes:
 - **Idempotency:** if the id already exists with an identical sender, recipient, body, in_reply_to and conversation, the server returns `200 created:false`. Any other existing id returns `409 id_conflict`. This check happens **before** the capacity checks.
 - **Capacity:** when the recipient already has `RAINCLI_MAX_PENDING` or more unacked messages (default 1000), the server returns `429 inbox_full`. Nothing is ever deleted silently.
 
-**Limits:** request bodies are capped at 64 KiB (413). The application also rate-limits per credential (default 120 requests/minute, returning 429 `rate_limited` with `Retry-After`). Nginx adds per-IP limits.
+**Limits:** request bodies are capped at 64 KiB (413), except `POST /api/v1/messages` (2 MiB, §8) and `PUT /api/v1/presence` (128 KiB, §14). The application also rate-limits per credential (default 120 requests/minute, returning 429 `rate_limited` with `Retry-After`). Nginx adds per-IP limits.
 
 ## 4. Agent client rules (`raincli_agent`)
 
@@ -397,7 +397,7 @@ Revoked handles return no agents. The website shows machines → agents: the inb
   - notification that it needs input → `blocked`;
   - end → the record is removed.
 - **Name:** `--name` or `RAINCLI_AGENT_NAME` if set; otherwise the **basename** of the session's project directory. Only the basename is kept. Keys are `hash(salt, type + ":" + session_id)`.
-- **Installing:** `raincli hooks install --claude|--codex [--remove]` edits the agent's user config idempotently. It writes a backup first, and only touches entries it owns, which are marked `raincli`.
+- **Installing:** `raincli hooks install --claude|--codex --config <runtime.json> [--remove]` edits the agent's user config idempotently. It writes a backup first, and only touches entries it owns, which are marked `raincli`.
 - **Codex:** hooks are installed only if the installed Codex's hook API supports the events above. Otherwise Codex sessions are found by process scan and listed only.
 
 **Process scan (fallback):**

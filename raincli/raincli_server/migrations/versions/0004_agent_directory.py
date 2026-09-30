@@ -41,7 +41,7 @@ def upgrade():
         sa.Column("version", sa.String(32), nullable=False),
         sa.Column("allow_downgrade", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("set_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.CheckConstraint(r"version ~ '^v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$'", name="ck_client_targets_version"))
+        sa.CheckConstraint(r"version ~ '^v(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'", name="ck_client_targets_version"))
 
 
 def downgrade():
