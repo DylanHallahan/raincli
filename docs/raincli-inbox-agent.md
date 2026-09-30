@@ -1,18 +1,22 @@
 # RainCLI inbox agent: operator setup
 
-Recommended mapping: a **dedicated inbox agent** in its own Herdr tab receives RainCLI messages, so routine team traffic doesn't interrupt your main work session.
+Recommended mapping: a **dedicated inbox agent** receives RainCLI messages, so routine team traffic doesn't interrupt your main work session. Each machine has exactly one inbox, and the runtime reports it to your team with the `inbox` badge and its reachability:
+- **`instant`:** a Herdr agent in its own tab (this document's main path). Messages are submitted as soon as it is idle.
+- **`next-turn`:** a Claude Code session, without Herdr, through the hooks. **Delivery waits until the session is next used**: messages are handed over at its next start or prompt. See [Next-turn inbox](#next-turn-inbox-claude-code-without-herdr).
+
+The other agents on the machine are listed for visibility only; teammates can't message them.
 
 | Component | Handles | Status |
 | --- | --- | --- |
 | Connector (`raincli connector run`) | Durable receipt and acknowledgement, attachments, retries, trust policy, holding messages while the target is busy, escalation queueing and notification | **Implemented and tested** (protocol §5, §8, §10) |
-| Inbox agent (an ordinary Claude, Codex or other agent in a Herdr pane) | The role in its `INBOX.md`: by default answering, follow-up questions, collaboration and escalation | **Operator setup**, described in this document. RainCLI doesn't run or supervise it beyond Herdr prompts |
+| Inbox agent (an ordinary Claude, Codex or other agent in a Herdr pane, or a Claude Code session through hooks) | The role in its `INBOX.md`: by default answering, follow-up questions, collaboration and escalation | **Operator setup**, described in this document. RainCLI doesn't run or supervise it beyond Herdr prompts |
 | Main session | Human judgment and consequential actions | Unchanged. Escalations reach it only through an explicit mapping |
 
 The connector never uses the focused pane, the current pane or any fallback. If a mapped agent is missing or its pins don't match, messages and escalations wait, and `raincli connector status` shows why.
 
 ## 1. Credentials
 
-Register an agent for the inbox (for example the handle `yourname-inbox`) on the website's **Agents** page. Download its config once and store it at `~/.config/raincli/agent.json` with mode 0600. Never paste the token into a prompt, a command line or a vault note.
+Add the machine (for example the handle `yourname-laptop`) on the website's **Machines** page with **Add a machine**. Download its config once and store it at `~/.config/raincli/agent.json` with mode 0600. Never paste the token into a prompt, a command line or a vault note. The machine's one credential serves the connector, the runtime and the CLI.
 
 ```bash
 raincli whoami            # confirms handle and team
@@ -77,12 +81,36 @@ Record the pane ID and working directory. You pin them in the connector config, 
 
 ## 5. Run the connector
 
+Normally the runtime runs the connector ([SETUP.md step 5](../SETUP.md#5-run-the-runtime-and-start-it-at-login-agent)). To run it by hand instead:
+
 ```bash
 raincli connector run --config ~/.config/raincli/connector.json          # foreground, in its own pane
 raincli connector status --config ~/.config/raincli/connector.json       # queue, holds, escalations
 ```
 
-The connector must run inside Herdr, because it calls `herdr agent get/prompt` and `herdr notification show`. Run it in a pane of the inbox tab.
+A Herdr-mapped connector must run where it can reach Herdr, because it calls `herdr agent get/prompt` and `herdr notification show`.
+
+## Next-turn inbox (Claude Code without Herdr)
+
+Instead of `herdr_agent`, the connector config names a hook session. The two are mutually exclusive:
+
+```json
+{
+  "agent_config": "~/.config/raincli/agent.json",
+  "mode": "inbox",
+  "inbox": {"hook": "claude", "name": "raincli-inbox"},
+  "shareable_context": ["/home/you/raincli-shareable"]
+}
+```
+
+- **Setup:** install the hooks with `raincli hooks install --claude` and start the session in the inbox workspace under the mapped name, for example `RAINCLI_AGENT_NAME=raincli-inbox claude`. Send the operator assignment as your first prompt, as for Herdr.
+- **Delivery waits until the session is next used.** The connector writes each fully framed message (the same text as for Herdr) to a private file, and the message's local state is `handed_over`. At the session's next `SessionStart` or `UserPromptSubmit`, the hook claims the waiting files, oldest first, and adds them to that turn as context. The connector then marks them `submitted`. Nothing is delivered while the session sits unused.
+- **Per-turn bound:** about 32 KiB per turn, always at least one message if it fits; the rest waits for the next turn. A single message over the bound is held as `too_large_for_hook`.
+- **No fallback:** with no live session of that name, messages are held `offline`; with more than one, `target_ambiguous`. If the session ends with messages still waiting, the connector takes them back and holds them `offline`.
+- **After a crash:** a message claimed without a receipt becomes `submission_uncertain` and is never handed over again automatically.
+- **Escalation** targets are Herdr agents. Without Herdr, omit `escalation`; the inbox agent then tells the sender what it can't answer.
+
+Framing, anti-forgery, durable receipts, attachments, trust policy and approval are unchanged.
 
 ## 6. What the inbox agent receives
 
@@ -115,6 +143,6 @@ raincli connector escalation-done --config ~/.config/raincli/connector.json <esc
 
 ## Limits (honest scope)
 
-- The optional `raincli runtime` only supervises connectors and reports availability; it does not start or drive agents. The inbox agent is only as capable as the agent you start, and it acts through ordinary Herdr prompts.
+- `raincli runtime` supervises connectors and reports availability and the machine's agent list; it does not start or drive agents. The inbox agent is only as capable as the agent you start, and it acts through ordinary Herdr prompts.
 - Whether an answer is correct, and whether it stays inside the shareable context, depends on the inbox agent following its instructions. The connector cannot enforce what an agent reads.
 - Notifications are local to your Herdr session. They don't reach your phone or email.

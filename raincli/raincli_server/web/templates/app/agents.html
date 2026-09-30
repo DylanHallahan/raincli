@@ -20,16 +20,14 @@
   <div class="table-wrap">
   <table class="table">
     <caption class="sr-only" id="machine-{{ row.agent.id }}">Machine {{ row.agent.handle }}</caption>
-    <thead><tr><th scope="col">Machine</th><th scope="col">Team</th><th scope="col">API connection</th><th scope="col">Session availability</th><th scope="col">Client</th><th scope="col">Credential</th><th scope="col">Last used</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+    <thead><tr><th scope="col">Machine</th><th scope="col">API connection</th><th scope="col">Session availability</th><th scope="col">Client</th><th scope="col">Credential</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
     <tbody>
       <tr {% if not row.active %}class="is-revoked"{% endif %}>
-        <td data-label="Machine"><span class="handle">{{ row.agent.handle }}</span>{% if row.agent.display_name != row.agent.handle %}<br><span class="muted small">{{ row.agent.display_name }}</span>{% endif %}</td>
-        <td data-label="Team">{{ row.team.slug }}</td>
+        <td data-label="Machine"><span class="handle">{{ row.agent.handle }}</span>{% if row.agent.display_name != row.agent.handle %}<br><span class="muted small">{{ row.agent.display_name }}</span>{% endif %}<br><span class="muted small">Team {{ row.team.slug }}</span></td>
         <td data-label="API connection">{{ conn_badge(row.connection) }}</td>
         <td data-label="Session availability">{{ presence_badge(row.runtime_status) }}</td>
         <td data-label="Client">{{ client_badges(row.client) }}</td>
-        <td data-label="Credential">{% if row.credential_prefix %}<code>{{ row.credential_prefix }}…</code>{% else %}<span class="muted">none</span>{% endif %}</td>
-        <td data-label="Last used">{{ time(row.last_used_at) or '—' }}</td>
+        <td data-label="Credential">{% if row.credential_prefix %}<code class="nowrap">{{ row.credential_prefix }}…</code>{% else %}<span class="muted">none</span>{% endif %}<br><span class="muted small">Last used {{ time(row.last_used_at) or 'never' }}</span></td>
         <td class="row-actions">
           {% if row.active %}
           <a class="btn btn-quiet btn-small" href="{{ url('/app') }}?agent={{ row.agent.id }}">Inbox</a>

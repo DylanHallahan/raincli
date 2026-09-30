@@ -4,16 +4,19 @@ The client remains Python 3.11+ with no third-party runtime dependencies. Use a 
 
 ## Install with PowerShell
 
+The default is a **managed install** with automatic updates, as on Linux ([SETUP.md](../SETUP.md#1-install-the-managed-client-agent)). A bootstrap checkout installs it, and a `raincli` function then runs everything through the stable launcher:
+
 ```powershell
 gh repo clone DylanHallahan/raincli "$HOME\src\raincli-repo"
 Set-Location "$HOME\src\raincli-repo\raincli"
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --no-deps .
-$env:Path = "$PWD\.venv\Scripts;" + $env:Path
+.\.venv\Scripts\raincli.exe runtime update --install          # the latest stable release -> $HOME\.raincli\client
+function raincli { py -3 "$HOME\.raincli\client\launch.py" @args }
 raincli --version
 ```
 
-That PATH change lasts for the current shell. Alternatively invoke the full path to `raincli.exe`; virtualenv activation is not necessary. Accept your invitation and download your agent credential as described in [SETUP.md](../SETUP.md), then replace `your-handle` below:
+The managed environment has no `raincli.exe`. The function lasts for the current shell; to keep it, add the same line to your PowerShell profile (`notepad $PROFILE`), asking before editing an existing profile. Accept your invitation and **add the machine** as described in [SETUP.md](../SETUP.md#2-accept-the-invitation-and-add-the-machine-you), then replace `your-handle` below:
 
 ```powershell
 raincli config init --api-url https://raincli.com --token-file "$HOME\Downloads\raincli-your-handle.json"
@@ -36,7 +39,7 @@ Private temporary files are flushed before publication. Windows replacement uses
 
 ## Runtime and startup
 
-The runtime, presence, startup and managed updates work as described in [SETUP.md](../SETUP.md#keep-the-connector-running-optional). Presence is advisory availability, not delivery or receipt. Use Windows paths in the runtime config, for example `$HOME\.config\raincli\runtime.json`:
+The runtime, presence, the agent list, startup and updates work as described in [SETUP.md](../SETUP.md#5-run-the-runtime-and-start-it-at-login-agent). Presence and the agent list are advisory, not delivery or receipt. On Windows the process-scan fallback uses `tasklist` and reports **type only**: the name is the type, the status is `unknown`, and no path or process id is sent. Use Windows paths in the runtime config, for example `$HOME\.config\raincli\runtime.json`:
 
 ```json
 {"connectors": ["C:\\Users\\you\\.config\\raincli\\connector.json"], "state_dir": "C:\\Users\\you\\.raincli\\runtime"}
@@ -48,7 +51,7 @@ raincli runtime status --config "$HOME\.config\raincli\runtime.json"
 raincli runtime stop --config "$HOME\.config\raincli\runtime.json"
 ```
 
-**Logon startup is opt-in.** It adds a `RainCLI` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` for the current user only: no service, no scheduled task and no elevation. It uses `pythonw.exe` when available, so no console window stays open. Every argument is quoted and the config is stored as its resolved long path, for example `"…\pythonw.exe" "…\launch.py" "runtime" "run" "--config" "C:\Users\you\.config\raincli\runtime.json"`. It never contains a credential. Paths containing `"` are refused. Installing does not start the runtime. To start it now, run `raincli runtime run --config <runtime.json>`. In a managed install there is no `raincli` command, so use the launcher instead: `pythonw "%USERPROFILE%\.raincli\client\launch.py" runtime run --config <runtime.json>`. That is `cmd` syntax; in PowerShell, write `"$env:USERPROFILE\.raincli\client\launch.py"`. Started through `pythonw`, the runtime has no console, and its output goes to `runtime.log` (below).
+**Logon startup** is part of the default setup, and you install it explicitly. It adds a `RainCLI` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` for the current user only: no service, no scheduled task and no elevation. It uses `pythonw.exe` when available, so no console window stays open. Every argument is quoted and the config is stored as its resolved long path, for example `"…\pythonw.exe" "…\launch.py" "runtime" "run" "--config" "C:\Users\you\.config\raincli\runtime.json"`. It never contains a credential. Paths containing `"` are refused. Installing does not start the runtime. To start it now without a console, use the launcher directly: `pythonw "%USERPROFILE%\.raincli\client\launch.py" runtime run --config <runtime.json>`. That is `cmd` syntax; in PowerShell, write `"$env:USERPROFILE\.raincli\client\launch.py"`. Started through `pythonw`, the runtime has no console, and its output goes to `runtime.log` (below).
 
 ```powershell
 raincli runtime startup --config "$HOME\.config\raincli\runtime.json"
@@ -58,7 +61,9 @@ raincli runtime startup --remove          # removes the value; a running runtime
 
 The command stored in the registry is limited to 260 characters. If installation refuses a longer one, use shorter install or config paths.
 
-**Managed updates** use `$HOME\.raincli\client` and the same `raincli runtime update` commands, checks and integrity limit as on Linux ([SETUP.md](../SETUP.md#managed-updates-opt-in)). The first stable release is **v0.2.0**. The managed environment has no `raincli.exe`; use `py -3 "$HOME\.raincli\client\launch.py" …`. After the first managed install, run `runtime startup --config …` again so logon startup uses the launcher.
+**Updates** use `$HOME\.raincli\client` and behave as on Linux ([SETUP.md](../SETUP.md#updates)): automatic by default, installed immediately when your team's operator sets a new version, from the canonical GitHub repository only. `raincli runtime update --manual` opts out and `--automatic` opts back in. **Releases are unsigned**; trust rests on TLS to GitHub plus the tag-to-commit resolution. Pushed updates need v0.3.0 or later. After the first managed install, run `runtime startup --config …` again so logon startup uses the launcher.
+
+**Inbox on Windows.** Delivery into Herdr on native Windows is not yet verified (see below). A Claude Code inbox through hooks (`next-turn`, [SETUP.md step 4c](../SETUP.md#4c-claude-code-inbox-agent-no-herdr)) uses the same `raincli hooks install --claude` command. Next-turn delivery waits until that session is next used. Hook installation and next-turn delivery on native Windows have not been exercised on a real Claude Code installation yet.
 
 Windows-specific behaviour:
 - The launcher stops the runtime by repeating `runtime stop` for up to 120 seconds, then uses `taskkill /T /F` as a last resort so no connector keeps the queue lock. A runtime normally needs at most 100 seconds; no new delivery starts after the stop, and queued messages stay durable.
