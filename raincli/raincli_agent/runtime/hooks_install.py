@@ -17,6 +17,7 @@ atomically with the file's mode kept, and leave a 0600 backup.
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import stat
@@ -168,6 +169,24 @@ def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_s
 KEEP_BACKUPS = 3
 
 
+def own_backups(directory, name):
+    """[(stamp, counter, path)] for backups this command wrote, and nothing else."""
+    pattern = re.compile(re.escape(name) + r"\.raincli-backup-([0-9]{8}-[0-9]{6})-([0-9]{1,6})")
+    out = []
+    for path in Path(directory).glob(name + ".raincli-backup-*"):
+        match = pattern.fullmatch(path.name)
+        if match and path.is_file():
+            out.append((match.group(1), int(match.group(2)), path))
+    return out
+
+
+def next_backup(directory, name):
+    """A new backup name whose counter only goes up, so names sort in write order."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    counter = 1 + max((c for _, c, _ in own_backups(directory, name)), default=0)
+    return Path(directory) / f"{name}.raincli-backup-{stamp}-{counter}"
+
+
 def write(path, raw, data, backup_dir=None):
     """Atomic write keeping the file's mode; returns the 0600 backup, if any.
 
@@ -177,19 +196,13 @@ def write(path, raw, data, backup_dir=None):
     mode, backup = 0o600, None
     if raw is not None:
         mode = stat.S_IMODE(os.stat(path).st_mode)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
         directory = Path(backup_dir or path.parent)
-        prefix = f"{path.name}.raincli-backup-"
-        backup = directory / f"{prefix}{stamp}"
-        n = 1
-        while backup.exists():
-            backup = directory / f"{prefix}{stamp}-{n}"
-            n += 1
+        backup = next_backup(directory, path.name)
         atomic_write_bytes(str(backup), raw, 0o600)
-        old = sorted((p for p in directory.glob(prefix + "*") if p.is_file()), key=lambda p: p.stat().st_mtime)
-        for stale in old[:-KEEP_BACKUPS]:
+        # Prune only our own backups, oldest first by (stamp, counter) (review 2, O14).
+        for stale in sorted(own_backups(directory, path.name))[:-KEEP_BACKUPS]:
             try:
-                stale.unlink()
+                stale[-1].unlink()
             except OSError:
                 pass
     else:

@@ -218,7 +218,7 @@ def test_linux_processes_honours_the_proc_root(tmp_path):
     (proc / "42/comm").write_text("claude\n")
     os.symlink("/opt/claude/versions/2.1.119", proc / "42/exe")
     (proc / "self").mkdir()
-    assert discovery.linux_processes(str(proc)) == {42: ("2.1.119", 7, "claude")}
+    assert discovery.linux_processes(str(proc)) == {42: ("claude", 7, "claude")}  # native path counts as claude
 
 
 def test_hook_session_inside_herdr_is_listed_once(state):

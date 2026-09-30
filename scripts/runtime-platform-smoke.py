@@ -182,6 +182,42 @@ def main():
             releaser.join()
             assert json.loads(read_private_file(probe)) == {"n": n}
         print("PASS: atomic replace and private reads ride out a concurrently held file", flush=True)
+        # Hook-session liveness (protocol 14.9): the real hook, run by an "agent"
+        # process, records that process's pid and start time; the session stays
+        # live while it runs and is gone once it exits. Windows: a copy of cmd.exe
+        # named claude.exe (parent walk over a Toolhelp snapshot, GetProcessTimes).
+        # Linux: a copy of bash at a native-install path (…/claude/versions/<n>).
+        live_state = root / "liveness-state"
+        live_state.mkdir(mode=0o700)
+        live_salt = sessions.ensure_salt(str(live_state))
+        sessions.sessions_dir(str(live_state), create=True)
+        payload = root / "liveness-payload.json"
+        payload.write_text(json.dumps({"session_id": "live-1", "cwd": str(root / "live-project")}))
+        hook_argv = f'"{sys.executable}" -m raincli_agent hook claude SessionStart --state-dir "{live_state}" < "{payload}"'
+        if os.name == "nt":
+            import shutil
+            agent = root / "agent-bin" / "claude.exe"
+            agent.parent.mkdir()
+            shutil.copy(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe"), agent)
+            # A raw command line: cmd.exe does not understand the \" escapes of an argv list.
+            agent_process = subprocess.Popen(f'"{agent}" /d /s /c "{hook_argv} & ping -n 60 127.0.0.1 >nul"')
+        else:
+            import shutil
+            agent = root / "share" / "claude" / "versions" / "2.1.119"
+            agent.parent.mkdir(parents=True)
+            shutil.copy(os.path.realpath(shutil.which("bash")), agent)
+            agent_process = subprocess.Popen([str(agent), "-c", f"sh -c '{hook_argv}'; sleep 60"])
+        try:
+            key = sessions.agent_key(live_salt, "claude:live-1")
+            record = wait_for(lambda: sessions.load_record(str(live_state), key), timeout=60)
+            assert record.get("pid") == agent_process.pid, (record.get("pid"), agent_process.pid)
+            assert sessions.process_state(record) == "alive"
+            assert len(sessions.live_sessions(str(live_state), "claude", "live-project", now=time.time() + 5 * 3600)) == 1
+        finally:
+            kill_tree(agent_process)
+        wait_for(lambda: sessions.process_state(record) == "dead", timeout=30)
+        assert sessions.live_sessions(str(live_state), "claude", "live-project") == []
+        print("PASS: hook-session liveness: the agent's pid is recorded, live however long it idles, gone once it exits", flush=True)
         if os.name == "nt":
             import winreg
             from raincli_agent.runtime import startup
