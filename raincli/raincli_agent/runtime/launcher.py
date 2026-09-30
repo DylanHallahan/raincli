@@ -126,11 +126,36 @@ def update_state(root):
     return data if isinstance(data, dict) else {}
 
 
+STOP_MARKER = "stop-requested.json"
+
+
+def awaiting_first_tick(state):
+    """``updating``, or an install whose switch timed out (it may still be switched to)."""
+    return state.get("state") == "updating" or (state.get("state") == "failed"
+                                                 and state.get("error") == "switch_timeout")
+
+
 def on_probation(root, pointer):
     """The runtime installed this version and it has not yet completed a first tick."""
     state = update_state(root)
     target = state.get("target") or {}
-    return state.get("state") == "updating" and target.get("version") == pointer.get("tag")
+    return awaiting_first_tick(state) and target.get("version") == pointer.get("tag")
+
+
+def stop_was_requested(root, since):
+    """The runtime records a graceful stop it was asked for (a signal or ``runtime
+    stop``), so such an exit during probation is not a failed first start."""
+    marker = root / STOP_MARKER
+    try:
+        requested = marker.stat().st_mtime >= since - 1
+        marker.unlink()
+        return requested
+    except OSError:
+        return False
+
+
+class LockBusy(Exception):
+    pass
 
 
 def update_lock(root, timeout=300):
@@ -152,9 +177,12 @@ def update_lock(root, timeout=300):
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return fd
         except OSError as exc:
-            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or time.monotonic() > deadline:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
                 os.close(fd)
                 raise
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                raise LockBusy() from None
             time.sleep(0.2)
 
 
@@ -171,14 +199,17 @@ def update_unlock(fd):
         os.close(fd)
 
 
-def roll_back(root, pointer):
+def roll_back(root, pointer, timeout=300):
     """Restore the previous version after a failed first start. The update mode
     is left as it is: only an explicit rollback makes it manual.
 
     Under the update lock, and only if the pointer still names the failing
-    version (compare and swap): a concurrent change wins and nothing is undone."""
+    version (compare and swap): a concurrent change wins and nothing is undone.
+    Returns True, False, or "busy" when the lock was not free within ``timeout``."""
     try:
-        fd = update_lock(root)
+        fd = update_lock(root, timeout)
+    except LockBusy:
+        return "busy"
     except OSError:
         return False
     try:
@@ -254,18 +285,13 @@ def stop_runtime(process, python, config):
     process.wait(timeout=10)
 
 
-def main():
-    root = Path(__file__).resolve().parent
-    args = sys.argv[1:]
-    _, python = read_pointer(root)
-    if args[:2] != ["runtime", "run"]:
-        return passthrough(python, args)
-    config = args[args.index("--config") + 1] if "--config" in args[:-1] else None
-    own = Path(__file__).read_bytes()
+def supervise(root, args, config, command, own=None, probation_enabled=True):
+    """The ``runtime run`` loop: start the pointer's version, restart it after a
+    crash, switch versions gracefully and supervise a new version's first start."""
     stopped = False
     process = None
-    failures, started, next_start = 0, 0.0, 0.0
-    probation = False
+    failures, started, started_wall, next_start = 0, 0.0, 0.0, 0.0
+    probation = rollback_pending = False
 
     def stop(*_):
         nonlocal stopped
@@ -290,24 +316,40 @@ def main():
                 current = (pointer, python)
                 output = runtime_output(root)
                 try:
+                    (root / STOP_MARKER).unlink()
+                except OSError:
+                    pass
+                try:
                     # POSIX: a separate process group, so a terminal Ctrl-C reaches only
                     # this launcher (which stops the runtime gracefully) and a last-resort
                     # kill can include the connectors.
-                    process = subprocess.Popen([str(python), "-m", "raincli_agent", *args], stdin=subprocess.DEVNULL,
+                    process = subprocess.Popen(command(python), stdin=subprocess.DEVNULL,
                                                stdout=output, stderr=output, start_new_session=os.name != "nt",
                                                env=ISOLATED_ENV, **HIDDEN)
                 finally:
                     if output is not None:
                         os.close(output)
-                started = time.monotonic()
-                probation = on_probation(root, pointer)
+                started, started_wall = time.monotonic(), time.time()
+                probation = probation_enabled and on_probation(root, pointer)
+                rollback_pending = False
             code = process.poll()
             # On probation any exit this launcher did not ask for, even status 0,
-            # is a failed first start (review 1, finding 5).
-            if (code is not None and probation and time.monotonic() - started < PROBATION
-                    and on_probation(root, pointer) and roll_back(root, pointer)):
-                process, next_start, failures = None, 0.0, 0
-                continue  # the loop starts the restored version
+            # is a failed first start (review 1, finding 5), unless the runtime
+            # recorded that it was asked to stop (review 2, O10).
+            if code is not None and probation and (rollback_pending or time.monotonic() - started < PROBATION):
+                if not rollback_pending and stop_was_requested(root, started_wall):
+                    probation = False
+                elif on_probation(root, pointer):
+                    # Never wait on the lock here: a stop must stay prompt (review 2, O9).
+                    result = roll_back(root, pointer, timeout=0)
+                    if result == "busy":
+                        rollback_pending = True
+                        time.sleep(1)
+                        continue
+                    if result is True:
+                        process, next_start, failures = None, 0.0, 0
+                        continue  # the loop starts the restored version
+                    code = code or 1  # not rolled back: a failed start, never a clean stop
             if code == 0:
                 process = None
                 return 0  # stopped on request
@@ -322,14 +364,45 @@ def main():
                 # Switch only after the old runtime has fully exited.
                 stop_runtime(process, current[1], config)
                 process = None
-                if Path(__file__).read_bytes() != own:
-                    return relaunch(args)  # the new release shipped a new launcher
+                if own is not None and Path(__file__).read_bytes() != own:
+                    return relaunch(args)  # a newer launcher was adopted meanwhile
                 continue
             time.sleep(1)
         return 0
     finally:
         if process is not None:
             stop_runtime(process, current[1], config)
+
+
+def self_check(root):
+    """Exercise the ``runtime run`` branch against a stub runtime, without touching
+    any state: read the pointer, start the stub through the real loop, see it exit,
+    and stop a second stub gracefully. A candidate launcher must pass this before
+    it is adopted (review 2, O3)."""
+    read_pointer(root)
+    stub = [sys.executable, "-c", "raise SystemExit(0)"]
+    code = supervise(root, ["runtime", "run"], None, lambda python: stub, probation_enabled=False)
+    if code != 0:
+        return 1
+    if os.name != "nt":  # Windows stops a runtime through its config, which a stub lacks
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                   stdin=subprocess.DEVNULL, start_new_session=True)
+        stop_runtime(sleeper, sys.executable, None)
+    print("raincli launcher self-check ok")
+    return 0
+
+
+def main():
+    root = Path(__file__).resolve().parent
+    args = sys.argv[1:]
+    if args == ["--self-check"]:
+        return self_check(root)
+    _, python = read_pointer(root)
+    if args[:2] != ["runtime", "run"]:
+        return passthrough(python, args)
+    config = args[args.index("--config") + 1] if "--config" in args[:-1] else None
+    return supervise(root, args, config, lambda python: [str(python), "-m", "raincli_agent", *args],
+                     own=Path(__file__).read_bytes())
 
 
 def relaunch(args):

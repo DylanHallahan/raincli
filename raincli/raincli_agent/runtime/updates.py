@@ -316,7 +316,9 @@ def configure(root=None, mode=None, rollback=False):
             write_mode_file(root, keys)
         current.update(keys)
         if rollback:
-            sync_launcher(root, current["python"])  # the previous version's launcher already ran
+            # The previous version's launcher only if it passes the same check as an
+            # adoption; otherwise the current launcher stays (review 2, O8).
+            adopt_launcher(root, current["python"])
         write_pointer(root, current)
         return {"tag": current["tag"], "update_mode": current["update_mode"]}
     finally:
@@ -402,6 +404,11 @@ def adopt_launcher(root, python, base_python=None):
         result = subprocess.run([str(base), str(candidate), "--version"], capture_output=True, text=True,
                                 timeout=30, env=isolated, stdin=subprocess.DEVNULL)
         if result.returncode != 0 or not result.stdout.startswith("raincli "):
+            return "candidate_failed"
+        # The `runtime run` branch too, against a stub runtime (review 2, O3).
+        result = subprocess.run([str(base), str(candidate), "--self-check"], capture_output=True, text=True,
+                                timeout=60, env=isolated, stdin=subprocess.DEVNULL)
+        if result.returncode != 0 or "self-check ok" not in result.stdout:
             return "candidate_failed"
         atomic_write_bytes(root / "launch.py", data)
         return "adopted"

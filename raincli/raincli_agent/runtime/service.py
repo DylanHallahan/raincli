@@ -486,6 +486,13 @@ def run(path, once=False, pushed=None):
                     if supervisor.changed():
                         break
     finally:
+        if stop.is_set() and not once and pushed.managed():
+            # Asked to stop (a signal or `runtime stop`): tell the launcher this
+            # exit is not a failed first start (review 2, O10).
+            try:
+                atomic_write_json(pushed.root / "stop-requested.json", {"at": time.time()})
+            except OSError:
+                pass
         workers = supervisor.workers if supervisor else []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(workers))) as pool:
             list(pool.map(lambda w: w.retire(), workers))

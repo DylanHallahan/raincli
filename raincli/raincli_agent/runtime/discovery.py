@@ -12,19 +12,10 @@ import subprocess
 import sys
 
 from ..connector.herdr import HerdrError
-from . import sessions
+from . import procinfo, sessions
 
 MAX_AGENTS = 100
 HERDR_STATUS = {"idle": "idle", "done": "idle", "working": "working", "blocked": "blocked"}
-# Executable basenames per type for the process scan (basename only, 14.7 M5).
-SCAN_EXECUTABLES = {
-    "claude": ("claude", "claude.exe"),
-    "codex": ("codex", "codex.exe"),
-    "gemini": ("gemini", "gemini.exe"),
-    "cursor": ("cursor-agent", "cursor-agent.exe"),
-    "opencode": ("opencode", "opencode.exe"),
-}
-BY_EXECUTABLE = {exe: kind for kind, names in SCAN_EXECUTABLES.items() for exe in names}
 
 
 def entry(salt, source_id, name, kind, status, source, role=None, reachability=None):
@@ -76,16 +67,24 @@ def hook_entries(salt, state_dir, inbox, now=None):
     records = sessions.read_sessions(state_dir, now)
     want = (inbox[1], inbox[2]) if inbox and inbox[0] == "hook" else None
     live = [r for r in records if want and (r["type"], r["name"]) == want and r["status"] != "offline"]
+    stale_inbox = None
+    if want and not live:
+        # The mapped inbox is not live: list it once, as its newest stale record
+        # if there is one, otherwise as a placeholder (review 2, O12).
+        stale = [r for r in records if (r["type"], r["name"]) == want]
+        stale_inbox = max(stale, key=lambda r: r["updated_at"]) if stale else None
     out, pids = [], set()
     for record in records:
         if isinstance(record.get("pid"), int):
             pids.add(record["pid"])
-        is_inbox = len(live) == 1 and record is live[0]
+        if want and not live and (record["type"], record["name"]) == want and record is not stale_inbox:
+            continue
+        is_inbox = (len(live) == 1 and record is live[0]) or record is stale_inbox
         out.append({"key": record["key"], "name": sessions.normalize_name(record["name"], record["type"]),
                     "type": record["type"], "status": record["status"], "role": "inbox" if is_inbox else None,
                     "reachability": "next-turn" if is_inbox else None, "source": "hook",
                     "_pid": record["pid"] if isinstance(record.get("pid"), int) else None})
-    if want and not live:
+    if want and not live and stale_inbox is None:
         out.append(entry(salt, "hook-inbox:%s:%s" % want, want[1], want[0], "offline", "hook",
                          "inbox", "next-turn"))
     return out, pids
@@ -93,47 +92,30 @@ def hook_entries(salt, state_dir, inbox, now=None):
 
 # -- process scan ------------------------------------------------------------------
 
-def _read_stat_parent(proc, pid):
-    with open(f"{proc}/{pid}/stat", "rb") as fh:
-        return int(fh.read().rsplit(b")", 1)[1].split()[1])
-
-
 def linux_processes(proc="/proc"):
-    """Same-uid processes as {pid: (exe basename, parent pid, comm)}.
+    """Same-uid processes as {pid: (exe name, parent pid, comm)}.
 
-    Only the executable's basename and the kernel's short process name (comm)
-    are read; the command line never is (14.7 M5)."""
+    Only the executable's name (a native Claude Code path counts as ``claude``)
+    and the kernel's short process name (comm) are read; the command line never
+    is (14.7 M5)."""
     uid = os.getuid()
     out = {}
     for name in os.listdir(proc):
         if not name.isdigit():
             continue
-        pid = int(name)
         try:
             if os.stat(f"{proc}/{name}").st_uid != uid:
                 continue
-            parent = _read_stat_parent(proc, pid)
+            out[int(name)] = procinfo.linux_info(int(name), proc)
         except (OSError, ValueError, IndexError):
             continue
-        try:
-            exe = os.path.basename(os.readlink(f"{proc}/{name}/exe"))
-        except OSError:
-            exe = ""
-        try:
-            with open(f"{proc}/{name}/comm", "rb") as fh:
-                comm = fh.read(64).decode("utf-8", "replace").strip()
-        except OSError:
-            comm = ""
-        out[pid] = (exe, parent, comm)
     return out
 
 
-def kind_of(entry):
-    """The agent type of a process: its executable basename, or its comm. A native
-    Claude Code install runs ``…/versions/<n>`` but is named ``claude``; a Node
-    agent that sets its process title shows it in comm (review 1, finding 10)."""
-    exe, _parent, comm = (tuple(entry) + (None, None))[:3]
-    return BY_EXECUTABLE.get(exe) or BY_EXECUTABLE.get(comm or "")
+def kind_of(item):
+    """The agent type of a process (the same test the hook uses to find its agent)."""
+    exe, _parent, comm = (tuple(item) + ("", ""))[:3]
+    return procinfo.kind_of(exe, comm or "")
 
 
 def _cwd_name(pid):
@@ -143,40 +125,37 @@ def _cwd_name(pid):
         return ""
 
 
+def ancestors(pid, processes, limit=32):
+    parent = processes.get(pid, (None, None))[1]
+    for _ in range(limit):
+        if parent not in processes:
+            return
+        yield parent
+        parent = processes[parent][1]
+
+
 def herdr_descendant(pid, processes):
-    ancestor = processes.get(pid, (None, None))[1]
-    for _ in range(32):
-        if ancestor not in processes:
-            return False
-        if processes[ancestor][0] in ("herdr", "herdr.exe") or processes[ancestor][2:3] == ("herdr",):
-            return True
-        ancestor = processes[ancestor][1]
-    return False
+    return any("herdr" in (procinfo.plain(processes[a][0]), procinfo.plain(processes[a][2] or ""))
+               for a in ancestors(pid, processes))
 
 
 def linux_scan(salt, claimed_pids, herdr_ok, processes=None, cwd_name=_cwd_name):
     """Known agent processes not already reported by a hook record or Herdr.
 
     A process under a ``herdr`` server process runs in a Herdr pane, and when
-    Herdr could be read Herdr reports it. Child processes of an agent of the same
-    type are part of that agent."""
+    Herdr could be read Herdr reports it. A process with an ancestor of the same
+    type (Claude Code's own helpers, even through ``bash -c``) is part of that
+    agent (review 2, O11)."""
     processes = linux_processes() if processes is None else processes
     out = []
     for pid in sorted(processes):
         kind = kind_of(processes[pid])
         if kind is None or pid in claimed_pids:
             continue
-        parent = processes[pid][1]
-        if parent in processes and kind_of(processes[parent]) == kind:
+        up = list(ancestors(pid, processes))
+        if any(kind_of(processes[a]) == kind or a in claimed_pids for a in up):
             continue
-        ancestor, owned = parent, False
-        for _ in range(32):
-            if ancestor not in processes:
-                break
-            if ancestor in claimed_pids:
-                owned = True
-            ancestor = processes[ancestor][1]
-        if owned or (herdr_ok and herdr_descendant(pid, processes)):
+        if herdr_ok and herdr_descendant(pid, processes):
             continue
         out.append(entry(salt, f"scan:{kind}:{pid}", cwd_name(pid) or kind, kind, "unknown", "scan"))
     return out
@@ -197,7 +176,7 @@ def windows_scan(salt, claimed_pids, run=subprocess.run):
     for row in csv.reader(io.StringIO(proc.stdout or "")):
         if len(row) < 2 or not row[1].isdigit():
             continue
-        kind = BY_EXECUTABLE.get(row[0].lower())
+        kind = procinfo.kind_of(row[0])
         pid = int(row[1])
         if kind and pid not in claimed_pids:
             out.append(entry(salt, f"scan:{kind}:{pid}", kind, kind, "unknown", "scan"))
