@@ -148,3 +148,63 @@ def test_a_pid_from_another_namespace_is_not_claimed(tmp_path, monkeypatch):
     monkeypatch.setattr(procinfo, "pid_namespace", lambda: "pid:[4026531836]")
     found, pids = discovery.hook_entries(salt, str(state), None)
     assert pids == set() and found[0]["_pid"] is None
+
+
+# -- review 4 -------------------------------------------------------------------------------------
+
+CANDIDATES_R4 = {
+    "i broken roll_back": mutate('def roll_back(root, pointer, timeout=300):\n',
+                                 'def roll_back(root, pointer, timeout=300):\n    return False\n'),
+    "j broken relaunch": mutate("def relaunch(args):\n", "def relaunch(args):\n    raise RuntimeError('relaunch bug')\n"),
+    "k KeyError in on_probation under real state": mutate(
+        'return awaiting_first_tick(state) and target.get("version") == pointer.get("tag")',
+        'return awaiting_first_tick(state) and target.get("version") == pointer["tagg"]'),
+}
+
+
+@POSIX
+@pytest.mark.parametrize("name", sorted(CANDIDATES_R4))
+def test_probation_rollback_and_relaunch_are_exercised(tmp_path, quick, name):
+    root, pointer, _ = fake_versions(tmp_path, "exit 0\n")
+    (Path(pointer["python"]).parents[2] / "launch.py").write_text(CANDIDATES_R4[name])
+    before = (root / "launch.py").read_bytes()
+    assert updates.adopt_launcher(root, pointer["python"], base_python=sys.executable) == "candidate_failed"
+    assert (root / "launch.py").read_bytes() == before
+    assert not list(root.glob(".launcher-check-*"))
+
+
+@POSIX
+def test_check_is_independent_of_the_working_directory(tmp_path, quick, monkeypatch):
+    """Run from raincli/, where `-m raincli_agent` would otherwise import the real package."""
+    monkeypatch.chdir(Path(launcher.__file__).resolve().parents[2])
+    assert (Path.cwd() / "raincli_agent").is_dir()
+    root = tmp_path / "client"
+    root.mkdir()
+    assert launcher_check.check(LAUNCHER.encode(), root, sys.executable) is None
+
+
+def test_stale_scratch_roots_are_swept(tmp_path):
+    old = tmp_path / (launcher_check.PREFIX + "old")
+    new = tmp_path / (launcher_check.PREFIX + "new")
+    old.mkdir()
+    new.mkdir()
+    os.utime(old, (1, 1))
+    launcher_check.sweep(tmp_path)
+    assert not old.exists() and new.exists()
+
+
+def test_backup_counters_beyond_six_digits_keep_growing(tmp_path):
+    (tmp_path / "settings.json.raincli-backup-20260930-120000-999999").write_text("x")
+    assert hooks_install.next_backup(tmp_path, "settings.json").name.endswith("-1000000")
+    (tmp_path / "settings.json.raincli-backup-20260930-120000-1000000").write_text("x")
+    assert hooks_install.next_backup(tmp_path, "settings.json").name.endswith("-1000001")
+
+
+def test_host_view_of_a_namespaced_hook_session_is_not_scanned(tmp_path):
+    processes = {10: ("bash", 1, "bash"), 11: ("claude", 10, "claude"), 20: ("bash", 1, "bash"),
+                 21: ("claude", 20, "claude")}
+    found = discovery.linux_scan(b"s" * 32, set(), False, processes=processes, cwd_name=lambda pid: "",
+                                 namespaces={("claude", "pid:[42]")},
+                                 ns_of=lambda pid: "pid:[42]" if pid == 11 else "pid:[1]")
+    assert [a["key"] for a in found] == [discovery.entry(b"s" * 32, "scan:claude:21", "", "claude", "unknown",
+                                                         "scan")["key"]]

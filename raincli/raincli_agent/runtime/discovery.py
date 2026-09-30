@@ -143,7 +143,22 @@ def herdr_descendant(pid, processes):
                for a in ancestors(pid, processes))
 
 
-def linux_scan(salt, claimed_pids, herdr_ok, processes=None, cwd_name=_cwd_name):
+def pid_ns_of(pid, proc="/proc"):
+    try:
+        return os.readlink(f"{proc}/{pid}/ns/pid")
+    except OSError:
+        return None
+
+
+def foreign_namespaces(state_dir, now=None):
+    """(type, pid namespace) of live hook sessions recorded in another pid
+    namespace: their host-side process has no claimant pid (review 4, finding 3)."""
+    ours = procinfo.pid_namespace()
+    return {(r["type"], r["pid_ns"]) for r in sessions.read_sessions(state_dir, now, drop=False)
+            if r.get("pid_ns") and r.get("pid_ns") != ours and r["status"] != "offline"}
+
+
+def linux_scan(salt, claimed_pids, herdr_ok, processes=None, cwd_name=_cwd_name, namespaces=(), ns_of=pid_ns_of):
     """Known agent processes not already reported by a hook record or Herdr.
 
     A process under a ``herdr`` server process runs in a Herdr pane, and when
@@ -161,6 +176,8 @@ def linux_scan(salt, claimed_pids, herdr_ok, processes=None, cwd_name=_cwd_name)
             continue
         if herdr_ok and herdr_descendant(pid, processes):
             continue
+        if namespaces and (kind, ns_of(pid)) in namespaces:
+            continue  # the host view of a hook session recorded inside its own pid namespace
         out.append(entry(salt, f"scan:{kind}:{pid}", cwd_name(pid) or kind, kind, "unknown", "scan"))
     return out
 
@@ -187,10 +204,10 @@ def windows_scan(salt, claimed_pids, run=subprocess.run):
     return out
 
 
-def scan(salt, claimed_pids, herdr_ok, processes=None):
+def scan(salt, claimed_pids, herdr_ok, processes=None, namespaces=()):
     try:
         if sys.platform.startswith("linux"):
-            return linux_scan(salt, claimed_pids, herdr_ok, processes)
+            return linux_scan(salt, claimed_pids, herdr_ok, processes, namespaces=namespaces)
         if os.name == "nt":
             return windows_scan(salt, claimed_pids)
     except OSError:
@@ -251,7 +268,8 @@ def discover(state_dir, salt, herdr, inbox, now=None, include_scan=True):
             processes = linux_processes()
         except OSError:
             processes = None
-    scanned = scan(salt, pids, herdr_ok, processes) if include_scan else []
+    namespaces = foreign_namespaces(state_dir, now) if include_scan and processes is not None else ()
+    scanned = scan(salt, pids, herdr_ok, processes, namespaces) if include_scan else []
     hooked, scanned = without_duplicates(hooked, scanned, herdr_ok, processes, inbox)
     for h in hooked:
         h.pop("_pid", None)  # local only: never reported

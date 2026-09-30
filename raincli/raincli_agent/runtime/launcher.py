@@ -28,7 +28,10 @@ HIDDEN = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" and s
 
 # A managed environment runs exactly its staged code: never a module search path
 # inherited from the caller's environment.
-ISOLATED_ENV = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")}
+# PYTHONSAFEPATH keeps the working directory (a source checkout, say) off sys.path
+# for `-m raincli_agent` (Python 3.11+; review 4, finding 1).
+ISOLATED_ENV = {**{k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")},
+                "PYTHONSAFEPATH": "1"}
 
 
 def runtime_output(root):
