@@ -166,10 +166,16 @@ def test_install_copies_verified_client_without_pip_and_syncs_launcher(tmp_path,
     assert updates.install(tmp_path, {"tag": "v" + __version__, "commit": "c" * 40})["status"] == "installed"
     assert not any(argv[1:3] == ["-m", "pip"] for argv in ran)  # no build backend or index
     assert any("--without-pip" in argv for argv in ran)
-    assert (tmp_path / "launch.py").read_text() == new_launcher
+    # The running launcher is kept: it supervises the new version's first start.
+    assert (tmp_path / "launch.py").read_text() == "# an older launcher\n"
     pointer = updates.read_pointer(tmp_path)
     version = real_run([pointer["python"], "-m", "raincli_agent", "--version"], capture_output=True, text=True)
     assert version.stdout.strip() == "raincli " + __version__
+    # Once that version has run, its launcher is checked and adopted.
+    monkeypatch.setattr(updates.subprocess, "run", real_run)
+    assert updates.adopt_launcher(tmp_path, pointer["python"], base_python=sys.executable) == "adopted"
+    assert (tmp_path / "launch.py").read_text() == new_launcher
+    assert updates.adopt_launcher(tmp_path, pointer["python"], base_python=sys.executable) == "current"
 
     # An archive whose root does not name the resolved commit is refused.
     monkeypatch.setattr(updates, "fetch", lambda url, limit: release_archive("d" * 40, root_name="raincli-" + "e" * 40))

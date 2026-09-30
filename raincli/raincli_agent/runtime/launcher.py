@@ -11,6 +11,7 @@ previous version is restored and ``rolled_back`` recorded (14.7 H2/M9).
 Versioned environments are never deleted here, so an environment still in use
 (Windows keeps its files open) remains available for rollback.
 """
+import errno
 import json
 import os
 from pathlib import Path
@@ -103,20 +104,74 @@ def on_probation(root, pointer):
     return state.get("state") == "updating" and target.get("version") == pointer.get("tag")
 
 
+def update_lock(root, timeout=300):
+    """The update lock that install, configure and migrate_mode hold (the same
+    file and the same flock/msvcrt byte lock as filelock.py), so a rollback is
+    never overwritten by a concurrent read-modify-write of the pointer."""
+    directory = root / "update-lock"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    fd = os.open(directory / "run.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or time.monotonic() > deadline:
+                os.close(fd)
+                raise
+            time.sleep(0.2)
+
+
+def update_unlock(fd):
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def roll_back(root, pointer):
     """Restore the previous version after a failed first start. The update mode
-    is left as it is: only an explicit rollback makes it manual."""
-    previous = pointer.get("previous") or {}
-    if not all(k in previous for k in ("tag", "commit", "python")) or not Path(previous["python"]).is_file():
+    is left as it is: only an explicit rollback makes it manual.
+
+    Under the update lock, and only if the pointer still names the failing
+    version (compare and swap): a concurrent change wins and nothing is undone."""
+    try:
+        fd = update_lock(root)
+    except OSError:
         return False
-    restored = {**pointer, **{k: previous[k] for k in ("tag", "commit", "python")},
-                "previous": {k: pointer[k] for k in ("tag", "commit", "python")}, "automatic": False}
-    state = update_state(root)
-    target = state.get("target")
-    write_json(root / "current.json", restored)
-    write_json(root / "update-state.json", {**state, "state": "rolled_back", "error": "first_start_failed",
-                                            "blocked": target})
-    return True
+    try:
+        try:
+            current = json.loads(read_text(root / "current.json"))
+        except (OSError, ValueError):
+            return False
+        if current.get("commit") != pointer.get("commit") or not on_probation(root, current):
+            return False
+        previous = current.get("previous") or {}
+        if not all(k in previous for k in ("tag", "commit", "python")) or not Path(previous["python"]).is_file():
+            return False
+        restored = {**current, **{k: previous[k] for k in ("tag", "commit", "python")},
+                    "previous": {k: current[k] for k in ("tag", "commit", "python")}, "automatic": False}
+        state = update_state(root)
+        target = state.get("target")
+        write_json(root / "current.json", restored)
+        write_json(root / "update-state.json", {**state, "state": "rolled_back", "error": "first_start_failed",
+                                                "blocked": target})
+        return True
+    finally:
+        update_unlock(fd)
 
 
 def passthrough(python, args):
@@ -212,13 +267,15 @@ def main():
                 started = time.monotonic()
                 probation = on_probation(root, pointer)
             code = process.poll()
-            if code == 0:
-                process = None
-                return 0  # stopped on request
+            # On probation any exit this launcher did not ask for, even status 0,
+            # is a failed first start (review 1, finding 5).
             if (code is not None and probation and time.monotonic() - started < PROBATION
                     and on_probation(root, pointer) and roll_back(root, pointer)):
                 process, next_start, failures = None, 0.0, 0
                 continue  # the loop starts the restored version
+            if code == 0:
+                process = None
+                return 0  # stopped on request
             if code is not None:
                 # Crashed: restart with bounded backoff. Windows logon startup has
                 # no service manager to do this.

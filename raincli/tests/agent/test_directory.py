@@ -20,6 +20,12 @@ RAINCLI = Path(__file__).resolve().parents[2]
 POSIX = pytest.mark.skipif(os.name == "nt", reason="POSIX modes and shell hook commands")
 
 
+@pytest.fixture(autouse=True)
+def no_agent_process(monkeypatch):
+    """These tests run under a real agent; hook records name no process unless a test says so."""
+    monkeypatch.setattr(hook, "agent_pid", lambda agent_type: None)
+
+
 @pytest.fixture
 def state(tmp_path):
     """A runtime state directory as the runtime prepares it: salt and sessions/."""
@@ -268,13 +274,16 @@ def test_real_proc_scan_reads_only_this_user(state):
         assert os.stat(f"/proc/{pid}").st_uid == os.getuid()
 
 
-def test_windows_scan_is_type_only():
+def test_windows_scan_is_type_only(monkeypatch):
+    monkeypatch.setenv("USERNAME", "me")
     csv_out = '"claude.exe","4242","Console","1","100 K"\n"notepad.exe","7","Console","1","1 K"\n' \
               '"codex.exe","99","Console","1","1 K"\n'
     run = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, csv_out, "")
     found = discovery.windows_scan(b"s" * 32, {99}, run=run)
     assert [(a["name"], a["type"], a["status"], a["source"]) for a in found] == [
         ("claude", "claude", "unknown", "scan")]
+    monkeypatch.delenv("USERNAME")
+    assert discovery.windows_scan(b"s" * 32, set(), run=run) == []  # never other users' processes
 
 
 def test_normalize_dedupes_keys_keeps_one_inbox_first_and_caps_at_100():
@@ -402,7 +411,8 @@ def test_hook_command_prefers_the_stable_launcher(tmp_path, monkeypatch):
     from raincli_agent.runtime import updates
     monkeypatch.setattr(updates, "default_root", lambda: tmp_path / "client")
     monkeypatch.setattr(hooks_install.shutil, "which", lambda name: None)
-    assert hooks_install.launcher_prefix()[0][1:] == ["-m", "raincli_agent"]
+    with pytest.raises(ConfigError, match="no stable raincli command"):
+        hooks_install.launcher_prefix()  # never a versioned interpreter (14.7 M8)
     (tmp_path / "client").mkdir()
     (tmp_path / "client/launch.py").write_text("")
     prefix, how = hooks_install.launcher_prefix()

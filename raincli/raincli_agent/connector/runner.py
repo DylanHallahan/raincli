@@ -175,7 +175,7 @@ class Connector:
                     self._recover_handover(record)
                 elif record["state"] == q.HANDED_OVER:
                     target = self._inbox_target()[0] if self.config.inbox_hook else None
-                    self._reconcile_handover(record, target, ending=True)
+                    self._reconcile_handover(record, target)
                 elif record["state"] == q.SUBMITTING:
                     q.Queue.transition(record, q.UNCERTAIN,
                                        detail="connector restarted during submission; not resubmitted")
@@ -398,43 +398,48 @@ class Connector:
     def _recover_handover(self, record):
         """Died between marking ``submitting`` and recording ``handed_over``."""
         key, mid = record["handover_key"], record["id"]
-        state = sessions.handover_state(self.sessions_state, key, mid, now=self._clock() + sessions.CLAIM_GRACE)
-        if state == "pending":
-            q.Queue.transition(record, q.HANDED_OVER, detail="handed over (recovered after restart)")
-        elif state == "submitted":
-            q.Queue.transition(record, q.SUBMITTED, detail="emitted by the hook session (recovered after restart)")
-            sessions.settle(self.sessions_state, key, mid)
-        elif any(os.path.lexists(os.path.join(self.sessions_state, sessions.SESSIONS, key + ".inbox", mid + ".md" + x))
-                 for x in (".claimed", ".receipt")):
-            q.Queue.transition(record, q.UNCERTAIN, detail="claimed by the hook without a receipt; not re-emitted")
-            sessions.settle(self.sessions_state, key, mid)
-        else:
+        if sessions.handover_state(self.sessions_state, key, mid) == "missing":
             # No file was ever written, so nothing can have reached the session.
             q.Queue.transition(record, q.RECEIVED, detail="restart before handover; nothing was handed over")
+            record.pop("handover_key", None)
+        else:
+            q.Queue.transition(record, q.HANDED_OVER, detail="handed over (recovered after restart)")
         self.queue.save(record)
         self.log(f"message {mid} is {record['state']} (restart during handover)")
 
-    def _reconcile_handover(self, record, target_key, ending=False, reason="offline", detail=""):
-        """Settle a handed-over message from the files. Never re-emits anything."""
+    def _reconcile_handover(self, record, target_key, reason="offline", detail=""):
+        """Settle a handed-over message from the files. Never re-emits anything.
+
+        A claim without a receipt becomes uncertain only CLAIM_GRACE seconds after
+        this connector first saw it, so a hook that is still emitting (it exits
+        within about 2 s) is never overtaken, whatever the file timestamps say."""
         key, mid = record["handover_key"], record["id"]
-        now = self._clock() + (sessions.CLAIM_GRACE if ending else 0)
-        state = sessions.handover_state(self.sessions_state, key, mid, now=now)
+        state = sessions.handover_state(self.sessions_state, key, mid)
         if state == "submitted":
             q.Queue.transition(record, q.SUBMITTED, detail=f"emitted to {self.config.target_label} (next turn)")
-        elif state == "uncertain":
-            q.Queue.transition(record, q.UNCERTAIN,
-                               detail="claimed by the hook without a receipt, or the handover file is missing; "
-                                      "not re-emitted")
-        elif state == "pending" and key != target_key:
-            # The session ended, went stale or is no longer the only one: take the
-            # file back unless the hook claims it first (the rename arbitrates).
+        elif state == "missing":
+            q.Queue.transition(record, q.UNCERTAIN, detail="the handover file is missing; not re-emitted")
+        elif state == "claimed":
+            seen = record.get("claim_seen_at")
+            if seen is None:
+                record["claim_seen_at"] = self._clock()
+                self.queue.save(record)
+                return False
+            if self._clock() - seen < sessions.CLAIM_GRACE:
+                return False
+            q.Queue.transition(record, q.UNCERTAIN, detail="claimed by the hook without a receipt; not re-emitted")
+        elif key != target_key:
+            # The session ended, its process exited, or it is no longer the only
+            # one: take the file back unless the hook claims it first (the rename
+            # arbitrates).
             if not sessions.reclaim(self.sessions_state, key, mid):
                 return False
             q.Queue.transition(record, q.HELD, reason=reason)
             record["hold_detail"] = detail or "the session ended before its next turn; reclaimed"
         else:
-            return False  # still pending for the live session, or a hook is claiming it now
+            return False  # still pending for the live session
         sessions.settle(self.sessions_state, key, mid)
+        record.pop("claim_seen_at", None)
         if record["state"] == q.HELD:
             record.pop("handover_key", None)
         self.queue.save(record)
@@ -451,6 +456,7 @@ class Connector:
                             or not os.path.lexists(os.path.join(self.sessions_state, sessions.SESSIONS,
                                                                 key + ".inbox", mid + ".md"))):
             record.pop("handover_key", None)
+            record["handover_retry_at"] = self._clock() + 30
             self._hold(record, "offline", f"cannot hand over to the session: {type(exc).__name__}")
         else:
             q.Queue.transition(record, q.UNCERTAIN, detail=f"handover failed after writing: {type(exc).__name__}")
@@ -478,6 +484,14 @@ class Connector:
                     continue
                 if self.stop_requested():
                     break
+                if self._clock() < record.get("handover_retry_at", 0):
+                    continue  # a recent handover failure: retry later without new history
+                try:
+                    sessions.inbox_dir(self.sessions_state, target_key, create=True)
+                except (OSError, ConfigError) as exc:
+                    # Checked before "submitting": a bad inbox directory only holds.
+                    self._hold(record, "offline", f"cannot hand over to the session: {type(exc).__name__}")
+                    continue
                 text = self._prompt_text(record)
                 if not sessions.fits_one_turn(text):
                     self._hold(record, "too_large_for_hook",

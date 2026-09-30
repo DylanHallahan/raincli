@@ -57,7 +57,8 @@ def presence_problem(body):
         keys.add(a["key"])
         name = a["name"]
         if (not isinstance(name, str) or not 1 <= len(name) <= 64 or not name.strip()
-                or re.search("[\x00-\x1f\x7f-\x9f\u2028\u2029]", name)):
+                or re.search("[\x00-\x1f\x7f-\x9f\u2028\u2029]", name)
+                or re.search(r"rc[ai]_[A-Za-z0-9_-]{20,}", name)):  # token-shaped: a real leak
             return "agent name"
         if a["type"] not in {"claude", "codex", "gemini", "cursor", "opencode", "other"}:
             return "agent type"

@@ -661,9 +661,8 @@ def run_hook(argv):
     return hook.main(rest[0], rest[1], options.get("--name"), options["--state-dir"])
 
 
+HOOK_USAGE = "raincli hook {claude,codex} EVENT [--name NAME] --state-dir DIR"
 HOOK_HELP = """\
-usage: raincli hook {claude,codex} EVENT [--name NAME] --state-dir DIR
-
 Agent hook installed by `raincli hooks install`. Reads the agent's hook JSON on
 stdin (at most 1 MiB), records this session's status for the runtime's agent
 directory under DIR/sessions/, and for Claude Code SessionStart/UserPromptSubmit
@@ -724,8 +723,10 @@ def build_parser():
                     "it sees it: the server names only a version, never a source. Downgrades need the "
                     "operator's --allow-downgrade. --install copies the client from the commit-verified "
                     "release archive into a new environment (no pip or package index), keeps the previous "
-                    "environment for --rollback, and installs that release's launcher; a running launcher "
-                    "switches to it and restores the previous version if the new one fails its first start. "
+                    "environment for --rollback, and points the launcher at it. The running launcher switches "
+                    "to the new version and restores the previous one if it fails its first start; the new "
+                    "version's launcher replaces it only after that version has run and the launcher passes a "
+                    "check. "
                     "Releases are not signed: trust rests on HTTPS to GitHub and the tag's commit.")
     update.add_argument("--root", metavar="DIR", help="managed installation directory (default: ~/.raincli/client)")
     operation = update.add_mutually_exclusive_group()
@@ -773,7 +774,7 @@ def build_parser():
     hooks_install.add_argument("--remove", action="store_true", help="remove only the raincli-marked hooks")
     hooks_install.set_defaults(func=cmd_hooks_install)
     hook = sub.add_parser("hook", help="agent hook entry point (installed by `raincli hooks install`)",
-                          description=HOOK_HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
+                          usage=HOOK_USAGE, description=HOOK_HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
                           add_help=True)
     hook.set_defaults(func=lambda a: EXIT_OK)
 
@@ -892,7 +893,9 @@ def build_parser():
 
 def main(argv=None, *, herdr=None):
     argv = sys.argv[1:] if argv is None else list(argv)
-    if argv[:1] == ["hook"] and not {"-h", "--help"} & set(argv):
+    if argv[:1] == ["hook"] and argv[1:] not in (["-h"], ["--help"]):
+        # Only a bare `raincli hook --help` shows help: `--name -h` is a name, and
+        # nothing an agent passes may print help into its context.
         return run_hook(argv[1:])
     args = build_parser().parse_args(argv)
     try:

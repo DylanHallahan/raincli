@@ -20,6 +20,12 @@ from .conftest import body_of, send, write_agent_config
 POSIX = pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
 
 
+@pytest.fixture(autouse=True)
+def no_agent_process(monkeypatch):
+    """These tests run under a real agent; hook records name no process unless a test says so."""
+    monkeypatch.setattr(hook, "agent_pid", lambda agent_type: None)
+
+
 class Clock:
     def __init__(self):
         self.now = 1_000_000.0
@@ -150,12 +156,15 @@ def test_crash_between_claim_and_receipt_is_uncertain_and_never_reemitted(env):
     mid = send(env.api, env.api.alice, "bob", "hello")["id"]
     connector.run_once()
     key = sessions.agent_key(env.salt, "claude:s1")
-    texts, ids = sessions.claim(str(env.state), key, now=env.clock.now)  # the hook dies before its receipt
+    texts, ids = sessions.claim(str(env.state), key)  # the hook dies before its receipt
     assert ids == [mid]
     connector.run_once()
     assert local(connector, mid)["state"] == q.HANDED_OVER  # a hook may still be finishing
-    env.clock.now += sessions.CLAIM_GRACE + 1
+    env.clock.now += sessions.CLAIM_GRACE - 1
     env.session("s1", "UserPromptSubmit", now=env.clock.now)  # keep the session live
+    connector.run_once()
+    assert local(connector, mid)["state"] == q.HANDED_OVER  # grace counts from the connector's first sighting
+    env.clock.now += 2
     connector.run_once()
     record = local(connector, mid)
     assert record["state"] == q.UNCERTAIN and "without a receipt" in record["detail"]
@@ -171,7 +180,7 @@ def test_restart_reconciles_from_the_files(env):
     ids = [send(env.api, env.api.alice, "bob", f"m{i}")["id"] for i in range(4)]
     connector.run_once()
     assert all(local(connector, m)["state"] == q.HANDED_OVER for m in ids)
-    sessions.claim(str(env.state), key, now=env.clock.now)  # all four claimed ...
+    sessions.claim(str(env.state), key)  # all four claimed ...
     sessions.write_receipts(str(env.state), key, [ids[0]])  # ... only the first receipted
     inbox = env.state / "sessions" / (key + ".inbox")
     os.rename(inbox / (ids[2] + ".md.claimed"), inbox / (ids[2] + ".md"))  # still pending
@@ -187,7 +196,12 @@ def test_restart_reconciles_from_the_files(env):
     restarted = env.connector()
     restarted.start()
     states = [local(restarted, m)["state"] for m in ids + [fifth]]
-    assert states == [q.SUBMITTED, q.UNCERTAIN, q.HANDED_OVER, q.UNCERTAIN, q.RECEIVED]
+    # The unreceipted claim is first seen now; the vanished file is uncertain at once.
+    assert states == [q.SUBMITTED, q.HANDED_OVER, q.HANDED_OVER, q.UNCERTAIN, q.RECEIVED]
+    env.clock.now += sessions.CLAIM_GRACE
+    restarted.run_once()
+    assert local(restarted, ids[1])["state"] == q.UNCERTAIN
+    assert local(restarted, ids[2])["state"] == q.HANDED_OVER  # still pending for the live session
 
 
 def test_session_end_reclaims_pending_files_and_holds_offline(env):
@@ -223,7 +237,7 @@ def test_reclaim_loses_race_to_a_claim(env):
     mid = send(env.api, env.api.alice, "bob", "hello")["id"]
     connector.run_once()
     key = sessions.agent_key(env.salt, "claude:s1")
-    texts, ids = sessions.claim(str(env.state), key, now=env.clock.now)
+    texts, ids = sessions.claim(str(env.state), key)
     sessions.write_receipts(str(env.state), key, ids)
     assert not sessions.reclaim(str(env.state), key, mid)  # the hook's rename won
     env.session("s1", "SessionEnd")
