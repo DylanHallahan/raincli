@@ -441,6 +441,22 @@ class Connector:
         self.log(f"message {mid} is {record['state']}")
         return True
 
+    def _undo_handover(self, record, key, exc):
+        """The handover file could not be written (for example an unsafe inbox
+        directory). Hold the message unless the file could already be emitted."""
+        mid = record["id"]
+        claimed = any(os.path.lexists(os.path.join(self.sessions_state, sessions.SESSIONS, key + ".inbox", mid + x))
+                      for x in (".md.claimed", ".md.receipt"))
+        if not claimed and (sessions.reclaim(self.sessions_state, key, mid)
+                            or not os.path.lexists(os.path.join(self.sessions_state, sessions.SESSIONS,
+                                                                key + ".inbox", mid + ".md"))):
+            record.pop("handover_key", None)
+            self._hold(record, "offline", f"cannot hand over to the session: {type(exc).__name__}")
+        else:
+            q.Queue.transition(record, q.UNCERTAIN, detail=f"handover failed after writing: {type(exc).__name__}")
+            self.queue.save(record)
+        self.log(f"message {mid} is {record['state']} (handover failed: {type(exc).__name__})")
+
     def process_next_turn(self):
         """Hand queued messages to the single live mapped hook session.
 
@@ -471,7 +487,11 @@ class Connector:
                 record["handover_key"] = target_key
                 q.Queue.transition(record, q.SUBMITTING)
                 self.queue.save(record)
-                sessions.hand_over(self.sessions_state, target_key, record["id"], text)
+                try:
+                    sessions.hand_over(self.sessions_state, target_key, record["id"], text)
+                except (OSError, ConfigError) as exc:
+                    self._undo_handover(record, target_key, exc)
+                    continue
                 q.Queue.transition(record, q.HANDED_OVER,
                                    detail=f"handed to {self.config.target_label}; delivered at its next turn")
                 self.queue.save(record)

@@ -302,7 +302,7 @@ def _read_regular(path, limit):
         os.close(fd)
 
 
-def claim(state_dir, key):
+def claim(state_dir, key, now=None):
     """Claim pending framed messages, oldest first, within the per-turn bound.
 
     Returns ``(texts, ids)``. The caller emits the texts and then calls
@@ -342,7 +342,8 @@ def claim(state_dir, key):
             if text is None:
                 continue
             break
-        os.utime(claimed)  # the claim time, for the connector's grace period
+        stamp = time.time() if now is None else now
+        os.utime(claimed, (stamp, stamp))  # the claim time, for the connector's grace period
         texts.append(text)
         ids.append(name[:-3])
         total_bytes += size

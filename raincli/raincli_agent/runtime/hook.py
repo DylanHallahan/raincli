@@ -128,7 +128,7 @@ def handle(agent_type, event, name, state_dir, stdin, stdout, now=None):
     sessions.write_record(state_dir, record)
     if agent_type != "claude" or event not in CLAIM_EVENTS:
         return "recorded"
-    texts, ids = sessions.claim(state_dir, key)
+    texts, ids = sessions.claim(state_dir, key, now=record["updated_at"])
     if not ids:
         return "recorded"
     output = {"hookSpecificOutput": {"hookEventName": event,
