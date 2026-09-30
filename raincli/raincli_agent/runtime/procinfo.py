@@ -80,9 +80,16 @@ def pid_namespace():
 
 # -- macOS and other POSIX: ps ---------------------------------------------------------
 
+def ps_env():
+    """A fixed locale and time zone: ``lstart`` is printed in local time and the
+    local language, and the hook (a terminal's TZ and LANG) and the runtime (a
+    login service's) must read the same start time (review 3, N1)."""
+    return {"LC_ALL": "C", "LANG": "C", "TZ": "UTC", "PATH": os.environ.get("PATH") or "/bin:/usr/bin"}
+
+
 def _ps(pid, fields):
     out = subprocess.run(["ps", "-o", fields, "-p", str(int(pid))], capture_output=True, text=True, timeout=2,
-                         stdin=subprocess.DEVNULL)
+                         stdin=subprocess.DEVNULL, env=ps_env())
     return out.stdout.strip() if out.returncode == 0 else None
 
 

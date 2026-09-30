@@ -74,16 +74,20 @@ def hook_entries(salt, state_dir, inbox, now=None):
         stale = [r for r in records if (r["type"], r["name"]) == want]
         stale_inbox = max(stale, key=lambda r: r["updated_at"]) if stale else None
     out, pids = [], set()
+    namespace = procinfo.pid_namespace()
     for record in records:
-        if isinstance(record.get("pid"), int):
-            pids.add(record["pid"])
+        same_namespace = record.get("pid_ns") is None or record.get("pid_ns") == namespace
+        # A pid from another namespace names some other process here (review 3, N3).
+        pid = record["pid"] if isinstance(record.get("pid"), int) and same_namespace else None
+        if pid is not None:
+            pids.add(pid)
         if want and not live and (record["type"], record["name"]) == want and record is not stale_inbox:
             continue
         is_inbox = (len(live) == 1 and record is live[0]) or record is stale_inbox
         out.append({"key": record["key"], "name": sessions.normalize_name(record["name"], record["type"]),
                     "type": record["type"], "status": record["status"], "role": "inbox" if is_inbox else None,
                     "reachability": "next-turn" if is_inbox else None, "source": "hook",
-                    "_pid": record["pid"] if isinstance(record.get("pid"), int) else None})
+                    "_pid": pid})
     if want and not live and stale_inbox is None:
         out.append(entry(salt, "hook-inbox:%s:%s" % want, want[1], want[0], "offline", "hook",
                          "inbox", "next-turn"))

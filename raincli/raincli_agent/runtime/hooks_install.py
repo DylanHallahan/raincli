@@ -199,10 +199,13 @@ def write(path, raw, data, backup_dir=None):
         directory = Path(backup_dir or path.parent)
         backup = next_backup(directory, path.name)
         atomic_write_bytes(str(backup), raw, 0o600)
-        # Prune only our own backups, oldest first by (stamp, counter) (review 2, O14).
-        for stale in sorted(own_backups(directory, path.name))[:-KEEP_BACKUPS]:
+        # Prune only our own backups, oldest first by the counter alone, which only
+        # grows: a clock step back can never make the new backup look oldest, and
+        # it is never a candidate anyway (review 3, N2).
+        older = sorted((b for b in own_backups(directory, path.name) if b[2] != backup), key=lambda b: b[1])
+        for stale in older[:max(0, len(older) - (KEEP_BACKUPS - 1))]:
             try:
-                stale[-1].unlink()
+                stale[2].unlink()
             except OSError:
                 pass
     else:
