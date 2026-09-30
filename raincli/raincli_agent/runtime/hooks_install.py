@@ -171,7 +171,7 @@ KEEP_BACKUPS = 3
 
 def own_backups(directory, name):
     """[(stamp, counter, path)] for backups this command wrote, and nothing else."""
-    pattern = re.compile(re.escape(name) + r"\.raincli-backup-([0-9]{8}-[0-9]{6})-([0-9]{1,6})")
+    pattern = re.compile(re.escape(name) + r"\.raincli-backup-([0-9]{8}-[0-9]{6})-([0-9]+)")
     out = []
     for path in Path(directory).glob(name + ".raincli-backup-*"):
         match = pattern.fullmatch(path.name)

@@ -210,20 +210,21 @@ def install(root=None, release=None):
         env = stage / "venv"
         subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(env)], check=True, timeout=90)
         # Verify the staged copy itself, never modules found through the caller's PYTHONPATH.
-        isolated = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")}
+        isolated = {**{k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")},
+                    "PYTHONSAFEPATH": "1"}  # nor the working directory (review 4, finding 1)
         python = env / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         purelib = subprocess.run([str(python), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
-                                 check=True, capture_output=True, text=True, timeout=15, env=isolated).stdout.strip()
+                                 check=True, capture_output=True, text=True, timeout=15, env=isolated, cwd=str(stage)).stdout.strip()
         shutil.copytree(source / "raincli/raincli_agent", Path(purelib) / "raincli_agent",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         shutil.copyfile(source / "raincli/raincli_agent/runtime/launcher.py", stage / "launch.py")
         try:
             check = subprocess.run([str(python), "-m", "raincli_agent", "--version"],
-                                   check=True, capture_output=True, text=True, timeout=15, env=isolated)
+                                   check=True, capture_output=True, text=True, timeout=15, env=isolated, cwd=str(stage))
             if check.stdout.strip() != "raincli " + release["tag"][1:]:
                 raise VerificationError("installed client version does not match the release tag")
             subprocess.run([str(python), "-m", "raincli_agent", "runtime", "--help"],
-                           check=True, capture_output=True, timeout=15, env=isolated)
+                           check=True, capture_output=True, timeout=15, env=isolated, cwd=str(stage))
             compile((stage / "launch.py").read_bytes(), str(stage / "launch.py"), "exec")
         except (subprocess.CalledProcessError, SyntaxError) as exc:
             # The staged release itself fails: a verification failure, not a transient one.
