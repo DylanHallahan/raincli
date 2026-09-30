@@ -461,3 +461,9 @@ def test_cli_agents_shows_machines_and_their_agents(tmp_path, capsys, monkeypatc
         assert ["helper", "codex", "working"] in [line.split() for line in lines[2:]]
         [scanned] = [line for line in lines if "sneaky" in line]
         assert "\x1b" not in scanned and "(detected, status unknown)" in scanned
+
+
+def test_runtime_finds_the_managed_root_it_runs_from(tmp_path):
+    root, python = managed_root(tmp_path)
+    assert pushed.PushedUpdates(python=python).root == root.resolve()
+    assert pushed.managed_root_of(sys.executable) is None or "versions" in sys.executable

@@ -18,7 +18,7 @@ from raincli_agent.config import write_config
 from raincli_agent.connector.queue import Queue
 from raincli_agent.errors import ConfigError
 from raincli_agent.fsutil import atomic_write_json, read_file_bytes, read_private_file
-from raincli_agent.runtime import updates
+from raincli_agent.runtime import pushed, sessions, updates
 from raincli_agent.runtime.service import request_stop, status
 from raincli_agent.runtime.startup import systemd_unit
 
@@ -127,9 +127,33 @@ def main():
             duplicate = subprocess.run([sys.executable, "-m", "raincli_agent", "runtime", "run", "--config", str(config), "--once"],
                                        capture_output=True, timeout=15)
             assert duplicate.returncode != 0
+            # Directory (protocol 14.3): a real hook process records a Claude Code
+            # session; the runtime publishes it with its salted key and basename only.
+            assert (state / "machine-salt").is_file()
+            hook_payload = json.dumps({"session_id": "smoke-session", "cwd": str(root / "private" / "smoke-project"),
+                                       "prompt": "private prompt"}).encode()
+            hooked = subprocess.run([sys.executable, "-m", "raincli_agent", "hook", "claude", "SessionStart",
+                                     "--state-dir", str(state)], input=hook_payload, capture_output=True, timeout=15)
+            assert (hooked.returncode, hooked.stderr) == (0, b""), hooked
+            salt = sessions.read_salt(str(state))
+
+            def listed():
+                agents = server.state.directory.get("runtime-test") or []
+                return [a for a in agents if a["source"] == "hook"]
+            [session] = wait_for(listed, timeout=60)
+            assert (session["name"], session["type"], session["status"]) == ("smoke-project", "claude", "idle")
+            assert session["key"] == sessions.agent_key(salt, "claude:smoke-session")
+            inbox = [a for a in server.state.directory["runtime-test"] if a["role"] == "inbox"]
+            assert [(a["name"], a["reachability"]) for a in inbox] == [("test-inbox", "instant")]
+            published = json.dumps(server.state.presence_bodies)
+            assert str(root) not in published and "private prompt" not in published
+            client = server.state.clients["runtime-test"]
+            assert client["version"] == __version__ and client["update_mode"] in ("manual", "automatic")
             request_stop(config)
             assert process.wait(timeout=30) == 0
             assert server.state.presence["runtime-test"] == "offline"
+            assert server.state.presence_bodies[-1][1] == {"status": "offline", "agents": []}
+            print("PASS: agent directory via a real hook process, salted keys, no paths; stop clears it", flush=True)
             q = Queue(str(root / "queue"))
             q.acquire_run_lock()
             q.release_run_lock()  # no orphan child holding the delivery queue
@@ -202,14 +226,30 @@ def main():
         # release lookup is excluded; venv creation and installation are real.
         files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=ROOT, text=True).splitlines()
 
+        # Synthetic later releases: the same code with another version, and one
+        # whose runtime fails its first start (to exercise the launcher's rollback).
+        base = tuple(int(x) for x in __version__.split("."))
+        good = "%d.%d.%d" % (base[0], base[1], base[2] + 1)
+        broken = "%d.%d.%d" % (base[0], base[1], base[2] + 2)
+        variants = {"c" * 40: (good, False), "d" * 40: (broken, True)}
+
         def archive_for(url, limit):
             # Like GitHub's codeload archive: one root named after the commit.
+            commit = url.rsplit("/", 1)[1]
+            version, crash = variants.get(commit, (None, False))
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
                 for name in files:
                     path = ROOT / name
-                    if path.is_file():
-                        archive.write(path, "raincli-" + url.rsplit("/", 1)[1] + "/" + name)
+                    if not path.is_file():
+                        continue
+                    data = path.read_bytes()
+                    if version and name == "raincli/raincli_agent/__init__.py":
+                        data = data.replace(('"%s"' % __version__).encode(), ('"%s"' % version).encode())
+                    if crash and name == "raincli/raincli_agent/runtime/service.py":
+                        data = data.replace(b"def run(path, once=False, pushed=None):\n",
+                                            b"def run(path, once=False, pushed=None):\n    raise SystemExit(3)\n")
+                    archive.writestr("raincli-" + commit + "/" + name, data)
             return buf.getvalue()
         original_fetch = updates.fetch
         updates.fetch = archive_for
@@ -218,12 +258,15 @@ def main():
             release = {"tag": "v" + __version__, "commit": "a" * 40}
             assert updates.install(managed, release)["status"] == "installed"
             before = updates.read_pointer(managed)
-            assert before["automatic"] is False
+            assert (before["automatic"], before["update_mode"]) == (False, "automatic")
             launcher = managed / "launch.py"
             result = subprocess.run([sys.executable, str(launcher), "--version"], capture_output=True, text=True, check=True, timeout=20)
             assert result.stdout.strip() == "raincli " + __version__
-            assert updates.configure(managed, automatic=True)["automatic"] is True
-            updates.configure(managed, automatic=False)
+            assert updates.configure(managed, mode="automatic")["update_mode"] == "automatic"
+            # Manual for the live runs below: the runtime never reaches GitHub here.
+            # The pushed install is driven from this process through the same path.
+            updates.configure(managed, mode="manual")
+            assert updates.read_pointer(managed)["automatic"] is False
             # Exercise the installed launcher and both installed environments as
             # real processes, including queue ownership across two handoffs.
             launcher_log = root / "launcher.log"
@@ -248,7 +291,48 @@ def main():
                 updates.configure(managed, rollback=True)
                 assert updates.read_pointer(managed)["commit"] == "a" * 40
                 assert updates.read_pointer(managed)["automatic"] is False
-                wait_for(lambda: replacement(second), timeout=75)
+                third = wait_for(lambda: replacement(second), timeout=75)
+                print("PASS: staged venv installation, live managed update/rollback handoff and released queue", flush=True)
+
+                # Pushed update (14.5): the team's target, installed immediately through
+                # the updater, handed over by the live launcher; the new version reports
+                # current. Then a target whose runtime fails its first start is rolled
+                # back by the launcher and reported rolled_back.
+                team = "alpha"
+
+                def push(version, commit):
+                    target = {"version": "v" + version, "allow_downgrade": False}
+                    server.state.targets[team] = target
+                    driver = pushed.PushedUpdates(managed, python=updates.read_pointer(managed)["python"],
+                                                  resolve=lambda tag: {"tag": tag, "commit": commit},
+                                                  log=lambda text: None)
+                    key = pushed.target_key(target)
+                    driver._save(state="updating", error=None, target=key, blocked=None)
+                    driver._run(key)
+                    assert driver.data["state"] == "updating", driver.data
+                    return key
+
+                push(good, "c" * 40)
+                assert updates.read_pointer(managed)["tag"] == "v" + good
+
+                def client_is(version, state_name):
+                    client = server.state.clients.get("runtime-test") or {}
+                    report = published_report()
+                    return (client.get("version") == version and client.get("update_state") == state_name
+                            and report and report["instance"] != third["instance"])
+                wait_for(lambda: client_is(good, "current"), timeout=90)
+                fourth = published_report()
+                key = push(broken, "d" * 40)
+                wait_for(lambda: updates.read_pointer(managed)["tag"] == "v" + good
+                         and updates.read_update_state(managed).get("state") == "rolled_back", timeout=90)
+                assert updates.read_update_state(managed)["blocked"] == key
+                assert updates.read_update_state(managed)["error"] == "first_start_failed"
+                assert updates.read_pointer(managed)["update_mode"] == "manual"  # unchanged by the rollback
+                wait_for(lambda: (server.state.clients.get("runtime-test") or {}).get("update_state") == "rolled_back"
+                         and (published_report() or fourth)["instance"] != fourth["instance"], timeout=90)
+                assert server.state.clients["runtime-test"]["version"] == good
+                assert server.state.clients["runtime-test"]["error"] == "first_start_failed"
+                print("PASS: pushed target installed and handed over; a failing first start rolled back", flush=True)
                 request_stop(config)
                 assert managed_process.wait(timeout=45) == 0
                 assert server.state.presence["runtime-test"] == "offline"
@@ -264,7 +348,6 @@ def main():
                         managed_process.wait(timeout=45)
                     except Exception:
                         kill_tree(managed_process)
-            print("PASS: staged venv installation, live managed update/rollback handoff, opt-in updates and released queue", flush=True)
         finally:
             updates.fetch = original_fetch
     print("Runtime smoke passed. Fake relay, unavailable Herdr; no production messages, login restart or GitHub release publication tested.")

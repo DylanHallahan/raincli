@@ -473,7 +473,7 @@ def run(path, once=False, pushed=None):
                 pushed.started()
                 # The machine credential's team target (14.5); acted on in the background.
                 first = next((w for w in supervisor.workers if not w.retired), None)
-                if first is not None and first.reply is not None:
+                if first is not None and first.reply is not None and not once:
                     pushed.consider(first.reply.get("target"))
                 if once:
                     break

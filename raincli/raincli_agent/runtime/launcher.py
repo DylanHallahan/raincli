@@ -25,6 +25,11 @@ GRACEFUL_STOP = 120  # the runtime needs <= 100 s (service.py stop budget), conn
 HIDDEN = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" and sys.stdout is None else {}
 
 
+# A managed environment runs exactly its staged code: never a module search path
+# inherited from the caller's environment.
+ISOLATED_ENV = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")}
+
+
 def runtime_output(root):
     """Where the runtime's own output goes. With a console it is inherited; under
     pythonw.exe there is none, so errors go to a private, size-capped runtime.log."""
@@ -115,7 +120,7 @@ def roll_back(root, pointer):
 
 
 def passthrough(python, args):
-    process = subprocess.Popen([str(python), "-m", "raincli_agent", *args])
+    process = subprocess.Popen([str(python), "-m", "raincli_agent", *args], env=ISOLATED_ENV)
     if os.name != "nt":
         # The terminal delivers Ctrl-C to both processes; the client handles it.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -137,7 +142,7 @@ def stop_runtime(process, python, config):
             try:
                 subprocess.run([str(python), "-m", "raincli_agent", "runtime", "stop", "--config", config],
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               timeout=10, **HIDDEN)
+                               timeout=10, env=ISOLATED_ENV, **HIDDEN)
             except (OSError, subprocess.TimeoutExpired):
                 pass
         try:
@@ -200,7 +205,7 @@ def main():
                     # kill can include the connectors.
                     process = subprocess.Popen([str(python), "-m", "raincli_agent", *args], stdin=subprocess.DEVNULL,
                                                stdout=output, stderr=output, start_new_session=os.name != "nt",
-                                               **HIDDEN)
+                                               env=ISOLATED_ENV, **HIDDEN)
                 finally:
                     if output is not None:
                         os.close(output)

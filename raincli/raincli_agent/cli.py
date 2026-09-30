@@ -43,7 +43,13 @@ modes (connector config "mode"):
                     escalates to the main session with `connector escalate`;
                     trust_mode defaults to "team". Recommended.
 trust_mode: "list" (trusted_senders / `connector trust`; others need approval) or
-"team" (every agent of this team auto-delivers). blocked_senders are always held."""
+"team" (every agent of this team auto-delivers). blocked_senders are always held.
+target: "herdr_agent" (a Herdr agent name; delivery is instant) or, instead,
+"inbox": {"hook": "claude", "name": NAME}, a Claude Code session outside Herdr
+reporting through `raincli hooks install --claude`. That delivery is next-turn:
+it waits until the session is next started or prompted, needs `raincli runtime
+run`, and holds messages offline (no such live session) or target_ambiguous
+(more than one); there is never a fallback."""
 
 CONNECTOR_HELP = """\
 The connector durably receives this agent's messages, acks them, and delivers

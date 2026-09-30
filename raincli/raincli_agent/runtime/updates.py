@@ -207,18 +207,20 @@ def install(root=None, release=None):
         # a fresh environment. No build backend, index or network is involved.
         env = stage / "venv"
         subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(env)], check=True, timeout=90)
+        # Verify the staged copy itself, never modules found through the caller's PYTHONPATH.
+        isolated = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")}
         python = env / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         purelib = subprocess.run([str(python), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
-                                 check=True, capture_output=True, text=True, timeout=15).stdout.strip()
+                                 check=True, capture_output=True, text=True, timeout=15, env=isolated).stdout.strip()
         shutil.copytree(source / "raincli/raincli_agent", Path(purelib) / "raincli_agent",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         shutil.copyfile(source / "raincli/raincli_agent/runtime/launcher.py", stage / "launch.py")
         check = subprocess.run([str(python), "-m", "raincli_agent", "--version"],
-                               check=True, capture_output=True, text=True, timeout=15)
+                               check=True, capture_output=True, text=True, timeout=15, env=isolated)
         if check.stdout.strip() != "raincli " + release["tag"][1:]:
             raise VerificationError("installed client version does not match the release tag")
         subprocess.run([str(python), "-m", "raincli_agent", "runtime", "--help"],
-                       check=True, capture_output=True, timeout=15)
+                       check=True, capture_output=True, timeout=15, env=isolated)
         # A fresh managed install starts automatic (14.5) without a migration notice.
         keys = mode_keys(old) if old else {"automatic": False, "update_mode": "automatic", "update_mode_chosen": True}
         pointer = {**release, "python": str(python), **keys,

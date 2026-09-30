@@ -42,10 +42,18 @@ def valid_target(target):
             and isinstance(target.get("allow_downgrade"), bool))
 
 
+def managed_root_of(python):
+    """The managed root whose ``versions/`` holds this interpreter, if any."""
+    for parent in Path(python).absolute().parents:
+        if parent.name == "versions" and (parent.parent / "current.json").is_file():
+            return parent.parent
+    return None
+
+
 class PushedUpdates:
     def __init__(self, root=None, python=None, clock=time.time, resolve=None, install=None, log=None):
-        self.root = Path(root or updates.default_root()).expanduser().resolve()
         self.python = Path(python or sys.executable).absolute()
+        self.root = Path(root or managed_root_of(self.python) or updates.default_root()).expanduser().resolve()
         self.clock = clock
         self.resolve = resolve or updates.resolve
         self.install = install or (lambda release: updates.install(self.root, release))
