@@ -121,6 +121,17 @@ def my_agents(db: Session, user: User, team_ids: list[uuid.UUID]) -> list[AgentR
     return _agent_rows(db, and_(Agent.owner_user_id == user.id, Agent.team_id.in_(team_ids)))
 
 
+def team_machines(db: Session, user: User, team_ids: list[uuid.UUID]) -> list[AgentRow]:
+    """Every machine in the viewer's teams, the viewer's own first (protocol §14.9).
+
+    The same team scope as ``GET /api/v1/agents``; managing a machine stays with its
+    owner (or a team owner, through the team routes)."""
+    if not team_ids:
+        return []
+    rows = _agent_rows(db, Agent.team_id.in_(team_ids))
+    return sorted(rows, key=lambda r: r.agent.owner_user_id != user.id)  # stable: keeps the query order
+
+
 def team_agents(db: Session, team: Team) -> list[AgentRow]:
     return _agent_rows(db, Agent.team_id == team.id)
 

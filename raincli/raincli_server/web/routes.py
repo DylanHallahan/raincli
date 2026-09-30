@@ -506,7 +506,7 @@ def _config_json(request: Request, token: str) -> str:
 def _agents_page(request, db, viewer, *, status: int = 200, **ctx) -> HTMLResponse:
     return render(
         request, "app/agents.html", viewer=viewer, status=status,
-        agents=queries.my_agents(db, viewer.user, _team_ids(viewer)), **ctx,
+        agents=queries.team_machines(db, viewer.user, _team_ids(viewer)), **ctx,
     )
 
 

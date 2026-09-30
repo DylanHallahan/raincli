@@ -5,8 +5,8 @@
 <section class="wrap page-pad">
   <div class="page-head">
     <div>
-      <h1>Your machines</h1>
-      <p class="muted">Each machine has one address and one credential. Teammates message the address, and the machine's inbox agent receives it. The other agents on the machine are listed for visibility only.</p>
+      <h1>Machines</h1>
+      <p class="muted">Every machine in your teams, yours first. Each machine has one address and one credential. Teammates message the address, and the machine's inbox agent receives it. The other agents on a machine are listed for visibility only.</p>
     </div>
   </div>
   {% if error %}<p class="flash flash-error" role="alert">{{ error[:1]|upper ~ error[1:] }}.</p>{% endif %}
@@ -16,20 +16,31 @@
     <p class="help">API connection reflects recent credential use. Session availability and the agent list are reported by the machine's runtime and lapse after two minutes without a report. Availability is advisory: it does not show that a message was delivered or read. <a href="https://github.com/DylanHallahan/raincli/blob/main/SETUP.md">Setup guide</a> · <a href="#add-machine">Add a machine</a></p>
   </div>
   {% for row in agents %}
-  <section class="machine" aria-labelledby="machine-{{ row.agent.id }}">
+  {% set mine = row.agent.owner_user_id == viewer.user.id %}
+  {% if loop.first and mine %}<h2 class="h3 machine-group">Your machines</h2>{% endif %}
+  {% if not mine and (loop.first or loop.previtem.agent.owner_user_id == viewer.user.id) %}<h2 class="h3 machine-group">Teammates' machines</h2>{% endif %}
+  <section class="machine{% if mine %} machine-mine{% endif %}" aria-labelledby="machine-{{ row.agent.id }}">
   <div class="table-wrap">
   <table class="table">
     <caption class="sr-only" id="machine-{{ row.agent.id }}">Machine {{ row.agent.handle }}</caption>
     <thead><tr><th scope="col">Machine</th><th scope="col">API connection</th><th scope="col">Session availability</th><th scope="col">Client</th><th scope="col">Credential</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
     <tbody>
       <tr {% if not row.active %}class="is-revoked"{% endif %}>
-        <td data-label="Machine"><span class="handle">{{ row.agent.handle }}</span>{% if row.agent.display_name != row.agent.handle %}<br><span class="muted small">{{ row.agent.display_name }}</span>{% endif %}<br><span class="muted small">Team {{ row.team.slug }}</span></td>
+        <td data-label="Machine"><span class="handle">{{ row.agent.handle }}</span>{% if row.agent.display_name != row.agent.handle %}<br><span class="muted small">{{ row.agent.display_name }}</span>{% endif %}<br><span class="muted small">Team {{ row.team.slug }}{% if not mine %} · {{ row.owner.display_name }}{% endif %}</span></td>
         <td data-label="API connection">{{ conn_badge(row.connection) }}</td>
         <td data-label="Session availability">{{ presence_badge(row.runtime_status) }}</td>
         <td data-label="Client">{{ client_badges(row.client) }}</td>
-        <td data-label="Credential">{% if row.credential_prefix %}<code class="nowrap">{{ row.credential_prefix }}…</code>{% else %}<span class="muted">none</span>{% endif %}<br><span class="muted small">Last used {{ time(row.last_used_at) or 'never' }}</span></td>
+        <td data-label="Credential">{% if not mine %}<span class="muted">—</span>{% elif row.credential_prefix %}<code class="nowrap">{{ row.credential_prefix }}…</code>{% else %}<span class="muted">none</span>{% endif %}{% if mine %}<br><span class="muted small">Last used {{ time(row.last_used_at) or 'never' }}</span>{% endif %}</td>
         <td class="row-actions">
-          {% if row.active %}
+          {% if row.active and not mine %}
+          <a class="btn btn-quiet btn-small" href="{{ url('/app/compose') }}?to={{ row.agent.handle }}">Message</a>
+          {% if viewer.role_in(row.team.id) == 'owner' %}
+          <form method="post" action="{{ url('/app/teams/' ~ row.team.slug ~ '/agents/' ~ row.agent.id ~ '/revoke') }}" data-confirm="Revoke {{ row.agent.handle }} (owned by {{ row.owner.display_name }})? Its credentials stop working immediately.">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <button class="btn btn-danger btn-small" type="submit">Revoke</button>
+          </form>
+          {% endif %}
+          {% elif row.active %}
           <a class="btn btn-quiet btn-small" href="{{ url('/app') }}?agent={{ row.agent.id }}">Inbox</a>
           <form method="post" action="{{ url('/app/agents/' ~ row.agent.id ~ '/rotate') }}" data-confirm="Rotate the credential for {{ row.agent.handle }}? The current credential stops working immediately.">
             <input type="hidden" name="csrf_token" value="{{ csrf }}">
@@ -67,7 +78,7 @@
   </table>
   </div>
   {% elif row.active %}
-  <p class="help machine-empty">No agents reported in the last two minutes. The list appears once this machine's runtime (v0.3.0 or later) is running.</p>
+  <p class="help machine-empty">No agents reported in the last two minutes.{% if mine %} The list appears once this machine's runtime (v0.3.0 or later) is running.{% endif %}</p>
   {% endif %}
   </section>
   {% else %}

@@ -409,6 +409,7 @@ pre.code {
 .inbox-agent > p, .inbox-agent li { max-width: 78ch; }
 .inbox-agent .h4 { margin: var(--s-5) 0 var(--s-2); }
 .machine { margin-bottom: var(--s-6); }
+.machine-group { margin: var(--s-6) 0 var(--s-3); }
 .machine .table-wrap { margin-bottom: var(--s-3); }
 .machine-sessions th:first-child { width: 1%; }
 .machine-empty { margin: 0 0 var(--s-3); }

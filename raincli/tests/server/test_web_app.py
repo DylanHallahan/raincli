@@ -382,7 +382,9 @@ def test_session_availability_column_expires_and_stays_separate_from_delivery(cl
     page = client.get("/app/agents").text
     cell = _availability_cell(page, "alice-agent")
     assert ">Busy<" in cell and "presence-busy" in cell
-    assert "bob-agent" not in page  # only the viewer's own agents are listed
+    # Every machine in the team is listed, the viewer's own first (protocol §14.9); other teams never.
+    assert ">Ready<" in _availability_cell(page, "bob-agent")
+    assert page.index("alice-agent") < page.index("bob-agent") and "eve-agent" not in page
     row = session.get(AgentPresence, world["agents"]["alice"].id)
     assert row.seen_at.isoformat() not in page  # no report timestamps or runtime details
 
@@ -398,7 +400,9 @@ def test_session_availability_column_expires_and_stays_separate_from_delivery(cl
     with TestClient(app) as bob:
         login(bob, email="bob@example.test")
         page = bob.get("/app/agents").text
-        assert ">Ready<" in _availability_cell(page, "bob-agent") and "alice-agent" not in page
+        assert ">Ready<" in _availability_cell(page, "bob-agent")
+        assert page.index('<span class="handle">bob-agent') < page.index('<span class="handle">alice-agent')
+        assert "eve-agent" not in page
 
 
 def test_member_cannot_manage_others_agents_but_owner_can_revoke(client, world, session, app):
@@ -1026,7 +1030,8 @@ def test_machines_page_lists_agents_with_inbox_first_and_no_keys(client, world, 
 
     login(client)
     page = client.get("/app/agents").text
-    assert "Your machines" in page and "Add a machine" in page and "Register an agent" not in page
+    assert "Your machines" in page and "Teammates' machines" in page
+    assert "Add a machine" in page and "Register an agent" not in page
     assert "No agents reported in the last two minutes" in page and "Not reported" in page
 
     presence.publish(session, world["agents"]["alice"], {
@@ -1052,7 +1057,9 @@ def test_machines_page_lists_agents_with_inbox_first_and_no_keys(client, world, 
     # The machine's version and update state appear on each agent.
     assert all("v0.3.1" in r and ">Rolled back<" in r for r in rows)
     assert "a" * 32 not in page and "b" * 32 not in page  # keys are never rendered
-    assert "bobs-secret-session" not in page  # only the viewer's machines
+    # Bob's machine and its agents are visible to his teammate, after Alice's own.
+    assert [r for r in _machine_sessions(page, "bob-agent") if "bobs-secret-session" in r]
+    assert page.index('data-machine="alice-agent"') < page.index('data-machine="bob-agent"')
 
     for row in session.scalars(select(MachineAgent)):
         row.seen_at -= timedelta(seconds=presence.TTL_SECONDS)
@@ -1090,3 +1097,27 @@ def test_add_machine_requires_csrf_and_shows_one_time_machine_credential(client,
     assert r.status_code == 200 and "alice-laptop is added" in r.text and "machine credential" in r.text
     prompt = re.search(r'<textarea id="setup-prompt"[^>]*>(.*?)</textarea>', r.text, re.S).group(1)
     assert "rca_" not in prompt and "managed install" in prompt and "inbox" in prompt
+
+
+def test_teammates_machines_are_visible_but_not_manageable(client, world, session, app):
+    from fastapi.testclient import TestClient
+
+    login(client)  # Alice owns team acme
+    page = client.get("/app/agents").text
+    bob_id, alice_id = world["agents"]["bob"].id, world["agents"]["alice"].id
+    bob_row = re.search(r'<span class="handle">bob-agent</span>.*?</tr>', page, re.S).group(0)
+    assert "Bob" in bob_row and "?to=bob-agent" in bob_row
+    assert f"/app/agents/{bob_id}/rotate" not in page and f"/app/agents/{bob_id}/revoke" not in page
+    assert f"/app/teams/acme/agents/{bob_id}/revoke" in bob_row  # a team owner may revoke it
+    assert world["tokens"]["bob"][:12] not in page  # never a teammate's credential prefix
+    assert world["tokens"]["alice"][:12] in page
+
+    with TestClient(app) as bob:  # a member: sees Alice's machine, cannot manage it
+        login(bob, email="bob@example.test")
+        page = bob.get("/app/agents").text
+        alice_row = re.search(r'<span class="handle">alice-agent</span>.*?</tr>', page, re.S).group(0)
+        assert "revoke" not in alice_row and "rotate" not in alice_row and "?to=alice-agent" in alice_row
+        assert world["tokens"]["alice"][:12] not in page
+        csrf = app_csrf(bob)
+        assert bob.post(f"/app/agents/{alice_id}/rotate", data={"csrf_token": csrf}).status_code == 404
+        assert bob.post(f"/app/agents/{alice_id}/revoke", data={"csrf_token": csrf}).status_code == 404

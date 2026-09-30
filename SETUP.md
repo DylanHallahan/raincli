@@ -74,7 +74,7 @@ The inbox is the one agent on this machine that receives your team's messages. C
 
 **Next-turn delivery waits until the session is next used.** A message to an idle Claude Code session that nobody touches waits, durably queued, until someone starts the session or types a prompt in it. Teammates see `next-turn` next to your inbox, and a waiting message shows to its sender as `held` with the reason `next_turn`, so they know not to expect an immediate answer. Choose Herdr if messages should be handled while you're away. The next-turn inbox is **Claude Code only**; Codex sessions can be listed, but not used as an inbox.
 
-For CLI only, skip to step 6 for the agent list, and skip the connector.
+For CLI only, skip steps 4–6 and go to step 7. The runtime needs a connector, so a CLI-only machine lists no agents and reports no client version; add an inbox later to get both.
 
 ### 4a. Workspace (agent, both inbox kinds)
 
@@ -151,7 +151,7 @@ Write `~/.config/raincli/connector.json` with mode 0600:
 
 `inbox` replaces `herdr_agent`; a config can't have both. Escalation targets are Herdr agents, so leave `escalation` out: the inbox agent then tells the sender what it can't answer.
 
-The next-turn inbox needs the runtime (`raincli runtime run`, step 5) and the Claude Code hooks (step 6). Install both before starting the session. **You:** start the inbox session under that name, then give it the operator assignment above as your first prompt:
+The next-turn inbox needs the runtime (`raincli runtime run`, step 5) and the Claude Code hooks (step 6). **Do steps 5 and 6 now, then come back here**: a session started before its hooks were installed isn't recorded, and messages stay held `offline` until it is restarted. **You:** then start the inbox session under that name, and give it the operator assignment above as your first prompt:
 
 ```bash
 cd ~/herdr/inbox-agent && RAINCLI_AGENT_NAME=raincli-inbox claude
@@ -161,6 +161,7 @@ How next-turn delivery works:
 - A message for the inbox is written to a private file on this machine (local state `handed_over`). Its sender sees it as `held` with the reason `next_turn` until it is handed over.
 - At the session's next start or prompt, the hook hands over every waiting message, oldest first, as additional context for that turn. The connector then marks each one `submitted`.
 - At most about **10,000 characters** are handed over per turn, because of Claude Code's limit on a hook's additional context. The rest waits for the following turn. A single message too large for a turn is held (`too_large_for_hook`) and never handed over; read it with `raincli show` instead.
+- A session counts as live while its Claude Code process is running, however long it sits idle; the directory then shows it `idle`. Waiting messages are taken back only when the session ends or its process exits.
 - If no live session has that name, messages are **held `offline`**. If more than one does, they are **held `target_ambiguous`**. RainCLI never picks another session.
 - If the connector or machine stops after a message was claimed but before its receipt, the message becomes `submission_uncertain` and is never handed over again automatically. Check `raincli connector status` and ask the sender to resend if needed.
 
@@ -245,7 +246,7 @@ raincli conversations
 
 ## What teammates see
 
-On the website's **Machines** page and in `raincli agents`, each machine shows its agents with the **inbox first**, then each agent's name, type and status, the inbox's reachability (`instant` or `next-turn`), and the machine's client version and update state. `raincli agents` prints the client version, update mode, update state and any error on the machine's line, and marks scan entries "(detected, status unknown)". The list covers reports from the last 120 seconds.
+On the website's **Machines** page (every machine in your teams, yours first) and in `raincli agents`, each machine shows its agents with the **inbox first**, then each agent's name, type and status, the inbox's reachability (`instant` or `next-turn`), and the machine's client version and update state. `raincli agents` prints the client version, update mode, update state and any error on the machine's line, and marks scan entries "(detected, status unknown)". The list covers reports from the last 120 seconds.
 
 Each handle also keeps its **session availability**:
 
