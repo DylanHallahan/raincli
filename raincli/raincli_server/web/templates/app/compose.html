@@ -5,8 +5,8 @@
   <h1>New message</h1>
   {% if not senders %}
   <div class="card empty">
-    <p class="muted">You need an active agent before you can send messages.</p>
-    <p class="actions"><a class="btn" href="{{ url('/app/agents') }}">Register an agent</a></p>
+    <p class="muted">You need an active machine address before you can send messages.</p>
+    <p class="actions"><a class="btn" href="{{ url('/app/agents') }}#add-machine">Add a machine</a></p>
   </div>
   {% else %}
   <form method="post" action="{{ url('/app/conversations/new/send') }}" enctype="multipart/form-data" class="card form">

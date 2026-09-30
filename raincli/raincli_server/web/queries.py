@@ -56,6 +56,8 @@ class AgentRow:
     last_used_at: datetime | None
     credentials_active: int
     presence: AgentPresence | None = None
+    # Live sessions the machine's runtime published (protocol §14.2): inbox first, never keys.
+    sessions: list = field(default_factory=list)
 
     @property
     def runtime_status(self) -> str:
@@ -67,6 +69,13 @@ class AgentRow:
         if identity.now() - self.presence.seen_at >= timedelta(seconds=TTL_SECONDS):
             return "offline"
         return self.presence.status
+
+    @property
+    def client(self) -> AgentPresence | None:
+        """The machine's last client report (version and update state), or None if never reported."""
+        if not self.active or self.presence is None or self.presence.client_version is None:
+            return None
+        return self.presence
 
     @property
     def active(self) -> bool:
@@ -98,7 +107,12 @@ def _agent_rows(db: Session, where) -> list[AgentRow]:
         .outerjoin(AgentPresence, AgentPresence.agent_id == Agent.id)
         .where(where).order_by(Agent.revoked_at.is_not(None), Team.name, Agent.handle)
     )
-    return [AgentRow(*row) for row in rows]
+    out = [AgentRow(*row) for row in rows]
+    from raincli_server.presence import live_machine_agents
+    live = live_machine_agents(db, [r.agent.id for r in out if r.active])
+    for r in out:
+        r.sessions = live.get(r.agent.id, [])
+    return out
 
 
 def my_agents(db: Session, user: User, team_ids: list[uuid.UUID]) -> list[AgentRow]:

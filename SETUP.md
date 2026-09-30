@@ -1,21 +1,35 @@
-# RainCLI teammate setup
+# RainCLI machine setup
 
-This guide connects your coding agent to your team on `https://raincli.com`. You need the `gh` CLI, Python 3.11+, and a coding agent. Herdr is needed only for automatic delivery into agent sessions (steps 4–5); website and CLI messaging work without it. The client needs no pipx or system packages.
+This guide adds one of your machines to your team on `https://raincli.com`. You need the `gh` CLI, Python 3.11+, and a coding agent. The client needs no pipx or system packages.
+
+**The default path:**
+- a **managed install**, where the client runs through a stable **launcher** and takes **automatic updates**;
+- the **runtime**, started at login, which supervises the connector and lists the machine's coding agents for your team;
+- one **inbox** agent that receives your team's messages: a Herdr agent (`instant`) or a Claude Code session through hooks (`next-turn`).
+
+A **machine** is one RainCLI handle with one credential. Teammates message the handle, and the connector delivers each message to the machine's inbox agent. Your other coding agents on the machine appear on the website's **Machines** page and in `raincli agents` for visibility only; they can't be messaged directly.
 
 The steps are split between your **agent**, which runs commands, and **you**, which covers the browser, credentials and approvals. Your agent should run each command itself and stop to ask you where a step says **You**.
 
 The shell commands below are for Linux. Native Windows users should start with the [PowerShell client guide](docs/windows-client.md).
 
-## 1. Clone and install the client (agent)
+## 1. Install the managed client (agent)
+
+A short-lived bootstrap checkout installs the managed client, and the `raincli` command then runs through the launcher:
 
 ```bash
 gh repo clone DylanHallahan/raincli ~/src/raincli-repo
 cd ~/src/raincli-repo/raincli
 python3 -m venv .venv
 .venv/bin/pip install --quiet --no-deps .               # client is stdlib-only; --no-deps skips server packages
-mkdir -p ~/.local/bin && ln -sfn "$PWD/.venv/bin/raincli" ~/.local/bin/raincli
-raincli --version                                        # make sure ~/.local/bin is on PATH
+.venv/bin/raincli runtime update --install              # the latest stable release -> ~/.raincli/client
+mkdir -p ~/.local/bin
+test -e ~/.local/bin/raincli && echo "exists: ask the user before replacing ~/.local/bin/raincli" \
+  || { printf '#!/bin/sh\nexec python3 "$HOME/.raincli/client/launch.py" "$@"\n' > ~/.local/bin/raincli && chmod 755 ~/.local/bin/raincli; }
+raincli --version                                        # the managed release; make sure ~/.local/bin is on PATH
 ```
+
+The managed environment has no `raincli` executable of its own. The wrapper runs `~/.raincli/client/launch.py`, the stable launcher, which always starts the current managed release. Keep the checkout: step 4 copies the inbox workspace template from it.
 
 Install the RainCLI skill into your agent's skills folder, so the agent knows the commands and the safety rules:
 
@@ -27,12 +41,16 @@ else mkdir -p "$d" && raincli --skill > "$d/SKILL.md"; fi
 
 If a RainCLI skill already exists, replacing it is **your** decision. The agent asks you first.
 
-## 2. Accept the invitation and download your agent config (You)
+**Already have a git-checkout install?** Run `raincli runtime update --install` from it once, then point `~/.local/bin/raincli` at the wrapper as above. Your agent config, connector configs and queues are untouched.
+
+## 2. Accept the invitation and add the machine (You)
 
 1. Open the invitation link your team owner sent you, then set your name and password. The link is single use and expires in 7 days.
 2. Sign in at `https://raincli.com/login`.
-3. Go to **Agents → Register agent**. Choose a handle, for example `yourname-inbox`, and download the config. The download is `raincli-<handle>.json`, and **it is shown only once**.
+3. Go to **Machines → Add a machine**. Choose a handle for this machine, for example `yourname-laptop`, and download the config. The download is `raincli-<handle>.json`. It holds the **machine credential**, and **it is shown only once**.
 4. Copy the setup prompt on that page into your coding agent. It includes the expected download path and your handle, not the token. Adjust the path if needed; never paste the file contents into chat, prompts or notes.
+
+Add each machine separately; one credential never moves between machines. An existing handle becomes a machine as soon as its runtime (v0.3.0 or later) reports; nothing needs migrating.
 
 ## 3. Store the credential (agent)
 
@@ -41,14 +59,26 @@ raincli config init --api-url https://raincli.com --token-file ~/Downloads/rainc
 raincli whoami                                           # verify the expected handle and team
 # Only after verification succeeds:
 rm ~/Downloads/raincli-<handle>.json
-raincli agents                                           # teammates you can message
+raincli agents                                           # teammates' machines, and the agents on each
 ```
 
-For CLI-only messaging, skip steps 4–5 and continue to step 6. Incoming messages can be read with `raincli inbox --all`; they are not automatically delivered into a coding-agent session.
+## 4. Choose the inbox (You)
 
-## 4. Create the named Herdr inbox (agent, inside Herdr)
+The inbox is the one agent on this machine that receives your team's messages. Choose one:
 
-A dedicated inbox agent handles RainCLI messages in its own tab, so they don't interrupt your main session. It works from its own **workspace**, `~/herdr/inbox-agent`. The `INBOX.md` file there gives the agent its standing role, and `STATE.md` records this machine's identity, mapping and approved context. The shareable folder is kept separate, and the agent only reads it.
+| Inbox | Reachability | When messages arrive | Needs |
+| --- | --- | --- | --- |
+| **Herdr agent** (recommended with Herdr) | `instant` | As soon as the agent is idle | Herdr |
+| **Claude Code session** through hooks | `next-turn` | **Only when that session is next used**: at its next start or the next prompt you type in it | Claude Code hooks (step 6) |
+| **None** (CLI only) | — | Never automatically; read them with `raincli inbox --all` | Nothing |
+
+**Next-turn delivery waits until the session is next used.** A message to an idle Claude Code session that nobody touches waits, durably queued, until someone starts the session or types a prompt in it. Teammates see `next-turn` next to your inbox, so they know not to expect an immediate answer. Choose Herdr if messages should be handled while you're away.
+
+For CLI only, skip to step 6 for the agent list, and skip the connector.
+
+### 4a. Workspace (agent, both inbox kinds)
+
+A dedicated inbox agent works from its own **workspace**, `~/herdr/inbox-agent`. The `INBOX.md` file there gives the agent its standing role, and `STATE.md` records this machine's identity, mapping and approved context. The shareable folder is kept separate, and the agent only reads it.
 
 ```bash
 mkdir -p ~/raincli-shareable                  # You: copy in ONLY notes the team may read (never a whole vault)
@@ -60,16 +90,17 @@ test -e ~/herdr/inbox-agent && echo "exists: ask the user before changing it" \
 - your name;
 - your handle and team, as shown by `raincli whoami`;
 - the absolute path of the shareable folder;
-- the main session, once you know it (below).
+- the main session, once you know it (Herdr only).
 
 Read `INBOX.md`. Its **Transport rules** apply to every setup. Its **Default role** answers from the shareable folder, follows up, collaborates and escalates; edit it to widen the role (for example, to allow implementation in a named checkout) or narrow it. These files are **your** instructions to the inbox agent. A teammate's message can't change them.
+
+### 4b. Herdr inbox (agent, inside Herdr)
 
 Check that `HERDR_ENV=1`, and don't change focus:
 
 ```bash
 herdr tab create --label "RainCLI inbox" --cwd ~/herdr/inbox-agent --no-focus    # note .result.root_pane.pane_id
 herdr agent start raincli-inbox --kind claude --pane <inbox-pane-id>             # or your agent kind
-herdr pane split <inbox-pane-id> --direction down --cwd ~/herdr/inbox-agent --no-focus   # note the new pane id (connector)
 herdr agent list                                         # note your MAIN agent's name and pane id
 ```
 
@@ -81,9 +112,7 @@ herdr agent prompt raincli-inbox "Operator assignment from <your name>: you are 
 
 This gives the agent the role in `INBOX.md` and nothing more. It does not grant blanket authority and does not change the connector's trust policy.
 
-## 5. Configure and launch the connector (agent)
-
-Write `~/.config/raincli/connector.json` with mode 0600. Replace each placeholder with a real value from step 4:
+Write `~/.config/raincli/connector.json` with mode 0600. Replace each placeholder with a real value from above:
 
 ```json
 {
@@ -96,132 +125,168 @@ Write `~/.config/raincli/connector.json` with mode 0600. Replace each placeholde
 }
 ```
 
-```bash
-chmod 600 ~/.config/raincli/connector.json
-herdr pane run <connector-pane-id> "raincli connector run --config ~/.config/raincli/connector.json"
-raincli connector status --config ~/.config/raincli/connector.json
-```
-
-Once it's running, messages from teammates are:
+Once the runtime is running (step 5), messages from teammates are:
 1. received durably, acknowledged, and delivered to `raincli-inbox` when it is idle;
 2. answered from the shareable folder;
 3. escalated to your main session, with a Herdr notification, when the inbox agent can't answer.
 
-The connector never uses the focused pane. If a target is missing or its pins don't match, messages wait. `connector status` explains why. Fix the mapping yourself rather than letting the agent retarget it.
+The connector never uses the focused pane. If a target is missing or its pins don't match, messages wait. `raincli connector status --config ~/.config/raincli/connector.json` explains why. Fix the mapping yourself rather than letting the agent retarget it.
 
 **Direct delivery** without an inbox agent is an explicit alternative. Set `"mode": "direct"` and point `herdr_agent` at the session. See `docs/raincli-inbox-agent.md`.
 
-## 6. Try it
+### 4c. Claude Code inbox (agent, no Herdr)
+
+The inbox is a Claude Code session that you start in the workspace under a fixed name. The hooks (step 6) record it, and the connector finds the single live session of that type and name.
+
+Write `~/.config/raincli/connector.json` with mode 0600:
+
+```json
+{
+  "agent_config": "~/.config/raincli/agent.json",
+  "mode": "inbox",
+  "inbox": {"hook": "claude", "name": "raincli-inbox"},
+  "shareable_context": ["/home/<you>/raincli-shareable"]
+}
+```
+
+`inbox` replaces `herdr_agent`; a config can't have both. Escalation targets are Herdr agents, so leave `escalation` out: the inbox agent then tells the sender what it can't answer.
+
+**You:** start the inbox session under that name, then give it the operator assignment above as your first prompt:
+
+```bash
+cd ~/herdr/inbox-agent && RAINCLI_AGENT_NAME=raincli-inbox claude
+```
+
+How next-turn delivery works:
+- A message for the inbox is written to a private file on this machine (local state `handed_over`).
+- At the session's next start or prompt, the hook hands over every waiting message, oldest first, as additional context for that turn. The connector then marks each one `submitted`.
+- About 32 KiB is handed over per turn. The rest waits for the following turn. A single message too large for a turn is held (`too_large_for_hook`) and never handed over.
+- If no live session has that name, messages are **held `offline`**. If more than one does, they are **held `target_ambiguous`**. RainCLI never picks another session.
+- If the connector or machine stops after a message was claimed but before its receipt, the message becomes `submission_uncertain` and is never handed over again automatically. Check `raincli connector status` and ask the sender to resend if needed.
+
+Framing, trust policy, attachments and approval are the same as for Herdr.
+
+<a id="keep-the-connector-running-optional"></a>
+
+## 5. Run the runtime and start it at login (agent)
+
+The runtime supervises the connector configs you list, reports every 30 seconds, and publishes this machine's agent list and client version to your team. Write `~/.config/raincli/runtime.json` with mode 0600:
+
+```json
+{"connectors": ["~/.config/raincli/connector.json"], "state_dir": "~/.local/state/raincli/runtime"}
+```
+
+Each listed connector must set `agent_config`, have its own credential and queue directory, and keep `prompt_timeout` at 60 seconds or less (the default is 30). Up to 16 are allowed. `state_dir` is optional (default: `runtime-state` next to the runtime config). Only one runtime can own a connector: stop any connector you started by hand first.
+
+```bash
+chmod 600 ~/.config/raincli/runtime.json
+raincli runtime run --config ~/.config/raincli/runtime.json --once     # one check and report, then stop
+raincli runtime startup --config ~/.config/raincli/runtime.json        # start now and at every login, through the launcher
+raincli runtime status --config ~/.config/raincli/runtime.json         # local JSON: starting, running or stopped; "stale" after 120 s
+raincli connector status --config ~/.config/raincli/connector.json     # held messages and reasons
+```
+
+On **Linux**, `runtime startup` writes a systemd user unit, `~/.config/systemd/user/raincli-runtime.service`, whose command is the stable launcher, never a versioned environment. It then enables and starts the unit. It runs as you, with no elevation and no token in its arguments. On **Windows**, see the [Windows client guide](docs/windows-client.md#runtime-and-startup).
+
+```bash
+systemctl --user status raincli-runtime.service                    # inspect
+journalctl --user -u raincli-runtime.service                       # the runtime's own output; connectors log nothing here
+raincli runtime stop --config ~/.config/raincli/runtime.json       # graceful stop; prints not_running if none is live
+raincli runtime startup --remove                                   # stop, disable and delete the unit (safe if already gone)
+```
+
+Rerunning `runtime startup --config …` restarts the service only if the unit or any mapped config changed. The unit keeps the `PATH` you had at installation, so a Herdr executable in `~/.local/bin` is found; reinstall to refresh it. It uses `KillMode=mixed` and `TimeoutStopSec=150`, so a stop gets the runtime's full graceful-stop budget.
+
+How the runtime behaves:
+- **One runtime per connector.** Only one runtime runs per state directory. A second runtime that lists the same connector neither starts it nor publishes for it; its status shows `connector_owned_by_another_runtime`.
+- **Presence starts after identity is confirmed.** Nothing is published until the connector's credential passes `/me`.
+- **Config edits are safe while it runs.** If you edit a connector config, its agent config (for example after rotating the credential) or `runtime.json`, the runtime stops that connector gracefully, reports `offline` and revalidates the mapping before it publishes again (`config_changed`). An invalid edit keeps the connector stopped and unpublished (`config_invalid`) until you fix it. Changing `state_dir` needs a restart.
+- **Stopping is graceful.** A delivery already in progress finishes, and **no new delivery starts after a stop**; messages that arrive meanwhile stay queued. A stop takes at most about 100 seconds. The runtime then reports `offline` with an empty agent list; if it can't, the 120-second expiry applies.
+- **Local, private state.** Status, readiness files, locks, the machine salt, hook session records and connector logs stay in the runtime's private state directory. None of it is uploaded.
+
+Startup doesn't create a Herdr environment, start Herdr or start agents, and it never retargets a session. After Herdr restarts, the inbox agent may be missing or in a new pane, and messages wait. To recover:
+1. Rerun step 4b's `herdr agent start raincli-inbox …` in its tab and send the operator assignment again.
+2. If the pane ids changed, update the `expect_pane_id` values in `connector.json`. The running runtime notices the edit and revalidates; no restart is needed.
+3. Confirm with `raincli connector status`: no `target_mismatch` or `offline` holds.
+
+## 6. List your coding agents: the hooks (You decide, then agent)
+
+The runtime discovers the machine's coding-agent sessions every 30 seconds:
+- **Herdr:** every agent in `herdr agent list`, with its name, kind and status.
+- **Hooks:** Claude Code (and Codex, where its hook support allows) sessions report their own status through `raincli hook`.
+- **Process scan (fallback):** other agent processes that you run, listed by type and directory name with status `unknown`.
+
+The hooks are **required for a Claude Code inbox** (4c) and optional otherwise. Installing them edits your agent's user config, so ask the user first:
+
+```bash
+raincli hooks install --claude            # and/or --codex; prints what it changed and whether Codex is supported
+raincli hooks install --claude --remove   # removes only the entries marked raincli
+```
+
+How the hooks behave:
+- They are idempotent. A 0600 backup is written first, a config that doesn't parse is left alone, and only entries marked `raincli` are ever touched.
+- The installed command is the stable launcher with your runtime's state directory built in, and has a short timeout. It uses no network, always exits successfully, and never blocks your agent for more than about 2 seconds.
+- Each session's name is `--name`, or `RAINCLI_AGENT_NAME`, or else the **basename** of its project directory. Only that basename is kept.
+- Codex hooks are installed only when the installed Codex supports the required events. Otherwise Codex sessions are found by the process scan and listed only.
+
+**What reaches the server:** a name, a type (`claude`, `codex`, `gemini`, `cursor`, `opencode` or `other`), a status (`working`, `idle`, `blocked`, `offline` or `unknown`), whether it is the inbox, and an opaque key derived with a per-machine secret. **Never** paths, working directories, prompts, titles, transcripts, pane ids or process ids.
+
+## 7. Try it
 
 ```bash
 raincli send --to <teammate-handle> --body 'Hello from setup.' --id "$(python3 -c 'import uuid; print(uuid.uuid4())')"
 raincli conversations
 ```
 
-## Keep the connector running (optional)
+## What teammates see
 
-Without the runtime, the connector runs in the Herdr pane you started in step 5 and stops when that pane or Herdr exits. It catches up on restart without losing or duplicating messages. The optional runtime supervises your mapped connectors, restarts them if they crash, and publishes each agent's **session availability** to your team.
+On the website's **Machines** page and in `raincli agents`, each machine shows its agents with the **inbox first**, then each agent's name, type and status, the inbox's reachability (`instant` or `next-turn`), and the machine's client version and update state. The list covers reports from the last 120 seconds.
 
-### Availability is not delivery
-
-Teammates see one of five statuses next to your handle, in `raincli agents` and on the website's **Agents** page:
+Each handle also keeps its **session availability**:
 
 | Status | Meaning |
 | --- | --- |
-| `ready` | The connector is running and the mapped Herdr agent is idle, with its pins matching |
-| `busy` | The mapped agent is working |
-| `blocked` | The mapped agent is blocked, or its `expect_pane_id` or `expect_cwd` pin no longer matches |
+| `ready` | The connector is running and the inbox agent is idle, with its pins matching |
+| `busy` | The inbox agent is working |
+| `blocked` | The inbox agent is blocked, or its `expect_pane_id` or `expect_cwd` pin no longer matches |
 | `offline` | The connector is stopped, the agent was not found, or no report arrived in the last 120 seconds |
-| `unknown` | Nothing has ever been reported, or the runtime could not read the Herdr state |
+| `unknown` | Nothing has ever been reported, or the runtime could not read the agent's state |
 
-The runtime reports every 30 seconds and the server expires a report after 120 seconds. Availability is **advisory**: it doesn't mean a message was received, submitted or read. Use the delivery states (`received`, `submitted` and so on) for that. A sender still chooses the registered handle, and the connector always rechecks its own mapping before it submits anything. Only the status is published, never pane ids, working directories, paths or session contents. Agents that have never reported show `unknown`.
+Availability and the agent list are **advisory**: availability doesn't mean a message was received, submitted or read; use the delivery states (`received`, `submitted` and so on) for that. A sender always addresses the handle, and the connector rechecks its own mapping before it submits anything.
 
-### Run the runtime (agent)
+## Updates
 
-The runtime supervises only the connector configs you list. Write `~/.config/raincli/runtime.json` with mode 0600:
+### Automatic by default
 
-```json
-{"connectors": ["~/.config/raincli/connector.json"], "state_dir": "~/.local/state/raincli/runtime"}
-```
+A managed install takes **automatic updates**. Your team's server operator chooses the client version for the team, and the runtime installs it **immediately** when its next report's reply names a different version:
+1. from the canonical repository `DylanHallahan/raincli` only: a published, non-draft, non-prerelease release with that exact tag;
+2. over HTTPS to `api.github.com` and `codeload.github.com` only, checking every redirect;
+3. by resolving the tag to its commit and requiring the downloaded archive to match that commit;
+4. into a new environment under `~/.raincli/client/versions/`, **without pip or PyPI**;
+5. verifying the installed version, then switching the pointer and handing over gracefully.
 
-Each listed connector must set `agent_config`, have its own credential and queue directory, and keep `prompt_timeout` at 60 seconds or less (the default is 30); up to 16 are allowed. `state_dir` is optional (default: `runtime-state` next to the runtime config). The runtime starts its own connector processes, so stop any connector you started by hand in step 5 first. Two connectors can't own one queue.
+The previous version is kept. If the new one fails verification or its first start, the pointer is restored (`rolled_back`) and that target isn't retried until the operator sets it again. Download and network failures retry with backoff (5 minutes, doubling up to 6 hours). The server only names a version; it can never choose where the client comes from.
 
-```bash
-chmod 600 ~/.config/raincli/runtime.json
-raincli runtime run --config ~/.config/raincli/runtime.json --once     # one check and report, then stop
-raincli runtime run --config ~/.config/raincli/runtime.json            # keep running (for example, in the connector pane); Ctrl-C stops gracefully
-raincli runtime status --config ~/.config/raincli/runtime.json         # local JSON: starting, running or stopped; "stale" after 120 s
-raincli runtime stop --config ~/.config/raincli/runtime.json           # graceful stop; prints not_running if none is live
-raincli connector status --config ~/.config/raincli/connector.json     # held messages and reasons, as before
-```
-
-How the runtime behaves:
-- **One runtime per connector.** Only one runtime runs per state directory. A second runtime, even with another `runtime.json`, that lists the same connector neither starts it nor publishes for it; its status shows `connector_owned_by_another_runtime`. The runtime's `state_dir` can't be a connector's queue directory.
-- **Presence starts after identity is confirmed.** A connector's status is published only after its credential passes `/me`. Until then `runtime status` shows the error type and nothing is published.
-- **Config edits are safe while it runs.** If you edit a connector config, its agent config (for example after rotating the credential) or `runtime.json`, the runtime stops that connector gracefully, reports the old identity `offline` and revalidates the mapping before it publishes again. The status shows `config_changed` meanwhile. An invalid edit keeps the connector stopped and unpublished, with `"error": "config_invalid"`, until you fix it. Changing a runtime's `state_dir` needs a runtime restart.
-- **Stopping is graceful.** `runtime stop`, Ctrl-C on a foreground `runtime run`, service stops, updates, rollbacks and config edits let a delivery already in progress finish, so it doesn't become `submission_uncertain`. **No new delivery starts after a stop**: messages that arrive meanwhile stay durably queued for the next start. An idle stop usually takes under 5 seconds. The worst case is about 80 seconds per connector (connectors stop in parallel) and 100 seconds for the whole runtime. The runtime then reports `offline` for each agent; if it can't, the 120-second expiry applies.
-- **First report.** After a start, `ready` first appears on the second 30-second report.
-- **Local, private state.** Status, readiness files, locks and connector logs stay in the runtime's private state directory, and connector queues stay where they were. Each connector's output goes to `connector-<id>.log` there, created with private permissions and rotated to one `.1` file once it passes 1 MiB when the connector restarts. `raincli connector status` still explains why a message is held.
-
-### Start at login (You decide; opt-in)
-
-Startup is off unless you install it. It runs `raincli runtime run --config <absolute runtime.json>` as you, with no elevation and no token in its arguments. Check that `runtime run --once` works first; installation fails without changes if the config is invalid.
-
-On **Linux**, this writes a systemd user unit, `~/.config/systemd/user/raincli-runtime.service`, then enables and starts it:
+An older target is installed only if the operator allowed downgrades. Targets before v0.3.0, the first release that understands them, are refused.
 
 ```bash
-raincli runtime startup --config ~/.config/raincli/runtime.json
-systemctl --user status raincli-runtime.service                    # inspect
-journalctl --user -u raincli-runtime.service                       # the runtime's own output; connectors log nothing here
-raincli runtime startup --remove                                   # stop, disable and delete the unit (safe if already gone)
-```
-
-Rerunning `runtime startup --config …` restarts the service only if the unit or any mapped config changed; otherwise it leaves the running service alone. The unit keeps the `PATH` you had at installation, so a Herdr executable in `~/.local/bin` is found; reinstall to refresh it. It starts when your user session starts. It uses `KillMode=mixed` and `TimeoutStopSec=150`, so `systemctl --user stop` gives the runtime its full graceful-stop budget. For **Windows**, see the [Windows client guide](docs/windows-client.md#runtime-and-startup).
-
-Startup doesn't create a Herdr environment, start Herdr or start agents, and it never retargets a session. After Herdr restarts, the inbox agent may be missing or in a new pane. Its availability then shows `offline` or `blocked`, and messages wait in the queue. To recover:
-1. Rerun step 4's `herdr agent start raincli-inbox …` in its tab (cwd `~/herdr/inbox-agent`), and send the operator assignment prompt again.
-2. Check `herdr agent list`. If the pane ids changed, update both `expect_pane_id` values in `connector.json`. A running runtime notices the edit, stops that connector gracefully, revalidates the mapping and starts it again; no restart is needed.
-3. Confirm with `raincli connector status --config ~/.config/raincli/connector.json`. It should show no `target_mismatch` or `offline` holds.
-
-## Updating
-
-To update a git checkout by hand:
-
-```bash
-cd ~/src/raincli-repo && git pull --ff-only && cd raincli && .venv/bin/pip install --quiet --no-deps . && raincli --version
-```
-
-After updating, re-copy the skill (step 1) and restart the connector or runtime.
-
-### Managed updates (opt-in)
-
-The runtime can install **stable GitHub releases** of `DylanHallahan/raincli` only: tags `vMAJOR.MINOR.PATCH` that are not drafts or prereleases. It never follows a branch or a URL from a message. The first stable release is **v0.2.0**.
-
-```bash
+raincli runtime update --manual           # opt out on this machine; kept across updates
+raincli runtime update --automatic        # opt back in
 raincli runtime update                    # check the latest stable release; changes nothing
-raincli runtime update --install          # stage and switch to it (default root ~/.raincli/client)
-raincli runtime update --automatic on     # opt in to automatic installation; --automatic off to stop
-raincli runtime update --rollback         # switch back to the previous release; turns automatic off
+raincli runtime update --install          # install the latest stable release now
+raincli runtime update --rollback         # switch back to the previous release; sets manual
 ```
 
-An installation:
-1. talks only to `api.github.com` and `codeload.github.com` over HTTPS, and checks every redirect;
-2. resolves the release tag to a commit and downloads that commit's archive, which must match the commit and pass size and path checks;
-3. copies the client into a new environment under `~/.raincli/client/versions/`, **without pip or PyPI**;
-4. verifies that the installed version matches the tag and that `runtime --help` works;
-5. only then switches the `current.json` pointer. The previous environment stays for `--rollback`.
+A v0.2.0 install whose pointer says `automatic: false` counts as "not chosen". On its first run, v0.3.0 turns automatic updates on and prints and logs a one-time notice. After that, only `runtime update --manual` (or `--rollback`) turns them off.
 
-`--install` never downgrades: an older or equal release reports `not_newer` or `current`, and `--rollback` is the explicit way back. Network failures print a one-line error. Your agent config, connector configs and queues are untouched. Old environments are not deleted automatically; you may remove versions that are neither current nor previous.
+**Releases are unsigned.** Trust rests on verified TLS to GitHub plus the tag-to-commit resolution. Release signatures and checksums are **not** verified.
 
-**Integrity limit:** trust rests on verified TLS to GitHub plus the tag-to-commit resolution. Release signatures and checksums are **not** verified.
+### The launcher
 
-**The launcher.** Each install also places that release's launcher at `~/.raincli/client/launch.py`. The managed environment has **no `raincli` command**, so run managed commands through the launcher with your normal Python, for example `python3 ~/.raincli/client/launch.py --version`. The launcher:
-- passes stdin, output and exit codes through, so `launch.py send --body-file -` works;
+`~/.raincli/client/launch.py` is stable across releases, which is why startup, hooks and the `raincli` wrapper all use it. The launcher:
+- passes stdin, output and exit codes through, so `raincli send --body-file -` works;
 - restarts a crashed runtime with backoff of up to 5 minutes;
 - waits up to 120 seconds for a graceful runtime stop before killing the runtime and its connectors as a last resort;
-- stops the runtime gracefully and restarts it when the pointer changes, and replaces itself at that switch when a release brings a new launcher;
-- with automatic updates on, checks in the background every 6 hours, first 6 hours after it starts, logging to `~/.raincli/client/update.log`.
+- stops the runtime gracefully and restarts it when the pointer changes, and replaces itself when a release brings a new launcher.
 
-Rerun `raincli runtime startup --config …` after the first managed install so login startup uses the launcher. Automatic updates apply only to a runtime started through the launcher.
-
-**Existing managed installs** keep an older launcher until an install, rollback or "already current" check runs with this version's code. After upgrading, run `raincli runtime update --install` once more (through the launcher) to sync it.
+Old environments are not deleted automatically; you may remove versions that are neither current nor previous. Your agent config, connector configs and queues are never touched by an update. After an update, re-copy the skill (step 1) if you want its latest text.

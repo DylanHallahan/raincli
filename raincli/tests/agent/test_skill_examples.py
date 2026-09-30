@@ -48,6 +48,7 @@ def _expand(template: str) -> list[list[str]]:
         for key in sorted(PLACEHOLDERS, key=len, reverse=True):
             v = re.sub(rf"(?<![\w-]){re.escape(key)}(?![\w-])", PLACEHOLDERS[key], v)
         v = v.replace("…", "").strip()
+        v = re.sub(r'"\$\(.*?\)"', PLACEHOLDERS["UUID4"], v)  # a quoted command substitution is one argument
         out.append(shlex.split(v)[1:])  # drop leading "raincli"
     return out
 
@@ -55,8 +56,10 @@ def _expand(template: str) -> list[list[str]]:
 def _examples(text: str) -> list[tuple[str, bool]]:
     """(example, inline). Code-block lines are full invocations; inline mentions may name a command only."""
     found = []
-    for block in re.findall(r"```(?:bash)?\n(.*?)```", text, re.S):
-        found += [(ln.strip(), False) for ln in block.splitlines() if ln.strip().startswith("raincli ")]
+    # Pair every fence (```json blocks included) so bash blocks after them are still checked.
+    for lang, block in re.findall(r"^```(\w*)\n(.*?)^```", text, re.S | re.M):
+        if lang in ("", "bash"):
+            found += [(ln.strip(), False) for ln in block.splitlines() if ln.strip().startswith("raincli ")]
     found += [(ref, True) for ref in re.findall(r"`(raincli [^`]+)`", text)]
     return [(e, i) for e, i in found if "--help" not in e and "never `" not in e and not e.rstrip().endswith("…")]
 

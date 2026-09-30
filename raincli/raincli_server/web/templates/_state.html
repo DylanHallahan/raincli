@@ -21,3 +21,36 @@
 {%- set label = labels.get(status, labels['unknown']) -%}
 <span class="badge presence-{{ status if status in labels else 'unknown' }}" title="{{ label[1] }}">{{ label[0] }}</span>
 {%- endmacro %}
+{% macro session_badge(status) -%}
+{#- A coding-agent session the machine's runtime saw; advisory like presence. -#}
+{%- set labels = {
+  'working': ('Working', 'The session was working at the last report.'),
+  'idle': ('Idle', 'The session was idle at the last report.'),
+  'blocked': ('Blocked', 'The session was waiting for input at the last report.'),
+  'offline': ('Offline', 'The session has not been active recently.'),
+  'unknown': ('Unknown', 'The runtime found this session but cannot read its state.'),
+} -%}
+{%- set label = labels.get(status, labels['unknown']) -%}
+<span class="badge session-{{ status if status in labels else 'unknown' }}" title="{{ label[1] }}">{{ label[0] }}</span>
+{%- endmacro %}
+{% macro reach_badge(reachability) -%}
+{%- if reachability == 'instant' -%}
+<span class="badge reach-instant" title="Messages are handed to this Herdr session as soon as it is idle.">Instant</span>
+{%- elif reachability == 'next-turn' -%}
+<span class="badge reach-next-turn" title="Messages wait until this Claude Code session is next used.">Next turn</span>
+{%- endif -%}
+{%- endmacro %}
+{% macro client_badges(client) -%}
+{%- if client -%}
+{%- set states = {
+  'current': ('Up to date', 'The client is running the version it was asked to run.'),
+  'updating': ('Updating', 'The client is installing a new version.'),
+  'failed': ('Update failed', 'The last update attempt failed; the previous version is still running.'),
+  'rolled_back': ('Rolled back', 'The new version failed its checks and the previous version was restored.'),
+} -%}
+{%- set s = states.get(client.update_state, (client.update_state, '')) -%}
+<span class="client-version">v{{ client.client_version }}</span> <span class="badge update-{{ client.update_state }}" title="{{ s[1] }}{% if client.update_error %} ({{ client.update_error }}){% endif %}">{{ s[0] }}</span>{% if client.update_mode == 'manual' %} <span class="muted small">manual updates</span>{% endif %}
+{%- else -%}
+<span class="muted small" title="The client has not reported a version; it predates v0.3.0 or has not run.">Not reported</span>
+{%- endif -%}
+{%- endmacro %}

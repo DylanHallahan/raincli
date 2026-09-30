@@ -1012,3 +1012,81 @@ def test_layout_guards_for_code_blocks_and_landing_footer(client):
     pre_rule = css[css.index("pre.code {"):css.index("}", css.index("pre.code {"))]
     assert "white-space: pre-wrap" in pre_rule and "overflow-wrap: anywhere" in pre_rule
     assert ".public main { flex: none; }" in css
+
+
+def _machine_sessions(html: str, handle: str) -> list[str]:
+    table = re.search(rf'<table class="table machine-sessions" data-machine="{handle}">(.*?)</table>', html, re.S)
+    assert table, f"no agents table for {handle}"
+    return re.findall(r"<tr>(.*?)</tr>", table.group(1).split("</thead>", 1)[1], re.S)
+
+
+def test_machines_page_lists_agents_with_inbox_first_and_no_keys(client, world, session):
+    from raincli_server import presence
+    from raincli_server.models import MachineAgent
+
+    login(client)
+    page = client.get("/app/agents").text
+    assert "Your machines" in page and "Add a machine" in page and "Register an agent" not in page
+    assert "No agents reported in the last two minutes" in page and "Not reported" in page
+
+    presence.publish(session, world["agents"]["alice"], {
+        "status": "ready",
+        "client": {"version": "0.3.1", "update_mode": "automatic", "update_state": "rolled_back",
+                   "error": "verify_failed"},
+        "agents": [
+            {"key": "b" * 32, "name": "notes", "type": "codex", "status": "working", "source": "hook"},
+            {"key": "a" * 32, "name": "team-inbox", "type": "claude", "status": "idle", "role": "inbox",
+             "reachability": "next-turn", "source": "hook"},
+            {"key": "c" * 32, "name": "aider", "type": "other", "status": "unknown", "source": "scan"},
+        ]})
+    presence.publish(session, world["agents"]["bob"], {"status": "ready", "agents": [
+        {"key": "d" * 32, "name": "bobs-secret-session", "type": "claude", "status": "idle", "source": "herdr"}]})
+    session.commit()
+    page = client.get("/app/agents").text
+    rows = _machine_sessions(page, "alice-agent")
+    assert len(rows) == 3
+    # The inbox badge comes first, on the inbox row only, with its reachability.
+    assert 'class="badge role-inbox"' in rows[0] and "team-inbox" in rows[0] and ">Next turn<" in rows[0]
+    assert "role-inbox" not in rows[1] + rows[2] and "reach-" not in rows[1] + rows[2]
+    assert ">aider<" in rows[1] and ">Unknown<" in rows[1] and ">notes<" in rows[2] and ">Working<" in rows[2]
+    # The machine's version and update state appear on each agent.
+    assert all("v0.3.1" in r and ">Rolled back<" in r for r in rows)
+    assert "a" * 32 not in page and "b" * 32 not in page  # keys are never rendered
+    assert "bobs-secret-session" not in page  # only the viewer's machines
+
+    for row in session.scalars(select(MachineAgent)):
+        row.seen_at -= timedelta(seconds=presence.TTL_SECONDS)
+    session.commit()
+    page = client.get("/app/agents").text
+    assert "machine-sessions" not in page and "team-inbox" not in page
+
+    presence.publish(session, world["agents"]["alice"], {"status": "ready", "agents": [
+        {"key": "a" * 32, "name": "inbox <b>x", "type": "claude", "status": "idle", "role": "inbox",
+         "reachability": "instant", "source": "herdr"}]})
+    identity.revoke_agent(session, world["agents"]["alice"])
+    session.commit()
+    page = client.get("/app/agents").text
+    assert "machine-sessions" not in page and "<b>x" not in page and "v0.3.1" not in page
+
+
+def test_machine_names_are_escaped(client, world, session):
+    from raincli_server import presence
+
+    login(client)
+    presence.publish(session, world["agents"]["alice"], {"status": "ready", "agents": [
+        {"key": "a" * 32, "name": "<img src=x onerror=alert(1)>", "type": "claude", "status": "idle", "source": "herdr"}]})
+    session.commit()
+    page = client.get("/app/agents").text
+    assert "<img src=x" not in page and "&lt;img src=x onerror=alert(1)&gt;" in page
+
+
+def test_add_machine_requires_csrf_and_shows_one_time_machine_credential(client, world, session):
+    login(client)
+    data = {"team": "acme", "handle": "alice-laptop"}
+    assert client.post("/app/agents", data=data).status_code == 403
+    assert client.post("/app/agents", data={**data, "csrf_token": "wrong"}).status_code == 403
+    assert identity.find_agent(session, world["teams"]["acme"], "alice-laptop") is None
+    r = client.post("/app/agents", data={**data, "csrf_token": app_csrf(client)})
+    assert r.status_code == 200 and "alice-laptop is added" in r.text and "machine credential" in r.text
+    prompt = re.search(r'<textarea id="setup-prompt"[^>]*>(.*?)</textarea>', r.text, re.S).group(1)
+    assert "rca_" not in prompt and "managed install" in prompt and "inbox" in prompt

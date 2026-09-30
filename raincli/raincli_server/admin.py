@@ -15,12 +15,13 @@ import os
 import sys
 from typing import Callable, TextIO
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from raincli_server import identity
+from raincli_server import identity, presence
 from raincli_server.db import make_engine, make_sessionmaker, session_scope
-from raincli_server.models import Agent, AgentCredential, Team, User
+from raincli_server.models import Agent, AgentCredential, AgentPresence, ClientTarget, Team, User
 
 
 class AdminError(Exception):
@@ -138,6 +139,18 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("list-agents", help="list agents (never shows tokens)")
     c.add_argument("--team", metavar="SLUG")
 
+    c = sub.add_parser("set-client-version",
+                       help="push a client version to every managed machine in a team (protocol §14.5)")
+    c.add_argument("--team", required=True, metavar="SLUG")
+    target = c.add_mutually_exclusive_group(required=True)
+    target.add_argument("version", nargs="?", metavar="vX.Y.Z", help="release tag, v0.3.0 or later")
+    target.add_argument("--clear", action="store_true", help="remove the team's target")
+    c.add_argument("--allow-downgrade", action="store_true",
+                   help="let machines on a newer version install this older one")
+
+    c = sub.add_parser("client-status", help="list each machine's client version and update state")
+    c.add_argument("--team", required=True, metavar="SLUG")
+
     sub.add_parser("migrate", help="upgrade the database schema to head")
     return p
 
@@ -223,6 +236,57 @@ def _dispatch(args, session: Session, env, stdin, stdout, stderr, prompt) -> Non
                 team.slug, agent.handle, owner.email, "active" if agent.revoked_at is None else "revoked",
                 ",".join(c.prefix + "…" for c in creds) or "-", last.isoformat() if last else "never",
             ]), file=stdout)
+    elif cmd == "set-client-version":
+        _set_client_version(session, _team(session, args.team), args, stdout, stderr)
+    elif cmd == "client-status":
+        _client_status(session, _team(session, args.team), stdout)
+
+
+def _set_client_version(session: Session, team: Team, args, stdout, stderr) -> None:
+    if args.clear:
+        if args.allow_downgrade:
+            raise AdminError("--allow-downgrade cannot be combined with --clear")
+        target = session.get(ClientTarget, team.id)
+        if target is None:
+            print(f"team {team.slug} has no client target", file=stdout)
+            return
+        session.delete(target)
+        print(f"cleared the client target for {team.slug}; machines keep their installed version", file=stdout)
+        return
+    version = args.version if args.version.startswith("v") else "v" + args.version
+    try:
+        numeric = presence.version_tuple(version)
+    except ValueError:
+        raise AdminError(f"{args.version} is not a release version like v0.3.0") from None
+    if numeric < presence.MIN_TARGET:
+        raise AdminError(f"{version} predates pushed updates; the target must be v0.3.0 or later")
+    if args.allow_downgrade:
+        print(f"warning: --allow-downgrade lets machines in {team.slug} newer than {version} install it; "
+              "it applies only while this target is set", file=stderr)
+    # set_at changes on every upsert, so a runtime may retry a target it rolled back (protocol §14.7).
+    values = {"version": version, "allow_downgrade": args.allow_downgrade, "set_at": func.now()}
+    session.execute(insert(ClientTarget).values(team_id=team.id, **values)
+                    .on_conflict_do_update(index_elements=[ClientTarget.team_id], set_=values))
+    print(f"client target for {team.slug} is {version}"
+          f"{' (downgrade allowed)' if args.allow_downgrade else ''}", file=stdout)
+
+
+def _client_status(session: Session, team: Team, stdout) -> None:
+    """One tab-separated line per active handle; the target first. Never shows keys or paths."""
+    target = session.get(ClientTarget, team.id)
+    print("target\t" + (f"{target.version}{' allow-downgrade' if target.allow_downgrade else ''}"
+                        if target else "none"), file=stdout)
+    print("\t".join(["handle", "version", "update_mode", "update_state", "error", "seen_at"]), file=stdout)
+    rows = session.execute(
+        select(Agent, AgentPresence).outerjoin(AgentPresence, AgentPresence.agent_id == Agent.id)
+        .where(Agent.team_id == team.id, Agent.revoked_at.is_(None)).order_by(Agent.handle))
+    for agent, row in rows:
+        if row is None or row.client_version is None:
+            fields = ["-", "-", "-", "-"]
+        else:
+            fields = [row.client_version, row.update_mode, row.update_state, row.update_error or "-"]
+        seen = row.seen_at.isoformat() if row is not None else "never"
+        print("\t".join([agent.handle, *fields, seen]), file=stdout)
 
 
 def _emit_token(out: str | None, token: str, env, stdout, stderr, summary: str) -> None:

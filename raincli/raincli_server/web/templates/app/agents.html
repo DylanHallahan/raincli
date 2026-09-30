@@ -1,33 +1,33 @@
 {% extends "base.html" %}
-{% from "_state.html" import conn_badge, presence_badge, time %}
-{% block title %}Agents · RainCLI{% endblock %}
+{% from "_state.html" import conn_badge, presence_badge, session_badge, reach_badge, client_badges, time %}
+{% block title %}Machines · RainCLI{% endblock %}
 {% block main %}
 <section class="wrap page-pad">
   <div class="page-head">
     <div>
-      <h1>Your agents</h1>
-      <p class="muted">Register an address for your agent, then connect it to your machine. Each address has its own credential.</p>
+      <h1>Your machines</h1>
+      <p class="muted">Each machine has one address and one credential. Teammates message the address, and the machine's inbox agent receives it. The other agents on the machine are listed for visibility only.</p>
     </div>
   </div>
   {% if error %}<p class="flash flash-error" role="alert">{{ error[:1]|upper ~ error[1:] }}.</p>{% endif %}
 
   <div class="agent-explainer">
-    <p><strong>Your account owns identities, not open sessions.</strong> A RainCLI handle is the address teammates message. A connector maps that address to a named Herdr agent; opening a new tab does not register it.</p>
-    <p class="help">API connection reflects recent credential use. Session availability is reported by the optional runtime and lapses to offline after two minutes without a report. It is advisory: it does not show that a message was delivered or read. Start with one inbox per machine. <a href="https://github.com/DylanHallahan/raincli/blob/main/SETUP.md">Setup guide</a> · <a href="#register-agent">Register an agent</a></p>
+    <p><strong>Your account owns machines, not open sessions.</strong> A RainCLI handle is the address teammates message. On the machine, the connector hands messages to one <strong>inbox</strong> agent: a Herdr agent (instant) or a Claude Code session (at its next turn). You can't message the other agents directly.</p>
+    <p class="help">API connection reflects recent credential use. Session availability and the agent list are reported by the machine's runtime and lapse after two minutes without a report. Availability is advisory: it does not show that a message was delivered or read. <a href="https://github.com/DylanHallahan/raincli/blob/main/SETUP.md">Setup guide</a> · <a href="#add-machine">Add a machine</a></p>
   </div>
-  {% if agents %}
+  {% for row in agents %}
+  <section class="machine" aria-labelledby="machine-{{ row.agent.id }}">
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th scope="col">Agent</th><th scope="col">Team</th><th scope="col">API connection</th><th scope="col">Session availability</th><th scope="col">Credential</th><th scope="col">Last used</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+    <caption class="sr-only" id="machine-{{ row.agent.id }}">Machine {{ row.agent.handle }}</caption>
+    <thead><tr><th scope="col">Machine</th><th scope="col">API connection</th><th scope="col">Session availability</th><th scope="col">Client</th><th scope="col">Credential</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
     <tbody>
-      {% for row in agents %}
       <tr {% if not row.active %}class="is-revoked"{% endif %}>
-        <td data-label="Agent"><span class="handle">{{ row.agent.handle }}</span>{% if row.agent.display_name != row.agent.handle %}<br><span class="muted small">{{ row.agent.display_name }}</span>{% endif %}</td>
-        <td data-label="Team">{{ row.team.slug }}</td>
+        <td data-label="Machine"><span class="handle">{{ row.agent.handle }}</span>{% if row.agent.display_name != row.agent.handle %}<br><span class="muted small">{{ row.agent.display_name }}</span>{% endif %}<br><span class="muted small">Team {{ row.team.slug }}</span></td>
         <td data-label="API connection">{{ conn_badge(row.connection) }}</td>
         <td data-label="Session availability">{{ presence_badge(row.runtime_status) }}</td>
-        <td data-label="Credential">{% if row.credential_prefix %}<code>{{ row.credential_prefix }}…</code>{% else %}<span class="muted">none</span>{% endif %}</td>
-        <td data-label="Last used">{{ time(row.last_used_at) or '—' }}</td>
+        <td data-label="Client">{{ client_badges(row.client) }}</td>
+        <td data-label="Credential">{% if row.credential_prefix %}<code class="nowrap">{{ row.credential_prefix }}…</code>{% else %}<span class="muted">none</span>{% endif %}<br><span class="muted small">Last used {{ time(row.last_used_at) or 'never' }}</span></td>
         <td class="row-actions">
           {% if row.active %}
           <a class="btn btn-quiet btn-small" href="{{ url('/app') }}?agent={{ row.agent.id }}">Inbox</a>
@@ -44,17 +44,40 @@
           {% endif %}
         </td>
       </tr>
+    </tbody>
+  </table>
+  </div>
+  {% if row.sessions %}
+  <div class="table-wrap">
+  <table class="table machine-sessions" data-machine="{{ row.agent.handle }}">
+    <caption class="sr-only">Agents on {{ row.agent.handle }}</caption>
+    <thead><tr><th scope="col"><span class="sr-only">Role</span></th><th scope="col">Agent</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col">Reachability</th><th scope="col">Machine client</th></tr></thead>
+    <tbody>
+      {% for s in row.sessions %}
+      <tr>
+        <td data-label="Role">{% if s.role == 'inbox' %}<span class="badge role-inbox" title="Messages to {{ row.agent.handle }} are delivered to this agent.">Inbox</span>{% endif %}</td>
+        <td data-label="Agent">{{ s.name }}</td>
+        <td data-label="Type">{{ s.type }}</td>
+        <td data-label="Status">{{ session_badge(s.status) }}</td>
+        <td data-label="Reachability">{% if s.role == 'inbox' %}{{ reach_badge(s.reachability) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td data-label="Machine client">{{ client_badges(row.client) }}</td>
+      </tr>
       {% endfor %}
     </tbody>
   </table>
   </div>
-  {% else %}
-  <div class="card empty"><p class="muted">No agent addresses yet. Register your first one below, download its config, then give your coding agent the setup prompt.</p></div>
+  {% elif row.active %}
+  <p class="help machine-empty">No agents reported in the last two minutes. The list appears once this machine's runtime (v0.3.0 or later) is running.</p>
   {% endif %}
+  </section>
+  {% else %}
+  <div class="card empty"><p class="muted">No machines yet. Add your first one below, download its config, then give your coding agent the setup prompt.</p></div>
+  {% endfor %}
 
   {% if viewer.teams %}
-  <form method="post" action="{{ url('/app/agents') }}" class="card form register" id="register-agent">
-    <h2 class="h3">Register an agent</h2>
+  <form method="post" action="{{ url('/app/agents') }}" class="card form register" id="add-machine">
+    <h2 class="h3">Add a machine</h2>
+    <p class="help">One address and one credential per machine. The runtime on that machine lists its coding agents here and delivers messages to the inbox agent you choose during setup.</p>
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <div class="grid-fields">
       <div>
@@ -66,17 +89,17 @@
       <div>
         <label for="handle">Handle</label>
         <input id="handle" name="handle" required maxlength="32" pattern="[a-z][a-z0-9-]{1,31}" autocomplete="off" spellcheck="false" value="{{ form.handle or '' }}" aria-describedby="handle-help">
-        <p id="handle-help" class="help">Lowercase letters, digits and dashes; unique in the team. Teammates address the agent by this.</p>
+        <p id="handle-help" class="help">Lowercase letters, digits and dashes; unique in the team. Teammates address this machine's inbox by it, for example <code>dylan-laptop</code>.</p>
       </div>
       <div>
         <label for="display_name">Display name <span class="muted">(optional)</span></label>
         <input id="display_name" name="display_name" maxlength="80" value="{{ form.display_name or '' }}">
       </div>
     </div>
-    <div class="form-row"><span class="help">The credential is shown once, on the next page.</span><button class="btn" type="submit">Register agent</button></div>
+    <div class="form-row"><span class="help">The machine credential is shown once, on the next page.</span><button class="btn" type="submit">Add machine</button></div>
   </form>
   {% else %}
-  <p class="card muted">Join a team to register agents.</p>
+  <p class="card muted">Join a team to add machines.</p>
   {% endif %}
   {% if viewer.teams %}{% with handle=None %}{% include "app/_inbox_agent.html" %}{% endwith %}{% endif %}
 </section>

@@ -246,7 +246,7 @@ def build_api(parent: FastAPI) -> FastAPI:
     async def update_presence(request: Request):
         data = await authed_json_body(request, "messages:ack")
         return await run(request, "messages:ack",
-                         lambda session, auth: {"presence": presence.publish(session, auth.agent, data)},
+                         lambda session, auth: presence.publish(session, auth.agent, data),
                          counted=False)
 
     @api.post("/messages")

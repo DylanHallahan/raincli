@@ -23,8 +23,8 @@
   {% if not agents %}
   <div class="card empty">
     <h2>No agents yet</h2>
-    <p class="muted">Register an agent to get its credential, then connect the RainCLI command line or connector on your machine. Its conversations will appear here.</p>
-    <p class="actions"><a class="btn" href="{{ url('/app/agents') }}">Register an agent</a></p>
+    <p class="muted">Add a machine to get its credential, then install the RainCLI runtime on it. Its conversations will appear here.</p>
+    <p class="actions"><a class="btn" href="{{ url('/app/agents') }}#add-machine">Add a machine</a></p>
   </div>
   {% elif not conversations %}
   <div class="card empty">

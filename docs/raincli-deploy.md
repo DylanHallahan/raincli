@@ -89,7 +89,7 @@ rc_admin create-user --email <owner email> --name "<Owner name>"         # promp
 rc_admin create-team --slug pilot --name "Pilot" --owner <owner email>
 ```
 
-The owner then signs in at `https://raincli.com/login` and invites the second pilot account from the **Team** page. The invitation is a single-use link that expires in 7 days and is shared out of band; no email is sent. Each person registers their own agents on the **Agents** page and downloads the agent config once.
+The owner then signs in at `https://raincli.com/login` and invites the second pilot account from the **Team** page. The invitation is a single-use link that expires in 7 days and is shared out of band; no email is sent. Each person adds their own machines on the **Machines** page (**Add a machine**) and downloads each machine's config once.
 
 ## Upgrade
 
@@ -112,6 +112,168 @@ It also adds `PUT /api/v1/presence`, which is served by the existing `location /
 - `python -m raincli_server.migrate current` (run like `rc_admin`, as the service user with the env file loaded) shows `0003`.
 
 Because this release runs a new migration, rolling it back follows checklist item 2 below.
+
+### Upgrading to the directory release (migration `0004`)
+
+This release adds migration `0004_agent_directory`:
+- four nullable columns on `agent_presence`: `client_version`, `update_mode`, `update_state` and `update_error` (a short error code);
+- a `machine_agents` table: up to 100 rows per handle, each with an opaque key, name, type, status, the inbox role and reachability, the discovery source and the server receipt time. A handle's rows are **replaced as a whole** by each report that carries an agent list, so the table doesn't grow with traffic. Check constraints and a partial unique index allow at most one inbox per handle, and reachability only on the inbox;
+- a `client_targets` table: at most one row per team, holding a version tag, the downgrade flag and `set_at`.
+
+None of these hold paths, working directories, prompts, titles, transcripts, pane ids or process ids; the server rejects any report that tries to send them. `install.sh` takes the `PRE_BACKUP` and migrates as usual. No new secrets, environment variables or Nginx changes are needed. A report is normally a few KiB; 100 agents with 64-character ASCII names stay under 30 KiB, inside the 64 KiB API body limit.
+
+After the upgrade, check with a test machine's credential:
+- `PUT /api/v1/presence` with only `{"status": …}` (a v0.2.0 client) still returns 200, now with `"target": null`;
+- `GET /api/v1/agents` includes `"machine": null` and `"agents": []` for handles that haven't reported a directory;
+- `python -m raincli_server.migrate current` (run like `rc_admin`) shows `0004`.
+
+Existing handles keep working unchanged, and each becomes a machine once its runtime (v0.3.0 or later) reports. Because this release runs a new migration, rolling it back follows checklist item 2 below.
+
+### Client versions (admin CLI)
+
+The operator chooses which client version each team's managed installs run. The server stores and replies with **a version only**; clients install it only from stable releases of the canonical GitHub repository, so the server can't choose where code comes from. Releases are unsigned (see [SETUP.md](../SETUP.md#updates)).
+
+```bash
+rc_admin set-client-version --team pilot v0.3.1                    # upsert the team's target; set_at = now()
+rc_admin set-client-version --team pilot v0.3.0 --allow-downgrade  # also lets newer machines go back; prints a warning
+rc_admin set-client-version --team pilot --clear                   # remove the target; machines keep what they have
+rc_admin client-status --team pilot                                # the target, then one line per active handle
+```
+
+- The version must be a release tag `vMAJOR.MINOR.PATCH`, **v0.3.0 or later** (the first client that understands targets); `0.3.1` is accepted and stored as `v0.3.1`. Anything else is rejected without changes.
+- `--allow-downgrade` is stored with that target only. Setting the target again without it turns downgrades off.
+- Every `set-client-version` refreshes `set_at`. A machine that rolled a target back retries it only after the target row changes, so re-running the same command is how you ask for another attempt after fixing the cause.
+- Machines act on the target at their next report (within about 30 seconds), and only when their install is managed and set to automatic.
+- `client-status` prints tab-separated lines: `target` and the target (or `none`), a header, then `handle`, `version`, `update_mode`, `update_state`, `error` and the last report time. `-` means the handle's client hasn't reported a version (older than v0.3.0, or never run); `never` means no report at all. It never shows keys, agent names or paths.
+
+Publish the release on GitHub before setting it as a target. A target with no matching stable release shows up as `failed` in `client-status`, and the previous version keeps running.
+
+## Webserver client migration (release venv → managed install)
+
+The webserver also runs a RainCLI **client**: a runtime and connector for the operator's own machine handle. Until now that client ran from the **server's release venv** under `/opt/raincli/…`. That couples the client to server deploys: every server install or rollback silently changes the client, pruning a release can break its unit, and it can't take pushed updates. This procedure moves it to a managed install under the client user's home, with a unit that runs the **stable launcher**. The main agent runs it on the host; nothing here was run by its author.
+
+Before you start:
+- Deploy the directory release (migration `0004`) first, and publish a v0.3.0-or-later client release on GitHub.
+- Do it in a quiet period: the connector stops for up to about 2 minutes, and queued messages wait durably.
+- The host needs outbound HTTPS to `api.github.com` and `codeload.github.com` **for the client user**. The server's own sandboxed `raincli.service` is unaffected and keeps its loopback-only IP policy.
+- Each step names who runs it: `root`, or the client user `$CU` (the account that owns the client's configs).
+
+### 1. Inventory (read-only)
+
+```bash
+CU=<client user>                      # the user that owns ~/.config/raincli/agent.json for the webserver's handle
+CH=$(getent passwd "$CU" | cut -d: -f6)                                # its home directory
+AS_CU=(sudo -iu "$CU" env XDG_RUNTIME_DIR="/run/user/$(id -u "$CU")")   # reaches the user's systemd manager
+"${AS_CU[@]}" systemctl --user list-units 'raincli*' --all; "${AS_CU[@]}" systemctl --user cat raincli-runtime.service
+systemctl list-units 'raincli*' --all                                  # a system-level client unit, if that's how it runs
+sudo grep -rl 'raincli_agent\|bin/raincli' /etc/systemd/system "$CH/.config/systemd/user" 2>/dev/null
+sudo -iu "$CU" bash -lc 'command -v raincli; readlink -f "$(command -v raincli)"; raincli --version; raincli whoami'
+loginctl show-user "$CU" -p Linger                                     # a user unit needs Linger=yes on a server
+```
+
+Record:
+- the unit's name and whether it is a **user** or **system** unit, and its full current text;
+- the `ExecStart` interpreter (expected under `/opt/raincli/releases/<release>/venv/` or `/opt/raincli/current/venv/`);
+- the absolute paths of `runtime.json`, its `state_dir`, the connector configs and `agent.json`;
+- the handle and team from `whoami`.
+
+Stop here if `whoami` fails or the runtime shows connector errors; fix those first.
+
+### 2. Back up the unit and the client configs
+
+```bash
+sudo install -d -m 0700 /root/raincli-client-migration
+sudo cp -a <unit file path> /root/raincli-client-migration/                     # the file found in step 1
+sudo tar -C "$CH" -czf /root/raincli-client-migration/client-config.tgz .config/raincli
+sudo chmod 600 /root/raincli-client-migration/*
+```
+
+The backup contains the machine credential. Keep it root-only and delete it once the migration is confirmed (step 7).
+
+### 3. Install the managed client (client user)
+
+Use the release venv's client one last time, as a bootstrap only:
+
+```bash
+sudo -iu "$CU" /opt/raincli/current/venv/bin/raincli runtime update --install    # -> ~/.raincli/client, latest stable release
+sudo -iu "$CU" python3 "$CH/.raincli/client/launch.py" --version                # expect v0.3.0 or later
+```
+
+This changes nothing that the running client uses. If it fails (for example, no outbound HTTPS), stop and fix that; the old client keeps running.
+
+### 4. Stop the old client gracefully
+
+Stop it with the **old** client, which knows how its own runtime runs (`<old raincli>` is the release venv's `raincli` from step 1's `ExecStart`):
+
+```bash
+sudo -iu "$CU" <old raincli> runtime stop --config <abs runtime.json>
+# then disable the old unit so it doesn't restart:
+"${AS_CU[@]}" systemctl --user disable --now raincli-runtime.service     # user unit
+sudo systemctl disable --now <old system unit>                          # or, if it was a system unit
+```
+
+A graceful stop takes up to about 100 seconds. Wait until `<old raincli> runtime status --config <abs runtime.json>` shows `stopped` before disabling the unit, so systemd doesn't kill connectors mid-delivery (the old unit may lack `KillMode=mixed` and the 150-second stop timeout).
+
+### 5. Install the fixed unit
+
+**If the client ran as a user unit** (the normal case), let the managed client write the unit. Run through the launcher, `runtime startup` writes an `ExecStart` that uses the system Python and the stable launcher, never a versioned venv:
+
+```bash
+sudo loginctl enable-linger "$CU"      # only if step 1 showed Linger=no; the user manager must run without a login
+sudo -iu "$CU" python3 "$CH/.raincli/client/launch.py" runtime run --config <abs runtime.json> --once
+"${AS_CU[@]}" python3 "$CH/.raincli/client/launch.py" runtime startup --config <abs runtime.json>
+"${AS_CU[@]}" systemctl --user cat raincli-runtime.service
+```
+
+The unit must match this shape:
+
+```ini
+[Unit]
+Description=RainCLI mapped agent runtime
+
+[Service]
+Type=simple
+ExecStart="/usr/bin/python3" "/home/<client user>/.raincli/client/launch.py" "runtime" "run" "--config" "<abs runtime.json>"
+Environment="PATH=…"
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=150
+# config-sha256: …
+
+[Install]
+WantedBy=default.target
+```
+
+Check that `ExecStart` names `.raincli/client/launch.py` and nothing under `/opt/raincli`, `venv` or `versions/`. `KillMode=mixed` sends the stop signal to the launcher only, which stops the runtime and its connectors gracefully. `TimeoutStopSec=150` covers the launcher's 120-second graceful wait.
+
+**If the client ran as a system unit,** keep its name, `User=` and `Group=`, and replace only these lines (then `systemctl daemon-reload` and `systemctl enable --now <unit>`):
+
+```ini
+ExecStart=/usr/bin/python3 /home/<client user>/.raincli/client/launch.py runtime run --config <abs runtime.json>
+Environment=HOME=/home/<client user>
+KillMode=mixed
+TimeoutStopSec=150
+Restart=on-failure
+RestartSec=10
+```
+
+Also point any `raincli` command on the client user's `PATH` that resolves into `/opt/raincli` at the launcher, as in [SETUP.md step 1](../SETUP.md#1-install-the-managed-client-agent). Hooks are not needed on the webserver unless a coding agent runs there.
+
+### 6. Verify
+
+```bash
+sudo -iu "$CU" python3 "$CH/.raincli/client/launch.py" runtime status --config <abs runtime.json>    # running
+sudo -iu "$CU" python3 "$CH/.raincli/client/launch.py" connector status --config <abs connector.json>
+rc_admin client-status --team <slug>        # the webserver's handle: its version, automatic, current
+```
+
+Within a minute, the handle's **Machines** page entry shows its client version and agent list. Send a test message to the handle and confirm the reply as usual. Then check that server deploys no longer touch the client: `readlink -f` on everything in the unit's `ExecStart` resolves outside `/opt/raincli`.
+
+### 7. Finish, or roll back
+
+- **Success:** delete `/root/raincli-client-migration` (it holds the credential). The next pushed version (`rc_admin set-client-version`) updates the webserver's client like any other machine.
+- **Rollback:** stop and disable the new unit (`runtime startup --remove` for a user unit), restore the backed-up unit file, then `daemon-reload` and `enable --now` it. The old client resumes from the same configs and queues. The managed install under `~/.raincli/client` can stay; nothing uses it until its unit is back.
 
 ## Rollback checklist
 
@@ -141,7 +303,7 @@ Because this release runs a new migration, rolling it back follows checklist ite
   - Owners remove members on the **Team** page, which revokes that member's sessions and agents in the team.
   - Operator fallbacks: `rc_admin rotate-agent|revoke-agent|remove-member|disable-user`.
   - Rotating `RAINCLI_SECRET_KEY` (edit the env file, then `systemctl restart raincli`) invalidates CSRF tokens.
-- **Presence:** agents' runtimes report every 30 seconds with their own credential (`messages:ack` scope), and each report expires 120 seconds after the server receives it. Reads are limited to the caller's team. Presence is advisory availability, not delivery; it doesn't change any message's state. Rows are overwritten in place, one per agent, so the table doesn't grow with traffic.
+- **Presence and the directory:** each machine's runtime reports every 30 seconds with its own credential (`messages:ack` scope), and each report expires 120 seconds after the server receives it. A report may carry up to 100 agents and the client's version; any invalid entry rejects the whole report. Reads are limited to the caller's team, never return agent keys, and return no agents for revoked handles. Presence and the directory are advisory, not delivery; they don't change any message's state. Presence rows are overwritten in place and directory rows are replaced per report, so neither grows with traffic.
 - **Capacity:** each recipient's backlog of unacknowledged messages is capped by `RAINCLI_MAX_PENDING`, and senders get `429 inbox_full`. Nothing is deleted automatically.
 - **Security posture:** TLS protects messages in transit, but the server and its operator can read message content. RainCLI is **not** end-to-end encrypted.
 - **Path prefix:** the app supports `RAINCLI_ROOT_PATH`, but `raincli.com.conf` assumes the app is at `/`. A prefixed deployment would need every `location` prefixed to match.
