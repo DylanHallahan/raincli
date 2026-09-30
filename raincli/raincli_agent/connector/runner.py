@@ -14,9 +14,10 @@ import time
 from .. import attachments as att
 from ..config import standard_config_path
 from .config import HANDLE_RE
-from ..errors import ApiError, RainError, Unauthorized
+from ..errors import ApiError, ConfigError, RainError, Unauthorized
 from ..text import escape_line, escape_text
 from . import queue as q
+from ..runtime import sessions
 from .herdr import READY_STATUSES, HerdrError, HerdrRejected, HerdrTimeout
 
 # Protocol section 11.1: compact metadata plus one rule. A teammate message is a
@@ -125,13 +126,17 @@ def reportable(record):
         return (q.HELD, record["hold_reason"])
     if state in (q.SUBMITTED, q.UNCERTAIN, q.REJECTED):
         return (state, record.get("detail") or "")
+    if state == q.HANDED_OVER:
+        return (q.HELD, "next_turn")  # waiting for the hook session's next turn (14.4)
     return None  # received, submitting and dismissed have no server event
 
 
 class Connector:
     def __init__(self, config, api, herdr, queue, *, identity=None, log=None,
-                 sleep=time.sleep, clock=time.time, agent_config_path=None):
+                 sleep=time.sleep, clock=time.time, agent_config_path=None, sessions_state=None):
         self.config = config
+        # The runtime state directory holding hook sessions (next-turn inbox only).
+        self.sessions_state = sessions_state
         # The identity the session must reply with; None when it is the default path.
         path = agent_config_path or config.agent_config
         self.prompt_agent_config = (os.path.abspath(path) if path and
@@ -152,6 +157,8 @@ class Connector:
     # -- lifecycle -------------------------------------------------------
 
     def start(self):
+        if self.config.inbox_hook and not self.sessions_state:
+            raise ConfigError("a hook-session inbox is delivered by `raincli runtime run`, which owns the sessions")
         if self.identity is None:
             me = self.api.me()
             self.identity = {"handle": me["agent"]["handle"], "team": me["agent"]["team"]["slug"]}
@@ -162,7 +169,14 @@ class Connector:
         """A record still ``submitting`` on disk means we died mid-submission."""
         with self.queue.lock():
             for record in self.queue.all():
-                if record["state"] == q.SUBMITTING:
+                if record.get("handover_key") and not self.sessions_state:
+                    continue  # settled once a runtime that owns the sessions runs this queue
+                if record["state"] == q.SUBMITTING and record.get("handover_key"):
+                    self._recover_handover(record)
+                elif record["state"] == q.HANDED_OVER:
+                    target = self._inbox_target()[0] if self.config.inbox_hook else None
+                    self._reconcile_handover(record, target, ending=True)
+                elif record["state"] == q.SUBMITTING:
                     q.Queue.transition(record, q.UNCERTAIN,
                                        detail="connector restarted during submission; not resubmitted")
                     self.queue.save(record)
@@ -329,6 +343,8 @@ class Connector:
         The queue lock is released while ``herdr.prompt`` runs (R2-L7), so
         operator commands and ``connector escalate`` never wait on a prompt. The
         durable ``submitting`` record and run.lock guard the state meanwhile."""
+        if self.config.inbox_hook:
+            return self.process_next_turn()
         chosen = None
         with self.queue.lock():
             trusted = self.trusted()
@@ -336,11 +352,7 @@ class Connector:
             for record in self.queue.all():
                 if not record["acked"] or record["state"] not in q.PENDING:
                     continue
-                hold = self.policy_hold(record, trusted)
-                if hold:
-                    detail = (f"sender {record['sender']} is in blocked_senders" if hold == "sender_blocked"
-                              else f"sender {record['sender']} is not trusted (trust_mode list)")
-                    self._hold(record, hold, detail)
+                if self._policy_held(record, trusted):
                     continue
                 if submitted:
                     self._hold(record, "busy", "another message was submitted this iteration")
@@ -363,6 +375,108 @@ class Connector:
             self.queue.save(record)
             self.log(f"message {record['id']} is {record['state']}")
 
+    def _policy_held(self, record, trusted):
+        hold = self.policy_hold(record, trusted)
+        if hold:
+            detail = (f"sender {record['sender']} is in blocked_senders" if hold == "sender_blocked"
+                      else f"sender {record['sender']} is not trusted (trust_mode list)")
+            self._hold(record, hold, detail)
+        return bool(hold)
+
+    # -- next-turn inbox (protocol 14.4, 14.7) ------------------------------
+
+    def _inbox_target(self):
+        """(key of the single live mapped hook session or None, hold reason, detail)."""
+        kind, name = self.config.inbox_hook
+        live = sessions.live_sessions(self.sessions_state, kind, name, now=self._clock())
+        if len(live) == 1:
+            return live[0]["key"], None, ""
+        if not live:
+            return None, "offline", f"no live {kind} hook session named {name}"
+        return None, "target_ambiguous", f"{len(live)} live {kind} hook sessions are named {name}"
+
+    def _recover_handover(self, record):
+        """Died between marking ``submitting`` and recording ``handed_over``."""
+        key, mid = record["handover_key"], record["id"]
+        state = sessions.handover_state(self.sessions_state, key, mid, now=self._clock() + sessions.CLAIM_GRACE)
+        if state == "pending":
+            q.Queue.transition(record, q.HANDED_OVER, detail="handed over (recovered after restart)")
+        elif state == "submitted":
+            q.Queue.transition(record, q.SUBMITTED, detail="emitted by the hook session (recovered after restart)")
+            sessions.settle(self.sessions_state, key, mid)
+        elif any(os.path.lexists(os.path.join(self.sessions_state, sessions.SESSIONS, key + ".inbox", mid + ".md" + x))
+                 for x in (".claimed", ".receipt")):
+            q.Queue.transition(record, q.UNCERTAIN, detail="claimed by the hook without a receipt; not re-emitted")
+            sessions.settle(self.sessions_state, key, mid)
+        else:
+            # No file was ever written, so nothing can have reached the session.
+            q.Queue.transition(record, q.RECEIVED, detail="restart before handover; nothing was handed over")
+        self.queue.save(record)
+        self.log(f"message {mid} is {record['state']} (restart during handover)")
+
+    def _reconcile_handover(self, record, target_key, ending=False, reason="offline", detail=""):
+        """Settle a handed-over message from the files. Never re-emits anything."""
+        key, mid = record["handover_key"], record["id"]
+        now = self._clock() + (sessions.CLAIM_GRACE if ending else 0)
+        state = sessions.handover_state(self.sessions_state, key, mid, now=now)
+        if state == "submitted":
+            q.Queue.transition(record, q.SUBMITTED, detail=f"emitted to {self.config.target_label} (next turn)")
+        elif state == "uncertain":
+            q.Queue.transition(record, q.UNCERTAIN,
+                               detail="claimed by the hook without a receipt, or the handover file is missing; "
+                                      "not re-emitted")
+        elif state == "pending" and key != target_key:
+            # The session ended, went stale or is no longer the only one: take the
+            # file back unless the hook claims it first (the rename arbitrates).
+            if not sessions.reclaim(self.sessions_state, key, mid):
+                return False
+            q.Queue.transition(record, q.HELD, reason=reason)
+            record["hold_detail"] = detail or "the session ended before its next turn; reclaimed"
+        else:
+            return False  # still pending for the live session, or a hook is claiming it now
+        sessions.settle(self.sessions_state, key, mid)
+        if record["state"] == q.HELD:
+            record.pop("handover_key", None)
+        self.queue.save(record)
+        self.log(f"message {mid} is {record['state']}")
+        return True
+
+    def process_next_turn(self):
+        """Hand queued messages to the single live mapped hook session.
+
+        Nothing interrupts the session: each message is written as a framed file
+        that the session's hook emits at its next start or prompt."""
+        with self.queue.lock():
+            target_key, reason, detail = self._inbox_target()
+            for record in self.queue.all():
+                if record["state"] == q.HANDED_OVER:
+                    self._reconcile_handover(record, target_key, reason=reason or "offline", detail=detail)
+            trusted = self.trusted()
+            for record in self.queue.all():
+                if not record["acked"] or record["state"] not in q.PENDING:
+                    continue
+                if self._policy_held(record, trusted):
+                    continue
+                if target_key is None:
+                    self._hold(record, reason, detail)
+                    continue
+                if self.stop_requested():
+                    break
+                text = self._prompt_text(record)
+                if not sessions.fits_one_turn(text):
+                    self._hold(record, "too_large_for_hook",
+                               f"framed message exceeds the per-turn bound ({sessions.CLAIM_CAP_CHARS} characters)")
+                    continue
+                record["attempts"] = record.get("attempts", 0) + 1
+                record["handover_key"] = target_key
+                q.Queue.transition(record, q.SUBMITTING)
+                self.queue.save(record)
+                sessions.hand_over(self.sessions_state, target_key, record["id"], text)
+                q.Queue.transition(record, q.HANDED_OVER,
+                                   detail=f"handed to {self.config.target_label}; delivered at its next turn")
+                self.queue.save(record)
+                self.log(f"message {record['id']} is handed_over")
+
     def _hold(self, record, reason, detail=""):
         if record["state"] == q.HELD and record["hold_reason"] == reason:
             if record.get("hold_detail") != detail:  # local detail only; no new event
@@ -380,6 +494,10 @@ class Connector:
         record["attempts"] = record.get("attempts", 0) + 1
         q.Queue.transition(record, q.SUBMITTING)
         self.queue.save(record)
+        return self._prompt_text(record)
+
+    def _prompt_text(self, record):
+        """The section 11.1 prompt; identical for Herdr and next-turn delivery."""
         guidance = ""
         if self.config.mode == "inbox":
             guidance = inbox_guidance(record["id"], self.identity["handle"],

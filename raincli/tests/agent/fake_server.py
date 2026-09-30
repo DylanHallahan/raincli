@@ -35,6 +35,60 @@ class ApiFail(Exception):
         self.status, self.code, self.message, self.headers = status, code, message or code, headers or {}
 
 
+AGENT_KEYS = {"key", "name", "type", "status", "role", "reachability", "source"}
+CLIENT_KEYS = {"version", "update_mode", "update_state", "error"}
+
+
+def presence_problem(body):
+    """Protocol 14.1 / 14.7 validation: all-or-nothing, unknown keys rejected at every level."""
+    if not isinstance(body, dict) or set(body) - {"status", "agents", "client"} or "status" not in body:
+        return "keys"
+    if body["status"] not in {"ready", "busy", "blocked", "unknown", "offline"}:
+        return "status"
+    agents = body.get("agents", [])
+    if not isinstance(agents, list) or len(agents) > 100:
+        return "agents"
+    keys, inboxes = set(), 0
+    for a in agents:
+        if not isinstance(a, dict) or set(a) != AGENT_KEYS:
+            return "agent keys"
+        if not isinstance(a["key"], str) or not re.fullmatch(r"[a-z0-9]{8,64}", a["key"]) or a["key"] in keys:
+            return "agent key"
+        keys.add(a["key"])
+        name = a["name"]
+        if (not isinstance(name, str) or not 1 <= len(name) <= 64 or not name.strip()
+                or re.search("[\x00-\x1f\x7f-\x9f\u2028\u2029]", name)):
+            return "agent name"
+        if a["type"] not in {"claude", "codex", "gemini", "cursor", "opencode", "other"}:
+            return "agent type"
+        if a["status"] not in {"working", "idle", "blocked", "offline", "unknown"}:
+            return "agent status"
+        if a["source"] not in {"herdr", "hook", "scan"} or (a["source"] == "scan" and a["status"] != "unknown"):
+            return "agent source"
+        if a["role"] not in (None, "inbox") or (a["role"] is None) != (a["reachability"] is None):
+            return "agent role"
+        if a["role"] == "inbox":
+            inboxes += 1
+            if a["reachability"] not in ("instant", "next-turn"):
+                return "reachability"
+    if inboxes > 1:
+        return "inboxes"
+    client = body.get("client")
+    if client is not None:
+        if not isinstance(client, dict) or set(client) - CLIENT_KEYS or not {"version", "update_mode", "update_state"} <= set(client):
+            return "client keys"
+        if not re.fullmatch(r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}", str(client["version"])):
+            return "client version"
+        if client["update_mode"] not in ("automatic", "manual"):
+            return "update mode"
+        if client["update_state"] not in ("current", "updating", "failed", "rolled_back"):
+            return "update state"
+        error = client.get("error")
+        if error is not None and not (isinstance(error, str) and re.fullmatch(r"[a-z0-9_.:-]{1,64}", error)):
+            return "client error"
+    return None
+
+
 class FakeState:
     def __init__(self):
         self.lock = threading.Condition()
@@ -44,6 +98,10 @@ class FakeState:
         self.messages = {}  # id -> internal record
         self.conversations = {}  # id -> {"pair": frozenset, "team": slug}
         self.presence = {}
+        self.directory = {}  # handle -> agents list (snapshot, protocol 14.1)
+        self.clients = {}  # handle -> client block
+        self.targets = {}  # team -> {"version", "allow_downgrade"} (reply target)
+        self.presence_bodies = []  # every accepted presence body, in order
         self.events = []  # (message id, state, detail)
         self.seq = 0
         self.max_pending = 1000
@@ -358,13 +416,26 @@ class _Handler(BaseHTTPRequestHandler):
                                        "team": {"slug": caller["team"], "name": st.teams[caller["team"]]}},
                              "credential": {"prefix": auth[7:15], "scopes": ["messages:read", "messages:send", "messages:ack"]}}
             if method == "PUT" and route == "/presence":
-                if not isinstance(body, dict) or set(body) != {"status"} or body["status"] not in {"ready", "busy", "blocked", "unknown", "offline"}:
-                    raise ApiFail(400, "invalid")
+                if presence_problem(body):
+                    raise ApiFail(400, "invalid", presence_problem(body))
                 st.presence[caller["handle"]] = body["status"]
-                return 200, {"presence": {"status": body["status"], "expires_at": "test-expiry"}}
+                st.presence_bodies.append((caller["handle"], body))
+                if "agents" in body:
+                    st.directory[caller["handle"]] = body["agents"]
+                if "client" in body:
+                    st.clients[caller["handle"]] = body["client"]
+                return 200, {"presence": {"status": body["status"], "expires_at": "test-expiry"},
+                             "target": st.targets.get(caller["team"])}
             if method == "GET" and route == "/agents":
+                def machine(handle):
+                    c = st.clients.get(handle)
+                    return None if c is None else {"client_version": c["version"], "update_mode": c["update_mode"],
+                                                   "update_state": c["update_state"], "error": c.get("error"),
+                                                   "seen_at": "now"}
                 return 200, {"agents": [{"handle": a["handle"], "display_name": a["display_name"],
-                                         "active": a["active"]}
+                                         "active": a["active"], "machine": machine(a["handle"]),
+                                         "agents": [{k: v for k, v in e.items() if k != "key"}
+                                                    for e in st.directory.get(a["handle"], [])]}
                                         for a in st.agents.values() if a["team"] == caller["team"]]}
             if method == "POST" and route == "/messages":
                 return st.send(caller, body)

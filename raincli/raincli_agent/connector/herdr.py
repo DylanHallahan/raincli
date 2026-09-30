@@ -52,6 +52,10 @@ class HerdrBoundary:
         """Show a visible Herdr notification. Raise HerdrError on failure."""
         raise NotImplementedError
 
+    def list_agents(self):
+        """Every live agent as ``{name, kind, status, terminal_id, cwd}``. Raise HerdrError."""
+        raise NotImplementedError
+
 
 def _find_agent_dict(obj):
     if isinstance(obj, dict):
@@ -123,6 +127,27 @@ class HerdrCli(HerdrBoundary):
         return AgentInfo(name=name, status=str(agent.get("agent_status") or "unknown"),
                          pane_id=str(agent.get("pane_id") or ""), cwd=str(agent.get("cwd") or ""))
 
+    def list_agents(self):
+        proc = self._run(["agent", "list"], self.timeout)
+        if proc.returncode != 0:
+            code, message = _error_code(proc.stderr)
+            raise HerdrError(f"herdr agent list failed ({code or proc.returncode}): {message}")
+        try:
+            data = json.loads(proc.stdout)
+        except ValueError:
+            raise HerdrError("herdr agent list returned non-JSON output") from None
+        agents = data.get("result", {}).get("agents") if isinstance(data, dict) else None
+        if not isinstance(agents, list):
+            raise HerdrError("herdr agent list returned no agent list")
+        out = []
+        for agent in agents:
+            if isinstance(agent, dict):
+                # "name" is absent for an unnamed agent; "agent" is its kind (claude, codex, ...).
+                out.append({"name": agent.get("name") if isinstance(agent.get("name"), str) else None,
+                            "kind": str(agent.get("agent") or ""), "status": str(agent.get("agent_status") or ""),
+                            "terminal_id": str(agent.get("terminal_id") or ""), "cwd": str(agent.get("cwd") or "")})
+        return out
+
     def prompt(self, name, text, timeout):
         proc = self._run(["agent", "prompt", name, text], timeout)
         if proc.returncode == 0:
@@ -173,8 +198,17 @@ class FakeHerdr(HerdrBoundary):
     def __post_init__(self):
         self._lock = threading.Lock()
 
-    def add(self, name, status="idle", pane_id="w9:p1", cwd="/work", focused=False):
-        self.agents[name] = {"info": AgentInfo(name, status, pane_id, cwd), "focused": focused}
+    list_error: Exception = None
+
+    def add(self, name, status="idle", pane_id="w9:p1", cwd="/work", focused=False, kind="claude"):
+        self.agents[name] = {"info": AgentInfo(name, status, pane_id, cwd), "focused": focused, "kind": kind}
+
+    def list_agents(self):
+        with self._lock:
+            if self.list_error is not None:
+                raise self.list_error
+            return [{"name": name, "kind": entry.get("kind", "claude"), "status": entry["info"].status,
+                     "terminal_id": "t-" + name, "cwd": entry["info"].cwd} for name, entry in self.agents.items()]
 
     def set_status(self, name, status):
         self.agents[name]["info"] = replace(self.agents[name]["info"], status=status)

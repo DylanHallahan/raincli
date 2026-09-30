@@ -48,8 +48,8 @@ def test_worker_waits_for_authenticated_queue_owner(tmp_path):
     class Api:
         def me(self):
             return {"agent": {"handle": "inbox-agent"}}
-        def publish_presence(self, state):
-            return {"expires_at": "soon"}
+        def report_presence(self, state, agents=None, client=None):
+            return {"presence": {"expires_at": "soon"}, "target": None}
     worker.process, worker.api = Process(), Api()
     assert worker.tick(1)["status"] == "offline"
     atomic_write_json(worker.ready_path, {"pid": 123})  # pid alone no longer suffices

@@ -20,6 +20,7 @@ from ..connector.herdr import HerdrCli, HerdrError, READY_STATUSES
 from ..connector.queue import Queue
 from ..errors import ConfigError
 from ..fsutil import atomic_write_json, ensure_private_dir, read_file_bytes, read_private_file
+from . import discovery, sessions
 
 LOG_LIMIT = 1024 * 1024  # per connector log; one rotated generation is kept
 # Graceful-stop budget. A supervised connector long-polls in slices of at most
@@ -106,9 +107,23 @@ def load_runtime(path):
     return path, state, configs
 
 
-def availability(cfg, herdr, running):
+HOOK_PRESENCE = {"idle": "ready", "working": "busy", "blocked": "blocked"}
+
+
+def inbox_spec(cfg):
+    """How the directory marks this connector's inbox (14.3)."""
+    return ("hook", *cfg.inbox_hook) if cfg.inbox_hook else ("herdr", cfg.herdr_agent)
+
+
+def availability(cfg, herdr, running, state_dir=None):
     if not running:
         return "offline"
+    if cfg.inbox_hook:
+        # Next-turn inbox: the single live hook session of that type and name.
+        live = sessions.live_sessions(state_dir, *cfg.inbox_hook) if state_dir else []
+        if len(live) != 1:
+            return "offline" if not live else "blocked"  # none, or ambiguous (held target_ambiguous)
+        return HOOK_PRESENCE.get(live[0]["status"], "unknown")
     try:
         info = herdr.get_agent(cfg.herdr_agent)
     except HerdrError:
@@ -162,6 +177,7 @@ class Worker:
         self.started = 0
         self.handle = None  # confirmed by the server for this credential
         self.retired = False
+        self.reply = None  # the last presence reply (with the team's update target)
         self.report = {"connector": path, "status": "offline", "reported": False}
         self.state = state
         self._new_handshake()
@@ -243,7 +259,10 @@ class Worker:
         return (self.handle is not None and isinstance(record, dict) and isinstance(record.get("pid"), int)
                 and {k: v for k, v in record.items() if k != "pid"} == {"handle": self.handle, **self.binding})
 
-    def tick(self, now):
+    def tick(self, now, agents=None, client=None):
+        """One supervision step. ``agents`` is this handle's directory snapshot and
+        ``client`` the runtime's version block (protocol 14.1); None omits them."""
+        self.reply = None
         if self.retired or self.changed():
             self.retire()
             return self._retired_report()
@@ -276,14 +295,15 @@ class Worker:
             except OSError:
                 self.next_start = now + 30
         running = self.process is not None and self.process.poll() is None
-        state = availability(self.cfg, self.herdr, running and self._confirmed_ready())
+        state = availability(self.cfg, self.herdr, running and self._confirmed_ready(), self.state)
         self.report.update(status=state, process_running=running, child_pid=self.process.pid if running else None)
         if self.changed():  # edited during this tick: never publish under a stale binding
             self.retire()
             return self._retired_report()
         try:
-            presence = self.api.publish_presence(state)
-            self.report.update(reported=True, expires_at=presence["expires_at"])
+            self.reply = self.api.report_presence(state, agents, client)
+            self.report.update(reported=True, expires_at=self.reply["presence"]["expires_at"],
+                               agents=len(agents) if agents is not None else None)
         except Exception as exc:
             # Do not persist server text or arbitrary exception details: no secrets
             # or local tool output belong in status records.
@@ -305,14 +325,15 @@ class Worker:
         self._release()
         if self.handle is not None:
             try:
-                self.api.publish_presence("offline")
+                # The directory empties at once rather than expiring (14.7 L11).
+                self.api.report_presence("offline", [])
             except Exception:
                 pass  # server expiry handles shutdown while disconnected
 
 
 class Supervisor:
-    def __init__(self, path, state, configs, runtime_sha):
-        self.path, self.state = path, state
+    def __init__(self, path, state, configs, runtime_sha, salt=None):
+        self.path, self.state, self.salt = path, state, salt
         self.workers = [Worker(p, cfg, identity, state, binding) for p, cfg, identity, binding in configs]
         self.seen = (runtime_sha, tuple(w.binding for w in self.workers))
         self.error = self.reason = None
@@ -353,6 +374,27 @@ class Supervisor:
         self.workers, self.error, self.reason = workers, None, None
         self.seen = (snapshot[0], tuple(w.binding for w in workers))
 
+    def directories(self):
+        """Each live worker's directory snapshot, or None when there is no salt.
+
+        The first connector's credential is the machine credential: it publishes
+        every session found on this machine. Any further connector publishes only
+        its own inbox, so a session is never listed twice under this machine."""
+        live = [w for w in self.workers if not w.retired]
+        if self.salt is None or not live:
+            return {}
+        out = {}
+        for index, worker in enumerate(live):
+            spec = inbox_spec(worker.cfg)
+            try:
+                found = discovery.discover(str(self.state), self.salt, worker.herdr, spec, include_scan=index == 0)
+            except Exception:
+                found = None  # discovery is advisory; the report then leaves the directory unchanged
+            if found is not None and index:
+                found = [a for a in found if a["role"] == "inbox"]
+            out[id(worker)] = found
+        return out
+
 
 HANDSHAKE = re.compile(r"ready-[0-9a-f]{32}\.json(\.stop)?")
 
@@ -376,12 +418,22 @@ def stop_requested(state, instance):
     return isinstance(request, dict) and request.get("instance") == instance
 
 
-def run(path, once=False):
+def run(path, once=False, pushed=None):
+    from .pushed import PushedUpdates
+    from . import updates
     path = Path(path).expanduser().resolve()
     runtime_sha = file_sha256(path)
     path, state, configs = load_runtime(path)
     queue = Queue(str(state))
     queue.acquire_run_lock()
+    # The per-machine salt and the hook sessions directory (14.7 H3, M7).
+    salt = sessions.ensure_salt(str(state))
+    sessions.sessions_dir(str(state), create=True)
+    pushed = pushed or PushedUpdates()
+    if pushed.managed():
+        notice = updates.migrate_mode(pushed.root)
+        if notice:
+            print(notice, file=sys.stderr, flush=True)  # the runtime log or journal keeps it
     stop = threading.Event()
     previous = {}
     supervisor = None
@@ -392,6 +444,7 @@ def run(path, once=False):
                 "connectors": connectors}
         if supervisor is not None and supervisor.error:
             data["error"], data["error_reason"] = supervisor.error, supervisor.reason
+        data["client"] = pushed.client()  # version, update mode and state, as reported
         try:
             atomic_write_json(state / "status.json", data)
         except OSError:
@@ -403,17 +456,25 @@ def run(path, once=False):
         # Publish this instance before any slow first tick, so a stop request
         # made during startup targets it rather than a previous run.
         record("starting", [])
-        supervisor = Supervisor(path, state, configs, runtime_sha)
+        supervisor = Supervisor(path, state, configs, runtime_sha, salt)
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
             while not stop.is_set():
                 supervisor.refresh(pool)
-                futures = [pool.submit(w.tick, time.monotonic()) for w in supervisor.workers]
+                directories = supervisor.directories()
+                client = pushed.client()
+                futures = [pool.submit(w.tick, time.monotonic(), directories.get(id(w)), client)
+                           for w in supervisor.workers]
                 while concurrent.futures.wait(futures, timeout=1).not_done:
                     if stop_requested(state, instance):
                         stop.set()  # honoured as soon as the in-flight ticks return
                 if stop_requested(state, instance):
                     stop.set()
                 record("running", [f.result() for f in futures])
+                pushed.started()
+                # The machine credential's team target (14.5); acted on in the background.
+                first = next((w for w in supervisor.workers if not w.retired), None)
+                if first is not None and first.reply is not None:
+                    pushed.consider(first.reply.get("target"))
                 if once:
                     break
                 for _ in range(30):

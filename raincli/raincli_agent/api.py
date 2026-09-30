@@ -79,7 +79,16 @@ class ApiClient:
         return f"ApiClient(api_url={self.api_url!r})"
 
     def publish_presence(self, status):
-        return self.request("PUT", "/presence", body={"status": status})[1]["presence"]
+        return self.report_presence(status)["presence"]
+
+    def report_presence(self, status, agents=None, client=None):
+        """PUT /presence (protocol 14.1); returns the whole reply, including ``target``."""
+        body = {"status": status}
+        if agents is not None:
+            body["agents"] = agents
+        if client is not None:
+            body["client"] = client
+        return self.request("PUT", "/presence", body=body)[1]
 
     # -- transport -------------------------------------------------------
 

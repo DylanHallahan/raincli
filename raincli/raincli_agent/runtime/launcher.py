@@ -4,9 +4,12 @@ Uses the operator's base Python. Ordinary commands run the managed client with
 stdin, stdout, stderr and the exit status passed through unchanged. For
 ``runtime run`` it polls a local pointer, gracefully stops the runtime (which
 stops its connectors and releases their queue locks) before starting the newly
-selected environment, and checks official releases only if opted in. Versioned
-environments are never deleted here, so an environment still in use (Windows
-keeps its files open) remains available for rollback.
+selected environment. It never checks for releases itself: the runtime installs
+a team's pushed target (protocol 14.5). A version the runtime just installed is
+on probation until it reports ``current``: if it exits with an error first, the
+previous version is restored and ``rolled_back`` recorded (14.7 H2/M9).
+Versioned environments are never deleted here, so an environment still in use
+(Windows keeps its files open) remains available for rollback.
 """
 import json
 import os
@@ -16,6 +19,7 @@ import subprocess
 import sys
 import time
 
+PROBATION = 300  # a newly installed version must reach its first tick within this
 GRACEFUL_STOP = 120  # the runtime needs <= 100 s (service.py stop budget), connectors in parallel
 # Started at logon by pythonw.exe there is no console: do not open one per child.
 HIDDEN = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" and sys.stdout is None else {}
@@ -58,6 +62,56 @@ def read_pointer(root):
     if not python.parent.resolve().is_relative_to(root / "versions") or not python.is_file():
         raise RuntimeError("managed Python path is invalid")
     return pointer, python
+
+
+def write_json(path, data):
+    """Atomic private write (a standalone copy of fsutil.atomic_write_json)."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (json.dumps(data, indent=2, sort_keys=True) + "\n").encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == 19:
+                raise
+            time.sleep(0.05)
+
+
+def update_state(root):
+    try:
+        data = json.loads(read_text(root / "update-state.json"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def on_probation(root, pointer):
+    """The runtime installed this version and it has not yet completed a first tick."""
+    state = update_state(root)
+    target = state.get("target") or {}
+    return state.get("state") == "updating" and target.get("version") == pointer.get("tag")
+
+
+def roll_back(root, pointer):
+    """Restore the previous version after a failed first start. The update mode
+    is left as it is: only an explicit rollback makes it manual."""
+    previous = pointer.get("previous") or {}
+    if not all(k in previous for k in ("tag", "commit", "python")) or not Path(previous["python"]).is_file():
+        return False
+    restored = {**pointer, **{k: previous[k] for k in ("tag", "commit", "python")},
+                "previous": {k: pointer[k] for k in ("tag", "commit", "python")}, "automatic": False}
+    state = update_state(root)
+    target = state.get("target")
+    write_json(root / "current.json", restored)
+    write_json(root / "update-state.json", {**state, "state": "rolled_back", "error": "first_start_failed",
+                                            "blocked": target})
+    return True
 
 
 def passthrough(python, args):
@@ -114,15 +168,15 @@ def main():
     config = args[args.index("--config") + 1] if "--config" in args[:-1] else None
     own = Path(__file__).read_bytes()
     stopped = False
-    process = updater = None
+    process = None
     failures, started, next_start = 0, 0.0, 0.0
+    probation = False
 
     def stop(*_):
         nonlocal stopped
         stopped = True
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, stop)
-    last_update = time.monotonic()  # wait six hours after start before checking
     current = None
     try:
         while not stopped:
@@ -151,10 +205,15 @@ def main():
                     if output is not None:
                         os.close(output)
                 started = time.monotonic()
+                probation = on_probation(root, pointer)
             code = process.poll()
             if code == 0:
                 process = None
                 return 0  # stopped on request
+            if (code is not None and probation and time.monotonic() - started < PROBATION
+                    and on_probation(root, pointer) and roll_back(root, pointer)):
+                process, next_start, failures = None, 0.0, 0
+                continue  # the loop starts the restored version
             if code is not None:
                 # Crashed: restart with bounded backoff. Windows logon startup has
                 # no service manager to do this.
@@ -169,25 +228,9 @@ def main():
                 if Path(__file__).read_bytes() != own:
                     return relaunch(args)  # the new release shipped a new launcher
                 continue
-            if updater is not None and updater.poll() is not None:
-                updater = None
-            if updater is None and pointer.get("automatic") and time.monotonic() - last_update >= 21600:
-                last_update = time.monotonic()
-                # Run the check without blocking this loop, so a stop is handled promptly.
-                with open(root / "update.log", "wb") as log:
-                    updater = subprocess.Popen([str(python), "-m", "raincli_agent", "runtime", "update", "--install", "--root", str(root)],
-                                               stdout=log, stderr=log, stdin=subprocess.DEVNULL, **HIDDEN)
-                updater_started = time.monotonic()
-            if updater is not None and time.monotonic() - updater_started > 420:
-                updater.kill()  # the pointer is replaced atomically, never half-written
-                updater.wait(timeout=10)
-                updater = None
             time.sleep(1)
         return 0
     finally:
-        if updater is not None and updater.poll() is None:
-            updater.kill()
-            updater.wait(timeout=10)
         if process is not None:
             stop_runtime(process, current[1], config)
 
