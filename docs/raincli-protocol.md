@@ -519,3 +519,11 @@ The connector config may map the inbox to a hook session instead of Herdr: `"inb
 - The graceful-stop `offline` report sends `"agents": []`.
 
 **Schema (L12).** `CHECK ((role IS NULL) = (reachability IS NULL))` is enforced.
+
+### 14.8 Integration decisions (binding)
+
+- **Re-arming a blocked target.** The presence reply's `target` also carries `set_at` (ISO 8601): `{"version", "allow_downgrade", "set_at"}`. A client blocks a target that rolled back or failed verification per `{version, allow_downgrade, set_at}`, so the operator re-arms it by setting the same target again.
+- **Several connectors in one runtime.** A legacy setup can run several connectors, one handle each. The connector whose config path sorts first publishes the machine directory and drives pushed updates from its team's target. The others publish only their own inbox entry. New setups use one machine credential and a single connector.
+- **Held next-turn messages.** A next-turn message in `handed_over` is reported to the sender as `held` with the detail `next_turn`.
+- **Blocked status.** It comes from the agent's notification hook. The installed hooks don't include per-tool events (they would cost a process start on every tool call), so a session stays `blocked` until its next prompt or stop.
+- **`raincli hooks install`** requires `--config <runtime.json>`, so the installed hook command can embed the runtime's state directory.
