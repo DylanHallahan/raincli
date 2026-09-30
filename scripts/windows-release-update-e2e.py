@@ -139,15 +139,23 @@ class Cluster:
             sockets = self.work / "sock"
             sockets.mkdir()
             options += f" -k {sockets}"
-        subprocess.run([pg_ctl, "-D", str(self.data), "-l", str(self.log), "-w", "-t", "60", "-o", options, "start"],
-                       check=True, capture_output=True, timeout=90)
+        # Never pipe pg_ctl's output: the postgres server it launches inherits the pipe handles and keeps
+        # them open, so subprocess.run would wait for EOF forever (on Windows even after its timeout).
+        # The server's own output goes to -l; stop() runs whatever happens, so mark started first.
         self.started = True
+        try:
+            subprocess.run([pg_ctl, "-D", str(self.data), "-l", str(self.log), "-w", "-t", "60", "-o", options, "start"],
+                           check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=90)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise Failure(f"pg_ctl start failed ({type(exc).__name__}): " + SECRETS.scrub(tail(self.log, 2000))) from None
         return f"postgresql://raincli:{self.password}@127.0.0.1:{self.port}/postgres"
 
     def stop(self):
         if self.started:
-            subprocess.run([self.pg_ctl, "-D", str(self.data), "-m", "fast", "-w", "-t", "60", "stop"],
-                           capture_output=True, timeout=90)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                subprocess.run([self.pg_ctl, "-D", str(self.data), "-m", "fast", "-w", "-t", "60", "stop"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
 
 
 class ThrowawayDatabase:
@@ -488,16 +496,16 @@ def diagnose(work):
                  client / "managed/update-state.json", client / "managed/update-mode.json",
                  client / "launcher.log", client / "managed/runtime.log", client / "managed/update.log"]:
         if path.exists():
-            say(f"--- {path.relative_to(work)} ---\n{tail(path)}")
+            say(f"--- {shown(path, work)} ---\n{tail(path)}")
     for path in sorted((client / "runtime-state").glob("connector-*.log*")):
-        say(f"--- {path.relative_to(work)} ---\n{tail(path, 4000)}")
+        say(f"--- {shown(path, work)} ---\n{tail(path, 4000)}")
     for path in sorted((client / "managed/versions").glob("*")):
         say(f"managed version dir: {path.name}")
     pg_path = work / "pg-path"
     pg_log = Path(pg_path.read_text()) / "postgres.log" if pg_path.exists() else work / "pg/postgres.log"
     for path in (work / "server/server.log", pg_log):
         if path.exists():
-            say(f"--- {path.relative_to(work)} ---\n{tail(path, 4000)}")
+            say(f"--- {shown(path, work)} ---\n{tail(path, 4000)}")
     say("===== END DIAGNOSTICS =====")
 
 
@@ -517,6 +525,14 @@ def parse_args(argv=None):
     if updates.version_key(args.from_version) >= updates.version_key(args.to_version):
         parser.error("--to-version must be newer than --from-version")
     return args
+
+
+def shown(path, work):
+    """A diagnostics label: relative to the work dir when inside it (the cluster lives outside it)."""
+    try:
+        return str(path.relative_to(work))
+    except ValueError:
+        return str(path)
 
 
 def main(argv=None):
