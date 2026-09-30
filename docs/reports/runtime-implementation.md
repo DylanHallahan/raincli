@@ -28,7 +28,7 @@ Main owns merging to `main`, releases and deployment. None of them has happened.
   - a staged separate environment built **without pip or PyPI**, verified before the pointer swap;
   - no downgrade, and the previous environment is retained for rollback;
   - a managed launcher that passes stdin and stdout through, restarts a crashed runtime, updates itself, and checks for updates every 6 h without blocking.
-  - **Integrity limit:** TLS plus commit resolution. There are no release signatures. No stable release exists yet.
+  - **Integrity limit:** TLS plus commit resolution. There are no release signatures. v0.2.0 is the first stable release.
 - **Windows specifics:**
   - readiness uses a per-spawn handshake, because a venv's `python.exe` is a redirector running the interpreter under a different pid;
   - a bounded retry rides out transient sharing violations on atomic replace and reads;

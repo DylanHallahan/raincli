@@ -193,9 +193,9 @@ cd ~/src/raincli-repo && git pull --ff-only && cd raincli && .venv/bin/pip insta
 
 After updating, re-copy the skill (step 1) and restart the connector or runtime.
 
-### Managed updates (opt-in; no stable release yet)
+### Managed updates (opt-in)
 
-The runtime can install **stable GitHub releases** of `DylanHallahan/raincli` only: tags `vMAJOR.MINOR.PATCH` that are not drafts or prereleases. It never follows a branch or a URL from a message. **No stable release exists yet**, so `runtime update` currently reports `no_release` and nothing installs.
+The runtime can install **stable GitHub releases** of `DylanHallahan/raincli` only: tags `vMAJOR.MINOR.PATCH` that are not drafts or prereleases. It never follows a branch or a URL from a message. The first stable release is **v0.2.0**.
 
 ```bash
 raincli runtime update                    # check the latest stable release; changes nothing

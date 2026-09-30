@@ -113,4 +113,4 @@ def test_runtime_commands_and_presence_boundary_are_documented(doc):
     for status in ("ready", "busy", "blocked", "offline", "unknown"):
         assert status in text
     assert re.search(r"not\*{0,2} (delivery|one of these states)", text) or "doesn't mean a message was received" in text
-    assert "No stable release exists yet" in text
+    assert "stable" in text and "signature" in text  # stable releases only; unsigned, and saying so
