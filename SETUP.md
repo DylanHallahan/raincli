@@ -69,10 +69,10 @@ The inbox is the one agent on this machine that receives your team's messages. C
 | Inbox | Reachability | When messages arrive | Needs |
 | --- | --- | --- | --- |
 | **Herdr agent** (recommended with Herdr) | `instant` | As soon as the agent is idle | Herdr |
-| **Claude Code session** through hooks | `next-turn` | **Only when that session is next used**: at its next start or the next prompt you type in it | Claude Code hooks (step 6) |
+| **Claude Code session** through hooks | `next-turn` | **Only when that session is next used**: at its next start or the next prompt you type in it | Claude Code hooks (step 6); Claude Code only |
 | **None** (CLI only) | — | Never automatically; read them with `raincli inbox --all` | Nothing |
 
-**Next-turn delivery waits until the session is next used.** A message to an idle Claude Code session that nobody touches waits, durably queued, until someone starts the session or types a prompt in it. Teammates see `next-turn` next to your inbox, so they know not to expect an immediate answer. Choose Herdr if messages should be handled while you're away.
+**Next-turn delivery waits until the session is next used.** A message to an idle Claude Code session that nobody touches waits, durably queued, until someone starts the session or types a prompt in it. Teammates see `next-turn` next to your inbox, and a waiting message shows to its sender as `held` with the reason `next_turn`, so they know not to expect an immediate answer. Choose Herdr if messages should be handled while you're away. The next-turn inbox is **Claude Code only**; Codex sessions can be listed, but not used as an inbox.
 
 For CLI only, skip to step 6 for the agent list, and skip the connector.
 
@@ -151,16 +151,16 @@ Write `~/.config/raincli/connector.json` with mode 0600:
 
 `inbox` replaces `herdr_agent`; a config can't have both. Escalation targets are Herdr agents, so leave `escalation` out: the inbox agent then tells the sender what it can't answer.
 
-**You:** start the inbox session under that name, then give it the operator assignment above as your first prompt:
+The next-turn inbox needs the runtime (`raincli runtime run`, step 5) and the Claude Code hooks (step 6). Install both before starting the session. **You:** start the inbox session under that name, then give it the operator assignment above as your first prompt:
 
 ```bash
 cd ~/herdr/inbox-agent && RAINCLI_AGENT_NAME=raincli-inbox claude
 ```
 
 How next-turn delivery works:
-- A message for the inbox is written to a private file on this machine (local state `handed_over`).
+- A message for the inbox is written to a private file on this machine (local state `handed_over`). Its sender sees it as `held` with the reason `next_turn` until it is handed over.
 - At the session's next start or prompt, the hook hands over every waiting message, oldest first, as additional context for that turn. The connector then marks each one `submitted`.
-- About 32 KiB is handed over per turn. The rest waits for the following turn. A single message too large for a turn is held (`too_large_for_hook`) and never handed over.
+- At most about **10,000 characters** are handed over per turn, because of Claude Code's limit on a hook's additional context. The rest waits for the following turn. A single message too large for a turn is held (`too_large_for_hook`) and never handed over; read it with `raincli show` instead.
 - If no live session has that name, messages are **held `offline`**. If more than one does, they are **held `target_ambiguous`**. RainCLI never picks another session.
 - If the connector or machine stops after a message was claimed but before its receipt, the message becomes `submission_uncertain` and is never handed over again automatically. Check `raincli connector status` and ask the sender to resend if needed.
 
@@ -213,21 +213,26 @@ Startup doesn't create a Herdr environment, start Herdr or start agents, and it 
 
 The runtime discovers the machine's coding-agent sessions every 30 seconds:
 - **Herdr:** every agent in `herdr agent list`, with its name, kind and status.
-- **Hooks:** Claude Code (and Codex, where its hook support allows) sessions report their own status through `raincli hook`.
+- **Hooks:** Claude Code sessions, and Codex sessions where Codex's hooks are enabled, report their own status through `raincli hook`.
 - **Process scan (fallback):** other agent processes that you run, listed by type and directory name with status `unknown`.
 
-The hooks are **required for a Claude Code inbox** (4c) and optional otherwise. Installing them edits your agent's user config, so ask the user first:
+The hooks are **required for a Claude Code inbox** (4c) and optional otherwise. Installing them edits your agent's user config, so ask the user first. They need the runtime config from step 5, whose `state_dir` the hooks write to:
 
 ```bash
-raincli hooks install --claude            # and/or --codex; prints what it changed and whether Codex is supported
-raincli hooks install --claude --remove   # removes only the entries marked raincli
+raincli hooks install --claude --config ~/.config/raincli/runtime.json            # ~/.claude/settings.json
+raincli hooks install --codex --config ~/.config/raincli/runtime.json             # ~/.codex/hooks.json; prints whether Codex supports hooks
+raincli hooks install --claude --config ~/.config/raincli/runtime.json --remove   # removes only the entries marked raincli
 ```
+
+**Codex: review the hooks once in Codex.** Codex asks you to review new hooks before they run. After installing, open Codex and approve the RainCLI hooks in its `/hooks` view; until then Codex sessions are listed only by the process scan. Codex hooks work on Linux and macOS only.
 
 How the hooks behave:
 - They are idempotent. A 0600 backup is written first, a config that doesn't parse is left alone, and only entries marked `raincli` are ever touched.
-- The installed command is the stable launcher with your runtime's state directory built in, and has a short timeout. It uses no network, always exits successfully, and never blocks your agent for more than about 2 seconds.
-- Each session's name is `--name`, or `RAINCLI_AGENT_NAME`, or else the **basename** of its project directory. Only that basename is kept.
-- Codex hooks are installed only when the installed Codex supports the required events. Otherwise Codex sessions are found by the process scan and listed only.
+- The installed command is the stable launcher (or the `raincli` entry point on an unmanaged install) with your runtime's state directory built in, and has a short timeout. It uses no network, always exits successfully, and never blocks your agent for more than about 2 seconds. Its errors are logged as codes only, in `<state_dir>/hook.log`.
+- A session's status comes from its hook events: `working` from a prompt, `idle` when a turn ends, and `blocked` when it asks for input. There are no per-tool hooks (they would start a process on every tool call), so **a session stays `blocked` until its next prompt or stop**, even after you answer the question.
+- Each session's name is `--name`, or `RAINCLI_AGENT_NAME` (for example `RAINCLI_AGENT_NAME=inbox claude`), or else the **basename** of its project directory. Only that basename is kept.
+- Codex hooks are installed only when the installed Codex reports its hooks feature enabled. Otherwise Codex sessions are found by the process scan and listed only.
+- The runtime keeps the per-machine salt (`<state_dir>/machine-salt`) and the hook session records (`<state_dir>/sessions/`) private and local.
 
 **What reaches the server:** a name, a type (`claude`, `codex`, `gemini`, `cursor`, `opencode` or `other`), a status (`working`, `idle`, `blocked`, `offline` or `unknown`), whether it is the inbox, and an opaque key derived with a per-machine secret. **Never** paths, working directories, prompts, titles, transcripts, pane ids or process ids.
 
@@ -240,7 +245,7 @@ raincli conversations
 
 ## What teammates see
 
-On the website's **Machines** page and in `raincli agents`, each machine shows its agents with the **inbox first**, then each agent's name, type and status, the inbox's reachability (`instant` or `next-turn`), and the machine's client version and update state. The list covers reports from the last 120 seconds.
+On the website's **Machines** page and in `raincli agents`, each machine shows its agents with the **inbox first**, then each agent's name, type and status, the inbox's reachability (`instant` or `next-turn`), and the machine's client version and update state. `raincli agents` prints the client version, update mode, update state and any error on the machine's line, and marks scan entries "(detected, status unknown)". The list covers reports from the last 120 seconds.
 
 Each handle also keeps its **session availability**:
 
@@ -265,19 +270,21 @@ A managed install takes **automatic updates**. Your team's server operator choos
 4. into a new environment under `~/.raincli/client/versions/`, **without pip or PyPI**;
 5. verifying the installed version, then switching the pointer and handing over gracefully.
 
-The previous version is kept. If the new one fails verification or its first start, the pointer is restored (`rolled_back`) and that target isn't retried until the operator sets it again. Download and network failures retry with backoff (5 minutes, doubling up to 6 hours). The server only names a version; it can never choose where the client comes from.
+The previous version is kept. If the new one fails verification, or doesn't start within 5 minutes of the switch, the launcher restores the previous version and the machine reports `rolled_back`. That target isn't retried until the operator sets it again (even to the same version). Download and network failures retry with backoff (5 minutes, doubling up to 6 hours). The server only names a version; it can never choose where the client comes from.
 
 An older target is installed only if the operator allowed downgrades. Targets before v0.3.0, the first release that understands them, are refused.
+
+Automatic is the **default for managed installs**. There is no periodic pull any more: the runtime updates only when the operator's target changes, or when you run `--install`.
 
 ```bash
 raincli runtime update --manual           # opt out on this machine; kept across updates
 raincli runtime update --automatic        # opt back in
-raincli runtime update                    # check the latest stable release; changes nothing
+raincli runtime update --check            # check the latest stable release; changes nothing (the default without a flag)
 raincli runtime update --install          # install the latest stable release now
 raincli runtime update --rollback         # switch back to the previous release; sets manual
 ```
 
-A v0.2.0 install whose pointer says `automatic: false` counts as "not chosen". On its first run, v0.3.0 turns automatic updates on and prints and logs a one-time notice. After that, only `runtime update --manual` (or `--rollback`) turns them off.
+**Upgrading a v0.2.0 managed install.** v0.2.0 recorded `automatic: false` whenever nobody chose, so it counts as "not chosen". On the first run of v0.3.0 or later, the runtime turns automatic updates on and prints a **one-time notice** (in its log or `journalctl --user -u raincli-runtime.service`). From then on your choice is recorded, and only `runtime update --manual` (or `--rollback`) turns automatic updates off. Run `raincli runtime update --manual` if you want to stay manual.
 
 **Releases are unsigned.** Trust rests on verified TLS to GitHub plus the tag-to-commit resolution. Release signatures and checksums are **not** verified.
 
