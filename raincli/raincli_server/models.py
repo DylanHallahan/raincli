@@ -112,8 +112,52 @@ class AgentPresence(Base):
     agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    __table_args__ = (CheckConstraint("status IN ('ready','busy','blocked','offline','unknown')",
-                                     name="ck_agent_presence_status"),)
+    # Machine client report (protocol §14.3); null for clients older than v0.3.0.
+    client_version: Mapped[str | None] = mapped_column(String(32))
+    update_mode: Mapped[str | None] = mapped_column(String(16))
+    update_state: Mapped[str | None] = mapped_column(String(16))
+    update_error: Mapped[str | None] = mapped_column(String(200))
+    __table_args__ = (
+        CheckConstraint("status IN ('ready','busy','blocked','offline','unknown')", name="ck_agent_presence_status"),
+        CheckConstraint("update_mode IS NULL OR update_mode IN ('automatic','manual')", name="ck_agent_presence_mode"),
+        CheckConstraint("update_state IS NULL OR update_state IN ('current','updating','failed','rolled_back')",
+                        name="ck_agent_presence_update_state"),
+    )
+
+
+class MachineAgent(Base):
+    """One agent session published by a machine's runtime (protocol §14.2). Snapshot-replaced."""
+
+    __tablename__ = "machine_agents"
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    role: Mapped[str | None] = mapped_column(String(16))
+    reachability: Mapped[str | None] = mapped_column(String(16))
+    source: Mapped[str] = mapped_column(String(8), nullable=False)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        CheckConstraint("status IN ('working','idle','blocked','offline','unknown')", name="ck_machine_agents_status"),
+        CheckConstraint("type IN ('claude','codex','gemini','cursor','opencode','other')", name="ck_machine_agents_type"),
+        CheckConstraint("role IS NULL OR role = 'inbox'", name="ck_machine_agents_role"),
+        CheckConstraint("reachability IS NULL OR (role = 'inbox' AND reachability IN ('instant','next-turn'))",
+                        name="ck_machine_agents_reachability"),
+        CheckConstraint("source IN ('herdr','hook','scan')", name="ck_machine_agents_source"),
+        Index("uq_machine_agents_one_inbox", "agent_id", unique=True, postgresql_where="role = 'inbox'"),
+    )
+
+
+class ClientTarget(Base):
+    """Operator-set client version for a team (protocol §14.4). Names a version, never a source."""
+
+    __tablename__ = "client_targets"
+    team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    allow_downgrade: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    set_at: Mapped[datetime] = _created()
+    __table_args__ = (CheckConstraint("version ~ '^v[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}$'", name="ck_client_targets_version"),)
 
 
 class AgentCredential(Base):

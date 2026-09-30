@@ -338,3 +338,119 @@ Presence tells teammates whether a registered handle's explicitly mapped session
 - **Local state.** Runtime state (status, readiness files, locks and `connector-<id>.log` files, rotated at 1 MiB with one `.1` generation) stays local in private files and is never uploaded. Only the five-value status above reaches the server; errors are recorded locally as a short code or an exception class name only.
 
 **Startup and updates** are opt-in client features that the server does not see. Updates use HTTPS to `api.github.com` and `codeload.github.com` only (checked on every redirect), resolve a stable tag to a commit, require the archive to match that commit, install without pip or a package index, never downgrade, and switch only after verification. Integrity rests on TLS plus commit resolution; release signatures are not verified. See [SETUP.md](../SETUP.md#keep-the-connector-running-optional) and the [Windows guide](windows-client.md).
+
+## 14. Machine agent directory and pushed updates (v1.6, binding)
+
+A **machine** is a registered handle with **one machine credential**. The runtime on that machine publishes every coding-agent session it can see. Messages still go only to the handle, and the connector delivers them to the machine's **inbox** agent. Direct messages to other sessions are not supported. The directory is for visibility only.
+
+### 14.1 Presence report (extends §13)
+
+`PUT /api/v1/presence` (scope `messages:ack`, the machine credential) accepts:
+
+```json
+{"status": "ready|busy|blocked|offline|unknown",
+ "agents": [{"key": "...", "name": "...", "type": "...", "status": "...",
+             "role": "inbox"|null, "reachability": "instant"|"next-turn"|null, "source": "herdr|hook|scan"}],
+ "client": {"version": "0.3.0", "update_mode": "automatic|manual",
+            "update_state": "current|updating|failed|rolled_back", "error": "<≤200 chars, secret-free>"|null}}
+```
+
+- **Fields:** `agents` and `client` are optional, so a v0.2.0 body of only `{status}` stays valid. Unknown keys → `400 invalid`.
+- **Snapshot:** when `agents` is present, it **replaces** the handle's directory rows in one transaction. `[]` clears them.
+- **Size:** up to 100 agents.
+- **Agent fields:**
+  - `key`: `^[a-z0-9]{8,64}$`. It's opaque: the runtime derives it by hashing a source id with a per-machine salt. Keys are unique within a report.
+  - `name`: same rules as display names, 1–64 characters, required.
+  - `type`: one of `claude`, `codex`, `gemini`, `cursor`, `opencode` or `other`.
+  - `status`: one of `working`, `idle`, `blocked`, `offline` or `unknown`. A Herdr `unknown` stays `unknown`.
+- **Role and reachability:**
+  - At most one agent may carry `role: "inbox"`.
+  - `reachability` must be `instant` or `next-turn` for the inbox, and null for every other agent.
+  - `source: "scan"` requires `status: "unknown"`.
+- **Client fields:** `client.version` matches `^\d{1,4}\.\d{1,4}\.\d{1,4}$`. `update_state` and `update_mode` come from the sets above.
+- **Never sent or stored:** paths, cwd, prompts, titles, transcripts, pane ids or process ids.
+- **Reply:** `{"presence": {…as §13…}, "target": {"version": "vX.Y.Z", "allow_downgrade": bool} | null}`. The target is the team's current `client_targets` row, if one exists. It holds a **version only, never a URL, repository or host**.
+
+### 14.2 Directory read
+
+`GET /api/v1/agents` (team-scoped, as before) adds two blocks to each handle:
+- `"machine": {"client_version", "update_mode", "update_state", "error", "seen_at"}`, or null;
+- `"agents": [{"name", "type", "status", "role", "reachability", "source"}]`. Only rows younger than **120 s** are included. Keys are not returned.
+
+Revoked handles return no agents. The website shows machines → agents: the inbox badge, name, type and status, reachability (inbox only), and the machine's version and update state on each agent.
+
+### 14.3 Discovery (runtime, every 30 s)
+
+**Herdr:** `herdr agent list`, all agents. The name is the Herdr agent name, and the type is the Herdr agent kind (anything else maps to `other`).
+- The status map is idle or done → `idle`, working → `working`, blocked → `blocked`, unknown or anything else → `unknown`.
+- The connector's mapped `herdr_agent` is `role: inbox`, `reachability: instant`.
+- Keys are `hash(salt, "herdr:" + agent name)`.
+
+**Hooks:** `raincli hook <claude|codex> <event> [--name NAME]`.
+- **Command:** it reads the agent's hook JSON from stdin (at most 1 MiB), uses **no network**, and writes one 0600 session record atomically under `<runtime state_dir>/sessions/`.
+- **Session record:** `key`, `type`, `name`, `status`, `updated_at`. A record older than 10 minutes that has no `end` event counts as `offline`, and one older than 1 h is dropped.
+- **Failure handling:** it always exits 0, logs its own errors to a private rotated log, and never blocks the agent for more than about 2 s.
+- **Status events:**
+  - start → `idle`;
+  - prompt submit or turn → `working`;
+  - stop or turn end → `idle`;
+  - notification that it needs input → `blocked`;
+  - end → the record is removed.
+- **Name:** `--name` or `RAINCLI_AGENT_NAME` if set; otherwise the **basename** of the session's project directory. Only the basename is kept. Keys are `hash(salt, type + ":" + session_id)`.
+- **Installing:** `raincli hooks install --claude|--codex [--remove]` edits the agent's user config idempotently. It writes a backup first, and only touches entries it owns, which are marked `raincli`.
+- **Codex:** hooks are installed only if the installed Codex's hook API supports the events above. Otherwise Codex sessions are found by process scan and listed only.
+
+**Process scan (fallback):**
+- **Linux:** `/proc/*/{comm,cmdline,cwd}` for known agent executables not already reported by Herdr or hooks, as the type plus the cwd basename.
+- **Windows:** `tasklist` is type-only, with the name set to the type.
+- **Scan entries:** always `status: unknown`, `source: scan`.
+
+### 14.4 Next-turn inbox (a non-Herdr Claude Code session)
+
+The connector config may map the inbox to a hook session instead of Herdr: `"inbox": {"hook": "claude", "name": "<session name>"}`. It is mutually exclusive with `herdr_agent`.
+
+- **Mapping:** the target is the single live hook session of that type and name. If none is live, the message is **held `offline`**. If more than one is live, it is **held `target_ambiguous`**. There is never a fallback.
+- **Handover:** instead of `herdr agent prompt`, the connector writes the fully framed prompt (§11.1 layout, identical text) to `sessions/<key>.inbox/<message-id>.md` (0600, atomic), with state `submitting`.
+- **On the next `SessionStart` or `UserPromptSubmit` of the mapped session,** the hook:
+  1. atomically claims every pending file (renamed to `.claimed`);
+  2. emits them, oldest first, as the hook's additional context;
+  3. writes a claim receipt.
+
+  The connector then marks each claimed message `submitted`.
+- **Edge cases:** a file claimed without a receipt, after a crash, becomes `submission_uncertain`, and is never re-emitted automatically. The per-turn total is bounded (about 64 KiB, with the rest waiting for the next turn).
+- **Reachability** is reported as `next-turn`. The docs must say that delivery waits until the session is next used.
+- **Unchanged:** framing, anti-forgery, durable receipts, attachment handling, escalation and approval.
+
+### 14.5 Pushed updates
+
+- **Operator:**
+  - `raincli-admin set-client-version --team SLUG vX.Y.Z [--allow-downgrade]` upserts the team's target.
+  - `--allow-downgrade` is stored with the target and applies only while that target is set. The CLI prints a warning when it is used.
+  - `raincli-admin set-client-version --team SLUG --clear` removes the target.
+  - `raincli-admin client-status --team SLUG` lists each machine's version and update state.
+- **Runtime:** it acts on the presence reply's `target`.
+  - **When:** only when `update_mode` is `automatic`, the install is managed (a launcher or pointer exists), and `target != installed`. An older target needs `allow_downgrade`.
+  - **How:** it installs **immediately**, through the existing path, with no 6-hour wait:
+    1. the canonical repository `DylanHallahan/raincli` only;
+    2. a non-draft, non-prerelease release with that exact tag;
+    3. the tag resolved to its commit;
+    4. the archive matched to that commit;
+    5. a pip-less staged environment;
+    6. version verification;
+    7. the pointer swap and a graceful handoff.
+
+    The previous version is kept for rollback.
+  - **States:** it reports `updating` while working, then `current` on success, or `failed` with an error. `rolled_back` means the new version failed verification or its first start, and the pointer was restored.
+  - **Retries:** a failed target is retried with exponential backoff (5 min doubling up to 6 h), and at once when the target changes.
+  - **Transport:** the runtime never accepts a URL, host or repository from the server.
+- **Removed:** the 6-hour automatic pull check. `runtime update --check`/`--install` stay available for manual use.
+- **Defaults:**
+  - Managed installs default to `update_mode: automatic`.
+  - `raincli runtime update --manual` opts out and `--automatic` opts back in; both are persisted.
+  - A v0.2.0 pointer with `automatic: false` is treated as **not chosen**. On the first run of this version, the runtime turns automatic on, and prints and logs a one-time notice. It records `update_mode_chosen: true` from then on, and after that only an explicit `--manual` turns it off.
+- **Trust:** releases are **unsigned**. The trust chain is HTTPS to GitHub plus the resolution of the tag to its commit. The server chooses only *which* version, never *where from*.
+
+### 14.6 Setup
+- The website's "Add a machine" replaces "Register an agent". It uses the same backend: one handle and one credential per machine.
+- Existing handles become machines as soon as their runtime sends `agents`. Nothing is migrated by force.
+- The setup guide makes the managed install, the launcher and automatic updates the default path, and covers the hooks and the inbox choice (Herdr `instant` or Claude Code hook `next-turn`).
