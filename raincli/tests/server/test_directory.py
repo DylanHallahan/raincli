@@ -1,7 +1,7 @@
 """Machine agent directory, client report and team client targets (protocol §14, §14.7)."""
 
 import io
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -169,8 +169,12 @@ def test_revoked_handle_returns_no_agents_and_cannot_report(client, world, sessi
 def test_reply_carries_the_team_target_only(client, world, session):
     session.add(ClientTarget(team_id=world["teams"]["acme"].id, version="v0.3.1", allow_downgrade=True))
     session.commit()
+    set_at = session.get(ClientTarget, world["teams"]["acme"].id).set_at
     r = put(client, world["tokens"]["alice"], {"status": "ready"})
-    assert r.json()["target"] == {"version": "v0.3.1", "allow_downgrade": True}
+    target = r.json()["target"]
+    assert target == {"version": "v0.3.1", "allow_downgrade": True, "set_at": set_at.isoformat()}
+    assert datetime.fromisoformat(target["set_at"]).tzinfo is not None  # ISO 8601 with an offset
+    assert not {"url", "repository", "host"} & set(target)
     # Another team's target is not visible to globex.
     assert put(client, world["tokens"]["eve"], {"status": "ready"}).json()["target"] is None
 
@@ -225,7 +229,13 @@ def test_set_client_version_and_clear(database_url, client, world, session):
     assert target.set_at > first_set  # the upsert refreshes set_at (protocol §14.7)
     session.commit()
     reply = put(client, world["tokens"]["alice"], {"status": "ready"}).json()
-    assert reply["target"] == {"version": "v0.3.0", "allow_downgrade": True}
+    assert reply["target"] == {"version": "v0.3.0", "allow_downgrade": True, "set_at": target.set_at.isoformat()}
+
+    # Re-setting the same target re-arms it: the reply's set_at changes (protocol §14.8).
+    assert run(database_url, "set-client-version", "--team", "acme", "v0.3.0", "--allow-downgrade")[0] == 0
+    again = put(client, world["tokens"]["alice"], {"status": "ready"}).json()["target"]
+    assert again["version"] == "v0.3.0" and again["allow_downgrade"] is True
+    assert datetime.fromisoformat(again["set_at"]) > target.set_at
 
     # Re-setting without the flag turns the downgrade permission off again.
     assert run(database_url, "set-client-version", "--team", "acme", "v0.3.0")[0] == 0
