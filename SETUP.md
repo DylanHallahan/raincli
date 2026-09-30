@@ -219,8 +219,8 @@ The runtime discovers the machine's coding-agent sessions every 30 seconds:
 The hooks are **required for a Claude Code inbox** (4c) and optional otherwise. Installing them edits your agent's user config, so ask the user first:
 
 ```bash
-raincli hooks install --claude            # and/or --codex; prints what it changed and whether Codex is supported
-raincli hooks install --claude --remove   # removes only the entries marked raincli
+raincli hooks install --claude --config ~/.config/raincli/runtime.json           # and/or --codex; prints what it changed and whether Codex is supported
+raincli hooks install --claude --config ~/.config/raincli/runtime.json --remove  # removes only the entries marked raincli
 ```
 
 How the hooks behave:

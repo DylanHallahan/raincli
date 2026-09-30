@@ -244,11 +244,15 @@ def main():
                     if not path.is_file():
                         continue
                     data = path.read_bytes()
+                    # A Windows checkout has CRLF line endings (core.autocrlf): match
+                    # either, and fail loudly if a patch does not apply exactly once.
                     if version and name == "raincli/raincli_agent/__init__.py":
-                        data = data.replace(('"%s"' % __version__).encode(), ('"%s"' % version).encode())
+                        data, count = re.subn(rb'__version__ = "[0-9.]+"', ('__version__ = "%s"' % version).encode(), data)
+                        assert count == 1, "synthetic version patch did not apply"
                     if crash and name == "raincli/raincli_agent/runtime/service.py":
-                        data = data.replace(b"def run(path, once=False, pushed=None):\n",
-                                            b"def run(path, once=False, pushed=None):\n    raise SystemExit(3)\n")
+                        data, count = re.subn(rb"(def run\(path, once=False, pushed=None\):(\r?\n))",
+                                              rb"\1    raise SystemExit(3)\2", data)
+                        assert count == 1, "synthetic first-start failure patch did not apply"
                     archive.writestr("raincli-" + commit + "/" + name, data)
             return buf.getvalue()
         original_fetch = updates.fetch
