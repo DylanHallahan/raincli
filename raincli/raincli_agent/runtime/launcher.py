@@ -70,12 +70,41 @@ def read_pointer(root):
     return pointer, python
 
 
-def write_json(path, data):
-    """Atomic private write (a standalone copy of fsutil.atomic_write_json)."""
+WRITE_HELPER = ("import json, sys\n"
+                "from raincli_agent.fsutil import atomic_write_json\n"
+                "atomic_write_json(sys.argv[1], json.load(sys.stdin))\n")
+
+
+def write_json(path, data, python=None):
+    """Atomic private write of a managed-state file.
+
+    It goes through the client's own helper (``fsutil.atomic_write_json``), run
+    by ``python``, a managed interpreter known to work. On Windows that helper
+    sets the owner to the current user and a protected DACL explicitly; a plain
+    file created by an administrator would instead be owned by
+    BUILTIN\\Administrators with an inherited ACL, and every later read of the
+    pointer would refuse it. The result is read back and compared. Only on POSIX,
+    where a 0600 file created here is equivalent, does it fall back to a local write."""
+    text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    if python is not None:
+        try:
+            subprocess.run([str(python), "-c", WRITE_HELPER, str(path)], input=text.encode(), env=ISOLATED_ENV,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+                           check=True, **HIDDEN)
+            if json.loads(read_text(path)) == data:
+                return
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    if os.name == "nt":
+        raise OSError("cannot write managed state through the client's private-file helper")
+    _write_json_posix(path, text)
+
+
+def _write_json_posix(path, text):
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, (json.dumps(data, indent=2, sort_keys=True) + "\n").encode())
+        os.write(fd, text.encode())
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -166,9 +195,15 @@ def roll_back(root, pointer):
                     "previous": {k: current[k] for k in ("tag", "commit", "python")}, "automatic": False}
         state = update_state(root)
         target = state.get("target")
-        write_json(root / "current.json", restored)
-        write_json(root / "update-state.json", {**state, "state": "rolled_back", "error": "first_start_failed",
-                                                "blocked": target})
+        # Written by the version being restored, through the client's own helper.
+        helper = previous["python"]
+        try:
+            write_json(root / "current.json", restored, helper)
+            write_json(root / "update-state.json", {**state, "state": "rolled_back", "error": "first_start_failed",
+                                                    "blocked": target}, helper)
+        except OSError as exc:
+            print(f"raincli launcher: rollback not written: {exc}", file=sys.stderr, flush=True)
+            return False
         return True
     finally:
         update_unlock(fd)

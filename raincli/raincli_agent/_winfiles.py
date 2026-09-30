@@ -128,23 +128,21 @@ def check_private(fd):
     if code:
         raise c.WinError(code)
     try:
-        if not owner or _sid_text(owner) != current_sid():
-            raise PermissionError("credential is not owned by the current Windows user")
-        if not dacl:
-            raise PermissionError("credential has an unrestricted Windows ACL")
-        # ACL header: revision, reserved, size, ACE count, reserved.
-        count = c.c_ushort.from_address(dacl.value + 4).value
-        trusted = {current_sid(), "S-1-5-18", "S-1-5-32-544"}
-        for index in range(count):
-            ace = P()
-            _check(_get_ace(dacl, index, c.byref(ace)))
-            kind, flags = (c.c_ubyte * 2).from_address(ace.value)
-            if flags & 8:  # INHERIT_ONLY does not grant access to this file
-                continue
-            if kind == 1:  # ACCESS_DENIED_ACE only restricts access
-                continue
-            if kind != 0 or _sid_text(ace.value + 8) not in trusted:
-                raise PermissionError("credential ACL grants access outside this user, SYSTEM and Administrators; re-import with config init")
+        from .fsutil import windows_acl_problem
+        aces = None
+        if dacl:
+            aces = []
+            # ACL header: revision, reserved, size, ACE count, reserved.
+            count = c.c_ushort.from_address(dacl.value + 4).value
+            for index in range(count):
+                ace = P()
+                _check(_get_ace(dacl, index, c.byref(ace)))
+                kind, flags = (c.c_ubyte * 2).from_address(ace.value)
+                # Only allow/deny ACEs carry a SID at offset 8; others are refused by kind.
+                aces.append((kind, flags, _sid_text(ace.value + 8) if kind in (0, 1) else None))
+        problem = windows_acl_problem(_sid_text(owner) if owner else None, aces, current_sid())
+        if problem:
+            raise PermissionError(problem)
     finally:
         _free(sd)
 
