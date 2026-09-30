@@ -2,7 +2,7 @@
 
 Recommended mapping: a **dedicated inbox agent** receives RainCLI messages, so routine team traffic doesn't interrupt your main work session. Each machine has exactly one inbox, and the runtime reports it to your team with the `inbox` badge and its reachability:
 - **`instant`:** a Herdr agent in its own tab (this document's main path). Messages are submitted as soon as it is idle.
-- **`next-turn`:** a Claude Code session, without Herdr, through the hooks. **Delivery waits until the session is next used**: messages are handed over at its next start or prompt. See [Next-turn inbox](#next-turn-inbox-claude-code-without-herdr).
+- **`next-turn`:** a Claude Code session, without Herdr, through the hooks (Claude Code only; not Codex). **Delivery waits until the session is next used**: messages are handed over at its next start or prompt. See [Next-turn inbox](#next-turn-inbox-claude-code-without-herdr).
 
 The other agents on the machine are listed for visibility only; teammates can't message them.
 
@@ -103,9 +103,10 @@ Instead of `herdr_agent`, the connector config names a hook session. The two are
 }
 ```
 
-- **Setup:** install the hooks with `raincli hooks install --claude` and start the session in the inbox workspace under the mapped name, for example `RAINCLI_AGENT_NAME=raincli-inbox claude`. Send the operator assignment as your first prompt, as for Herdr.
-- **Delivery waits until the session is next used.** The connector writes each fully framed message (the same text as for Herdr) to a private file, and the message's local state is `handed_over`. At the session's next `SessionStart` or `UserPromptSubmit`, the hook claims the waiting files, oldest first, and adds them to that turn as context. The connector then marks them `submitted`. Nothing is delivered while the session sits unused.
-- **Per-turn bound:** about 32 KiB per turn, always at least one message if it fits; the rest waits for the next turn. A single message over the bound is held as `too_large_for_hook`.
+- **Setup:** it needs the runtime (`raincli runtime run`). Install the hooks with `raincli hooks install --claude --config ~/.config/raincli/runtime.json`, then start the session in the inbox workspace under the mapped name, for example `RAINCLI_AGENT_NAME=raincli-inbox claude`. Send the operator assignment as your first prompt, as for Herdr. The next-turn inbox is **Claude Code only**.
+- **Delivery waits until the session is next used.** The connector writes each fully framed message (the same text as for Herdr) to a private file, and the message's local state is `handed_over`. The sender sees it as `held` with the reason `next_turn`. At the session's next `SessionStart` or `UserPromptSubmit`, the hook claims the waiting files, oldest first, and adds them to that turn as context. The connector then marks them `submitted`. Nothing is delivered while the session sits unused.
+- **Per-turn bound:** about **10,000 characters** per turn (Claude Code's limit on a hook's additional context), always at least one message if it fits; the rest waits for the next turn. A single message over the bound is held as `too_large_for_hook`.
+- **Status:** the session reports `blocked` when it asks for input, and **stays `blocked` until its next prompt or stop**, because there are no per-tool hooks.
 - **No fallback:** with no live session of that name, messages are held `offline`; with more than one, `target_ambiguous`. If the session ends with messages still waiting, the connector takes them back and holds them `offline`.
 - **After a crash:** a message claimed without a receipt becomes `submission_uncertain` and is never handed over again automatically.
 - **Escalation** targets are Herdr agents. Without Herdr, omit `escalation`; the inbox agent then tells the sender what it can't answer.

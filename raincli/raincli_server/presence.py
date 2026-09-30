@@ -145,10 +145,14 @@ def version_tuple(version: str) -> tuple[int, int, int]:
 
 
 def target_json(target: ClientTarget | None) -> dict | None:
-    """The team's client target: a version only, never a URL, repository or host."""
+    """The team's client target: a version only, never a URL, repository or host.
+
+    ``set_at`` changes on every operator upsert, so re-setting the same version re-arms a
+    target the client blocked after a rollback (protocol §14.8)."""
     if target is None:
         return None
-    return {"version": target.version, "allow_downgrade": bool(target.allow_downgrade)}
+    return {"version": target.version, "allow_downgrade": bool(target.allow_downgrade),
+            "set_at": target.set_at.isoformat()}
 
 
 def live_machine_agents(session, agent_ids) -> dict:

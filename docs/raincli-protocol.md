@@ -527,3 +527,12 @@ The connector config may map the inbox to a hook session instead of Herdr: `"inb
 - **Held next-turn messages.** A next-turn message in `handed_over` is reported to the sender as `held` with the detail `next_turn`.
 - **Blocked status.** It comes from the agent's notification hook. The installed hooks don't include per-tool events (they would cost a process start on every tool call), so a session stays `blocked` until its next prompt or stop.
 - **`raincli hooks install`** requires `--config <runtime.json>`, so the installed hook command can embed the runtime's state directory.
+
+### 14.9 Decisions after review 1 (binding)
+
+- **Idle next-turn inbox (review 1, finding 7).** Next-turn delivery waits until the session is used, however long that is.
+  - A hook session whose recorded local process id is **alive** stays live and stays the handover target, and the directory shows it as `idle`. Time-based staleness no longer applies to it.
+  - Handed-over files are reclaimed only on SessionEnd, when the session's process has exited, or on target ambiguity.
+  - The 10-minute `offline` and 1-hour drop rules apply only to records with no determinable process.
+- **Website scope (finding 20).** The machines page shows **every machine in the viewer's team**, the viewer's own first, matching the team-scoped `GET /api/v1/agents`. Managing a machine stays limited to its owner or a team owner.
+- **Versions (finding 13).** Components have no leading zeros: `^v(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`, on both sides.
