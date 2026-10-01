@@ -298,7 +298,7 @@ There is no cap on conversation turns. Duplicate delivery is prevented by the du
 
 1. **§11.6 wording.** The "may be stored; retry with --id <id>" hint is printed only when storage is uncertain: exit 6, `rate_limited`, and 5xx. For definitive rejections the client prints `message id <id> was not stored (<code>)` instead. These are 400, 401, 403, 404, 409 and `inbox_full`.
 2. **Escalation eligibility.** `connector escalate` accepts only messages in local state `submitted` or `submission_uncertain`, which means messages the inbox agent could actually have seen. Any other state exits 3. An `--id` that already exists as a message or escalation id also exits 3.
-3. **Server-supplied sender.** `from` must match the handle grammar `^[a-z][a-z0-9-]{1,31}$`, or the message is skipped as malformed (see LOW-7 handling). Herdr notification bodies are passed as `--body=<value>`.
+3. **Server-supplied sender.** `from` must match the handle grammar `^[a-z][a-z0-9-]{1,31}$`, or the message is skipped as malformed (see LOW-7 handling). Herdr notification bodies are passed as a separate argument after `--body` (Herdr rejects `--body=<value>`, and takes the next argument verbatim even when it starts with `-`).
 4. **Symlinks.** The connector resolves `state_dir` with `realpath` once at startup, and the no-symlink rule applies only to the components it creates below that directory. `fetch` trusts the user-chosen `--dir` (or the cwd) as its base and refuses symlinks only in the components it creates (`raincli-attachments/<mid>/` and the files themselves).
 5. **Removal revokes invitations.** `remove_member` revokes that user's open invitations for that team, and `set_user_active(False)` revokes all of that user's open invitations.
 

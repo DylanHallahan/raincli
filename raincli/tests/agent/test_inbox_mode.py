@@ -368,4 +368,4 @@ def test_herdr_cli_notify_argv(tmp_path):
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     HerdrCli(str(script)).notify("RainCLI escalation", "alice: $(id) `x`")
     assert json.loads((tmp_path / "argv.json").read_text()) == [
-        "notification", "show", "RainCLI escalation", "--body=alice: $(id) `x`"]
+        "notification", "show", "RainCLI escalation", "--body", "alice: $(id) `x`"]

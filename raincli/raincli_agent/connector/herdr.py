@@ -165,8 +165,9 @@ class HerdrCli(HerdrBoundary):
         raise HerdrError(f"herdr agent prompt failed ({code or proc.returncode}): {message}")
 
     def notify(self, title, body):
-        # --body=<value>: a value starting with "-" can never be parsed as a flag.
-        proc = self._run(["notification", "show", title, f"--body={body}"], self.timeout)
+        # Herdr rejects "--body=<value>" ("unknown option"). It takes the argument after
+        # --body as the value even when it starts with "-", so keep them separate.
+        proc = self._run(["notification", "show", title, "--body", body], self.timeout)
         if proc.returncode != 0:
             code, message = _error_code(proc.stderr)
             raise HerdrError(f"herdr notification show failed ({code or proc.returncode}): {message}")

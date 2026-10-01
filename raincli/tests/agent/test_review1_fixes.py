@@ -529,13 +529,15 @@ def test_r2_l10_bad_sender_skipped(fake_api, connector_env, sender):
     assert conn.queue.cursor() == msg["seq"]
 
 
-def test_r2_l10_notify_body_uses_equals_form(tmp_path):
+def test_r2_l10_notify_body_is_a_separate_argument(tmp_path):
     script = tmp_path / "herdr"
     script.write_text(f"#!{sys.executable}\nimport json, sys\n"
                       f"open({str(tmp_path / 'argv.json')!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     HerdrCli(str(script)).notify("RainCLI escalation", "-evil: --help")
-    assert json.loads((tmp_path / "argv.json").read_text())[-1] == "--body=-evil: --help"
+    # Herdr 0.9 rejects "--body=<value>"; the value after --body is taken verbatim, even "-evil".
+    assert json.loads((tmp_path / "argv.json").read_text()) == [
+        "notification", "show", "RainCLI escalation", "--body", "-evil: --help"]
 
 
 # R2-L11: errors name the record kind
