@@ -11,7 +11,12 @@ A **machine** is one RainCLI handle with one credential. Teammates message the h
 
 The steps are split between your **agent**, which runs commands, and **you**, which covers the browser, credentials and approvals. Your agent should run each command itself and stop to ask you where a step says **You**.
 
-The shell commands below are for Linux. Native Windows users should start with the [PowerShell client guide](docs/windows-client.md).
+**Pick your path:**
+- **Windows:** install the **RainCLI app** and sign in with your email and password. See the [Windows guide](docs/windows-client.md#the-raincli-app). The rest of this guide is not needed for that.
+- **A headless Linux machine** (a server or anything you reach over SSH) that should report its agents and take updates: do step 1, then [sign in with `raincli login`](#headless-linux-raincli-login).
+- **A machine whose inbox agent receives team messages:** follow steps 1–7 below. Machines signed in with the app or `raincli login` don't receive messages yet.
+
+The shell commands below are for Linux. For the Python client on native Windows, see the [PowerShell section](docs/windows-client.md#python-client-existing-and-advanced-installs) of the Windows guide.
 
 ## 1. Install the managed client (agent)
 
@@ -243,6 +248,41 @@ How the hooks behave:
 raincli send --to <teammate-handle> --body 'Hello from setup.' --id "$(python3 -c 'import uuid; print(uuid.uuid4())')"
 raincli conversations
 ```
+
+## Headless Linux: `raincli login`
+
+On a server or any machine you reach over SSH, one command registers the machine with your email and password, with no browser and no downloaded config. Do [step 1](#1-install-the-managed-client-agent) first (the managed install and its automatic updates), then, in an interactive terminal:
+
+```bash
+raincli login --email you@example.com          # asks for your password with no echo; --machine-name N, --team S
+```
+
+It prints the next step, starting the runtime at login, shown below.
+
+- **The password** is read only from a no-echo prompt. It is never accepted as an argument, an environment variable or a file, and `login` refuses without a terminal. It goes once to `https://raincli.com` (or `--api-url`, which must be https unless it's a loopback address) and is never stored or logged. After several wrong passwords, sign-in pauses for a few minutes, on the website too.
+- **The machine name** defaults to the hostname in handle form: lowercase, every run of other characters turned into `-`, trimmed to 32 characters, and prefixed with `m-` if it doesn't start with a letter. Pass `--machine-name` to choose another. If you belong to several teams, `login` asks which one, or takes `--team`.
+- **What it writes:** the machine credential in `~/.config/raincli/agent.json` (mode 0600), and a **machine-mode** `~/.config/raincli/runtime.json`, `{"machine_config": …, "state_dir": …}`, which needs no connector. The machine appears on the **Machines** page, labelled "Signed in from <name>".
+- **It never reroutes delivery.** `login` refuses if any connector config or connector-mode `runtime.json` uses that `agent.json`; set up connectors through steps 2–5 instead. `--force` replaces only a machine-mode credential and runtime config that no connector uses.
+- **Signing in again** from the same machine replaces its credential and keeps its name. A name another member uses is `name taken`. Your own machine of that name on another computer is `name in use`: you can confirm replacing it only if it has never received a message or had an inbox; otherwise revoke it on the website and pick a new name.
+
+Then start it now and at every login, and let it run when you're logged out:
+
+```bash
+raincli runtime startup --config ~/.config/raincli/runtime.json   # systemd user unit, as in step 5
+loginctl enable-linger "$USER"                                     # keep user services running without a login session (may need an administrator)
+raincli runtime status --config ~/.config/raincli/runtime.json
+```
+
+In machine mode the runtime reports `ready`, the client version and update state, and this machine's coding agents (Herdr, hooks and the process scan; no inbox) every 30 seconds, and it installs the versions your team's operator pushes, automatically, exactly as described in [Updates](#updates). In machine mode, targets older than v0.4.0 are refused. **It doesn't receive messages yet:** messages sent to the handle are stored on the server until message routing arrives in a later release.
+
+To sign the machine out:
+
+```bash
+raincli logout                 # asks you to confirm the handle, revokes it, deletes agent.json and runtime.json, disables logon start
+raincli logout --local-only    # only delete the local credential and config (the machine stays active on the website)
+```
+
+If the server can't be reached, `logout` keeps the local credential and exits non-zero. Queues are never deleted.
 
 ## What teammates see
 

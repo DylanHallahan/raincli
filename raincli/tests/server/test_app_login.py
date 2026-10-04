@@ -361,3 +361,58 @@ def test_slug_vectors_shared_with_the_client():
     for v in vectors:
         assert security.slugify_machine_name(v["name"]) == v["slug"], v
         assert security.valid_handle(v["slug"]), v
+
+
+# Migration 0005 ------------------------------------------------------------------------
+
+def test_migration_0005_backfills_delivery_history_conservatively():
+    import os
+    import uuid
+
+    from alembic import command
+    from sqlalchemy import create_engine, inspect
+
+    from raincli_server.migrate import alembic_config
+
+    admin_url = os.environ.get("RAINCLI_TEST_DATABASE_URL", "")
+    if not admin_url:
+        pytest.skip("RAINCLI_TEST_DATABASE_URL not set")
+    psycopg = "postgresql+psycopg://" + admin_url.split("://", 1)[1]
+    name = f"raincli_mig5_{uuid.uuid4().hex[:12]}"
+    server = create_engine(psycopg, isolation_level="AUTOCOMMIT")
+    with server.connect() as conn:
+        conn.execute(text(f'CREATE DATABASE "{name}"'))
+    url = psycopg.rsplit("/", 1)[0] + "/" + name
+    db = create_engine(url)
+    try:
+        cfg = alembic_config(url)
+        command.upgrade(cfg, "0004")
+        with db.begin() as conn:
+            user = conn.execute(text("INSERT INTO users (id, email, display_name, password_hash, is_active) "
+                                     "VALUES (gen_random_uuid(), 'm@example.test', 'M', 'x', true) RETURNING id")).scalar()
+            team = conn.execute(text("INSERT INTO teams (id, slug, name) VALUES (gen_random_uuid(), 'mt', 'MT') "
+                                     "RETURNING id")).scalar()
+            ids = {}
+            for handle in ("reported", "used", "fresh"):
+                ids[handle] = conn.execute(text(
+                    "INSERT INTO agents (id, team_id, owner_user_id, handle, display_name) "
+                    "VALUES (gen_random_uuid(), :t, :u, :h, :h) RETURNING id"), {"t": team, "u": user, "h": handle}).scalar()
+                conn.execute(text(
+                    "INSERT INTO agent_credentials (id, agent_id, token_hash, prefix, scopes, last_used_at) "
+                    "VALUES (gen_random_uuid(), :a, :h, 'rca_x', ARRAY['messages:read'], :used)"),
+                    {"a": ids[handle], "h": handle.ljust(64, "0"), "used": None if handle != "used" else "2026-01-01"})
+            conn.execute(text("INSERT INTO agent_presence (agent_id, status, seen_at) VALUES (:a, 'ready', now())"),
+                         {"a": ids["reported"]})
+        command.upgrade(cfg, "head")
+        with db.connect() as conn:
+            rows = dict(conn.execute(text("SELECT handle, inbox_role_at IS NOT NULL FROM agents")).all())
+        assert rows == {"reported": True, "used": True, "fresh": False}
+        command.downgrade(cfg, "0004")
+        columns = {c["name"] for c in inspect(db).get_columns("agents")}
+        assert not {"signed_in_from", "rotated_at", "rotated_by", "inbox_role_at"} & columns
+        command.upgrade(cfg, "head")
+    finally:
+        db.dispose()
+        with server.connect() as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        server.dispose()

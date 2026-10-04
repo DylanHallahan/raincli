@@ -27,6 +27,10 @@ objects.githubusercontent.com, release-assets.githubusercontent.com): a hosts-fi
 them at 127.0.0.1:443, where a fake release endpoint serves a certificate from a test root CA
 added to the runner's LocalMachine Root store (§15.8 M11). The shipped client has no override.
 Every credential is generated here and never printed. See docs/release-testing.md.
+
+With ``--real FROM TO`` (for example ``--real v0.4.0 v0.4.1``) it skips the fake endpoint, the
+hosts file and the test CA: it downloads both versions' installer assets from the published
+releases of the canonical repository, and the pushed update fetches the real assets from GitHub.
 """
 import argparse
 import contextlib
@@ -457,8 +461,29 @@ def prepare_old_pip_client(work):
     return venv
 
 
+def download_release_installers(work):
+    """The published RainCLI-Setup assets of OLD and NEW, by exact name, checksum-verified."""
+    target = work / "installers"
+    target.mkdir()
+    for version in (OLD, NEW):
+        release = json.loads(updates.fetch(f"{updates.API}/releases/tags/v{version}", 1024 * 1024))
+        check(not release.get("draft") and not release.get("prerelease"), f"v{version} is not a stable release")
+        files = {}
+        for name in (f"RainCLI-Setup-{version}.exe", f"RainCLI-Setup-{version}.exe.sha256"):
+            asset = next((a for a in release.get("assets", []) if a.get("name") == name), None)
+            check(asset is not None, f"release v{version} has no asset {name}; attach it first (docs/release-testing.md)")
+            request = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "RainCLI-app-e2e"})
+            with urllib.request.urlopen(request, timeout=300) as response:
+                files[name] = response.read()
+            (target / name).write_bytes(files[name])
+        setup = f"RainCLI-Setup-{version}.exe"
+        check(files[setup + ".sha256"] == f"{hashlib.sha256(files[setup]).hexdigest()}  {setup}\n".encode(),
+              f"the published checksum of {setup} does not match it")
+    return target
+
+
 def run_e2e(args, work, stack):
-    installers = Path(args.installers).resolve()
+    installers = download_release_installers(work) if args.real else Path(args.installers).resolve()
     server = release_e2e.Server(work / "server", args.server_python)
     server.work.mkdir()
     server.prepare()
@@ -482,20 +507,24 @@ def run_e2e(args, work, stack):
     staged.unlink()
     say(f"PASS: throwaway server on {server.url}; user, team {TEAM} and observer {OBSERVER}")
 
-    ca = TestCA(work)
-    ca.create()
-    stack.callback(ca.remove)
-    fake = FakeGitHub(work, installers)
-    fake.start(str(work / "leaf.pem"), str(work / "leaf.key"))
-    stack.callback(fake.stop)
-    hosts = HostsEntry()
-    hosts.add()
-    stack.callback(hosts.remove)
-    with urllib.request.urlopen(f"https://api.github.com/repos/{updates.REPO}/releases/tags/v{NEW}",
-                                timeout=20) as response:  # the system trust store accepts the test CA
-        check(json.loads(response.read())["tag_name"] == "v" + NEW, "the fake release endpoint is not reachable")
-    fake.requests.clear()
-    say("PASS: fake release endpoint on the real hostnames (hosts file, test root CA, port 443)")
+    fake = None
+    if args.real:
+        say(f"PASS: published installers of v{OLD} and v{NEW} downloaded and checksum-verified")
+    else:
+        ca = TestCA(work)
+        ca.create()
+        stack.callback(ca.remove)
+        fake = FakeGitHub(work, installers)
+        fake.start(str(work / "leaf.pem"), str(work / "leaf.key"))
+        stack.callback(fake.stop)
+        hosts = HostsEntry()
+        hosts.add()
+        stack.callback(hosts.remove)
+        with urllib.request.urlopen(f"https://api.github.com/repos/{updates.REPO}/releases/tags/v{NEW}",
+                                    timeout=20) as response:  # the system trust store accepts the test CA
+            check(json.loads(response.read())["tag_name"] == "v" + NEW, "the fake release endpoint is not reachable")
+        fake.requests.clear()
+        say("PASS: fake release endpoint on the real hostnames (hosts file, test root CA, port 443)")
 
     app = App(work)
     stack.callback(lambda: release_e2e.kill_marked({str(app.root)}))
@@ -550,15 +579,18 @@ def run_e2e(args, work, stack):
     check(app.run_value() == run_before and reg_values(UNINSTALL_KEY) == key_before,
           "/UPDATE changed the Run value or the uninstall key")
     check(not list((app.root / "versions" / NEW).glob("unins*")), "/UPDATE left an uninstaller")
-    installer_hosts, checksum_hosts = fake.fetched(NEW)
-    check(installer_hosts == {"objects.githubusercontent.com"}, f"installer served by {installer_hosts}")
-    check(checksum_hosts == {"release-assets.githubusercontent.com"}, f"checksum served by {checksum_hosts}")
-    asset_calls = [r for r in fake.requests if "/releases/assets/" in r[2]]
-    check(asset_calls and all(r[0] == "api.github.com" and r[3] == "application/octet-stream" for r in asset_calls),
-          "assets were not fetched through the API asset URL with Accept: application/octet-stream")
-    check(all(r[0] in HOSTS for r in fake.requests), "a request named a host outside the allowlist")
-    say(f"PASS: 4. pushed {NEW}: assets via the API asset URL and the exact download hosts, /UPDATE left the "
-        "Run value and uninstall key alone, install.json swapped, relaunched from the new version")
+    if fake is not None:
+        installer_hosts, checksum_hosts = fake.fetched(NEW)
+        check(installer_hosts == {"objects.githubusercontent.com"}, f"installer served by {installer_hosts}")
+        check(checksum_hosts == {"release-assets.githubusercontent.com"}, f"checksum served by {checksum_hosts}")
+        asset_calls = [r for r in fake.requests if "/releases/assets/" in r[2]]
+        check(asset_calls and all(r[0] == "api.github.com" and r[3] == "application/octet-stream"
+                                  for r in asset_calls),
+              "assets were not fetched through the API asset URL with Accept: application/octet-stream")
+        check(all(r[0] in HOSTS for r in fake.requests), "a request named a host outside the allowlist")
+    say(f"PASS: 4. pushed {NEW} through the {'published' if args.real else 'fake'} release assets"
+        f"{'' if args.real else ' (API asset URL, exact download hosts)'}: /UPDATE left the Run value and "
+        "uninstall key alone, install.json swapped, relaunched from the new version")
 
     # 5. downgrade refused, then allowed
     server.admin("set-client-version", "--team", TEAM, "v" + OLD)
@@ -652,10 +684,20 @@ def diagnose(work):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--installers", required=True,
-                        help=f"directory holding RainCLI-Setup-{OLD}.exe and RainCLI-Setup-{NEW}.exe with .sha256 files")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--installers",
+                        help=f"directory holding locally built RainCLI-Setup-{OLD}.exe and -{NEW}.exe with .sha256 files")
+    source.add_argument("--real", nargs=2, metavar=("FROM", "TO"),
+                        help="published releases vX.Y.Z (v0.4.0 or later) whose installer assets to use")
     parser.add_argument("--server-python", help="an existing Python with raincli/requirements.lock installed")
     args = parser.parse_args(argv)
+    global OLD, NEW
+    if args.real:
+        tags = args.real
+        if (not all(updates.TAG_RE.fullmatch(t) for t in tags) or updates.version_key(tags[0]) < (0, 4, 0)
+                or updates.version_key(tags[0]) >= updates.version_key(tags[1])):
+            parser.error("--real takes two release tags vX.Y.Z, v0.4.0 or later, oldest first")
+        OLD, NEW = tags[0][1:], tags[1][1:]
     if os.name != "nt" or os.environ.get("GITHUB_ACTIONS") != "true":
         parser.error("this e2e changes the hosts file, the trusted roots, the Run value and the user PATH; "
                      "it runs only on a disposable GitHub Actions Windows runner")

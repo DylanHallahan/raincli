@@ -7,9 +7,20 @@ name: Manual Windows app e2e
 # The release assets come from a fake endpoint on the REAL GitHub hostnames, reached through a
 # hosts-file entry and a test root CA in this runner's trust store (protocol §15.8 M11): the
 # shipped client has no override. No secrets, no production server, no release is touched.
+# With real_from and real_to set (for example v0.4.0 and v0.4.1), it builds nothing and uses the
+# installer assets attached to those published releases instead, through real GitHub.
 # Manual only; read-only token.
 on:
   workflow_dispatch:
+    inputs:
+      real_from:
+        description: Published release to install first (vX.Y.Z >= v0.4.0); empty builds test installers instead
+        required: false
+        default: ''
+      real_to:
+        description: Published release to push (newer than real_from); used only with real_from
+        required: false
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -26,13 +37,24 @@ jobs:
       - name: Install the pinned build and e2e tools (hash-checked wheels only)
         run: 'python -m pip install --disable-pip-version-check --require-hashes --only-binary :all: -r packaging/windows/requirements-build.txt -r packaging/windows/requirements-e2e.txt'
       - name: Build the 0.4.0 and 0.4.1 test installers from this ref
+        if: inputs.real_from == ''
         env:
           PYTHONUTF8: '1'
         run: |
           python packaging/windows/build.py --version 0.4.0 --work build/e2e-0.4.0 --out dist/e2e
           python packaging/windows/build.py --version 0.4.1 --work build/e2e-0.4.1 --out dist/e2e
-      - name: Install, sign in, update, downgrade, migrate and uninstall
+      - name: Install, sign in, update, downgrade, migrate and uninstall (test installers)
+        if: inputs.real_from == ''
         env:
           PYTHONUTF8: '1'
         # The image's PostgreSQL (PGBIN) runs as a fresh initdb cluster on a random loopback port.
         run: python scripts/windows-app-e2e.py --installers dist/e2e
+      - name: Install, sign in, update, downgrade, migrate and uninstall (published release assets)
+        if: inputs.real_from != ''
+        env:
+          PYTHONUTF8: '1'
+          # Inputs reach the script as data, never as shell text; it validates the tags.
+          REAL_FROM: ${{ inputs.real_from }}
+          REAL_TO: ${{ inputs.real_to }}
+        shell: pwsh
+        run: python scripts/windows-app-e2e.py --real "$env:REAL_FROM" "$env:REAL_TO"
