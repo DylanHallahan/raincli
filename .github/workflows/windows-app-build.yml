@@ -1,0 +1,52 @@
+name: Manual Windows app build
+# Builds the Windows app installer, RainCLI-Setup-<X.Y.Z>.exe, and its .sha256 from the
+# dispatched ref, at the version in raincli/raincli_agent/__init__.py, and uploads both as a
+# workflow ARTIFACT. It never creates or edits a release: the main agent downloads the
+# artifact and attaches the two files to the release by hand (docs/release-testing.md).
+# The bundle check fails the build if any test hook is frozen in (protocol §15.8 M11).
+# Manual only; read-only token.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+      - name: Install the pinned build tools (hash-checked wheels only)
+        run: python -m pip install --disable-pip-version-check --require-hashes --only-binary :all: -r packaging/windows/requirements-build.txt
+      - name: Refuse test hooks in the source
+        shell: pwsh
+        run: |
+          $hooks = git ls-files | Select-String -Pattern '_build_test'
+          if ($hooks) { Write-Error "test hook files are tracked: $hooks"; exit 1 }
+      - name: Build, check the bundle and compile the installer
+        env:
+          PYTHONUTF8: '1'
+        run: python packaging/windows/build.py --out dist/windows
+      - name: Assert the built bundle carries no test hooks
+        shell: pwsh
+        run: |
+          $version = (Get-Content raincli/raincli_agent/__init__.py | Select-String '^__version__ = "(.+)"').Matches[0].Groups[1].Value
+          python packaging/windows/verify_bundle.py build/windows/dist --version $version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $setup = "dist/windows/RainCLI-Setup-$version.exe"
+          $line = (Get-Content "$setup.sha256" -Raw)
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($line -cne "$hash  RainCLI-Setup-$version.exe`n") { Write-Error "bad checksum file: $line"; exit 1 }
+          "version=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: RainCLI-Setup-${{ env.version }}
+          path: |
+            dist/windows/RainCLI-Setup-${{ env.version }}.exe
+            dist/windows/RainCLI-Setup-${{ env.version }}.exe.sha256
+          if-no-files-found: error
+          retention-days: 30
