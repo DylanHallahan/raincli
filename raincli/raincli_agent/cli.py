@@ -619,16 +619,155 @@ def cmd_runtime_stop(args):
 
 
 def cmd_runtime_update(args):
-    from .runtime import updates
+    from .runtime import updates, winapp
+    from .login import runtime_config_path, runtime_mode
     mode = "manual" if args.manual or args.automatic == "off" else "automatic" if args.automatic else None
+    app = winapp.app_root() if not args.root else None
+    if app is not None:
+        if args.rollback or mode is not None:
+            out_json(winapp.configure(app, mode=mode, rollback=args.rollback))
+            return EXIT_OK
+        if args.install:
+            raise UsageError("the RainCLI app installs the version your team's operator sets; "
+                             "use the app installer for anything else")
+        result = updates.latest() or {"status": "no_release"}
+        out_json(result)
+        return EXIT_OK
     if args.rollback or mode is not None:
-        result = updates.configure(args.root, mode=mode, rollback=args.rollback)
+        # Machine mode needs v0.4.0 or later (15.8 H8).
+        machine = runtime_mode(args.config or runtime_config_path(default_config_path())) == "machine"
+        result = updates.configure(args.root, mode=mode, rollback=args.rollback,
+                                   floor=winapp.MIN_VERSION if machine else None)
     elif args.install:
         result = updates.install(args.root)
     else:
         result = updates.latest() or {"status": "no_release"}
     out_json(result)
     return EXIT_OK
+
+
+def _need_tty(what):
+    """15.8 M3: checked before getpass, which would otherwise fall back to an echoing read."""
+    tty = sys.stdin is not None and sys.stdin.isatty()
+    if tty and os.name != "nt":
+        try:
+            os.close(os.open("/dev/tty", os.O_RDONLY))
+        except OSError:
+            tty = False
+    if not tty:
+        raise UsageError(f"{what} needs an interactive terminal; the password is read only from the terminal, "
+                         "never from a pipe, argv, the environment or a file")
+
+
+def _ask(prompt):
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        raise UsageError("no answer; cancelled") from None
+
+
+def cmd_login(args):
+    import getpass
+    from . import login
+    from .config import Secret, validate_api_url
+    _need_tty("raincli login")
+    api_url = validate_api_url(args.api_url)
+    plan = login.prepare(args.agent_config, force=args.force)
+    email = args.email or _ask("Email: ")
+    if not email:
+        raise UsageError("an email address is required")
+    name = args.machine_name
+    if not name:
+        default = plan["handle"] or login.default_machine_name()
+        name = _ask(f"Machine name [{default}]: ") or default
+    password = Secret(getpass.getpass("Password: "))
+    team, replace = args.team, False
+    while True:
+        try:
+            result = login.login(email, password, plan=plan, machine_name=name, team=team, replace=replace,
+                                 api_url=api_url)
+            break
+        except login.TeamChoiceRequired as exc:
+            if not exc.teams:
+                raise
+            out("You are a member of several teams:")
+            for number, item in enumerate(exc.teams, 1):
+                out(f"  {number}. {escape_line(item['slug'])} ({escape_line(item['name'])})")
+            choice = _ask("Team (number or slug): ")
+            picked = [t for n, t in enumerate(exc.teams, 1) if choice in (str(n), t["slug"])]
+            if not picked:
+                raise UsageError("no such team; cancelled") from None
+            team = picked[0]["slug"]
+        except login.NameInUse as exc:
+            out(f"raincli: {escape_line(str(exc))}")
+            phrase = f"replace machine {name}"
+            answer = _ask(f'Type "{phrase}" to replace it, or enter another machine name: ')
+            if answer == phrase:
+                replace = True
+            elif answer:
+                name, replace = login.check_machine_name(answer), False
+            else:
+                raise UsageError("cancelled") from None
+        except login.NameTaken as exc:
+            out(f"raincli: {escape_line(str(exc))}")
+            answer = _ask("Another machine name: ")
+            if not answer:
+                raise UsageError("cancelled") from None
+            name, replace = login.check_machine_name(answer), False
+    protection = "DPAPI-protected, private Windows ACL" if os.name == "nt" else "mode 0600"
+    team_info = result["team"]
+    out(f"signed in as {escape_line(result['handle'])} in team {escape_line(team_info['slug'])}"
+        f" ({escape_line(team_info['name'])})")
+    if result["rotated"]:
+        out("this machine's previous credential was revoked and replaced")
+    out(f"wrote {result['config']} ({protection}) for {result['api_url']}")
+    if result["server_api_url"] and result["server_api_url"] != result["api_url"]:
+        out(f"note: the server names its API as {result['server_api_url']}; this config keeps {result['api_url']}")
+    if result["runtime_written"]:
+        out(f"wrote {result['runtime_config']} (machine mode: presence, version and agent directory; "
+            "messages to this machine stay stored until message routing arrives)")
+        out(login.logon_start_hint(result["runtime_config"]))
+    else:
+        out(f"kept {result['runtime_config']}: this machine's connector delivery continues unchanged")
+    return EXIT_OK
+
+
+def cmd_logout(args):
+    from . import login
+    path, handle = login.describe(args.agent_config)
+    if not args.yes:
+        if not (sys.stdin is not None and sys.stdin.isatty()):
+            raise UsageError("raincli logout asks for confirmation; run it in a terminal or pass --yes")
+        who = handle or "this machine (its credential cannot be checked)"
+        answer = _ask(f"Sign out {who}? It is revoked on the server and {path} is deleted. [y/N] ")
+        if answer.lower() not in ("y", "yes"):
+            out("not signed out")
+            return EXIT_OK
+    result = login.logout(path, local_only=args.local_only)
+    if result["server"] == "skipped":
+        out("not revoked on the server (--local-only); revoke the machine on the website's Machines page")
+    elif result["server"] == "already_revoked":
+        out("the server had already revoked this machine")
+    else:
+        out("signed out: the machine and its credential are revoked")
+    for removed in result["removed"]:
+        out(f"deleted {removed}")
+    if result["startup"] == "disabled":
+        out("disabled this machine's runtime at logon")
+    out("connector configs and queues are kept")
+    return EXIT_OK
+
+
+def cmd_migrate(args):
+    from .migrate import Migration
+    migration = Migration()
+    if args.dry_run:
+        plan = migration.detect()
+        out_json({"status": "nothing_to_migrate"} if plan is None else {"status": "plan", **plan.summary()})
+        return EXIT_OK
+    result = migration.run(notify=lambda message: print("raincli: " + message, file=sys.stderr, flush=True))
+    out_json(result)
+    return EXIT_OK if result["status"] in ("migrated", "nothing_to_migrate") else EXIT_TIMEOUT
 
 
 def cmd_hooks_install(args):
@@ -729,6 +868,9 @@ def build_parser():
                     "check. "
                     "Releases are not signed: trust rests on HTTPS to GitHub and the tag's commit.")
     update.add_argument("--root", metavar="DIR", help="managed installation directory (default: ~/.raincli/client)")
+    update.add_argument("--config", metavar="PATH",
+                        help="the runtime config this install runs (a machine-mode config refuses a rollback "
+                             "below v0.4.0)")
     operation = update.add_mutually_exclusive_group()
     operation.add_argument("--check", action="store_true",
                            help="only report the latest stable release (the default without a flag)")
@@ -754,6 +896,46 @@ def build_parser():
     startup.add_argument("--remove", action="store_true",
                          help="remove the login startup entry (Linux: also stop the service)")
     startup.set_defaults(func=cmd_runtime_startup)
+
+    login_parser = sub.add_parser(
+        "login", help="sign this machine in with your RainCLI account (headless; works over SSH)",
+        description="Sign this machine in: registers it in your team as a machine with one credential, writes "
+                    "the agent config (Windows: DPAPI-protected) and a machine-mode runtime config beside it. "
+                    "The password is read only with getpass from the terminal, never from argv, the "
+                    "environment, a pipe or a file; with no terminal the command refuses. Signing in again "
+                    "with --force rotates this machine's credential (its current one is sent as proof). It never "
+                    "replaces a credential or runtime config that connector delivery uses, except to rotate "
+                    "that same machine. In machine mode the runtime publishes presence, the client version and "
+                    "the agent directory; messages to the machine stay stored until message routing arrives.")
+    login_parser.add_argument("--email", help="account email (asked for when omitted)")
+    login_parser.add_argument("--machine-name", metavar="NAME",
+                              help="this machine's handle (default: the computer name in handle form)")
+    login_parser.add_argument("--team", metavar="SLUG", help="team, when you belong to several (asked for otherwise)")
+    login_parser.add_argument("--api-url", default="https://raincli.com",
+                              help="server (default https://raincli.com; https unless the host is loopback)")
+    login_parser.add_argument("--force", action="store_true",
+                              help="sign in again over an existing machine-mode credential")
+    login_parser.set_defaults(func=cmd_login)
+    logout_parser = sub.add_parser(
+        "logout", help="sign this machine out: revoke it and delete its local credential",
+        description="Revoke this machine and its credential on the server, stop its runtime and disable it at "
+                    "logon, then delete the agent config and its runtime config. Connector configs and queues "
+                    "are kept. If the server cannot be reached the credential is kept and the command fails; "
+                    "--local-only deletes it without revoking (revoke it on the website).")
+    logout_parser.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    logout_parser.add_argument("--local-only", action="store_true",
+                               help="delete the local credential without revoking it on the server")
+    logout_parser.set_defaults(func=cmd_logout)
+    migrate_parser = sub.add_parser(
+        "migrate", help="move an existing install to this client's credential storage (the Windows app runs it)",
+        description="Keep this machine's handle, credential, connectors and queues, and move them to this "
+                    "client: connector configs are normalized, the runtime config is written or kept, and on "
+                    "Windows tokens are DPAPI-protected (the old pip raincli then cannot read them). An old "
+                    "runtime is asked to stop first; a connector running in a window must be closed. It never "
+                    "signs in. The app finishes by starting the new runtime and disabling the old Run value. "
+                    "Steps are logged to <state_dir>/migration.log.")
+    migrate_parser.add_argument("--dry-run", action="store_true", help="only show what would be migrated")
+    migrate_parser.set_defaults(func=cmd_migrate)
 
     hooks = sub.add_parser("hooks", help="install agent hooks for the machine's agent directory")
     hooks_sub = hooks.add_subparsers(dest="hooks_command", required=True, parser_class=_Parser)

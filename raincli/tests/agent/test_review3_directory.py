@@ -153,7 +153,7 @@ def test_a_pid_from_another_namespace_is_not_claimed(tmp_path, monkeypatch):
 # -- review 4 -------------------------------------------------------------------------------------
 
 CANDIDATES_R4 = {
-    "i broken roll_back": mutate('def roll_back(root, pointer, timeout=300):\n',
+    "i broken roll_back": mutate('def roll_back(root, pointer, timeout=300, floor=None):\n',
                                  'def roll_back(root, pointer, timeout=300):\n    return False\n'),
     "j broken relaunch": mutate("def relaunch(args):\n", "def relaunch(args):\n    raise RuntimeError('relaunch bug')\n"),
     "k KeyError in on_probation under real state": mutate(

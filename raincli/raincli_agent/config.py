@@ -1,4 +1,7 @@
-"""Agent config: ``{"api_url": ..., "token": ...}`` in a 0600 JSON file (protocol section 4)."""
+"""Agent config: ``{"api_url": ..., "token": ...}`` in a 0600 JSON file (protocol section 4).
+
+On Windows the token is stored DPAPI-protected as ``token_dpapi`` (protocol 15.3);
+``load_config`` reads either form and every Windows write produces ``token_dpapi``."""
 
 import ipaddress
 import json
@@ -114,8 +117,30 @@ def load_config(path=None):
         raise ConfigError(f"config file {path} is not valid JSON") from None
     if not isinstance(data, dict):
         raise ConfigError(f"config file {path} must contain a JSON object")
-    return AgentConfig(api_url=validate_api_url(data.get("api_url")),
-                       token=validate_token(data.get("token")), path=path)
+    return AgentConfig(api_url=validate_api_url(data.get("api_url")), token=token_from(data), path=path)
+
+
+def protects_tokens():
+    """Whether writes store ``token_dpapi`` (Windows) rather than a plain ``token``."""
+    return os.name == "nt"
+
+
+def token_from(data):
+    """The token of a parsed agent config, in either stored form (15.3)."""
+    if "token_dpapi" in data:
+        if "token" in data:
+            raise ConfigError("config file holds both token and token_dpapi; sign in again with raincli login --force")
+        from .dpapi import unprotect_token
+        return validate_token(unprotect_token(data["token_dpapi"]))
+    return validate_token(data.get("token"))
+
+
+def stored_form(api_url, token):
+    """The JSON object written for a credential on this platform."""
+    if protects_tokens():
+        from .dpapi import protect_token
+        return {"api_url": api_url, "token_dpapi": protect_token(token.reveal())}
+    return {"api_url": api_url, "token": token.reveal()}
 
 
 def read_token_source(source, stdin, api_url=None):
@@ -173,5 +198,5 @@ def write_config(path, api_url, token, force=False):
         raise ConfigError(f"config file {path} already exists (use --force to replace it)")
     directory = os.path.dirname(os.path.abspath(path))
     ensure_private_dir(directory)
-    atomic_write_json(path, {"api_url": api_url, "token": token.reveal()}, mode=0o600)
+    atomic_write_json(path, stored_form(api_url, token), mode=0o600)
     return AgentConfig(api_url=api_url, token=token, path=path)

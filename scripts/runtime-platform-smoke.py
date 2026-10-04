@@ -92,6 +92,82 @@ def kill_tree(process):
     process.wait(timeout=10)
 
 
+PASSWORD = "smoke password, typed on a pty only"
+
+
+def login_on_pty(argv, password, timeout=60):
+    """Run ``raincli login`` on a pseudo-terminal, typing the password at its prompt."""
+    import pty
+    import select
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execv(argv[0], argv)
+    transcript, typed = b"", False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if select.select([fd], [], [], 0.2)[0]:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                break
+            transcript += chunk
+            if not typed and transcript.rstrip().endswith(b"Password:"):
+                os.write(fd, password.encode() + b"\n")
+                typed = True
+    _, raw = os.waitpid(pid, 0)
+    os.close(fd)
+    return os.waitstatus_to_exitcode(raw), transcript.decode(errors="replace")
+
+
+def headless_login_and_machine_mode(root, server):
+    """Headless sign-in (15.2) and a machine-mode runtime (15.4) as real processes."""
+    machine = root / "machine"
+    agent = machine / "agent.json"
+    runtime = machine / "runtime.json"
+    server.state.add_user("smoke@example.test", PASSWORD)
+    if sys.platform.startswith("linux"):
+        status, transcript = login_on_pty([sys.executable, "-m", "raincli_agent", "--config", str(agent), "login",
+                                           "--email", "smoke@example.test", "--machine-name", "smoke-machine",
+                                           "--api-url", server.url], PASSWORD)
+        assert status == 0, scrub(transcript)
+        assert PASSWORD not in transcript and "signed in as smoke-machine" in transcript
+        refused = subprocess.run([sys.executable, "-m", "raincli_agent", "--config", str(agent), "login", "--email",
+                                  "smoke@example.test", "--api-url", server.url], input=PASSWORD + "\n",
+                                 capture_output=True, text=True, timeout=30)
+        assert refused.returncode == 2 and "interactive terminal" in refused.stderr
+        for path in machine.rglob("*"):
+            assert not path.is_file() or PASSWORD.encode() not in path.read_bytes()
+        print("PASS: headless login on a pty (no echo, no argv/env/file password); no-TTY refused", flush=True)
+    else:
+        from raincli_agent import login
+        from raincli_agent.config import Secret
+        login.login("smoke@example.test", Secret(PASSWORD), api_url=server.url, config_path=str(agent),
+                    machine_name="smoke-machine")
+    assert json.loads(runtime.read_text()) == {"machine_config": str(agent), "state_dir": "runtime-state"}
+    log = root / "runtime-machine.log"
+    with open(log, "wb") as output:
+        process = subprocess.Popen([sys.executable, "-m", "raincli_agent", "runtime", "run", "--config", str(runtime)],
+                                   stdout=output, stderr=subprocess.STDOUT)
+    try:
+        wait_for(lambda: server.state.presence.get("smoke-machine") == "ready")
+        body = [b for h, b in server.state.presence_bodies if h == "smoke-machine"][-1]
+        assert body["client"]["version"] == __version__ and "agents" in body
+        assert all(a["role"] is None for a in body["agents"])
+        request_stop(runtime)
+        assert process.wait(timeout=30) == 0
+        assert server.state.presence["smoke-machine"] == "offline"
+    except BaseException:
+        diagnose("machine-mode runtime", runtime, machine / "runtime-state", logs=[log])
+        raise
+    finally:
+        if process.poll() is None:
+            kill_tree(process)
+    print("PASS: machine mode: ready, client block and directory with no inbox; graceful stop clears it", flush=True)
+    return agent, runtime
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="raincli-runtime-") as tmp, FakeApi() as server:
         root = Path(tmp)
@@ -218,6 +294,8 @@ def main():
         wait_for(lambda: sessions.process_state(record) == "dead", timeout=30)
         assert sessions.live_sessions(str(live_state), "claude", "live-project") == []
         print("PASS: hook-session liveness: the agent's pid is recorded, live however long it idles, gone once it exits", flush=True)
+        machine_config = machine_runtime = None
+        machine_config, machine_runtime = headless_login_and_machine_mode(root, server)
         if os.name == "nt":
             import winreg
             from raincli_agent.runtime import startup
@@ -267,7 +345,9 @@ def main():
         base = tuple(int(x) for x in __version__.split("."))
         good = "%d.%d.%d" % (base[0], base[1], base[2] + 1)
         broken = "%d.%d.%d" % (base[0], base[1], base[2] + 2)
-        variants = {"c" * 40: (good, False), "d" * 40: (broken, True)}
+        # Machine mode accepts v0.4.0 or later only (15.8 H8).
+        machine_good = "%d.%d.%d" % max((base[0], base[1], base[2] + 3), (0, 4, 0))
+        variants = {"c" * 40: (good, False), "d" * 40: (broken, True), "e" * 40: (machine_good, False)}
 
         def archive_for(url, limit):
             # Like GitHub's codeload archive: one root named after the commit.
@@ -376,6 +456,29 @@ def main():
                 request_stop(config)
                 assert managed_process.wait(timeout=45) == 0
                 assert server.state.presence["runtime-test"] == "offline"
+                # Machine mode under the managed launcher: a pushed update (15.4, 15.5).
+                machine_log = root / "launcher-machine.log"
+                with open(machine_log, "wb") as output:
+                    machine_process = subprocess.Popen([sys.executable, str(launcher), "runtime", "run", "--config",
+                                                        str(machine_runtime)], stdout=output, stderr=subprocess.STDOUT)
+                try:
+                    wait_for(lambda: (server.state.clients.get("smoke-machine") or {}).get("version") == good, timeout=60)
+                    push(machine_good, "e" * 40)
+                    wait_for(lambda: (server.state.clients.get("smoke-machine") or {}).get("version") == machine_good
+                             and server.state.clients["smoke-machine"]["update_state"] == "current", timeout=90)
+                    body = [b for h, b in server.state.presence_bodies if h == "smoke-machine"][-1]
+                    assert body["status"] == "ready" and all(a["role"] is None for a in body.get("agents", []))
+                    request_stop(machine_runtime)
+                    assert machine_process.wait(timeout=45) == 0
+                    assert server.state.presence["smoke-machine"] == "offline"
+                except BaseException:
+                    diagnose("machine-mode managed runtime", machine_runtime, root / "machine" / "runtime-state",
+                             managed, logs=[machine_log])
+                    raise
+                finally:
+                    if machine_process.poll() is None:
+                        kill_tree(machine_process)
+                print("PASS: machine mode under the managed launcher: pushed update installed and reported current", flush=True)
                 q.acquire_run_lock()
                 q.release_run_lock()
             except BaseException:

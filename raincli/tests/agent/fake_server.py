@@ -113,6 +113,12 @@ class FakeState:
         self.send_commits = 0
         self.tamper_download = {}  # attachment id -> bytes served instead of the stored ones
         self.missing_attachments = set()  # attachment ids whose row is "lost" (404)
+        # Machine sign-in (protocol 15.1, 15.8 H2): accounts and the shared limiter.
+        self.users = {}  # email -> {"password", "teams": [slug]}
+        self.owners = {}  # agent id -> email
+        self.delivered = set()  # agent ids with delivery history (they rotate only with previous_token)
+        self.login_failures = {}  # email -> failures
+        self.login_bodies = []  # every /app/login body received (tests check what was sent)
 
     # -- setup -----------------------------------------------------------
 
@@ -124,6 +130,62 @@ class FakeState:
         token = "rca_" + secrets.token_urlsafe(32)
         self.tokens[token] = agent_id
         return token
+
+    def add_user(self, email, password, teams=("alpha",)):
+        for team in teams:
+            self.teams.setdefault(team, team.title())
+        self.users[email] = {"password": password, "teams": list(teams)}
+
+    def app_login(self, body):
+        """15.1 as amended by 15.8: generic errors, team choice, name rules, rotation with proof."""
+        if not isinstance(body, dict) or set(body) - {"email", "password", "machine_name", "team",
+                                                      "previous_token", "replace"}:
+            raise ApiFail(400, "invalid")
+        user = self.users.get(body.get("email"))
+        if self.login_failures.get(body.get("email"), 0) >= 5:
+            raise ApiFail(429, "rate_limited", headers={"Retry-After": "900"})
+        if user is None or body.get("password") != user["password"]:
+            self.login_failures[body.get("email")] = self.login_failures.get(body.get("email"), 0) + 1
+            raise ApiFail(401, "invalid_credentials")
+        teams = user["teams"]
+        team = body.get("team")
+        if team is None:
+            if len(teams) != 1:
+                fail = ApiFail(409, "team_choice_required")
+                fail.extra = {"teams": [{"slug": t, "name": self.teams[t]} for t in teams]}
+                raise fail
+            team = teams[0]
+        elif team not in teams:
+            raise ApiFail(400, "invalid")
+        name = body.get("machine_name")
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name):
+            raise ApiFail(400, "invalid")
+        existing = self.agent_by_handle(team, name)
+        rotated = False
+        if existing is not None:
+            mine = self.owners.get(existing["id"]) == body["email"] and existing["active"]
+            if not mine:
+                raise ApiFail(409, "name_taken")
+            proof = self.tokens.get(body.get("previous_token") or "") == existing["id"]
+            if not proof and not (body.get("replace") is True and existing["id"] not in self.delivered):
+                raise ApiFail(409, "name_in_use")
+            for token in [t for t, aid in self.tokens.items() if aid == existing["id"]]:
+                del self.tokens[token]
+            token = "rca_" + secrets.token_urlsafe(32)
+            self.tokens[token] = existing["id"]
+            rotated, status = True, 200
+        else:
+            token = self.add_agent(name, team=team)
+            self.owners[self.tokens[token]] = body["email"]
+            status = 201
+        return status, {"api_url": "https://raincli.example", "token": token, "handle": name,
+                        "team": {"slug": team, "name": self.teams[team]}, "rotated": rotated}
+
+    def sign_out(self, caller):
+        caller["active"] = False
+        for token in [t for t, aid in self.tokens.items() if aid == caller["id"]]:
+            del self.tokens[token]
+        return 200, {"signed_out": True}
 
     def fail(self, method, path_regex, action, times=1):
         self.faults.append([method, re.compile(path_regex), action, times])
@@ -387,7 +449,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             status, payload = result
         except ApiFail as exc:
-            status, payload = exc.status, {"error": {"code": exc.code, "message": exc.message}}
+            status, payload = exc.status, {"error": {"code": exc.code, "message": exc.message,
+                                                     **getattr(exc, "extra", {})}}
             headers = exc.headers
         else:
             headers = None
@@ -402,6 +465,14 @@ class _Handler(BaseHTTPRequestHandler):
         route = path[len("/api/v1"):]
         if method == "GET" and route == "/health":
             return 200, {"ok": True, "db": "ok"}
+        if method == "POST" and route == "/app/login":
+            with st.lock:
+                try:
+                    body = json.loads(raw)
+                except ValueError:
+                    raise ApiFail(400, "invalid") from None
+                st.login_bodies.append(body)
+                return st.app_login(body)
         auth = self.headers.get("Authorization", "")
         with st.lock:
             agent_id = st.tokens.get(auth[7:]) if auth.startswith("Bearer ") else None
@@ -416,6 +487,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return 200, {"agent": {"handle": caller["handle"], "display_name": caller["display_name"],
                                        "team": {"slug": caller["team"], "name": st.teams[caller["team"]]}},
                              "credential": {"prefix": auth[7:15], "scopes": ["messages:read", "messages:send", "messages:ack"]}}
+            if method == "POST" and route == "/app/sign-out":
+                return st.sign_out(caller)
             if method == "PUT" and route == "/presence":
                 if presence_problem(body):
                     raise ApiFail(400, "invalid", presence_problem(body))

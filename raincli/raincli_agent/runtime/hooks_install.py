@@ -45,6 +45,10 @@ def launcher_prefix():
     """The stable command for the hook (14.7 M8): the managed launcher, or the
     ``raincli`` entry point; never a versioned environment's interpreter."""
     from .updates import default_root
+    from .winapp import SHIM, app_root
+    root = app_root()
+    if root is not None and (root / SHIM).is_file():
+        return [str(root / SHIM)], "app PATH shim"
     managed = default_root() / "launch.py"
     if managed.is_file():
         base = Path(getattr(sys, "_base_executable", sys.executable))

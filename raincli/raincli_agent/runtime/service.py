@@ -68,26 +68,51 @@ def load_bound(config_path):
 
 
 def _read_runtime(path):
+    """Parse a runtime config: ``connectors`` (connector mode) or ``machine_config``
+    (machine mode, 15.4), exactly one of them, and ``state_dir``. Returns
+    ``(path, connector entries, resolver, machine config path or None, state_dir)``."""
     path = Path(path).expanduser().resolve()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ConfigError(f"cannot read runtime config: {exc}") from None
-    if not isinstance(data, dict) or set(data) - {"connectors", "state_dir"}:
-        raise ConfigError("runtime config supports only connectors and state_dir")
-    entries = data.get("connectors")
-    if not isinstance(entries, list) or not 1 <= len(entries) <= 16 or not all(isinstance(p, str) and p for p in entries):
-        raise ConfigError("runtime connectors must contain 1-16 explicit connector config paths")
+    if not isinstance(data, dict) or set(data) - {"connectors", "machine_config", "state_dir"}:
+        raise ConfigError("runtime config supports only connectors, machine_config and state_dir")
     def absolute(p):
         return (path.parent / Path(p).expanduser()).resolve()
+    entries, machine = data.get("connectors"), data.get("machine_config")
+    if ("connectors" in data) == ("machine_config" in data):
+        raise ConfigError("runtime config needs exactly one of machine_config or a non-empty connectors list")
+    if machine is not None:
+        if not isinstance(machine, str) or not machine:
+            raise ConfigError("runtime machine_config must be the path of the machine's agent config")
+        entries, machine = [], absolute(machine)
+    elif not isinstance(entries, list) or not 1 <= len(entries) <= 16 or not all(isinstance(p, str) and p for p in entries):
+        raise ConfigError("runtime connectors must contain 1-16 explicit connector config paths")
     state = data.get("state_dir", "runtime-state")
     if not isinstance(state, str) or not state:
         raise ConfigError("runtime state_dir must be a path")
-    return path, entries, absolute, absolute(state)
+    return path, entries, absolute, machine, absolute(state)
+
+
+def load_machine(machine_path):
+    """Machine mode (15.4): the machine credential, bound to the bytes it was loaded from."""
+    machine_path = str(machine_path)
+    sha = file_sha256(machine_path)
+    identity = load_config(machine_path)
+    binding = fingerprint(machine_path, machine_path)
+    if sha is None or binding["config_sha256"] != sha:
+        raise ConfigError("machine config changed while loading; retry")
+    return machine_path, None, identity, binding
 
 
 def load_runtime(path):
-    path, entries, absolute, state = _read_runtime(path)
+    """``(path, state_dir, configs)``; ``configs`` holds ``(path, connector config,
+    identity, binding)`` per connector, or one entry with no connector config in
+    machine mode."""
+    path, entries, absolute, machine, state = _read_runtime(path)
+    if machine is not None:
+        return path, state, [load_machine(machine)]
     paths = [str(absolute(p)) for p in entries]
     if len(set(map(os.path.normcase, paths))) != len(paths):
         raise ConfigError("runtime connector paths must be unique")
@@ -107,11 +132,17 @@ def load_runtime(path):
     return path, state, configs
 
 
+def machine_mode(configs):
+    return len(configs) == 1 and configs[0][1] is None
+
+
 HOOK_PRESENCE = {"idle": "ready", "working": "busy", "blocked": "blocked"}
 
 
 def inbox_spec(cfg):
-    """How the directory marks this connector's inbox (14.3)."""
+    """How the directory marks this connector's inbox (14.3); None in machine mode."""
+    if cfg is None:
+        return None
     return ("hook", *cfg.inbox_hook) if cfg.inbox_hook else ("herdr", cfg.herdr_agent)
 
 
@@ -245,7 +276,8 @@ class Worker:
         except OSError:
             log = os.open(os.devnull, os.O_WRONLY)
         try:
-            return subprocess.Popen([sys.executable, "-m", "raincli_agent", "connector", "run", "--config", self.path, "--runtime-ready", str(self.ready_path)],
+            from .winapp import self_command
+            return subprocess.Popen(self_command("connector", "run", "--config", self.path, "--runtime-ready", str(self.ready_path)),
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         finally:
@@ -331,15 +363,75 @@ class Worker:
                 pass  # server expiry handles shutdown while disconnected
 
 
+class MachineWorker:
+    """Machine mode (15.4): no connector and no inbox. Publishes ``ready``, the
+    client block and the directory under the machine credential, and carries the
+    reply's update target. Messages to the machine stay stored on the server."""
+
+    def __init__(self, path, identity, state, binding):
+        self.path, self.cfg, self.binding, self.state = path, None, binding, state
+        self.api = ApiClient.from_config(identity, timeout=5, max_attempts=1)
+        self.herdr = HerdrCli("herdr", timeout=5)
+        self.handle = None
+        self.retired = False
+        self.reply = None
+        self.report = {"machine_config": path, "status": "offline", "reported": False}
+
+    def changed(self):
+        return fingerprint(self.path, self.path) != self.binding
+
+    def retire(self):
+        if not self.retired:
+            self.retired = True
+            self.stop()
+
+    def tick(self, now, agents=None, client=None):
+        self.reply = None
+        if self.retired or self.changed():
+            self.retire()
+            self.report = {"machine_config": self.path, "status": "offline", "reported": False,
+                           "error": "config_changed"}
+            return dict(self.report)
+        self.report = {"machine_config": self.path, "status": "offline", "reported": False}
+        if self.handle is None:
+            try:
+                self.handle = self.api.me()["agent"]["handle"]
+            except Exception as exc:
+                self.report["error"] = type(exc).__name__
+                return dict(self.report)
+        self.report.update(status="ready", handle=self.handle)
+        try:
+            self.reply = self.api.report_presence("ready", agents, client)
+            self.report.update(reported=True, expires_at=self.reply["presence"]["expires_at"],
+                               agents=len(agents) if agents is not None else None)
+        except Exception as exc:
+            self.report["error"] = type(exc).__name__
+        return dict(self.report)
+
+    def stop(self):
+        if self.handle is not None:
+            try:
+                self.api.report_presence("offline", [])
+            except Exception:
+                pass
+
+
+def make_worker(path, cfg, identity, state, binding):
+    if cfg is None:
+        return MachineWorker(path, identity, state, binding)
+    return Worker(path, cfg, identity, state, binding)
+
+
 class Supervisor:
     def __init__(self, path, state, configs, runtime_sha, salt=None):
         self.path, self.state, self.salt = path, state, salt
-        self.workers = [Worker(p, cfg, identity, state, binding) for p, cfg, identity, binding in configs]
+        self.workers = [make_worker(p, cfg, identity, state, binding) for p, cfg, identity, binding in configs]
         self.seen = (runtime_sha, tuple(w.binding for w in self.workers))
         self.error = self.reason = None
 
     def _snapshot(self):
-        return file_sha256(self.path), tuple(fingerprint(w.path, w.cfg.agent_config) for w in self.workers)
+        return file_sha256(self.path), tuple(
+            fingerprint(w.path, w.cfg.agent_config if w.cfg else w.path) for w in self.workers)
 
     def changed(self):
         return self._snapshot() != self.seen
@@ -368,7 +460,7 @@ class Supervisor:
             if worker is None or worker.binding != binding:
                 if worker is not None:
                     worker.retire()
-                worker = Worker(p, cfg, identity, state, binding)
+                worker = make_worker(p, cfg, identity, state, binding)
             workers.append(worker)
         list(pool.map(lambda w: w.retire(), current.values()))  # removed from the runtime config
         self.workers, self.error, self.reason = workers, None, None
@@ -430,6 +522,7 @@ def run(path, once=False, pushed=None):
     salt = sessions.ensure_salt(str(state))
     sessions.sessions_dir(str(state), create=True)
     pushed = pushed or PushedUpdates()
+    pushed.machine_mode = machine_mode(configs)
     if pushed.managed():
         notice = updates.migrate_mode(pushed.root)
         if notice:
@@ -460,6 +553,7 @@ def run(path, once=False, pushed=None):
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
             while not stop.is_set():
                 supervisor.refresh(pool)
+                pushed.machine_mode = bool(supervisor.workers) and all(w.cfg is None for w in supervisor.workers)
                 directories = supervisor.directories()
                 client = pushed.client()
                 futures = [pool.submit(w.tick, time.monotonic(), directories.get(id(w)), client)

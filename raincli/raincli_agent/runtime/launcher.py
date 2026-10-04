@@ -202,7 +202,25 @@ def update_unlock(fd):
         os.close(fd)
 
 
-def roll_back(root, pointer, timeout=300):
+MACHINE_FLOOR = (0, 4, 0)  # machine mode needs v0.4.0 or later (15.8 H8)
+
+
+def machine_mode(config):
+    """Whether the runtime config this launcher runs is in machine mode."""
+    try:
+        return config is not None and "machine_config" in json.loads(read_text(Path(config)))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def tag_key(tag):
+    try:
+        return tuple(int(part) for part in str(tag).removeprefix("v").split("."))
+    except ValueError:
+        return (0, 0, 0)
+
+
+def roll_back(root, pointer, timeout=300, floor=None):
     """Restore the previous version after a failed first start. The update mode
     is left as it is: only an explicit rollback makes it manual.
 
@@ -225,6 +243,8 @@ def roll_back(root, pointer, timeout=300):
         previous = current.get("previous") or {}
         if not all(k in previous for k in ("tag", "commit", "python")) or not Path(previous["python"]).is_file():
             return False
+        if floor is not None and tag_key(previous["tag"]) < floor:
+            return False  # that version cannot run this runtime config
         restored = {**current, **{k: previous[k] for k in ("tag", "commit", "python")},
                     "previous": {k: current[k] for k in ("tag", "commit", "python")}, "automatic": False}
         state = update_state(root)
@@ -344,7 +364,8 @@ def supervise(root, args, config, command, own=None, probation_enabled=True):
                     probation = False
                 elif on_probation(root, pointer):
                     # Never wait on the lock here: a stop must stay prompt (review 2, O9).
-                    result = roll_back(root, pointer, timeout=0)
+                    result = roll_back(root, pointer, timeout=0,
+                                       floor=MACHINE_FLOOR if machine_mode(config) else None)
                     if result == "busy":
                         rollback_pending = True
                         time.sleep(1)

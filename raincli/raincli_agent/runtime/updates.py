@@ -294,7 +294,7 @@ def lock_root(root, blocking=True):
     return lock
 
 
-def configure(root=None, mode=None, rollback=False):
+def configure(root=None, mode=None, rollback=False, floor=None):
     """Set the update mode (``automatic``/``manual``, persisted and chosen) or roll back.
 
     An explicit rollback sets ``manual``, so a pushed target does not immediately
@@ -310,6 +310,9 @@ def configure(root=None, mode=None, rollback=False):
             previous = current.get("previous")
             if not previous or not Path(previous.get("python", "")).is_file():
                 raise ConfigError("no previous managed release is available")
+            if floor is not None and version_key(previous["tag"]) < floor:
+                raise ConfigError("rollback below v%d.%d.%d is refused: that version cannot run this machine's "
+                                  "machine-mode runtime" % floor)
             current = {**previous, "previous": {k: current[k] for k in ("tag", "commit", "python")}}
             mode = "manual"
         if mode is not None:

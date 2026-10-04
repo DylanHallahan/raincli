@@ -16,6 +16,9 @@ REGISTRY_VALUE = "RainCLI"
 
 def command(config):
     from .updates import default_root
+    from .winapp import self_command
+    if getattr(sys, "frozen", False):
+        return self_command("runtime", "run", "--config", str(Path(config).resolve()))
     managed = default_root() / "launch.py"
     executable = Path(getattr(sys, "_base_executable", sys.executable) if managed.exists() else sys.executable)
     if os.name == "nt" and executable.with_name("pythonw.exe").exists():
@@ -54,6 +57,33 @@ def config_digest(config):
     for part in [file_sha256(path)] + [binding["config_sha256"] for _, _, _, binding in configs]:
         digest.update(part.encode())
     return digest.hexdigest()
+
+
+def installed_for(config):
+    """Whether this user's login startup runs ``config`` (Linux: the unit's
+    ExecStart; Windows: the Run value)."""
+    resolved = str(Path(config).resolve())
+    if os.name == "nt":
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REGISTRY_KEY) as key:
+                value = winreg.QueryValueEx(key, REGISTRY_VALUE)[0]
+        except FileNotFoundError:
+            return False
+        return f'"{resolved}"' in value
+    try:
+        unit = (Path.home() / ".config/systemd/user" / NAME).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return systemd_quote(resolved) in unit
+
+
+def remove_for(config):
+    """Disable login startup only when it runs ``config`` (logout, 15.8 M9)."""
+    if not installed_for(config):
+        return "not_enabled"
+    remove()
+    return "disabled"
 
 
 def systemd_unit(config, digest=None):

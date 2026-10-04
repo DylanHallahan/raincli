@@ -14,7 +14,7 @@ import time
 
 from .. import __version__
 from ..errors import ConfigError
-from . import updates
+from . import updates, winapp
 
 BACKOFF_START = 300  # 5 min, doubling up to 6 h: network and download failures only
 BACKOFF_MAX = 6 * 3600
@@ -52,12 +52,26 @@ def managed_root_of(python):
 
 
 class PushedUpdates:
-    def __init__(self, root=None, python=None, clock=time.time, resolve=None, install=None, log=None):
+    """``app_root`` is a Windows app install root (15.5): its updates come from the
+    release's installer assets. Otherwise a Python-managed install uses the v0.3 path."""
+
+    def __init__(self, root=None, python=None, clock=time.time, resolve=None, install=None, log=None,
+                 app_root=None):
         self.python = Path(python or sys.executable).absolute()
-        self.root = Path(root or managed_root_of(self.python) or updates.default_root()).expanduser().resolve()
+        self.app = Path(app_root) if app_root is not None else (None if root or python else winapp.app_root())
+        if self.app is not None:
+            self.root = self.app
+        else:
+            self.root = Path(root or managed_root_of(self.python) or updates.default_root()).expanduser().resolve()
         self.clock = clock
-        self.resolve = resolve or updates.resolve
-        self.install = install or (lambda release: updates.install(self.root, release))
+        self.machine_mode = False  # set by the runtime; machine mode refuses targets below v0.4.0 (15.8 H8)
+        self.pruned = False
+        if self.app is not None:
+            self.resolve = resolve or winapp.resolve
+            self.install = install or (lambda release: winapp.install(self.root, release["tag"], resolved=release))
+        else:
+            self.resolve = resolve or updates.resolve
+            self.install = install or (lambda release: updates.install(self.root, release))
         self.log = log or (lambda text: print("raincli runtime: " + text, file=sys.stderr, flush=True))
         self.thread = None
         self.launcher_checked = False
@@ -76,12 +90,20 @@ class PushedUpdates:
     # -- facts ----------------------------------------------------------------
 
     def managed(self):
-        """A managed install whose launcher runs this very interpreter."""
+        """A Windows app install, or a managed install whose launcher runs this very interpreter."""
+        if self.app is not None:
+            return winapp.current_version(self.root) is not None
         return ((self.root / "current.json").is_file() and (self.root / "launch.py").is_file()
                 and self.python.parent.resolve().is_relative_to(self.root / "versions"))
 
     def mode(self):
-        return updates.update_mode(self.root) if self.managed() else "manual"
+        if not self.managed():
+            return "manual"
+        return winapp.update_mode(self.root) if self.app is not None else updates.update_mode(self.root)
+
+    def floor(self):
+        """The lowest target this install accepts."""
+        return winapp.MIN_VERSION if (self.app is not None or self.machine_mode) else updates.MIN_TARGET
 
     def client(self):
         with self.lock:
@@ -123,6 +145,9 @@ class PushedUpdates:
         if (waiting and target.get("version")
                 and updates.version_key(target["version"]) == updates.version_key(__version__)):
             self._save(state="current", error=None, failures=0, blocked=None)
+        if self.app is not None:
+            self._app_started()
+            return
         if not self.launcher_checked and self.managed() and self.data.get("state") == "current":
             try:
                 result = updates.adopt_launcher_locked(self.root, self.python)
@@ -135,6 +160,21 @@ class PushedUpdates:
                 self.log("adopted this version's launcher")
             elif result == "candidate_failed":
                 self.log("this version's launcher failed its check; keeping the current launcher")
+
+    def _app_started(self):
+        """The stub's readiness heartbeat (15.8 H4); once current, prune old versions."""
+        try:
+            winapp.beat(self.root, __version__)
+        except OSError:
+            pass
+        if not self.pruned and self.data.get("state") == "current" and not winapp.read_install(self.root)["probation"]:
+            self.pruned = True
+            try:
+                removed = winapp.prune(self.root, self.python)
+            except OSError:
+                removed = []
+            if removed:
+                self.log("removed old app versions: " + ", ".join(removed))
 
     # -- the decision -------------------------------------------------------------
 
@@ -166,7 +206,7 @@ class PushedUpdates:
                 return
             self._fail("switch_timeout", network=True, target=key)
             return
-        if wanted < updates.MIN_TARGET:
+        if wanted < self.floor():
             self._save(state="failed", error="target_below_minimum", target=key, blocked=key)
             return
         if wanted < installed and not key["allow_downgrade"]:
