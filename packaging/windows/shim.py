@@ -7,7 +7,6 @@ from v0.4.0: it reads nothing but ``install.json`` and passes arguments through
 unchanged. Standard library only.
 """
 import json
-import os
 from pathlib import Path
 import re
 import signal
