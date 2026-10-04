@@ -147,6 +147,8 @@ def publish(session, agent, data):
         session.execute(delete(MachineAgent).where(MachineAgent.agent_id == agent.id))
         if agents:
             session.execute(insert(MachineAgent), [{"agent_id": agent.id, "seen_at": now, **a} for a in agents])
+        if agent.inbox_role_at is None and any(a.get("role") == "inbox" for a in agents):
+            agent.inbox_role_at = now  # delivery history: app sign-in may no longer replace it (§15.8 H2)
     return {"presence": {"status": status, "seen_at": now.isoformat(),
                          "expires_at": (now + timedelta(seconds=TTL_SECONDS)).isoformat()},
             "target": target_json(session.get(ClientTarget, agent.team_id))}

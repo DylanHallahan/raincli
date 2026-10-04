@@ -26,7 +26,7 @@
     <thead><tr><th scope="col">Machine</th><th scope="col">API connection</th><th scope="col">Session availability</th><th scope="col">Client</th><th scope="col">Credential</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
     <tbody>
       <tr {% if not row.active %}class="is-revoked"{% endif %}>
-        <td data-label="Machine"><span class="handle">{{ row.agent.handle }}</span>{% if row.agent.display_name != row.agent.handle %}<br><span class="muted small">{{ row.agent.display_name }}</span>{% endif %}<br><span class="muted small">Team {{ row.team.slug }}{% if not mine %} · {{ row.owner.display_name }}{% endif %}</span></td>
+        <td data-label="Machine"><span class="handle">{{ row.agent.handle }}</span>{% if row.agent.display_name != row.agent.handle %}<br><span class="muted small">{{ row.agent.display_name }}</span>{% endif %}{% if row.agent.signed_in_from %}<br><span class="muted small machine-signin">Signed in from {{ row.agent.signed_in_from }} · {{ time(row.agent.created_at) }}</span>{% endif %}{% if row.agent.rotated_at %}<br><span class="muted small machine-rotated">Credential replaced {{ {'app-login': 'by app sign-in', 'website': 'on the website', 'operator': 'by the operator'}[row.agent.rotated_by] }} {{ time(row.agent.rotated_at) }}</span>{% endif %}<br><span class="muted small">Team {{ row.team.slug }}{% if not mine %} · {{ row.owner.display_name }}{% endif %}</span></td>
         <td data-label="API connection">{{ conn_badge(row.connection) }}</td>
         <td data-label="Session availability">{{ presence_badge(row.runtime_status) }}</td>
         <td data-label="Client">{{ client_badges(row.client) }}</td>

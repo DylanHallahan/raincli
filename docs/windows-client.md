@@ -1,8 +1,83 @@
-# Native Windows client
+# RainCLI on Windows
 
-The client remains Python 3.11+ with no third-party runtime dependencies. Use a local NTFS drive for credentials and connector state. Network shares, FAT/exFAT, cloud-synced state directories and Windows service installation are not validated.
+**The RainCLI app is the default on Windows.** It is a per-user installer with a tray icon, built from the same stdlib client as the CLI: one client core with two front ends. It needs no Python, no admin rights and no terminal. The [Python client](#python-client-existing-and-advanced-installs) below remains for existing installs and for anyone who prefers it.
 
-## Install with PowerShell
+## The RainCLI app
+
+### Install
+1. Open the [latest release](https://github.com/DylanHallahan/raincli/releases/latest) of `DylanHallahan/raincli` and download `RainCLI-Setup-<X.Y.Z>.exe` and `RainCLI-Setup-<X.Y.Z>.exe.sha256`.
+2. Check the download in PowerShell. The two values must be identical:
+   ```powershell
+   (Get-FileHash "$HOME\Downloads\RainCLI-Setup-X.Y.Z.exe" -Algorithm SHA256).Hash.ToLower()
+   (Get-Content "$HOME\Downloads\RainCLI-Setup-X.Y.Z.exe.sha256").Split(' ')[0]
+   ```
+3. Run the installer. It installs for **your Windows account only**, into `%LOCALAPPDATA%\Programs\RainCLI`, without asking for admin rights.
+
+**SmartScreen.** The installer is **not code-signed**, so Windows may say "Windows protected your PC". Choose **More info → Run anyway** only for a file you downloaded from the release page above whose checksum matched. If anything else shows that warning, don't run it.
+
+The installer:
+- starts RainCLI at logon (a `RainCLI` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, pointing at `RainCLI.exe --background`);
+- adds **RainCLI** and **Uninstall RainCLI** to the Start menu;
+- puts the `raincli` command first on your user `PATH` (open a new terminal to use it);
+- starts the tray app, which signs you in on its first run, or moves an existing install over (below);
+- writes `installer-record.log` in the install folder, recording any startup entry for RainCLI that already existed, before it changes anything. It never overwrites a startup entry it hasn't recorded.
+
+### Sign in
+On its first run the tray asks for your RainCLI **email and password** and a **machine name**. The name defaults to the computer's name in handle form (lowercase letters, digits and dashes, for example `desktop-ab12cd`), and you can change it. If you belong to several teams, it asks which one. Signing in creates this machine on your team's **Machines** page, labelled "Signed in from <name>", with its own credential. Your password is sent once to `https://raincli.com` over HTTPS and is never stored or logged; the app never retries with it.
+
+- **"That name is taken"**: a teammate uses it, or a revoked machine had it. Choose another name.
+- **"You already have a machine with that name"**: signing in again on the same computer replaces its credential automatically. From another computer, the app asks you to confirm **replace machine <name>**, and that works only for a machine that has never received a message or had an inbox. Otherwise revoke the old machine on the website, then choose a new name.
+- After several wrong passwords, sign-in pauses for a few minutes, on the website too.
+
+Sign-in stores the machine credential in `%USERPROFILE%\.config\raincli\agent.json`, encrypted with Windows DPAPI for your Windows account (`token_dpapi`) and protected by an owner-only ACL. DPAPI protects the file at rest; it does not protect against other programs running as you. Copied to another account or computer, it fails with "sign in again".
+
+`raincli login` does the same from a terminal. It reads the password from a no-echo prompt only (never an argument, the environment or a file) and refuses without one.
+
+### What the app does in this release
+The tray icon shows whether the machine is **ready**, **offline**, **updating** or in **error**. Its window shows the connection, the machine name, the version and update state, and the coding agents on this machine. Its menu has **Open log**, **Pause/Resume**, **Sign out** and **Quit**.
+
+A machine signed in through the app runs in **machine mode**: it reports its presence, client version and agent list to your team, and it takes pushed updates. **It does not receive messages yet.** Messages sent to it are stored on the server until message routing arrives in a later release. Machines moved over from an existing connector setup (below) keep delivering exactly as before.
+
+### Updates
+Updates are automatic. When your team's operator sets a new version, the app:
+1. looks up the stable release with exactly that tag in `DylanHallahan/raincli`;
+2. downloads `RainCLI-Setup-<X.Y.Z>.exe` and its `.sha256` from that same release over HTTPS, accepting only `api.github.com`, `github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com` on port 443, checked on every redirect;
+3. checks the SHA-256 and installs the new version beside the current one, silently;
+4. switches to it and restarts the tray. If the new version doesn't come up within two minutes, it switches back and reports `rolled_back`.
+
+Downgrades need the operator's explicit permission. The current and previous versions are kept; older ones are removed.
+
+**Trust model:** TLS to GitHub plus write access to the repository. **Releases are unsigned.** The checksum detects a corrupted download, not a malicious release, and the release assets are not tied to the tag's commit. The server only names a version; it can never choose where the app comes from.
+
+### Moving an existing install to the app
+Run the installer. Its first run finds, in this order:
+1. a managed install (`%USERPROFILE%\.raincli\client` and its `RainCLI` Run value);
+2. an older pip or venv client (0.1.x or 0.2.x): `agent.json` at `RAINCLI_CONFIG` or `%USERPROFILE%\.config\raincli\agent.json`;
+3. the connector configs that use it, and any `runtime.json` beside them.
+
+It keeps your **handle, credential, connector configs and queues**: no new sign-in, no new machine and no new handle. It converts the token to DPAPI, keeps or writes a connector-mode `runtime.json` so delivery continues, starts the new runtime and checks that it's ready, and only then disables the old startup entry (recorded, not deleted). The old install's files stay where they are, but the old pip `raincli` command stops working; use the app's `raincli`. If an old connector window is still running, the app asks you to **close the old RainCLI window** to finish, and never kills it. Everything is logged, without secrets, to `migration.log` in the app's state directory.
+
+### Uninstall
+Use **Uninstall RainCLI** in the Start menu or Windows Settings. It asks whether to **sign this computer out** too (default **No**). Yes revokes the machine and deletes its credential; if that fails, the credential is kept and you're told.
+
+- **Removed:** the Run value, the `PATH` entry and the `raincli` command, the Start menu entries, every installed version, `RainCLI.exe`, `install.json`, and the hook entries marked `raincli`.
+- **Kept:** `agent.json` (unless you signed out), your queues, `machine-salt`, `migration.log`, `installer-record.log`, and any old startup entry that migration disabled (it is not restored).
+
+### Install layout
+```
+%LOCALAPPDATA%\Programs\RainCLI\
+  RainCLI.exe              stable stub: starts the current version and owns rollback; never updated in place
+  bin\raincli.exe          the CLI on PATH; runs the current version's raincli.exe
+  versions\<X.Y.Z>\        each version: RainCLI-app.exe (tray) and raincli.exe (CLI)
+  install.json             {"current", "previous", "probation"}
+  installer-record.log     startup entries found before the first change
+```
+
+## Python client (existing and advanced installs)
+
+The Python client remains Python 3.11+ with no third-party runtime dependencies. Use a local NTFS drive for credentials and connector state. Network shares, FAT/exFAT, cloud-synced state directories and Windows service installation are not validated.
+
+### Install with PowerShell
 
 The default is a **managed install** with automatic updates, as on Linux ([SETUP.md](../SETUP.md#1-install-the-managed-client-agent)). A bootstrap checkout installs it, and a `raincli` function then runs everything through the stable launcher:
 
@@ -31,13 +106,13 @@ The config lives at `$HOME\.config\raincli\agent.json`. New private files and di
 
 The same send/reply/fetch commands work in PowerShell. Use quoted Windows paths and `(New-Guid).ToString()` when supplying `--id`. For the optional skill, copy the packaged `raincli_agent\skill\SKILL.md` to your agent's skill folder; ask before replacing existing instructions. This avoids Windows PowerShell 5.1's UTF-16 output redirection.
 
-## Connector boundary
+### Connector boundary
 
 The native connector now has Windows process locks and file handling. Automatic delivery still requires a working Herdr executable and explicitly mapped session. A hosted runner's fake Herdr does **not** prove a real Windows Herdr installation. Until that integration is exercised, use the CLI directly on Windows or the previously exercised Linux/Herdr setup.
 
 Private temporary files are flushed before publication. Windows replacement uses `MoveFileExW` with replace-existing and write-through flags, and attachment publication uses NTFS hard links without overwriting. Windows does not expose the POSIX directory-fsync guarantee; the smoke test covers normal operation and process termination, not power-loss recovery. Reparse-point files and managed attachment subdirectories are rejected.
 
-## Runtime and startup
+### Runtime and startup
 
 The runtime, presence, the agent list, startup and updates work as described in [SETUP.md](../SETUP.md#5-run-the-runtime-and-start-it-at-login-agent). Presence and the agent list are advisory, not delivery or receipt. On Windows the process-scan fallback uses `tasklist` and reports **type only**: the name is the type, the status is `unknown`, and no path or process id is sent. Use Windows paths in the runtime config, for example `$HOME\.config\raincli\runtime.json`:
 
@@ -71,7 +146,7 @@ Windows-specific behaviour:
 - It restarts a crashed runtime with backoff, but if the launcher itself is killed, nothing restarts it until the next logon. Connectors can then outlive it until logoff, because no Job object is used.
 - Replacing the version pointer retries while the launcher has the file open.
 
-## One-off verification
+### One-off verification
 
 On September 28, 2026, revision `1390410` passed **10/10 checks on both Python 3.11.9 and 3.14.7** on native Windows Server 2022. [Successful Actions run](https://github.com/DylanHallahan/raincli/actions/runs/36479606073). The same revision passed all 195 existing Linux agent tests. The first Windows run exposed an 8.3 short-path false positive in shareable-context validation; the successful revision fixes it and checks junction ancestors explicitly.
 
@@ -88,3 +163,7 @@ python scripts/client-platform-smoke.py
 ```
 
 Run from the repository root. The script uses a disposable temporary directory and two synthetic identities, not your normal credentials.
+
+## Windows app verification
+
+[Manual Windows app build](../.github/workflows/windows-app-build.yml) builds the installer and its checksum on `windows-2022` and uploads them as a workflow artifact only; it fails if the bundle contains any test hook. [Manual Windows app e2e](../.github/workflows/windows-app-e2e.yml) builds 0.4.0 and 0.4.1 test installers from the same source and checks, against a throwaway in-job server: a silent per-user install, sign-in through `raincli login` on a pseudo console, the Run value, presence, a pushed upgrade and an explicit downgrade through the installer assets, sign-out and uninstall, and migration of a pip-installed v0.2.0 client with a connector config and queue. Its fake release endpoint answers on the real GitHub hostnames through a hosts-file entry and a test root CA on that disposable runner; the shipped app has no override. Both workflows are manual only and use no secrets. See [release testing](release-testing.md).

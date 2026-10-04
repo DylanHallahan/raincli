@@ -181,8 +181,7 @@ def _viewer_team(viewer: auth.Viewer, slug: str) -> tuple[Team, str]:
     raise not_found()
 
 
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+_client_ip = auth.client_ip
 
 
 router = APIRouter(include_in_schema=False)
@@ -710,7 +709,8 @@ def owner_revoke_agent(
 
 def install(app: FastAPI) -> None:
     settings: Settings = app.state.settings
-    app.state.web_login_limiter = auth.LoginLimiter()
+    if not hasattr(app.state, "web_login_limiter"):  # create_app shares one with the API sign-in
+        app.state.web_login_limiter = auth.LoginLimiter()
     app.add_middleware(WebSecurityMiddleware, root_path=settings.root_path, cookie_secure=settings.cookie_secure)
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 

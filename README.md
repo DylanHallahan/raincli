@@ -10,11 +10,16 @@ The hosted pilot is at **https://raincli.com**. Access is invite-only; teammates
 
 You need GitHub CLI, Python 3.11+ and a coding agent. Herdr is optional: without it, a Claude Code session can be the inbox through hooks, or you can use the CLI alone. No pipx required.
 
-Follow **[SETUP.md](SETUP.md)**. The default path is a managed install that runs through a stable launcher with automatic updates, then accepting a team invitation, adding the machine, choosing its inbox, and starting the runtime at login. For native Windows PowerShell, use the [Windows client guide](docs/windows-client.md), including its verification boundaries.
+- **Windows:** download and run the **RainCLI app** installer from the [latest release](https://github.com/DylanHallahan/raincli/releases/latest), then sign in with your email and password. It needs no Python and no admin rights. See the [Windows guide](docs/windows-client.md).
+- **A headless Linux machine** (over SSH): the managed install, then `raincli login`, which asks for your password at a no-echo prompt, registers the machine and starts at login through a systemd user unit, with automatic updates. See [SETUP.md](SETUP.md#headless-linux-raincli-login).
+- **A machine whose inbox agent receives messages:** follow **[SETUP.md](SETUP.md)**: a managed install that runs through a stable launcher with automatic updates, then accepting a team invitation, adding the machine, choosing its inbox, and starting the runtime at login.
+
+In this release, machines signed in through the app or `raincli login` report their presence, version and agents and take updates, but don't receive messages yet. Messages to them are stored until message routing arrives. Existing connector setups, including ones moved into the app, keep delivering.
 
 ## What is included
 
-- **Client:** a Python CLI for sending, replying, reading conversations and safely fetching Markdown attachments.
+- **Client:** a Python CLI for sending, replying, reading conversations and safely fetching Markdown attachments, and `raincli login`/`logout` for signing a machine in with an email and password.
+- **Windows app:** a per-user installer (no admin rights) with a tray icon over the same client core: sign-in, DPAPI-protected credential storage, logon start, pushed updates through the release's installer asset, and migration of existing installs.
 - **Herdr connector:** durable local storage, acknowledgements, explicit session mapping, team trust, blocked senders and queued escalation.
 - **Runtime:** supervises explicitly configured connectors, publishes advisory availability and the machine's agent list (Herdr, Claude Code and Codex hooks, and a process scan) to your team, starts at login (Linux user systemd, Windows per-user logon), and installs the client version your team's operator sets.
 - **Agent skill and workspace:** packaged guidance available through `raincli --skill`, plus model-neutral inbox instructions.
@@ -26,7 +31,7 @@ Follow **[SETUP.md](SETUP.md)**. The default path is a managed install that runs
 
 This is an early team pilot. A successful send means the server stored the message; session submission does not prove an agent acted or a person read it. The connector must be running, normally under the runtime. Messages go only to a machine's inbox; the other agents in the directory can't be messaged directly. A Claude Code inbox (`next-turn`, Claude Code only) receives messages only when that session is next used, at most about 10,000 characters per turn; until then its senders see the message as `held` (`next_turn`). A session's `blocked` status lasts until its next prompt. Codex hooks need a one-time review in Codex's `/hooks` and work on Linux and macOS only. Session availability (`ready`, `busy`, `blocked`, `offline`, `unknown`) and the agent list are advisory and expire after 120 seconds. They are not delivery or receipt, and they never include paths, prompts, titles, transcripts or process ids.
 
-Managed installs take automatic updates by default; `raincli runtime update --manual` opts a machine out. A v0.2.0 managed install turns automatic on at its first v0.3.0 run and prints a one-time notice. A pushed version that fails its first start is rolled back automatically. The server operator chooses only *which* version a team runs, never where it comes from: the client installs only stable releases of the canonical GitHub repository over HTTPS, pinned to the release's commit. **Releases are unsigned**; their signatures and checksums are not verified. Pushed updates need client v0.3.0 or later. Native Windows CI covers the runtime's managed update, rollback and stop paths against a synthetic release. Not yet verified: delivery into a real Herdr on Windows, hooks on native Windows, and updating from one published release to a newer one.
+The Windows app installer is **not code-signed**, so SmartScreen may warn about it; check its published SHA-256 first ([Windows guide](docs/windows-client.md#install)). The app's pushed updates verify that checksum, which detects a corrupted download but not a malicious release: trust rests on TLS to GitHub and write access to the repository. Managed installs take automatic updates by default; `raincli runtime update --manual` opts a machine out. A v0.2.0 managed install turns automatic on at its first v0.3.0 run and prints a one-time notice. A pushed version that fails its first start is rolled back automatically. The server operator chooses only *which* version a team runs, never where it comes from: the client installs only stable releases of the canonical GitHub repository over HTTPS, pinned to the release's commit. **Releases are unsigned**; their signatures and checksums are not verified. Pushed updates need client v0.3.0 or later. Native Windows CI covers the runtime's managed update, rollback and stop paths against a synthetic release. Not yet verified: delivery into a real Herdr on Windows, hooks on native Windows, and updating from one published release to a newer one.
 
 Transport uses HTTPS. The server can read message contents; this is **not end-to-end encrypted**. Share only approved context. Agents act on teammate requests within their current assignment; a message can't change an agent's instructions, expand its permissions, or grant access or sharing authority.
 
@@ -37,7 +42,8 @@ Markdown attachments are UTF-8, up to 256 KiB each, five files and 1 MiB total p
 - [Teammate setup](SETUP.md)
 - [Inbox agent and escalation](docs/raincli-inbox-agent.md)
 - [Protocol and delivery semantics](docs/raincli-protocol.md)
-- [Windows client](docs/windows-client.md)
+- [Windows app and client](docs/windows-client.md)
+- [Release testing](docs/release-testing.md)
 - [Self-hosting and operations](docs/raincli-deploy.md)
 
 ## Development

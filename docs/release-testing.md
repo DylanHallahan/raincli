@@ -55,3 +55,41 @@ It exits 1 after cleaning up. That is the expected result until `v0.3.0` is publ
 - GitHub's anonymous API limit (60 requests an hour per IP) applies, because the updater never sends credentials. A run makes about six API requests. On a shared runner IP, a `403` or `429` shows up as a network failure: re-run later.
 - Each phase waits up to 15 minutes. A graceful handover can take up to about 2 minutes, and reports arrive every 30 seconds.
 - **Not covered:** a real Herdr, login startup, hooks, and a failing release's automatic rollback. `scripts/runtime-platform-smoke.py` covers the rollback with synthetic archives.
+
+# Windows app installer assets (v0.4.0 and later)
+
+From v0.4.0, a release also carries the Windows app installer: `RainCLI-Setup-<X.Y.Z>.exe` and `RainCLI-Setup-<X.Y.Z>.exe.sha256`. App installs update only through these two assets (protocol §15.5, §15.8 M4), so **a release without them can't be pushed to Windows app machines.** No workflow attaches them: the build workflow has a read-only token and only uploads an artifact. The main agent attaches them by hand.
+
+## Building and attaching the assets (main agent)
+1. Set `__version__` in `raincli/raincli_agent/__init__.py` (and `version` in `raincli/pyproject.toml`) to `X.Y.Z`, merge, and tag the release commit `vX.Y.Z`.
+2. In GitHub, run **Actions → Manual Windows app build → Run workflow** on the tag `vX.Y.Z`. It:
+   - installs the hash-pinned build tools (`packaging/windows/requirements-build.txt`);
+   - freezes the tray, the CLI, the stub and the PATH shim with PyInstaller and compiles the Inno Setup installer (`packaging/windows/build.py`);
+   - **fails if the bundle contains any test hook** (`packaging/windows/verify_bundle.py`: no `_build_test` module or file, no `TEST_RELEASE_BASE`/`TEST_CERT_SHA256` name, no server or build-tool module, the real tray and stub) and checks the checksum line;
+   - uploads the artifact `RainCLI-Setup-X.Y.Z`, holding the two files.
+3. Download and check the artifact, then attach both files to the release:
+   ```bash
+   gh run download <run-id> -R DylanHallahan/raincli -n RainCLI-Setup-X.Y.Z -D /tmp/raincli-setup
+   cd /tmp/raincli-setup
+   sha256sum -c RainCLI-Setup-X.Y.Z.exe.sha256           # "RainCLI-Setup-X.Y.Z.exe: OK"
+   cat RainCLI-Setup-X.Y.Z.exe.sha256                    # exactly: 64 lowercase hex, two spaces, the file name
+   gh release upload vX.Y.Z RainCLI-Setup-X.Y.Z.exe RainCLI-Setup-X.Y.Z.exe.sha256 -R DylanHallahan/raincli
+   ```
+   The names must match exactly: the app looks up each asset by its exact name in the release that `vX.Y.Z` resolves to, and refuses a checksum line naming any other file.
+4. Publish the release as **stable** (non-draft, non-prerelease) only after both assets are attached.
+
+## The synthetic app e2e (any ref, before a release)
+**Actions → Manual Windows app e2e → Run workflow**, with the inputs left empty, builds 0.4.0 and 0.4.1 test installers from the same ref and runs `scripts/windows-app-e2e.py --installers dist/e2e` on a disposable `windows-2022` runner, against a throwaway in-job server (the same PostgreSQL and server setup as the managed e2e above). It checks, printing a `PASS:` line each:
+1. a silent per-user install with no admin: the layout, `install.json`, the HKCU Run value and uninstall key (none under HKLM), the shim first on the user `PATH`, the Start menu entries, and `installer-record.log`;
+2. sign-in through the installed `raincli login`, with the password typed into a pseudo console (ConPTY) at the no-echo prompt, never argv or the environment; `agent.json` holds `token_dpapi` only and `runtime.json` is machine mode;
+3. launching exactly the Run value's command line, then presence reporting the version, `automatic` and `current`;
+4. a pushed upgrade 0.4.0 → 0.4.1 through the installer assets: the release resolved, both assets fetched from the API asset URL with `Accept: application/octet-stream` and redirected to `objects.githubusercontent.com` and `release-assets.githubusercontent.com`, `/UPDATE` changing neither the Run value nor the uninstall key, `install.json` swapped, and the tray relaunched from `versions\0.4.1`;
+5. the downgrade refused, then allowed with `--allow-downgrade`, then the target cleared;
+6. `raincli logout --yes` through the PATH shim (the machine is revoked), then a silent uninstall that removes what §15.8 M10 lists and keeps the installer record;
+7. migration of a **pip-installed v0.2.0** client (installed from its release archive) with a connector config that omits `agent_config`, a runtime config and a queue: after a fresh install the handle and credential are unchanged, no machine is added, the token is DPAPI-protected, `runtime.json` is connector mode, a message sent after migration is delivered, and `migration.log` holds no token;
+8. an uninstall without sign-out that keeps `agent.json`, the connector config, the queue and `migration.log`.
+
+**How the fake release endpoint is reached.** The shipped app has no release-host override (§15.8 M11): `HOSTS`, `API` and `REPO` are constants, `raincli/tests/agent/test_release_constants.py` checks that, and the build refuses test hooks. So the e2e serves its fake release endpoint on the **real hostnames**, on that runner only: a hosts-file entry maps `api.github.com`, `github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com` to `127.0.0.1`, and a throwaway test root CA in the runner's LocalMachine Root store signs a certificate for exactly those names on port 443. The script removes both when it ends, and refuses to run anywhere but a GitHub Actions Windows runner.
+
+## The real-release app e2e (after attaching the assets)
+Once two stable releases carry the installer assets, for example `v0.4.0` and `v0.4.1`, run **Manual Windows app e2e** with `real_from` = `v0.4.0` and `real_to` = `v0.4.1`. It builds nothing, adds no hosts entry and no test CA. It downloads both releases' installers, checks them against their published checksums, and runs the same eight phases with real GitHub: the pushed upgrade and downgrade fetch the **published** assets through the exact allowlist. A missing asset fails with `release vX.Y.Z has no asset …; attach it first`. Record the `PASS` lines and the run URL in the release notes, as for the managed e2e.
