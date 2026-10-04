@@ -21,6 +21,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.sessionmaker = make_sessionmaker(engine)
+    from raincli_server.web.auth import LoginLimiter
+
+    # One limiter for every password sign-in: the website and POST /api/v1/app/login (protocol §15.1).
+    app.state.web_login_limiter = LoginLimiter()
 
     @app.get("/api/v1/health", include_in_schema=False)
     def health():

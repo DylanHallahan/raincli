@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from raincli_server import security
@@ -283,6 +284,43 @@ def revoke_agent(session: Session, agent: Agent, actor: User | None = None) -> N
         .values(revoked_at=ts)
     )
     session.flush()
+
+
+class NameTaken(IdentityError):
+    """The machine name belongs to another member, or to a revoked machine (protocol §15.1)."""
+
+
+def sign_in_machine(session: Session, team: Team, user: User, machine_name: str) -> tuple[Agent, str, bool]:
+    """Create or re-sign-in the machine ``machine_name`` for ``user`` (protocol §15.1).
+
+    Returns ``(agent, raw_token, rotated)``. A new name creates a machine owned by ``user`` with one
+    credential. The user's own active machine of that name gets its credential rotated (every older
+    credential is revoked). Any other holder of the name raises ``NameTaken``.
+    """
+    if membership(session, team.id, user.id) is None:
+        raise PermissionDenied("you are not a member of that team")
+    if not security.valid_handle(machine_name):
+        raise IdentityError("machine_name must match ^[a-z][a-z0-9-]{1,31}$")
+    existing = session.scalar(select(Agent).where(Agent.team_id == team.id, Agent.handle == machine_name)
+                              .with_for_update().execution_options(populate_existing=True))
+    if existing is None:
+        agent = Agent(team_id=team.id, owner_user_id=user.id, handle=machine_name, display_name=machine_name,
+                      signed_in_from=machine_name)
+        try:
+            with session.begin_nested():
+                session.add(agent)
+                session.flush()
+        except IntegrityError:
+            # A concurrent sign-in created the name first; treat it like any existing machine.
+            existing = session.scalar(select(Agent).where(Agent.team_id == team.id, Agent.handle == machine_name)
+                                      .with_for_update().execution_options(populate_existing=True))
+            if existing is None:
+                raise
+        else:
+            return agent, _issue_credential(session, agent, SCOPES), False
+    if existing.owner_user_id != user.id or existing.revoked_at is not None:
+        raise NameTaken("that machine name is taken in this team")
+    return existing, rotate_agent_credential(session, existing), True
 
 
 # Member removal and user disable (protocol §11.5, §12.5) --------------------------

@@ -104,6 +104,8 @@ class Agent(Base):
     display_name: Mapped[str] = mapped_column(String(80), nullable=False)
     created_at: Mapped[datetime] = _created()
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The machine name given to POST /api/v1/app/login when sign-in created this machine (§15.7).
+    signed_in_from: Mapped[str | None] = mapped_column(String(32))
     __table_args__ = (UniqueConstraint("team_id", "handle", name="uq_agents_team_handle"),)
 
 

@@ -144,6 +144,11 @@ def check_csrf(request: Request, submitted: object, viewer: Viewer | None) -> bo
 
 # Login rate limiting ------------------------------------------------------------
 
+def client_ip(request: Request) -> str:
+    """The limiter's IP key, for the website and the app sign-in alike."""
+    return request.client.host if request.client else "unknown"
+
+
 class LoginLimiter:
     """In-process sliding windows of failed sign-ins.
 
