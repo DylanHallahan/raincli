@@ -536,3 +536,100 @@ The connector config may map the inbox to a hook session instead of Herdr: `"inb
   - The 10-minute `offline` and 1-hour drop rules apply only to records with no determinable process.
 - **Website scope (finding 20).** The machines page shows **every machine in the viewer's team**, the viewer's own first, matching the team-scoped `GET /api/v1/agents`. Managing a machine stays limited to its owner or a team owner.
 - **Versions (finding 13).** Components have no leading zeros: `^v(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`, on both sides.
+
+## 15. Machine sign-in, Windows app and headless login (v1.7, binding)
+
+There is one client core (`raincli_agent`, standard library only) with two front ends: the **CLI**, which is headless and works over SSH, and the **Windows tray app**, a thin front end that calls the same functions. No behaviour is implemented twice.
+
+### 15.1 Sign-in endpoint
+`POST /api/v1/app/login` (JSON, no bearer token).
+- **Request:** `{"email", "password", "machine_name", "team"?}`.
+- **Throttling and password check:**
+  - It uses **the same `LoginLimiter` instance** as the website login. A lockout earned on either applies to both.
+  - Failures return a generic `401 invalid_credentials` or `429 rate_limited`, the same as the web login.
+  - The password is verified with the existing scrypt check and is never stored or logged.
+- **Team:**
+  - A member of exactly one team gets that team.
+  - A member of several teams who omits `team` gets `409 team_choice_required`, with `{"teams": [{"slug", "name"}]}`.
+  - An unknown `team`, or one the user isn't a member of, returns `400 invalid`.
+- **`machine_name`:**
+  - It must already match the handle grammar. The client slugifies the computer name (lowercase; runs of characters outside `[a-z0-9-]` become `-`; trimmed to 32 characters; prefixed with `m-` if it doesn't start with a letter). The user can edit it.
+  - If the name is new in the team, the server creates the machine (owned by the user) with **one machine credential**, and returns `201`.
+  - If the same user already owns an active machine with that handle, the server **rotates** that machine's credential (revoking the old one) and returns `200`, with `"rotated": true`.
+  - If another member owns it, or it is revoked, the reply is `409 name_taken`.
+- **Reply:** `{"api_url", "token", "handle", "team": {"slug", "name"}, "rotated": bool}`.
+- **MFA:** the error code `mfa_required` is reserved for when MFA arrives.
+- **Phase 1 issues no person session.** That arrives with Phase 2 messaging.
+
+`POST /api/v1/app/sign-out` (the machine's bearer credential) revokes that machine and all of its credentials, and returns `200 {"signed_out": true}`.
+
+### 15.2 Client sign-in
+- **`raincli login [--email E] [--machine-name N] [--team S] [--api-url URL] [--force]`:**
+  - The password is read **only** through `getpass`, with no echo. It is never taken from argv, the environment or a file. With no TTY, the command refuses.
+  - The default `--api-url` is `https://raincli.com`.
+  - It writes the config with `config.write_config`, or the Windows DPAPI form (§15.3).
+  - It refuses to overwrite an existing `agent.json` unless `--force` is given. On Windows, after `--force`, it re-registers.
+  - It then writes the machine-mode `runtime.json` (§15.4) and prints how to enable logon start.
+- **`raincli logout`:** calls sign-out, then deletes the local credential and runtime config. Queues are kept.
+- **The tray app's sign-in dialog** calls the same functions.
+
+### 15.3 Credential storage
+- **Linux and macOS:** unchanged, `agent.json` with mode 0600.
+- **Windows:** `agent.json` holds `{"api_url", "token_dpapi": "<base64 of CryptProtectData(token), CurrentUser, entropy b'raincli-agent-v1'>"}`, with the existing owner/ACL protection.
+  - `config.load` accepts `token` or `token_dpapi`.
+  - On Windows, every write produces `token_dpapi` only.
+  - Migration converts a plain `token`.
+  - A DPAPI blob from another user or machine fails with a clear "sign in again" error.
+
+### 15.4 Machine mode (runtime without a connector)
+- **Config:** `runtime.json` may be `{"machine_config": "<agent.json>", "state_dir": "<dir>"}`. It needs exactly one of `machine_config` or a non-empty `connectors`.
+- **In machine mode the runtime:**
+  - publishes `status: ready`, the client block and the agent directory (Herdr, hooks and scan; no inbox role) under that credential every 30 s;
+  - acts on pushed targets.
+- **Messages** to such a machine stay stored until Phase 2 routing.
+- **Connector mode** is unchanged.
+- **Startup:** `runtime startup --config runtime.json` works in both modes. On Linux it is a systemd user unit. On Windows, the app's Run value is the app's stable stub, `RainCLI.exe --background`.
+
+### 15.5 Windows app layout and pushed updates
+- **Install root:** `%LOCALAPPDATA%\Programs\RainCLI\`, per user, with no admin rights:
+  - `RainCLI.exe` is a stable stub that never changes in place;
+  - `versions\<X.Y.Z>\` holds each PyInstaller onedir build, containing `RainCLI-app.exe` (the tray) and `raincli.exe` (the CLI console);
+  - `current.txt` names the active version, and `previous.txt` the one before it.
+- **Installer:** Inno Setup with `PrivilegesRequired=lowest`. A normal install adds Start menu entries and the HKCU Run value `RainCLI` = `"<root>\RainCLI.exe" --background`, starts the tray, and runs migration (§15.6). `/UPDATE /DIR=<root>\versions\<X.Y.Z>` installs **only** the version folder: no Run value, no shortcuts, no launch. The uninstaller removes the Run value and files, and asks whether to sign out (default no). The CLI is put on the user's PATH as `…\RainCLI\bin\raincli.cmd`, which forwards to the current version.
+- **Release assets** (attached by the main agent): `RainCLI-Setup-<X.Y.Z>.exe` and `RainCLI-Setup-<X.Y.Z>.exe.sha256`. The checksum file is one line of 64 lowercase hex characters, two spaces, then the file name.
+- **Update path for Windows app installs.** A Linux, macOS or Python-managed install keeps the v0.3 path. A Windows app install, on a pushed target:
+  1. resolves the stable release with that tag in the canonical repository;
+  2. fetches both assets through the **exact** host allowlist, `api.github.com`, `github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com`, with https only, port 443, checked on every hop and with no wildcards. Sizes are bounded at 200 MiB for the installer and 1 KiB for the checksum;
+  3. verifies the SHA256;
+  4. runs the installer with `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /UPDATE /DIR=…`;
+  5. verifies `versions\<X.Y.Z>\raincli.exe --version`;
+  6. **rename-swaps** `current.txt` (writes `current.txt.new`, then replaces it) and records `previous.txt`;
+  7. stops the tray and runtime gracefully, and relaunches through the stub;
+  8. runs probation and rollback as in §14, with rollback rewriting `current.txt` to the previous version.
+
+  Downgrades still require `allow_downgrade`. **Unsigned.** The server names only a version.
+- **Pruning:** keep the current and previous versions and remove older ones, never the running one.
+
+### 15.6 Migrating existing installs (run by the installer and the tray's first run)
+**What it detects, in order:**
+1. a managed v0.2/v0.3 install (`%USERPROFILE%\.raincli\client` and an HKCU Run `RainCLI` value naming it);
+2. **an older pip/venv client (0.1.x/0.2.x):** an `agent.json` at `RAINCLI_CONFIG` or the default `~/.config/raincli/agent.json`;
+3. connector configs: JSON files in `~/.config/raincli/` (and the directory of `RAINCLI_CONFIG`) whose `agent_config` resolves to that `agent.json`, together with an existing `runtime.json` there.
+
+**What it does:**
+- keeps the **handle, the credential, the connector configs and their queues**. The token is converted to the DPAPI form (§15.3);
+- writes or keeps `runtime.json` in **connector mode** with those connectors, so delivery continues;
+- disables the old Run value, recording the original in the migration log;
+- leaves the old install's files in place.
+
+**Never:**
+- runs a fresh login when a credential exists;
+- creates a new machine;
+- changes the handle.
+
+**A running old connector:** if one holds its queue's run lock, the tray shows "close the old RainCLI window to finish" and retries, never killing it.
+
+**Record:** every migration is logged to `<state_dir>\migration.log`, with no secrets.
+
+### 15.7 Website
+Machines created by sign-in show on the Machines page like any other, labelled "signed in from <machine_name>" with a creation time. Revoking one there revokes its credential.
