@@ -633,3 +633,139 @@ There is one client core (`raincli_agent`, standard library only) with two front
 
 ### 15.7 Website
 Machines created by sign-in show on the Machines page like any other, labelled "signed in from <machine_name>" with a creation time. Revoking one there revokes its credential.
+
+### 15.8 Amendments after contract review 0 (binding; they override §15.1–15.7 where they conflict)
+
+**H1. One shared limiter.** The root app creates `LoginLimiter` once and passes the same object to the API sub-app. Tests:
+- 6 failures at `/login` → `/app/login` returns `429`;
+- 6 failures at `/app/login` → `/login` is blocked.
+
+**H2. Rotation needs proof.** If the user already owns an active machine with the requested handle in the team, the server rotates only when one of these holds:
+- **(a)** the request carries `"previous_token"`, a currently valid credential of that machine. The client sends it automatically when it has one.
+- **(b)** the request carries `"replace": true`, which the client sends only after the user confirms "replace machine <name>", **and** the machine has never been a message recipient or published an inbox role.
+
+Otherwise the server returns `409 name_in_use`, which is distinct from `name_taken`.
+- A machine with delivery history rotates **only** with (a). Otherwise the user revokes it on the website and picks a new name.
+- Every rotation is recorded (`rotated_at`, and `rotated_by` set to `app-login`) and shown on the Machines page.
+
+**H3. Login never reroutes delivery.**
+- `raincli login`, the tray sign-in included, **refuses** when any connector config or connector-mode `runtime.json` references the target `agent.json`. The one exception is a same-handle rotation per H2(a).
+- It never replaces a connector-mode `runtime.json`.
+- `--force`, on every OS, only allows replacing a **machine-mode** `agent.json` and `runtime.json` that no connector references.
+
+**H4. Process topology.**
+- **The stub owns probation.** The Run value starts the stub (`RainCLI.exe --background`). The stub starts `versions\<current>\RainCLI-app.exe`, which runs the tray and supervises the runtime as its child.
+- **The updater** runs in the runtime. It:
+  1. downloads and verifies the installer, then runs it in `/UPDATE` mode;
+  2. verifies the new version with `--version`;
+  3. writes `install.json` (M6), with `probation` set to the new version;
+  4. asks the app to exit with the "switch" code.
+- **The stub** survives the app's exit. It starts the new version and waits up to 120 s for its readiness heartbeat. On failure it restores `previous`, restarts the old version, and records `rolled_back`.
+- The stub is never changed by `/UPDATE`, so it must be correct from v0.4.0.
+
+**H5. Inno Setup update mode.**
+- `/UPDATE` is a custom parameter read in `[Code]` (`IsUpdate`).
+- In update mode the installer sets:
+  - `Uninstallable=no`;
+  - `CreateUninstallRegKey=no`;
+  - `CloseApplications=no`;
+  - `RestartApplications=no`;
+  - no Run value, shortcuts or launch.
+- The root install's uninstaller removes `versions\*` through `[UninstallDelete] filesandordirs`.
+- CI asserts that `/UPDATE` changes neither the Run value nor the uninstall key.
+
+**H6. Migration order.** If any step before step 3 fails, nothing is touched.
+1. Detect everything, normalize the configs (M8), and validate the new connector-mode `runtime.json` with the **new** `load_runtime`.
+2. Stop the old runtime (M7) and wait for every queue run lock.
+3. Convert the token or tokens with atomic writes.
+4. Start the new runtime and confirm it is ready.
+5. Only then disable the old Run value.
+
+The user is told that the old pip `raincli` stops working. The new CLI shim (L2) is put first on the user PATH.
+
+**H7. Record before overwrite.** The installer reads and records any existing `RainCLI` Run value, Startup-folder entry or Scheduled Task that starts `raincli`, before writing anything, and never overwrites an unrecorded value.
+
+**H8. No v0.3 under machine mode.** In machine mode the runtime refuses targets below `v0.4.0`, and rollback refuses a previous version below `v0.4.0`. This is checked on the client.
+
+**M1. Scopes.** Sign-in credentials get the same scopes as "Add a machine": `messages:read`, `messages:send` and `messages:ack`.
+
+**M2. Limiter accounting.**
+- Only a wrong password counts as a failure.
+- Once the password is correct, `team_choice_required`, `name_in_use`, `name_taken` and `400` responses call `success()`.
+- `blocked` is checked before scrypt runs, and the password is capped at 256 characters.
+- The tray never retries with a remembered password.
+
+**M3. Password handling.**
+- The CLI checks `isatty` itself and refuses before calling `getpass`, because `getpass` falls back to an echoing read.
+- The tray dialog (tkinter) never logs the request.
+- Client errors never include the request body.
+- `--api-url` is https unless the host is loopback.
+- The server never logs the body.
+- A test checks that a deliberate `400` leaves no password in the logs.
+
+**M4. Assets.**
+- Both assets come from the **same release object** that `resolve(tag)` returned, matched by exact name.
+- They are fetched from the API asset URL with `Accept: application/octet-stream`. The redirect hops are checked against the exact allowlist.
+- The file name in the `.sha256` line must equal the asset name.
+- **Trust model:** TLS to GitHub plus write access to the repository. Release assets are **not** bound to the tag's commit. The checksum detects corruption only. Releases are unsigned.
+
+**M5. Installer download.**
+- The installer is downloaded into a fresh, owner-only directory under the app's state that contains only the installer.
+- The bytes are verified as written.
+- It runs by absolute path with `shell=False`.
+- The directory is deleted afterwards.
+
+**M6. Swap and stub parsing.**
+- `install.json` is a single `{current, previous, probation}` written with `os.replace` and a flush. It replaces `current.txt` and `previous.txt`.
+- The stub validates versions against the §14.9 regex and checks that `versions\<v>\RainCLI-app.exe` exists.
+- The stub retries on a sharing violation.
+- Pruning never removes `current`, `previous` or the running version.
+
+**M7. Stopping an old runtime.** A managed install is stopped through its launcher's stop request. For a foreground pip connector, the user is shown "close the old RainCLI window to finish", with a cancel option. Each case has a test.
+
+**M8. Old configs.**
+- A missing `agent_config` means the default path.
+- `prompt_timeout` values over the maximum are clamped, and the clamp is logged.
+- The normalized config is written explicitly.
+- If the result still fails `load_runtime`, migration aborts with nothing changed.
+- Several `agent.json` files are all converted.
+- CI covers a connector config that omits `agent_config`.
+
+**M9. Sign-out safety.**
+- Sign-out asks for confirmation, showing the handle.
+- If sign-out fails, the local credential is kept and the command exits non-zero. There is an explicit `--local-only`.
+- `logout` also disables logon start: the systemd unit or the Run value.
+
+**M10. Uninstall and logout.**
+- **Removed:** the Run value, the PATH entry and shim, the Start menu entries, `versions\*`, the stub, `install.json`, and the `raincli`-marked hook entries.
+- **Kept:**
+  - `agent.json`, unless signed out;
+  - the queues;
+  - `machine-salt`;
+  - `migration.log`;
+  - the disabled old Run value, which is logged and not restored.
+
+**M11. No override in shipped code.** `HOSTS`, `API` and `REPO` are constants, and no environment variable, config key or flag changes them. The Windows e2e serves its fake release endpoint on the **real hostnames**:
+- a hosts-file entry;
+- a test root CA in the runner's LocalMachine Root store;
+- port 443.
+
+A test asserts that these are constants, and that the built bundle contains no test hooks.
+
+**L1. Slug.** The algorithm:
+1. lowercase the name;
+2. replace each run of characters outside `[a-z0-9]` with `-`;
+3. strip `-` from both ends;
+4. if the result doesn't start with a letter, prefix it with `m-`;
+5. truncate to 32 characters and strip `-` again;
+6. if the result is shorter than 2 characters, use `machine`.
+
+Client and server share test vectors.
+
+**L2.** The PATH shim is a tiny exe, `bin\raincli.exe`, not a `.cmd` file.
+
+**L3. DPAPI.** Use `CRYPTPROTECT_UI_FORBIDDEN` and `LocalFree`. DPAPI is protection at rest, not against malware running as the same user. A non-Windows load of a `token_dpapi` gives a clear error.
+
+**L4.** Migration takes a lock and is idempotent.
+
+**L5. Detecting an app install.** The client is an app install when it runs as a frozen executable under `<root>\versions\<v>\` and `<root>\RainCLI.exe` exists. That decision is never taken from the server or from configs.
