@@ -171,6 +171,8 @@ def build_api(parent: FastAPI) -> FastAPI:
     settings = parent.state.settings
     api = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     api.state.rate_limiter = RateLimiter(settings.rate_limit_per_min)
+    # The very LoginLimiter the website uses: a lockout on either applies to both (protocol §15.8 H1).
+    api.state.login_limiter = parent.state.web_login_limiter
     api.add_middleware(BodySizeLimit, limit=MAX_BODY_BYTES, send_limit=MAX_SEND_BODY_BYTES,
                        presence_limit=MAX_PRESENCE_BODY_BYTES)
     limiter: RateLimiter = api.state.rate_limiter
@@ -374,7 +376,7 @@ def build_api(parent: FastAPI) -> FastAPI:
             raise ApiError(400, "invalid", "request body must be valid JSON") from None
         ip = web_auth.client_ip(request)
         status, body = await run_in_threadpool(
-            sign_in, sessionmaker(), parent.state.web_login_limiter, data, ip, settings.public_url)
+            sign_in, sessionmaker(), api.state.login_limiter, data, ip, settings.public_url)
         return JSONResponse(body, status_code=status)
 
     @api.post("/app/sign-out")
@@ -388,17 +390,26 @@ def build_api(parent: FastAPI) -> FastAPI:
     return api
 
 
-_LOGIN_FIELDS = {"email", "password", "machine_name", "team"}
+_LOGIN_FIELDS = {"email", "password", "machine_name", "team", "previous_token", "replace"}
 
 
 def sign_in(factory, limiter: web_auth.LoginLimiter, data: object, ip: str, api_url: str) -> tuple[int, dict]:
-    """``POST /api/v1/app/login`` (protocol §15.1). Never stores, logs or echoes the password."""
+    """``POST /api/v1/app/login`` (protocol §15.1, §15.8). Never stores, logs or echoes the password.
+
+    Only a wrong password counts against the limiter. ``blocked`` is checked before scrypt runs, and
+    once the password is right every outcome calls ``success()`` (§15.8 M2).
+    """
     if not isinstance(data, dict) or set(data) - _LOGIN_FIELDS or not {"email", "password", "machine_name"} <= set(data):
-        raise ApiError(400, "invalid", 'body must be {"email", "password", "machine_name", "team"?}')
-    email, password, machine_name, team_slug = (data.get(k) for k in ("email", "password", "machine_name", "team"))
-    if not all(isinstance(v, str) for v in (email, password, machine_name)) or not (
-            team_slug is None or isinstance(team_slug, str)):
-        raise ApiError(400, "invalid", "email, password, machine_name and team must be strings")
+        raise ApiError(400, "invalid", 'body must be {"email", "password", "machine_name", "team"?, '
+                                       '"previous_token"?, "replace"?}')
+    email, password, machine_name, team_slug, previous_token = (
+        data.get(k) for k in ("email", "password", "machine_name", "team", "previous_token"))
+    replace = data.get("replace", False)
+    if (not all(isinstance(v, str) for v in (email, password, machine_name))
+            or not all(v is None or isinstance(v, str) for v in (team_slug, previous_token))
+            or not isinstance(replace, bool)):
+        raise ApiError(400, "invalid", "email, password, machine_name, team and previous_token must be strings, "
+                                       "and replace a boolean")
     if not security.valid_handle(machine_name):
         raise ApiError(400, "invalid", "machine_name must match ^[a-z][a-z0-9-]{1,31}$")
     if team_slug is not None and not security.valid_slug(team_slug):
@@ -413,14 +424,15 @@ def sign_in(factory, limiter: web_auth.LoginLimiter, data: object, ip: str, api_
             outcome = ApiError(401, "invalid_credentials", "that email and password combination is not correct")
         else:
             limiter.success(ip, email)
-            outcome = _sign_in_machine(session, user, machine_name, team_slug, api_url)
+            outcome = _sign_in_machine(session, user, machine_name, team_slug, api_url,
+                                       previous_token=previous_token, replace=replace)
     if isinstance(outcome, ApiError):
         raise outcome
     return outcome
 
 
-def _sign_in_machine(session: Session, user, machine_name: str, team_slug: str | None,
-                     api_url: str) -> tuple[int, dict] | ApiError:
+def _sign_in_machine(session: Session, user, machine_name: str, team_slug: str | None, api_url: str, *,
+                     previous_token: str | None, replace: bool) -> tuple[int, dict] | ApiError:
     """Choose the team, then create or rotate the machine. Errors are returned, so the caller still
     commits the password-hash upgrade that a successful password check may have made."""
     teams = [team for team, _role in identity.teams_for_user(session, user)]
@@ -436,9 +448,12 @@ def _sign_in_machine(session: Session, user, machine_name: str, team_slug: str |
         if team is None:
             return ApiError(400, "invalid", "unknown team")
     try:
-        agent, token, rotated = identity.sign_in_machine(session, team, user, machine_name)
+        agent, token, rotated = identity.sign_in_machine(session, team, user, machine_name,
+                                                         previous_token=previous_token, replace=replace)
     except identity.NameTaken:
         return ApiError(409, "name_taken", "that machine name is taken in this team; choose another")
+    except identity.NameInUse:
+        return ApiError(409, "name_in_use", "you already have a machine with that name")
     log.info("app sign-in: machine %s in team %s %s", agent.handle, team.slug, "rotated" if rotated else "created")
     return (200 if rotated else 201), {
         "api_url": api_url, "token": token, "handle": agent.handle,

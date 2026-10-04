@@ -1,0 +1,93 @@
+{
+ "comment": "Protocol 15.8 L1 machine-name slugs, shared by the server and client tests.",
+ "vectors": [
+  {
+   "name": "DESKTOP-AB12CD",
+   "slug": "desktop-ab12cd"
+  },
+  {
+   "name": "dylan-laptop",
+   "slug": "dylan-laptop"
+  },
+  {
+   "name": "Dylan's MacBook Pro",
+   "slug": "dylan-s-macbook-pro"
+  },
+  {
+   "name": "WIN-7Q2J9",
+   "slug": "win-7q2j9"
+  },
+  {
+   "name": "1234",
+   "slug": "m-1234"
+  },
+  {
+   "name": "12-ab",
+   "slug": "m-12-ab"
+  },
+  {
+   "name": "-x-",
+   "slug": "machine"
+  },
+  {
+   "name": "",
+   "slug": "machine"
+  },
+  {
+   "name": "a",
+   "slug": "machine"
+  },
+  {
+   "name": "A",
+   "slug": "machine"
+  },
+  {
+   "name": "é",
+   "slug": "machine"
+  },
+  {
+   "name": "Ünïcödé PC",
+   "slug": "n-c-d-pc"
+  },
+  {
+   "name": "my_pc.local",
+   "slug": "my-pc-local"
+  },
+  {
+   "name": "--Studio--",
+   "slug": "studio"
+  },
+  {
+   "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "slug": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+   "name": "a-------------------------------b",
+   "slug": "a-b"
+  },
+  {
+   "name": "m-",
+   "slug": "machine"
+  },
+  {
+   "name": "LAPTOP  01",
+   "slug": "laptop-01"
+  },
+  {
+   "name": "ab_______________________________cd",
+   "slug": "ab-cd"
+  },
+  {
+   "name": "9999999999999999999999999999999999999999",
+   "slug": "m-999999999999999999999999999999"
+  },
+  {
+   "name": "Ⅻ-PC",
+   "slug": "pc"
+  },
+  {
+   "name": "ＷＩＤＥ",
+   "slug": "machine"
+  }
+ ]
+}

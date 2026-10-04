@@ -16,7 +16,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from raincli_server import security
-from raincli_server.models import SCOPES, Agent, AgentCredential, Invitation, Membership, Team, User, WebSession
+from raincli_server.models import (SCOPES, Agent, AgentCredential, Invitation, Membership, Message, Team, User,
+                                   WebSession)
 
 INVITE_TTL = timedelta(days=7)
 
@@ -253,11 +254,19 @@ def can_manage_agent(session: Session, agent: Agent, actor: User) -> bool:
     return m is not None and m.role == "owner"
 
 
-def rotate_agent_credential(session: Session, agent: Agent, actor: User | None = None) -> str:
+ROTATED_BY = ("app-login", "website", "operator")
+
+
+def rotate_agent_credential(session: Session, agent: Agent, actor: User | None = None, *,
+                            by: str | None = None) -> str:
     """Issue a new credential and revoke all previous ones immediately.
 
-    ``actor=None`` means the operator (admin CLI).
+    ``actor=None`` means the operator (admin CLI). ``by`` records who rotated (protocol §15.8 H2);
+    it defaults to ``website`` with an actor and ``operator`` without.
     """
+    by = by or ("website" if actor is not None else "operator")
+    if by not in ROTATED_BY:
+        raise ValueError(f"unknown rotation source {by!r}")
     if actor is not None and not can_manage_agent(session, agent, actor):
         raise PermissionDenied("you cannot manage that agent")
     if agent.revoked_at is not None:
@@ -270,6 +279,7 @@ def rotate_agent_credential(session: Session, agent: Agent, actor: User | None =
         update(AgentCredential).where(AgentCredential.agent_id == agent.id, AgentCredential.revoked_at.is_(None))
         .values(revoked_at=now())
     )
+    agent.rotated_at, agent.rotated_by = now(), by
     return _issue_credential(session, agent, tuple(scopes))
 
 
@@ -290,12 +300,26 @@ class NameTaken(IdentityError):
     """The machine name belongs to another member, or to a revoked machine (protocol §15.1)."""
 
 
-def sign_in_machine(session: Session, team: Team, user: User, machine_name: str) -> tuple[Agent, str, bool]:
-    """Create or re-sign-in the machine ``machine_name`` for ``user`` (protocol §15.1).
+class NameInUse(IdentityError):
+    """The user's own active machine has that name, and the request lacks proof to replace it (§15.8 H2)."""
+
+
+def has_delivery_history(session: Session, agent: Agent) -> bool:
+    """True once the machine was a message recipient or published an inbox role (§15.8 H2)."""
+    if agent.inbox_role_at is not None:
+        return True
+    return session.scalar(select(Message.id).where(Message.recipient_agent_id == agent.id).limit(1)) is not None
+
+
+def sign_in_machine(session: Session, team: Team, user: User, machine_name: str, *,
+                    previous_token: str | None = None, replace: bool = False) -> tuple[Agent, str, bool]:
+    """Create or re-sign-in the machine ``machine_name`` for ``user`` (protocol §15.1, §15.8 H2).
 
     Returns ``(agent, raw_token, rotated)``. A new name creates a machine owned by ``user`` with one
-    credential. The user's own active machine of that name gets its credential rotated (every older
-    credential is revoked). Any other holder of the name raises ``NameTaken``.
+    credential. The user's own active machine of that name is rotated (every older credential revoked)
+    only with proof: ``previous_token``, a currently valid credential of that machine, or ``replace``
+    for a machine with no delivery history. Without proof this raises ``NameInUse``. Any other holder
+    of the name, or a revoked machine, raises ``NameTaken``.
     """
     if membership(session, team.id, user.id) is None:
         raise PermissionDenied("you are not a member of that team")
@@ -320,7 +344,15 @@ def sign_in_machine(session: Session, team: Team, user: User, machine_name: str)
             return agent, _issue_credential(session, agent, SCOPES), False
     if existing.owner_user_id != user.id or existing.revoked_at is not None:
         raise NameTaken("that machine name is taken in this team")
-    return existing, rotate_agent_credential(session, existing), True
+    proven = previous_token is not None and _is_live_credential_of(session, existing, previous_token)
+    if not proven and not (replace and not has_delivery_history(session, existing)):
+        raise NameInUse("you already have a machine with that name")
+    return existing, rotate_agent_credential(session, existing, by="app-login"), True
+
+
+def _is_live_credential_of(session: Session, agent: Agent, token: str) -> bool:
+    auth = authenticate_agent(session, token, touch=False)
+    return auth is not None and auth.agent.id == agent.id
 
 
 # Member removal and user disable (protocol §11.5, §12.5) --------------------------

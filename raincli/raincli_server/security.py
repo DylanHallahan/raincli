@@ -69,6 +69,15 @@ def valid_handle(value: object) -> bool:
     return isinstance(value, str) and bool(HANDLE_RE.fullmatch(value))
 
 
+def slugify_machine_name(name: str) -> str:
+    """A computer name as a handle (protocol §15.8 L1); tests/machine_slug_vectors.json is shared with the client."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    if not slug[:1].isascii() or not slug[:1].isalpha():
+        slug = "m-" + slug
+    slug = slug[:32].strip("-")
+    return slug if len(slug) >= 2 else "machine"
+
+
 def valid_slug(value: object) -> bool:
     return isinstance(value, str) and bool(SLUG_RE.fullmatch(value))
 

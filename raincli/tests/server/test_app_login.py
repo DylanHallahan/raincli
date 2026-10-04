@@ -46,33 +46,87 @@ def test_new_machine_created_with_one_credential(client, world, session):
     assert set(me["credential"]["scopes"]) == {"messages:read", "messages:send", "messages:ack"}
 
 
-def test_re_sign_in_rotates_the_same_machine(client, world, session):
+def test_re_sign_in_with_the_previous_token_rotates(client, world, session):
     first = app_login(client).json()["token"]
-    r = app_login(client)
+    r = app_login(client, previous_token=first)
     assert r.status_code == 200 and r.json()["rotated"] is True and r.json()["handle"] == "alice-laptop"
     second = r.json()["token"]
     assert second != first
     assert client.get("/api/v1/me", headers=auth(first)).status_code == 401
     assert client.get("/api/v1/me", headers=auth(second)).status_code == 200
     assert session.scalar(select(text("count(*)")).select_from(Agent).where(Agent.handle == "alice-laptop")) == 1
-    creds = credentials(session, session.scalar(select(Agent.id).where(Agent.handle == "alice-laptop")))
+    agent = session.scalar(select(Agent).where(Agent.handle == "alice-laptop"))
+    session.refresh(agent)
+    assert agent.rotated_by == "app-login" and agent.rotated_at is not None
+    creds = credentials(session, agent.id)
     assert len(creds) == 2 and creds[0].revoked_at is not None and creds[1].revoked_at is None
 
 
-def test_re_sign_in_rotates_a_machine_added_on_the_website(client, world):
-    old = world["tokens"]["alice"]
-    r = app_login(client, machine_name="alice-agent")
+def test_re_sign_in_without_proof_is_name_in_use(client, world, session):
+    token = app_login(client).json()["token"]
+    for extra in ({}, {"previous_token": "rca_not-a-real-token"}, {"previous_token": world["tokens"]["bob"]},
+                  {"replace": False}):
+        r = app_login(client, **extra)
+        assert r.status_code == 409 and err(r) == "name_in_use", extra
+    assert client.get("/api/v1/me", headers=auth(token)).status_code == 200  # untouched
+    agent = session.scalar(select(Agent).where(Agent.handle == "alice-laptop"))
+    assert agent.rotated_at is None and len(credentials(session, agent.id)) == 1
+
+
+def test_replace_without_delivery_history_rotates(client, world):
+    old = app_login(client).json()["token"]
+    r = app_login(client, replace=True)
     assert r.status_code == 200 and r.json()["rotated"] is True
     assert client.get("/api/v1/me", headers=auth(old)).status_code == 401
 
 
+def test_replace_refused_after_a_message_was_received(client, world, session):
+    from api_helpers import send
+
+    token = app_login(client).json()["token"]
+    assert send(client, world["tokens"]["bob"], "alice-laptop").status_code == 201
+    r = app_login(client, replace=True)
+    assert r.status_code == 409 and err(r) == "name_in_use"
+    r = app_login(client, replace=True, previous_token=token)  # proof of the credential still works
+    assert r.status_code == 200 and r.json()["rotated"] is True
+
+
+def test_replace_refused_after_an_inbox_role_was_published(client, world, session):
+    token = app_login(client).json()["token"]
+    report = {"status": "ready", "agents": [{"key": "1" * 32, "name": "inbox", "type": "claude", "status": "idle",
+                                             "role": "inbox", "reachability": "next-turn", "source": "hook"}]}
+    assert client.put("/api/v1/presence", json=report, headers=auth(token)).status_code == 200
+    report["agents"] = []  # the role is gone from the snapshot, but the history stays
+    assert client.put("/api/v1/presence", json=report, headers=auth(token)).status_code == 200
+    r = app_login(client, replace=True)
+    assert r.status_code == 409 and err(r) == "name_in_use"
+    assert app_login(client, previous_token=token).status_code == 200
+
+
+def test_website_machine_needs_proof(client, world):
+    old = world["tokens"]["alice"]
+    assert app_login(client, machine_name="alice-agent").status_code == 409
+    r = app_login(client, machine_name="alice-agent", previous_token=old)
+    assert r.status_code == 200 and r.json()["rotated"] is True
+    assert client.get("/api/v1/me", headers=auth(old)).status_code == 401
+
+
+def test_rotation_records_its_source(client, world, session):
+    agent = world["agents"]["bob"]
+    identity.rotate_agent_credential(session, agent)
+    assert agent.rotated_by == "operator"
+    identity.rotate_agent_credential(session, agent, world["users"]["bob"])
+    assert agent.rotated_by == "website" and agent.rotated_at is not None
+
+
 def test_name_taken_by_another_member_or_revoked(client, world, session):
-    r = app_login(client, machine_name="bob-agent")
+    r = app_login(client, machine_name="bob-agent", previous_token=world["tokens"]["bob"], replace=True)
     assert r.status_code == 409 and err(r) == "name_taken"
     assert client.get("/api/v1/me", headers=auth(world["tokens"]["bob"])).status_code == 200  # untouched
+    old = world["tokens"]["alice"]
     identity.revoke_agent(session, world["agents"]["alice"])
     session.commit()
-    r = app_login(client, machine_name="alice-agent")
+    r = app_login(client, machine_name="alice-agent", previous_token=old, replace=True)
     assert r.status_code == 409 and err(r) == "name_taken"
 
 
@@ -115,6 +169,8 @@ def test_account_without_team(client, world, session):
     {"email": "alice@example.test", "password": PASSWORD, "machine_name": "m-1", "extra": 1},
     {"email": 1, "password": PASSWORD, "machine_name": "m-pc"},
     {"email": "alice@example.test", "password": PASSWORD, "machine_name": "m-pc", "team": 5},
+    {"email": "alice@example.test", "password": PASSWORD, "machine_name": "m-pc", "replace": "yes"},
+    {"email": "alice@example.test", "password": PASSWORD, "machine_name": "m-pc", "previous_token": 1},
 ])
 def test_malformed_bodies(client, world, body):
     r = client.post("/api/v1/app/login", json=body)
@@ -140,11 +196,35 @@ def test_disabled_user_cannot_sign_in(client, world, session):
 
 # The shared limiter ----------------------------------------------------------------------
 
-def test_app_failures_land_in_the_website_limiter(client, world, app):
+def test_one_limiter_object_is_shared(client, world, app):
     limiter = app.state.web_login_limiter
-    assert not limiter._hits
+    assert app.state.api.state.login_limiter is limiter
     app_login(client, password=WRONG)
     assert limiter._hits["pair:testclient|alice@example.test"]
+
+
+def test_only_a_wrong_password_counts(client, world, session):
+    identity.add_member(session, world["teams"]["globex"], world["users"]["alice"])
+    session.commit()
+    app_login(client, machine_name="alice-laptop", team="acme")
+    for _ in range(8):  # right password, refused for other reasons: never a failure
+        assert app_login(client).status_code == 409  # team_choice_required
+        assert app_login(client, team="acme").status_code == 409  # name_in_use
+        assert app_login(client, team="nope").status_code == 400
+        assert app_login(client, team="acme", machine_name="bob-agent").status_code == 409  # name_taken
+        assert app_login(client, machine_name="Bad Name").status_code == 400
+    assert web_login(client).status_code == 303
+
+
+def test_blocked_is_checked_before_scrypt(client, world, monkeypatch):
+    from raincli_server import security
+
+    for _ in range(6):
+        app_login(client, password=WRONG)
+    calls = []
+    monkeypatch.setattr(security, "verify_password", lambda *a: calls.append(1) or True)
+    monkeypatch.setattr(security, "hash_password", lambda *a: calls.append(1) or "x")
+    assert app_login(client).status_code == 429 and calls == []
 
 
 def test_app_failures_lock_the_web_login(client, world):
@@ -213,11 +293,14 @@ def test_sign_out_needs_a_credential(client, world):
 # The Machines page (§15.7) -------------------------------------------------------------
 
 def test_machines_page_labels_signed_in_machines(client, world, session):
-    app_login(client)
+    token = app_login(client).json()["token"]
     assert web_login(client).status_code == 303
     page = client.get("/app/agents").text
     assert "Signed in from alice-laptop" in page
     assert page.count("Signed in from") == 1  # website-added machines carry no label
+    assert "Credential replaced" not in page
+    app_login(client, previous_token=token)
+    assert "Credential replaced by app sign-in" in client.get("/app/agents").text
     agent = session.scalar(select(Agent).where(Agent.handle == "alice-laptop"))
     r = client.post(f"/app/agents/{agent.id}/revoke", data={"csrf_token": app_csrf(client)},
                     follow_redirects=False)
@@ -242,7 +325,8 @@ def test_password_never_stored_logged_or_echoed(client, world, session, engine, 
         responses = [
             app_login(client, email="carol@example.test", password=secret, machine_name="carol-pc"),
             app_login(client, email="carol@example.test", password=secret, machine_name="carol-pc", team="acme"),
-            app_login(client, email="carol@example.test", password=secret, machine_name="carol-pc", team="acme"),
+            app_login(client, email="carol@example.test", password=secret, machine_name="carol-pc", team="acme",
+                      replace=True),
             app_login(client, email="carol@example.test", password=secret, machine_name="bob-agent", team="acme"),
             app_login(client, email="carol@example.test", password=secret, machine_name="carol-pc", team="nope"),
             app_login(client, email="carol@example.test", password=secret, machine_name="Bad Name"),
@@ -262,3 +346,18 @@ def test_password_never_stored_logged_or_echoed(client, world, session, engine, 
         for table in Base.metadata.sorted_tables:
             dump = conn.execute(text(f'SELECT coalesce(json_agg(t)::text, \'\') FROM "{table.name}" t')).scalar()
             assert secret not in dump, table.name
+
+
+# Machine-name slugs (§15.8 L1) -----------------------------------------------------------
+
+def test_slug_vectors_shared_with_the_client():
+    import json
+    from pathlib import Path
+
+    from raincli_server import security
+
+    vectors = json.loads((Path(__file__).parents[1] / "machine_slug_vectors.json").read_text("utf-8"))["vectors"]
+    assert len(vectors) >= 20
+    for v in vectors:
+        assert security.slugify_machine_name(v["name"]) == v["slug"], v
+        assert security.valid_handle(v["slug"]), v
