@@ -232,11 +232,15 @@ class Tray:
             self.host.pause()
 
         migration = Migration(app_root=self.root_dir, connector_configs=connector_configs,
-                              own_runtime=self.runtime_config, stop_own=pause, restart_own=self.host.resume)
+                              own_runtime=self.runtime_config, stop_own=pause, restart_own=self.host.resume,
+                              own_running=self.host.running)
         on_probation = self.root_dir is not None and winapp.read_install(self.root_dir)["probation"]
-        if self.signed_in():
+        pending = not on_probation and migration.pending()
+        # An old install's runtime may run this very config: never compete with it for
+        # its locks; migration stops it and starts ours at step 4 (review 2 R1).
+        if self.signed_in() and not (pending and migration.old_run_value()):
             self.host.start()
-        if on_probation or not migration.pending():
+        if not pending:
             if not self.signed_in():
                 self.sign_in()
             return
@@ -289,6 +293,16 @@ class Tray:
 
     def run(self):
         import pystray
+        lock = winapp.tray_lock(self.root_dir) if self.root_dir is not None else None
+        if self.root_dir is not None and lock is None:
+            return 0  # another tray already runs this install
+        try:
+            return self._run(pystray)
+        finally:
+            if lock is not None:
+                os.close(lock)
+
+    def _run(self, pystray):
         self.icon_state = "offline"
         self.icon = pystray.Icon("RainCLI", icon_image("offline"), f"{TITLE}: offline", self.menu())
         self.icon.run_detached()

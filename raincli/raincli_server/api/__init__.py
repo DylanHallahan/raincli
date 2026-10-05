@@ -257,6 +257,9 @@ def build_api(parent: FastAPI) -> FastAPI:
                     "team": {"slug": auth.team.slug, "name": auth.team.name},
                 },
                 "credential": {"prefix": auth.credential.prefix, "scopes": list(auth.credential.scopes)},
+                # The H2 replace rule's history (inbox role published, or a message recipient):
+                # migration asks for the connector config before choosing machine mode.
+                "delivery_history": identity.has_delivery_history(session, auth.agent),
             }
         return await run(request, None, work)
 

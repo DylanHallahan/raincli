@@ -486,7 +486,8 @@ class _Handler(BaseHTTPRequestHandler):
             if method == "GET" and route == "/me":
                 return 200, {"agent": {"handle": caller["handle"], "display_name": caller["display_name"],
                                        "team": {"slug": caller["team"], "name": st.teams[caller["team"]]}},
-                             "credential": {"prefix": auth[7:15], "scopes": ["messages:read", "messages:send", "messages:ack"]}}
+                             "credential": {"prefix": auth[7:15], "scopes": ["messages:read", "messages:send", "messages:ack"]},
+                             "delivery_history": caller["id"] in st.delivered}
             if method == "POST" and route == "/app/sign-out":
                 return st.sign_out(caller)
             if method == "PUT" and route == "/presence":

@@ -82,14 +82,16 @@ class Plan:
 class Migration:
     def __init__(self, *, env=None, registry=None, app_root=None, managed_root=None, home=None,
                  sleep=time.sleep, clock=time.monotonic, connector_configs=(), own_runtime=None,
-                 stop_own=None, restart_own=None, spawn=None, inbox=None):
-        """``own_runtime`` is the app's runtime config, which the tray may already be
-        running; ``stop_own``/``restart_own`` pause and resume it. ``connector_configs``
+                 stop_own=None, restart_own=None, own_running=None, spawn=None, inbox=None):
+        """``own_runtime`` is the app's runtime config; ``own_running()`` tells whether
+        the tray's runtime host is running it now, and ``stop_own``/``restart_own``
+        pause and resume it. ``connector_configs``
         are connector configs the user names explicitly (``--connector-config``)."""
         from .runtime import updates, winapp
         self.connector_configs = [str(Path(p).absolute()) for p in connector_configs]
         self.own_runtime = own_runtime
         self.stop_own, self.restart_own = stop_own, restart_own
+        self.own_running = own_running or (lambda: False)
         self.spawn = spawn or self._spawn
         self.inbox = inbox or self.inbox_role
         self.env = os.environ if env is None else env
@@ -311,12 +313,16 @@ class Migration:
         the app's own runtime (``own_runtime``; the tray restarts it) and an old
         runtime its Run value starts. ``[(kind, runtime config, dirs)]``."""
         out = []
-        if self.own_runtime is not None:
+        # "own" only while the tray's host really runs that config; a lock on the same
+        # config held by anything else (the old managed launcher) goes through the old
+        # Run value's stop request (review 2, R1).
+        own = self.own_runtime is not None and self.own_running()
+        if own:
             out.append(("own", str(self.own_runtime), self.runtime_dirs(self.own_runtime)))
         command = self.old_command(plan)
         if command is not None:
             config = command[command.index("--config") + 1]
-            if self.own_runtime is None or not _same(config, self.own_runtime):
+            if not (own and _same(config, self.own_runtime)):
                 out.append(("old", config, self.runtime_dirs(config)))
         return [(kind, config, dirs) for kind, config, dirs in out if dirs and self._busy(dirs[0])]
 
@@ -383,7 +389,7 @@ class Migration:
             owned = [d for _, _, dirs in owners for d in dirs]
             if all(any(_same(h, d) for d in owned) for h in held):
                 for kind, config, _ in owners:
-                    if (kind, config) not in stopped:
+                    if not any(_same(config, c) for _, c in stopped):  # each runtime config once
                         self.stop_runtime(kind, config, log)
                         stopped.append((kind, config))
             elif not notified:
@@ -420,20 +426,37 @@ class Migration:
                     return True
         return False
 
+    @staticmethod
+    def any_protected(plan):
+        for agent in plan.agent_configs:
+            try:
+                if "token_dpapi" in json.loads(read_private_file(agent, "agent config")):
+                    return True
+            except (ConfigError, ValueError):
+                continue
+        return False
+
+    def old_run_value(self):
+        """The current Run value when it is not the app's stub, else None."""
+        from .runtime import winapp
+        value = self.registry.get(winapp.RUN_VALUE)
+        if self.app_root is not None and value == winapp.run_value(self.app_root):
+            return None
+        return value
+
     def inbox_role(self, agent_config):
-        """Whether the server lists an inbox role for this credential's handle (review
-        1a F11): True, False, or None when it cannot be told (offline)."""
+        """Whether this credential's handle has delivery history, from ``GET /me``'s
+        ``delivery_history`` (review 2 R4: an inbox role ever published, or a message
+        recipient): True, False, or None when it cannot be told (offline, or a server
+        without the field)."""
         from .api import ApiClient
         from .errors import ApiError
         try:
             client = ApiClient.from_config(load_config(agent_config), timeout=15, max_attempts=2)
-            handle = client.me()["agent"]["handle"]
-            for machine in client.agents():
-                if machine.get("handle") == handle:
-                    return any(a.get("role") == "inbox" for a in machine.get("agents") or [])
-            return False
-        except (ApiError, ConfigError, KeyError, TypeError):
+            history = client.me().get("delivery_history")
+        except (ApiError, ConfigError, KeyError, TypeError, AttributeError):
             return None
+        return history if isinstance(history, bool) else None
 
     def run(self, start_runtime=None, *, notify=lambda message: None, cancelled=lambda: False, wait=600):
         """Migrate. ``start_runtime(runtime_config)`` starts the new runtime and returns
@@ -454,7 +477,7 @@ class Migration:
                 # An existing handle about to become machine mode: if it has served as an
                 # inbox, its connector config lives somewhere migration did not look.
                 role = self.inbox(plan.agent_configs[0])
-                log.write("inbox_role_checked", result=role)
+                log.write("delivery_history_checked", result=role)  # null: offline, cannot tell
                 if role:
                     message = (f"This machine delivered messages through a connector, but its connector config was "
                                f"not found. Run: raincli migrate --connector-config PATH")
@@ -476,9 +499,10 @@ class Migration:
                 from .runtime import winapp
                 winapp.write_settings(self.app_root, {"agent_config": plan.agent_configs[0],
                                                       "runtime_config": plan.runtime_config})
-                if converted:
-                    # The old Run value cannot read a converted token: the app starts at logon
-                    # from now on, even if step 4 fails (review 1a F1).
+                if converted or (plan.run_value and self.any_protected(plan)):
+                    # The old Run value cannot read a converted token, converted now or by an
+                    # earlier, interrupted run: the app starts at logon from now on, even if
+                    # step 4 fails (review 1a F1, review 2 R2, 15.9).
                     result["run_value"] = self.point_run_value_at_app(plan, log)
             if start_runtime is None:
                 return result
@@ -487,7 +511,7 @@ class Migration:
                 result["status"] = "runtime_not_ready"
                 return result
             log.write("new_runtime_ready")
-            if not converted:
+            if result["run_value"] == "unchanged":
                 result["run_value"] = self.point_run_value_at_app(plan, log)
             return result
         finally:

@@ -678,3 +678,51 @@ def test_tray_quits_on_request_and_entry_point_exists():
 
 def test_job_object_only_on_windows():
     assert winapp.kill_on_close_job(object()) is None if os.name != "nt" else True
+
+
+# -- review 2 ----------------------------------------------------------------------------------------
+
+def test_quit_waits_for_a_tray_whose_stub_died(app):
+    """R3: the stub's lock is free, but the tray (and its runtime) still run."""
+    lock = winapp.tray_lock(app)
+    clock = Clock()
+    try:
+        assert winapp.stub_quit(app, timeout=10, sleep=clock.sleep, clock=clock, running_from=lambda r: []) == 1
+        assert winapp.quit_requested(app)  # the tray answers the same request
+    finally:
+        os.close(lock)
+    assert winapp.stub_quit(app, running_from=lambda r: []) == 0 and not winapp.quit_requested(app)
+
+
+def test_quit_exits_1_while_a_process_runs_from_the_root(app):
+    clock = Clock()
+    pids = [4242]
+    assert winapp.stub_quit(app, timeout=5, sleep=clock.sleep, clock=clock, running_from=lambda r: pids) == 1
+    pids.clear()
+    assert winapp.stub_quit(app, running_from=lambda r: pids) == 0
+
+
+def test_tray_lock_is_single(app):
+    first = winapp.tray_lock(app)
+    try:
+        assert first is not None and winapp.tray_lock(app) is None
+        assert winapp.app_running(app, running_from=lambda r: [])
+    finally:
+        os.close(first)
+    assert not winapp.app_running(app, running_from=lambda r: [])
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc")
+def test_processes_under_finds_a_process_from_the_root(tmp_path):
+    import shutil
+    root = tmp_path / "RainCLI"
+    (root / "versions" / "0.4.0").mkdir(parents=True)
+    exe = root / "versions" / "0.4.0" / "sleeper"
+    shutil.copy(shutil.which("sleep"), exe)
+    process = subprocess.Popen([str(exe), "30"])
+    try:
+        assert process.pid in winapp.processes_under(root)
+        assert winapp.processes_under(tmp_path / "elsewhere") == []
+    finally:
+        process.kill()
+        process.wait()

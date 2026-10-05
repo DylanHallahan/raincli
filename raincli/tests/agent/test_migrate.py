@@ -380,6 +380,7 @@ def test_the_apps_own_runtime_is_paused_without_a_notice(home, tmp_path, windows
         held.release_run_lock()
     result = Migration(registry=Registry(), app_root=app, managed_root=home / "none", own_runtime=str(runtime),
                        stop_own=stop_own, restart_own=lambda: events.append("resumed"),
+                       own_running=lambda: "paused" not in events,
                        sleep=lambda s: None).run(started(), notify=messages.append)
     assert result["status"] == "migrated" and events == ["paused"] and CLOSE_OLD not in messages
 
@@ -413,14 +414,95 @@ def test_handle_with_an_inbox_role_asks_for_its_connector_config(home, tmp_path,
     assert json.loads((cfg_dir(home) / "runtime.json").read_text())["connectors"] == [str(connector)]
 
 
-def test_inbox_check_against_the_server(home, tmp_path, fake_api, app):
+def test_delivery_history_check_against_the_server(home, tmp_path, fake_api, app):
+    """Review 2 R4: GET /me's delivery_history, not the live directory."""
     from raincli_agent.config import write_config
     agent = cfg_dir(home) / "agent.json"
     write_config(str(agent), fake_api.url, fake_api.alice)
     migration = Migration(registry=Registry(), app_root=app, managed_root=home / "none")
     assert migration.inbox_role(str(agent)) is False
-    fake_api.state.directory["alice"] = [{"key": "k" * 16, "name": "inbox", "type": "claude", "status": "idle",
-                                          "role": "inbox", "reachability": "instant", "source": "herdr"}]
+    fake_api.state.delivered.add(fake_api.state.tokens[fake_api.alice])  # an inactive inbox: nothing live
+    assert fake_api.state.directory.get("alice") is None
     assert migration.inbox_role(str(agent)) is True
+    result = migration.run(started())
+    assert result["status"] == "connector_config_required"
+    log = (cfg_dir(home) / "runtime-state" / "migration.log").read_text()
+    assert '"result": true' in log
     write_config(str(agent), "http://127.0.0.1:9", fake_api.alice, force=True)
-    assert migration.inbox_role(str(agent)) is None  # offline: cannot tell
+    assert migration.inbox_role(str(agent)) is None  # offline: cannot tell, logged as null
+
+
+def test_managed_launcher_on_the_apps_own_config_gets_its_stop_request(home, tmp_path, windows, app):
+    """Review 2 R1 (e2e part C): the managed Run value and own_runtime name the same default
+    runtime.json, and the tray's host is not running it, so the holder is the old
+    launcher's runtime: it is asked to stop, with no "old window" notice, and migration finishes."""
+    managed, agent, runtime, registry = managed_install(home, tmp_path)
+    state = cfg_dir(home) / "runtime-state"
+    state.mkdir()
+    atomic_write_json(state / "status.json", {"status": "running", "instance": "launcher", "updated_at": 1})
+    held = Queue(str(state))
+    held.acquire_run_lock()
+    events, messages = [], []
+
+    def sleep(seconds):
+        if (state / "stop.json").exists() and "released" not in events:
+            events.append("released")
+            held.release_run_lock()  # the old runtime honours its stop request
+    migration = Migration(registry=registry, app_root=app, managed_root=managed, own_runtime=str(runtime),
+                          stop_own=lambda: events.append("paused"), restart_own=lambda: events.append("resumed"),
+                          own_running=lambda: False, sleep=sleep)
+    assert migration.old_run_value() and migration.pending()
+    result = migration.run(started(), notify=messages.append)
+    assert json.loads((state / "stop.json").read_text()) == {"instance": "launcher"}
+    assert result["status"] == "migrated" and events == ["released"] and CLOSE_OLD not in messages
+    assert registry["RainCLI"] == winapp.run_value(app)
+
+
+def test_tray_does_not_start_its_runtime_before_migrating_an_old_run_value(home, tmp_path, windows, app, monkeypatch):
+    """Review 2 R1: with migration pending and an old Run value, the tray's host waits."""
+    from raincli_agent.app import tray as tray_mod
+    managed, agent, runtime, registry = managed_install(home, tmp_path)
+    monkeypatch.setattr(winapp, "WindowsRegistry", lambda key=None: registry)
+    import raincli_agent.migrate as migrate_mod
+    monkeypatch.setattr(migrate_mod.Migration, "inbox_role", lambda self, config: None)
+
+    class Host:
+        def __init__(self):
+            self.calls = []
+
+        def start(self):
+            self.calls.append("start")
+
+        def running(self):
+            return False
+
+        resume = pause = lambda self: None
+
+    fake = type("T", (), {})()
+    fake.root_dir, fake.runtime_config, fake.agent_config = app, str(runtime), str(agent)
+    fake.host = Host()
+    fake.signed_in = lambda: True
+    fake.background = lambda fn, done=None: None  # the migration itself is not run here
+    fake.post = lambda *a: None
+    fake.migrating = False
+    tray_mod.Tray.first_run.__get__(fake)()
+    assert fake.host.calls == [] and fake.migrating
+    registry["RainCLI"] = winapp.run_value(app)  # no old Run value: the runtime starts first
+    fake.migrating = False
+    tray_mod.Tray.first_run.__get__(fake)()
+    assert fake.host.calls == ["start"]
+
+
+def test_repoints_after_an_interrupted_conversion(home, tmp_path, windows, app):
+    """Review 2 R2: converted earlier, not repointed; a later run that converts nothing and
+    is not ready still moves the Run value to the app."""
+    managed, agent, runtime, registry = managed_install(home, tmp_path)
+    from raincli_agent.config import load_config as load, stored_form
+    cfg = load(str(agent))
+    atomic_write_json(agent, stored_form(cfg.api_url, cfg.token))  # the earlier run's conversion
+    original = registry["RainCLI"]
+    result = Migration(registry=registry, app_root=app, managed_root=managed).run(started(ok=False))
+    assert result["status"] == "runtime_not_ready" and result["converted"] == []
+    assert registry == {"RainCLI": winapp.run_value(app)}
+    log = (cfg_dir(home) / "runtime-state" / "migration.log").read_text()
+    assert json.dumps(original)[1:-1] in log

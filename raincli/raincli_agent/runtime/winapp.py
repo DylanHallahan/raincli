@@ -807,18 +807,73 @@ class Stub:
                 self.sleep(1)
 
 
-def single_instance(root):
-    """The stub's lock: one app per user. Returns a descriptor, or None when held."""
+def single_instance(root, name="stub.lock"):
+    """The stub's lock (or another app lock): one per user. A descriptor, or None when held."""
     from .. import filelock
     directory = Path(root) / "app-lock"
     directory.mkdir(exist_ok=True)
-    fd = os.open(directory / "stub.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fd = os.open(directory / name, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         filelock.lock(fd, blocking=False)
     except BlockingIOError:
         os.close(fd)
         return None
     return fd
+
+
+def tray_lock(root):
+    """Held by the running tray (review 2 R3), so ``--quit`` sees a tray whose stub died."""
+    return single_instance(root, "tray.lock")
+
+
+def processes_under(root):
+    """Pids of processes (other than this one) whose executable is under ``root``.
+    Windows: a Toolhelp snapshot plus each process's full image path. Elsewhere
+    /proc/<pid>/exe. Processes that cannot be queried are skipped."""
+    prefix = os.path.normcase(str(Path(root).absolute())) + os.sep
+    found = []
+    if os.name == "nt":
+        from .procinfo import _windows, windows_snapshot
+        c, w, k, _ = _windows()
+        query = k.QueryFullProcessImageNameW
+        query.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD)]
+        for pid in windows_snapshot():
+            if pid in (0, os.getpid()):
+                continue
+            handle = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                continue
+            try:
+                buf, size = c.create_unicode_buffer(32768), w.DWORD(32768)
+                if query(handle, 0, buf, c.byref(size)) and os.path.normcase(buf.value).startswith(prefix):
+                    found.append(pid)
+            finally:
+                k.CloseHandle(handle)
+        return found
+    for entry in Path("/proc").iterdir() if Path("/proc").is_dir() else []:
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            exe = os.readlink(entry / "exe")
+        except OSError:
+            continue
+        if os.path.normcase(exe).startswith(prefix):
+            found.append(int(entry.name))
+    return found
+
+
+def app_running(root, running_from=processes_under):
+    """Whether any part of the app runs: the stub's or the tray's lock is held, or a
+    process runs from the install root."""
+    for name in ("stub.lock", "tray.lock"):
+        lock = single_instance(root, name)
+        if lock is None:
+            return True
+        os.close(lock)
+    try:
+        return bool(running_from(root))
+    except OSError:
+        return False
 
 
 def stub_main(root):
@@ -833,23 +888,21 @@ def stub_main(root):
         os.close(lock)
 
 
-def stub_quit(root, timeout=GRACEFUL_STOP, sleep=time.sleep, clock=time.monotonic):
+def stub_quit(root, timeout=GRACEFUL_STOP, sleep=time.sleep, clock=time.monotonic, running_from=processes_under):
     """``RainCLI.exe --quit`` (15.9): create ``<root>\\app-lock\\quit``, which the running
     stub answers by stopping the tray (runtime first) and exiting. Waits up to
-    ``timeout`` seconds for the stub's lock: 0 once it is free (or nothing was
-    running), 1 when the app is still running. It never kills anything."""
+    ``timeout`` seconds until the stub's and the tray's locks are free and no process
+    runs from ``<root>`` (review 2 R3): 0 then (or when nothing was running), 1 when
+    the app is still running. It never kills anything."""
     root = Path(root)
     (root / "app-lock").mkdir(parents=True, exist_ok=True)
-    lock = single_instance(root)
-    if lock is not None:
-        os.close(lock)
-        return 0  # not running
+    if not app_running(root, running_from):
+        clear_quit(root)
+        return 0
     (root / "app-lock" / QUIT).write_bytes(b"")
     deadline = clock() + timeout
     while True:
-        lock = single_instance(root)
-        if lock is not None:
-            os.close(lock)
+        if not app_running(root, running_from):
             clear_quit(root)
             return 0
         if clock() >= deadline:
