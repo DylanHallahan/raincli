@@ -31,7 +31,7 @@ from raincli_server import identity, messaging, presence, security
 from raincli_server.db import session_scope
 from raincli_server.identity import AgentAuth
 from raincli_server.messaging import MessagingError
-from raincli_server.models import Agent
+from raincli_server.models import ROUTING_POLICIES, Agent
 from raincli_server.web import auth as web_auth
 
 log = logging.getLogger("raincli_server.api")
@@ -61,9 +61,8 @@ def error_response(status: int, code: str, message: str, headers: dict | None = 
 class ApiError(MessagingError):
     def __init__(self, status: int, code: str, message: str, headers: dict | None = None,
                  extra: dict | None = None):
-        super().__init__(status, code, message)
+        super().__init__(status, code, message, extra)  # extra: e.g. "teams" for team_choice_required
         self.headers = headers
-        self.extra = extra  # top-level fields beside "error", e.g. "teams" for team_choice_required
 
 
 # Middleware and limits ------------------------------------------------------------
@@ -284,9 +283,10 @@ def build_api(parent: FastAPI) -> FastAPI:
         def work(session, auth: AgentAuth):
             req = messaging.SendRequest.parse(data, auth.agent.handle)
             msg, created = messaging.send_message(
-                session, auth.agent, id=req.id, to_handle=req.to, body=req.body,
+                session, auth.agent, id=req.id, to=req.to, body=req.body,
                 conversation_id=req.conversation_id, in_reply_to=req.in_reply_to,
                 max_pending=settings.max_pending, attachments=req.attachments,
+                from_agent=req.from_agent, kind=req.kind,
             )
             return created, {"message": m(session, msg), "created": created}
         created, body = await run(request, "messages:send", work, counted=False)
@@ -299,6 +299,7 @@ def build_api(parent: FastAPI) -> FastAPI:
         limit: int = Query(100, ge=1, le=MAX_SEQ),
         wait: float = Query(0, ge=0),
         include_acked: bool = Query(False),
+        routing: int = Query(0, ge=0, le=1),
     ):
         wait = min(wait, MAX_WAIT_SECONDS)
         limit = min(limit, messaging.INBOX_LIMIT_MAX)
@@ -310,7 +311,8 @@ def build_api(parent: FastAPI) -> FastAPI:
                 with session_scope(sessionmaker()) as session:
                     auth = authenticate(session, request, "messages:read", count=count)
                     msgs, cursor = messaging.inbox(
-                        session, auth.agent, after=after, limit=limit, include_acked=include_acked)
+                        session, auth.agent, after=after, limit=limit, include_acked=include_acked,
+                        routing_capable=bool(routing))
                     return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}
             result = await run_in_threadpool(poll)
             first = False
@@ -318,6 +320,22 @@ def build_api(parent: FastAPI) -> FastAPI:
             if result["messages"] or remaining <= 0 or await request.is_disconnected():
                 return result
             await asyncio.sleep(min(POLL_INTERVAL, remaining))
+
+    @api.put("/routing")
+    async def set_routing(request: Request):
+        """The machine's routing policy (§16.5): ``{"routing": "all" | "inbox-only"}``."""
+        data = await authed_json_body(request, "messages:ack")
+
+        def work(session, auth: AgentAuth):
+            if not isinstance(data, dict) or set(data) != {"routing"} or data["routing"] not in ROUTING_POLICIES:
+                raise ApiError(400, "invalid", 'body must be {"routing": "all" | "inbox-only"}')
+            auth.agent.routing = data["routing"]
+            return {"routing": auth.agent.routing}
+        return await run(request, "messages:ack", work, counted=False)
+
+    @api.get("/routing")
+    async def get_routing(request: Request):
+        return await run(request, None, lambda session, auth: {"routing": auth.agent.routing})
 
     @api.get("/messages/{message_id}")
     async def get_message(request: Request, message_id: str):

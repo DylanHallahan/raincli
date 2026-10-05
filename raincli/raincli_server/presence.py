@@ -14,7 +14,8 @@ from sqlalchemy.dialects.postgresql import insert
 
 from . import identity, security
 from .messaging import MessagingError
-from .models import AgentPresence, ClientTarget, MachineAgent
+from .models import AgentPresence, ClientTarget, KnownAgent, MachineAgent
+from .routing import KNOWN_RETENTION_DAYS
 
 TTL_SECONDS = 120
 STATES = {"ready", "busy", "blocked", "offline", "unknown"}
@@ -26,7 +27,8 @@ AGENT_TYPES = ("claude", "codex", "gemini", "cursor", "opencode", "other")
 AGENT_STATES = ("working", "idle", "blocked", "offline", "unknown")
 AGENT_SOURCES = ("herdr", "hook", "scan")
 REACHABILITY = ("instant", "next-turn")
-AGENT_FIELDS = {"key", "name", "type", "status", "role", "reachability", "source"}
+ANY_REACHABILITY = ("instant", "next-turn", "listed")  # §16.2: every agent may carry one
+AGENT_FIELDS = {"key", "name", "type", "status", "role", "reachability", "source", "ambiguous"}
 AGENT_REQUIRED = {"key", "name", "type", "status", "source"}
 
 # ASCII digits without leading zeros (protocol §14.7, §14.9); \d would also match non-ASCII digits.
@@ -66,7 +68,8 @@ def _parse_agents(value) -> list[dict]:
     for i, item in enumerate(value):
         where = f"agents[{i}]"
         if not isinstance(item, dict) or not AGENT_REQUIRED <= set(item) or set(item) - AGENT_FIELDS:
-            raise _invalid(f"{where} must have exactly key, name, type, status, source and optionally role, reachability")
+            raise _invalid(f"{where} must have exactly key, name, type, status, source and optionally role, "
+                           "reachability, ambiguous")
         key, name = item["key"], item["name"]
         if not _is_str(key) or not AGENT_KEY_RE.fullmatch(key):
             raise _invalid(f"{where}.key must match [a-z0-9]{{8,64}}")
@@ -82,19 +85,23 @@ def _parse_agents(value) -> list[dict]:
             raise _invalid(f"{where}.status must be one of {', '.join(AGENT_STATES)}")
         if not _is_str(item["source"], AGENT_SOURCES):
             raise _invalid(f"{where}.source must be one of {', '.join(AGENT_SOURCES)}")
-        role, reach = item.get("role"), item.get("reachability")
+        role, reach, ambiguous = item.get("role"), item.get("reachability"), item.get("ambiguous", False)
         if role is not None and role != "inbox":
             raise _invalid(f'{where}.role must be "inbox" or null')
+        if not isinstance(ambiguous, bool):
+            raise _invalid(f"{where}.ambiguous must be true or false")
         if role == "inbox":
             inboxes += 1
             if not _is_str(reach, REACHABILITY):
                 raise _invalid(f'{where}.reachability must be "instant" or "next-turn" for the inbox')
-        elif reach is not None:
-            raise _invalid(f"{where}.reachability is only reported for the inbox agent")
+        elif reach is not None and not _is_str(reach, ANY_REACHABILITY):
+            raise _invalid(f'{where}.reachability must be "instant", "next-turn", "listed" or null')
+        if ambiguous and reach != "listed":
+            raise _invalid(f'{where}: an ambiguous name is reported with reachability "listed"')
         if item["source"] == "scan" and item["status"] != "unknown":
             raise _invalid(f'{where}: a scanned agent must report status "unknown"')
         out.append({"key": key, "name": name.strip(), "type": item["type"], "status": item["status"],
-                    "role": role, "reachability": reach, "source": item["source"]})
+                    "role": role, "reachability": reach, "source": item["source"], "ambiguous": ambiguous})
     if inboxes > 1:
         raise _invalid("at most one agent may be the inbox")
     return out
@@ -149,9 +156,29 @@ def publish(session, agent, data):
             session.execute(insert(MachineAgent), [{"agent_id": agent.id, "seen_at": now, **a} for a in agents])
         if agent.inbox_role_at is None and any(a.get("role") == "inbox" for a in agents):
             agent.inbox_role_at = now  # delivery history: app sign-in may no longer replace it (§15.8 H2)
+        _remember_known_agents(session, agent, agents, now)
     return {"presence": {"status": status, "seen_at": now.isoformat(),
                          "expires_at": (now + timedelta(seconds=TTL_SECONDS)).isoformat()},
             "target": target_json(session.get(ClientTarget, agent.team_id))}
+
+
+def _remember_known_agents(session, agent, agents: list[dict], now) -> None:
+    """Upsert non-ambiguous deliverable names into ``known_agents`` and prune old ones (§16.2)."""
+    deliverable = {}
+    for a in agents:
+        if a["reachability"] in REACHABILITY and not a["ambiguous"]:
+            deliverable.setdefault(a["name"], a)
+    if deliverable:
+        rows = [{"agent_id": agent.id, "name": name, "type": a["type"], "reachability": a["reachability"],
+                 "last_seen_at": now} for name, a in deliverable.items()]
+        stmt = insert(KnownAgent).values(rows)
+        session.execute(stmt.on_conflict_do_update(
+            index_elements=[KnownAgent.agent_id, KnownAgent.name],
+            set_={"type": stmt.excluded.type, "reachability": stmt.excluded.reachability,
+                  "last_seen_at": stmt.excluded.last_seen_at}))
+    session.execute(delete(KnownAgent).where(
+        KnownAgent.agent_id == agent.id,
+        KnownAgent.last_seen_at < now - timedelta(days=KNOWN_RETENTION_DAYS)))
 
 
 def version_tuple(version: str) -> tuple[int, int, int]:
@@ -214,7 +241,8 @@ def directory(session, agents):
                     "presence": {"status": status, "seen_at": row.seen_at.isoformat() if row else None,
                                  "expires_at": expires.isoformat() if expires else None},
                     "machine": None if revoked else machine_json(row),
+                    "routing": agent.routing,
                     "agents": [{"name": m.name, "type": m.type, "status": m.status, "role": m.role,
-                                "reachability": m.reachability, "source": m.source}
+                                "reachability": m.reachability, "source": m.source, "ambiguous": m.ambiguous}
                                for m in live.get(agent.id, [])]})
     return out

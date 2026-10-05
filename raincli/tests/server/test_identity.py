@@ -101,7 +101,7 @@ def test_attachment_table_enforces_integrity(session, world):
 
     a, b = world["agents"]["alice"], world["agents"]["bob"]
     lo, hi = sorted([a.id, b.id])
-    conv = Conversation(team_id=a.team_id, agent_a_id=lo, agent_b_id=hi)
+    conv = Conversation(team_id=a.team_id, agent_a_id=lo, agent_b_id=hi, a_key=f"m:{lo}", b_key=f"m:{hi}")
     session.add(conv)
     session.flush()
     msg = Message(id=uuid.uuid4(), team_id=a.team_id, conversation_id=conv.id,

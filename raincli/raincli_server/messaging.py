@@ -31,10 +31,12 @@ from datetime import datetime, timezone
 
 from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session, aliased, object_session
+from sqlalchemy.orm import Session, object_session
 
-from raincli_server import security
-from raincli_server.models import EVENT_STATES, Agent, Attachment, Conversation, DeliveryEvent, Message
+from raincli_server import routing, security
+from raincli_server.models import (EVENT_STATES, MESSAGE_KINDS, Agent, Attachment, Conversation, DeliveryEvent,
+                                   Membership, Message, User)
+from raincli_server.routing import Endpoint
 
 EVENT_DETAIL_MAX = 500
 INBOX_LIMIT_MAX = 500
@@ -42,14 +44,7 @@ CONVERSATIONS_LIMIT_MAX = 200
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-class MessagingError(Exception):
-    """A protocol-level failure: ``status`` and ``code`` follow protocol §3."""
-
-    def __init__(self, status: int, code: str, message: str):
-        super().__init__(message)
-        self.status = status
-        self.code = code
-        self.message = message
+from raincli_server.messaging_errors import MessagingError  # noqa: E402  (re-exported)
 
 
 def _invalid(message: str) -> MessagingError:
@@ -71,6 +66,23 @@ def iso(ts: datetime | None) -> str | None:
 def _handle(session: Session, agent_id: uuid.UUID) -> str:
     agent = session.get(Agent, agent_id)
     return agent.handle if agent is not None else ""
+
+
+def sender_endpoint(session: Session, msg: Message) -> Endpoint:
+    if msg.sender_user_id is not None:
+        return Endpoint("person", user=session.get(User, msg.sender_user_id))
+    agent = session.get(Agent, msg.sender_agent_id)
+    # from_agent is a hint for replies (§16.1); the sender is the machine.
+    return Endpoint("agent", agent=agent, name=msg.sender_agent_name) if msg.sender_agent_name else \
+        Endpoint("machine", agent=agent)
+
+
+def recipient_endpoint(session: Session, msg: Message) -> Endpoint:
+    if msg.recipient_user_id is not None:
+        return Endpoint("person", user=session.get(User, msg.recipient_user_id))
+    agent = session.get(Agent, msg.recipient_agent_id)
+    return Endpoint("agent", agent=agent, name=msg.recipient_agent_name) if msg.recipient_agent_name else \
+        Endpoint("machine", agent=agent)
 
 
 _ATTACHMENT_META = (Attachment.id, Attachment.message_id, Attachment.filename, Attachment.media_type,
@@ -100,21 +112,45 @@ def attachments_json(message: Message) -> list[dict]:
     return _attachment_meta(session, [message.id])[message.id]
 
 
+def hold_reason(session: Session, msg: Message) -> str | None:
+    """The hold a sender sees: derived for an unacked ``stored`` message (§16.12 C8), otherwise the
+    latest ``held`` event's detail when the message is held."""
+    if msg.delivery_state == "stored" and msg.acked_at is None:
+        recipient = session.get(Agent, msg.recipient_agent_id) if msg.recipient_agent_id else None
+        return routing.derived_hold(session, recipient, msg.recipient_agent_name, msg.sender_user_id is not None)
+    if msg.delivery_state == "held":
+        return session.scalar(
+            select(DeliveryEvent.detail).where(DeliveryEvent.message_id == msg.id, DeliveryEvent.state == "held")
+            .order_by(DeliveryEvent.id.desc()).limit(1))
+    return None
+
+
 def message_json(session: Session, msg: Message, attachments: list[dict] | None = None) -> dict:
-    """Protocol message JSON (M), including attachment metadata."""
+    """Protocol message JSON (M), including attachment metadata and the §16 endpoints.
+
+    ``from``/``to`` keep their v0.4 meaning for machine endpoints (the handle); a person is ``@email``.
+    """
     if attachments is None:
         attachments = _attachment_meta(session, [msg.id])[msg.id]
+    sender, recipient = sender_endpoint(session, msg), recipient_endpoint(session, msg)
+    hold = hold_reason(session, msg)
+    state = "held" if msg.delivery_state == "stored" and hold else msg.delivery_state
     return {
         "id": str(msg.id),
         "conversation_id": str(msg.conversation_id),
         "in_reply_to": str(msg.in_reply_to) if msg.in_reply_to else None,
-        "from": _handle(session, msg.sender_agent_id),
-        "to": _handle(session, msg.recipient_agent_id),
+        "from": sender.agent.handle if sender.agent else "@" + sender.user.email,
+        "to": recipient.agent.handle if recipient.agent else "@" + recipient.user.email,
+        "from_endpoint": sender.json(),
+        "to_endpoint": recipient.json(),
+        "from_agent": msg.sender_agent_name,
+        "kind": msg.kind,
         "body": msg.body,
         "created_at": iso(msg.created_at),
         "seq": msg.seq,
         "acked_at": iso(msg.acked_at),
-        "delivery_state": msg.delivery_state,
+        "delivery_state": state,
+        "hold_reason": hold,
         "delivery_updated_at": iso(msg.delivery_updated_at),
         "attachments": attachments,
     }
@@ -126,7 +162,7 @@ def messages_json(session: Session, messages: list[Message]) -> list[dict]:
     return [message_json(session, m, meta[m.id]) for m in messages]
 
 
-# Lookups ---------------------------------------------------------------------
+# Lookups and visibility (§16.6) --------------------------------------------------
 
 def _load_message(session: Session, message_id: uuid.UUID, *, lock: bool = False) -> Message | None:
     stmt = select(Message).where(Message.id == message_id).execution_options(populate_existing=True)
@@ -139,11 +175,37 @@ def _is_participant(msg: Message, agent: Agent) -> bool:
     return agent.id in (msg.sender_agent_id, msg.recipient_agent_id)
 
 
+def owned_machine_ids(session: Session, user: User, team_id: uuid.UUID | None = None) -> set[uuid.UUID]:
+    stmt = select(Agent.id).where(Agent.owner_user_id == user.id)
+    if team_id is not None:
+        stmt = stmt.where(Agent.team_id == team_id)
+    return set(session.scalars(stmt))
+
+
+def person_can_see(session: Session, msg: Message, user: User) -> bool:
+    """A person sees messages where they are an endpoint, plus those to or from machines they own,
+    while they are still a member of the message's team (§16.6)."""
+    if session.get(Membership, (msg.team_id, user.id)) is None:
+        return False
+    if user.id in (msg.sender_user_id, msg.recipient_user_id):
+        return True
+    machines = {msg.sender_agent_id, msg.recipient_agent_id} - {None}
+    return bool(machines & owned_machine_ids(session, user, msg.team_id))
+
+
 def get_visible_message(session: Session, agent: Agent, message_id: uuid.UUID | str) -> Message:
-    """The message if ``agent`` is its sender or recipient; otherwise ``404`` (no existence leak)."""
+    """The message if ``agent`` is its sender or recipient machine; otherwise ``404`` (no existence leak)."""
     mid = parse_uuid(message_id, "message id", not_found=True)
     msg = _load_message(session, mid)
     if msg is None or msg.team_id != agent.team_id or not _is_participant(msg, agent):
+        raise _not_found()
+    return msg
+
+
+def get_message_for_person(session: Session, user: User, message_id: uuid.UUID | str) -> Message:
+    mid = parse_uuid(message_id, "message id", not_found=True)
+    msg = _load_message(session, mid)
+    if msg is None or not person_can_see(session, msg, user):
         raise _not_found()
     return msg
 
@@ -161,46 +223,56 @@ def parse_uuid(value: object, what: str, *, not_found: bool = False) -> uuid.UUI
         raise _invalid(f"{what} must be a UUID") from None
 
 
-def _pending_count(session: Session, recipient_id: uuid.UUID) -> int:
+def _pending_count(session: Session, recipient: Endpoint) -> int:
+    where = (Message.recipient_user_id == recipient.user.id) if recipient.kind == "person" else \
+        (Message.recipient_agent_id == recipient.agent.id)
     return session.scalar(
-        select(func.count()).select_from(Message)
-        .where(Message.recipient_agent_id == recipient_id, Message.acked_at.is_(None))
-    ) or 0
+        select(func.count()).select_from(Message).where(where, Message.acked_at.is_(None))) or 0
 
 
-def _default_conversation(session: Session, team_id: uuid.UUID, x: uuid.UUID, y: uuid.UUID) -> Conversation:
-    a, b = sorted((x, y))
+def _endpoint_columns(side: str, ep: Endpoint) -> dict:
+    """Conversation columns for side ``a`` or ``b``."""
+    agent_col = {"a": "agent_a_id", "b": "agent_b_id"}[side]
+    return {agent_col: ep.machine_id, f"{side}_agent_name": ep.name if ep.kind == "agent" else None,
+            f"{side}_user_id": ep.user.id if ep.kind == "person" else None, f"{side}_key": ep.key}
+
+
+def _default_conversation(session: Session, team_id: uuid.UUID, x: Endpoint, y: Endpoint) -> Conversation:
+    a, b = sorted((x, y), key=lambda ep: ep.key)
     session.execute(
         pg_insert(Conversation)
-        .values(id=uuid.uuid4(), team_id=team_id, agent_a_id=a, agent_b_id=b, is_default=True)
-        .on_conflict_do_nothing(index_elements=["agent_a_id", "agent_b_id"], index_where=Conversation.is_default)
+        .values(id=uuid.uuid4(), team_id=team_id, is_default=True, **_endpoint_columns("a", a),
+                **_endpoint_columns("b", b))
+        .on_conflict_do_nothing(index_elements=["a_key", "b_key"], index_where=Conversation.is_default)
     )
     return session.scalar(
         select(Conversation).where(
-            Conversation.agent_a_id == a, Conversation.agent_b_id == b, Conversation.is_default.is_(True))
+            Conversation.a_key == a.key, Conversation.b_key == b.key, Conversation.is_default.is_(True))
     )
 
 
-def _same_payload(existing: Message, sender: Agent, recipient: Agent, body: str,
-                  in_reply_to: uuid.UUID | None, conversation_id: uuid.UUID | None,
-                  attachment_keys: list[tuple[str, str]]) -> bool:
-    session = object_session(existing)
-    stored = [
-        (a["filename"], a["sha256"]) for a in _attachment_meta(session, [existing.id])[existing.id]
-    ] if session is not None else []
+def _payload(sender: Endpoint, recipient: Endpoint, body: str, in_reply_to, conversation_id, kind: str,
+             attachment_keys: list[tuple[str, str]]) -> tuple:
+    return (sender.key, recipient.key, body, in_reply_to, conversation_id, kind, attachment_keys)
+
+
+def _same_payload(session: Session, existing: Message, payload: tuple) -> bool:
+    sender_key, recipient_key, body, in_reply_to, conversation_id, kind, attachment_keys = payload
+    stored = [(a["filename"], a["sha256"]) for a in _attachment_meta(session, [existing.id])[existing.id]]
     return (
         stored == attachment_keys
-        and existing.sender_agent_id == sender.id
-        and existing.recipient_agent_id == recipient.id
+        and sender_endpoint(session, existing).key == sender_key
+        and recipient_endpoint(session, existing).key == recipient_key
         and existing.body == body
+        and existing.kind == kind
         and existing.in_reply_to == in_reply_to
         # An omitted conversation_id means "the server's choice", which the first send made.
         and (conversation_id is None or existing.conversation_id == conversation_id)
     )
 
 
-def _idempotent_result(existing: Message, *args) -> tuple[Message, bool]:
-    if _same_payload(existing, *args):
+def _idempotent_result(session: Session, existing: Message, payload: tuple) -> tuple[Message, bool]:
+    if _same_payload(session, existing, payload):
         return existing, False
     raise MessagingError(409, "id_conflict", "a different message already uses this id")
 
@@ -251,99 +323,163 @@ def get_attachment_for_agent(session: Session, agent: Agent, message_id: uuid.UU
     return att
 
 
+def get_attachment_for_person(session: Session, user: User, message_id: uuid.UUID | str,
+                              attachment_id: uuid.UUID | str) -> Attachment:
+    msg = get_message_for_person(session, user, message_id)
+    aid = parse_uuid(attachment_id, "attachment id", not_found=True)
+    att = session.scalar(select(Attachment).where(Attachment.id == aid, Attachment.message_id == msg.id))
+    if att is None:
+        raise MessagingError(404, "not_found", "attachment not found")
+    return att
+
+
 # Send --------------------------------------------------------------------------
+
+def machine_endpoint(agent: Agent, from_agent: str | None = None) -> Endpoint:
+    """A machine credential's sender endpoint: the machine, or one of its agents named by ``from_agent``."""
+    return Endpoint("agent", agent=agent, name=from_agent) if from_agent else Endpoint("machine", agent=agent)
+
 
 def send_message(
     session: Session,
     sender_agent: Agent,
     *,
     id: uuid.UUID | str,  # noqa: A002 - protocol field name
-    to_handle: str,
+    to_handle: str | None = None,
+    to: object = None,
     body: str,
     conversation_id: uuid.UUID | str | None = None,
     in_reply_to: uuid.UUID | str | None = None,
     max_pending: int,
     attachments: list[tuple[str, bytes]] | None = None,
+    from_agent: str | None = None,
+    kind: str = "message",
 ) -> tuple[Message, bool]:
-    """Store a message from ``sender_agent``. Returns ``(message, created)``.
+    """Store a message from a machine credential (§3, §16.1). ``to`` is any §16.1 endpoint form;
+    ``to_handle`` is the v0.4 machine-endpoint shorthand. Returns ``(message, created)``."""
+    from raincli_server.presence import valid_agent_name
 
-    ``created`` is False for an idempotent retry (same id and payload, including the
-    ordered attachment (filename, sha256) list). ``attachments`` are ``(filename, bytes)``
-    pairs; they are stored in the same transaction as the message (protocol §8).
-    """
+    if from_agent is not None and (not valid_agent_name(from_agent) or from_agent != from_agent.strip()):
+        raise _invalid("from_agent must be a directory name: 1-64 characters, no control or format characters")
+    if sender_agent.revoked_at is not None:
+        raise MessagingError(403, "forbidden", "sender agent is revoked")
+    return send(session, machine_endpoint(sender_agent, from_agent), sender_agent.team_id, id=id,
+                to=to if to is not None else to_handle, body=body, conversation_id=conversation_id,
+                in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments, kind=kind)
+
+
+def send_as_person(session: Session, user: User, team_id: uuid.UUID, *, id, to: object, body: str,  # noqa: A002
+                   conversation_id=None, in_reply_to=None, max_pending: int,
+                   attachments: list[tuple[str, bytes]] | None = None, kind: str = "message") -> tuple[Message, bool]:
+    """Store a message from a person (§16.3, §16.4). Only ``kind: message`` (§16.12 C11)."""
+    if not user.is_active or session.get(Membership, (team_id, user.id)) is None:
+        raise MessagingError(403, "forbidden", "you are not a member of that team")
+    if kind != "message":
+        raise _invalid("a person sends kind message only")
+    return send(session, Endpoint("person", user=user), team_id, id=id, to=to, body=body,
+                conversation_id=conversation_id, in_reply_to=in_reply_to, max_pending=max_pending,
+                attachments=attachments, kind=kind)
+
+
+def _sends_as(sender: Endpoint, msg: Message, side: str) -> bool:
+    """Whether ``sender`` holds the ``side`` ("sender"/"recipient") of ``msg``: the same machine, or the
+    same person."""
+    if sender.kind == "person":
+        return getattr(msg, f"{side}_user_id") == sender.user.id
+    return getattr(msg, f"{side}_agent_id") == sender.agent.id
+
+
+def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: object, body: str,  # noqa: A002
+         conversation_id=None, in_reply_to=None, max_pending: int,
+         attachments: list[tuple[str, bytes]] | None = None, kind: str = "message") -> tuple[Message, bool]:
+    """The one send path for every sender and endpoint kind (§16.1, §16.2, §16.4, §16.12 C7, C10, C11)."""
     message_id = parse_uuid(id, "id")
     reply_to = parse_uuid(in_reply_to, "in_reply_to") if in_reply_to is not None else None
     conv_id = parse_uuid(conversation_id, "conversation_id") if conversation_id is not None else None
     if not security.valid_message_body(body):
         raise _invalid("body must be 1-16000 characters of plain text")
+    if kind not in MESSAGE_KINDS:
+        raise _invalid(f"kind must be one of: {', '.join(MESSAGE_KINDS)}")
     files = validate_attachments(attachments)
-    if sender_agent.revoked_at is not None:
-        raise MessagingError(403, "forbidden", "sender agent is revoked")
+    if to is None:
+        raise _invalid(routing.BAD_RECIPIENT)
 
-    # Same response for unknown, other-team, revoked and self: never reveal other teams' handles.
-    bad_recipient = _invalid("recipient must be another active agent in your team")
-    if not security.valid_handle(to_handle):
-        raise bad_recipient
-    # Lock the recipient row first: serializes sends to this recipient (capacity + cursor order).
-    recipient = session.scalar(
-        select(Agent).where(Agent.team_id == sender_agent.team_id, Agent.handle == to_handle)
-        .with_for_update(key_share=True).execution_options(populate_existing=True)
-    )
-    if recipient is None or recipient.id == sender_agent.id:
-        raise bad_recipient
-    payload = (sender_agent, recipient, body, reply_to, conv_id, [(n, h) for n, _, h in files])
+    # Lock the recipient first: serializes sends to it (capacity and cursor order).
+    recipient = routing.resolve(session, team_id, routing.parse_endpoint(to), lock=True)
+    if recipient.key == sender.key or (recipient.kind == "machine" and sender.kind != "person"
+                                       and recipient.agent.id == sender.agent.id):
+        # §16.12 C7: never to the sender's own endpoint, nor a machine to its own inbox.
+        raise _invalid(routing.BAD_RECIPIENT)
+    if kind == "escalation" and not (sender.kind != "person" and recipient.kind == "person"
+                                     and recipient.user.id == sender.agent.owner_user_id):
+        raise _invalid("an escalation goes only from a machine to its own owner (§16.8)")
+    payload = _payload(sender, recipient, body, reply_to, conv_id, kind, [(n, h) for n, _, h in files])
 
     # Idempotency is decided before any other state or capacity check.
     existing = _load_message(session, message_id)
     if existing is not None:
-        return _idempotent_result(existing, *payload)
-    if recipient.revoked_at is not None:
-        raise bad_recipient
+        return _idempotent_result(session, existing, payload)
+
+    if recipient.kind == "agent":
+        routing.check_agent_route(session, recipient)
 
     parent: Message | None = None
+    conversation: Conversation | None = None
     if reply_to is not None:
         parent = _load_message(session, reply_to)
-        if parent is None or parent.team_id != sender_agent.team_id or not _is_participant(parent, sender_agent):
+        visible = parent is not None and parent.team_id == team_id and (
+            person_can_see(session, parent, sender.user) if sender.kind == "person"
+            else _is_participant(parent, sender.agent))
+        if not visible:
             raise MessagingError(404, "not_found", "in_reply_to message not found")
-        other = parent.recipient_agent_id if parent.sender_agent_id == sender_agent.id else parent.sender_agent_id
-        if other != recipient.id:
+        # The other participant, seen from the replier (§16.4 replies, C10).
+        other = recipient_endpoint(session, parent) if _sends_as(sender, parent, "sender") else \
+            sender_endpoint(session, parent)
+        fallback = other.kind == "agent" and recipient.kind == "machine" and recipient.agent.id == other.agent.id
+        if recipient.key != other.key and not fallback:
             raise _invalid("a reply must be addressed to the other participant of the parent message")
         if conv_id is not None and conv_id != parent.conversation_id:
             raise _invalid("conversation_id does not match the parent message")
-        conversation_id_final = parent.conversation_id
+        candidate = session.get(Conversation, parent.conversation_id)
+        if candidate is not None and {candidate.a_key, candidate.b_key} == {sender.key, recipient.key}:
+            conversation = candidate
     elif conv_id is not None:
-        conv = session.get(Conversation, conv_id)
-        if conv is None or {conv.agent_a_id, conv.agent_b_id} != {sender_agent.id, recipient.id}:
+        candidate = session.get(Conversation, conv_id)
+        if candidate is None or candidate.team_id != team_id or \
+                {candidate.a_key, candidate.b_key} != {sender.key, recipient.key}:
             raise _invalid("conversation_id is not a conversation between you and the recipient")
-        conversation_id_final = conv.id
-    else:
-        conversation_id_final = _default_conversation(
-            session, sender_agent.team_id, sender_agent.id, recipient.id).id
+        conversation = candidate
+    if conversation is None:
+        conversation = _default_conversation(session, team_id, sender, recipient)
 
-    if _pending_count(session, recipient.id) >= max_pending:
+    if _pending_count(session, recipient) >= max_pending:
         raise MessagingError(429, "inbox_full", "the recipient has too many unacknowledged messages")
 
-    inserted = session.scalar(
-        pg_insert(Message)
-        .values(
-            id=message_id, team_id=sender_agent.team_id, conversation_id=conversation_id_final,
-            in_reply_to=reply_to, sender_agent_id=sender_agent.id, recipient_agent_id=recipient.id,
-            body=body, delivery_state="stored",
-        )
-        .on_conflict_do_nothing(index_elements=["id"])
-        .returning(Message.id)
+    values = dict(
+        id=message_id, team_id=team_id, conversation_id=conversation.id, in_reply_to=reply_to, body=body,
+        delivery_state="stored", kind=kind,
+        sender_agent_id=sender.machine_id, sender_agent_name=sender.name if sender.kind == "agent" else None,
+        sender_user_id=sender.user.id if sender.kind == "person" else None,
+        recipient_agent_id=recipient.machine_id,
+        recipient_agent_name=recipient.name if recipient.kind == "agent" else None,
+        recipient_user_id=recipient.user.id if recipient.kind == "person" else None,
     )
+    inserted = session.scalar(
+        pg_insert(Message).values(**values).on_conflict_do_nothing(index_elements=["id"]).returning(Message.id))
     msg = _load_message(session, message_id)
-    if inserted is None:  # lost a race with a concurrent send of the same id (other recipient)
-        return _idempotent_result(msg, *payload)
+    if inserted is None:  # lost a race with a concurrent send of the same id
+        return _idempotent_result(session, msg, payload)
     for position, (name, data, sha) in enumerate(files):
         session.add(Attachment(message_id=message_id, position=position, filename=name,
                                media_type=security.ATTACHMENT_MEDIA_TYPE, size=len(data), sha256=sha,
                                content=data))
     session.flush()
 
-    if parent is not None and parent.recipient_agent_id == sender_agent.id:
-        _set_state(session, parent.id, "replied", sender_agent.id, detail=None)
+    if parent is not None and (_sends_as(sender, parent, "recipient") or (
+            sender.kind == "person" and parent.recipient_agent_id is not None
+            and parent.recipient_agent_id in owned_machine_ids(session, sender.user, team_id))):
+        _set_state(session, parent.id, "replied", sender.machine_id if sender.kind != "person" else None,
+                   detail=None)
     return msg, True
 
 
@@ -425,10 +561,36 @@ def _clamp(value: int, lo: int, hi: int) -> int:
 
 
 def inbox(session: Session, agent: Agent, *, after: int = 0, limit: int = 100,
-          include_acked: bool = False) -> tuple[list[Message], int]:
-    """Messages to ``agent`` with ``seq > after``, ascending. Returns ``(messages, cursor)``."""
+          include_acked: bool = False, routing_capable: bool = False) -> tuple[list[Message], int]:
+    """Messages to ``agent`` with ``seq > after``, ascending. Returns ``(messages, cursor)``.
+
+    §16.2 capability gate: without ``routing_capable`` (``?routing=1``), messages to a named agent and
+    messages from a person are not returned (a v0.4 connector would deliver them to its inbox, or skip
+    them as malformed). With it, the machine is recorded as routing-capable.
+    """
+    if routing_capable and agent.routing_capable_at is None:
+        agent.routing_capable_at = func.now()
+        session.flush()
     stmt = (
         select(Message).where(Message.recipient_agent_id == agent.id, Message.seq > after)
+        .order_by(Message.seq).limit(_clamp(limit, 1, INBOX_LIMIT_MAX))
+        .execution_options(populate_existing=True)
+    )
+    if not routing_capable:
+        stmt = stmt.where(Message.recipient_agent_name.is_(None), Message.sender_user_id.is_(None))
+    if not include_acked:
+        stmt = stmt.where(Message.acked_at.is_(None))
+    messages = list(session.scalars(stmt))
+    return messages, (messages[-1].seq if messages else after)
+
+
+def person_inbox(session: Session, user: User, *, after: int = 0, limit: int = 100,
+                 include_acked: bool = False) -> tuple[list[Message], int]:
+    """Messages addressed to the person in teams they still belong to, ``seq > after`` ascending."""
+    teams = select(Membership.team_id).where(Membership.user_id == user.id)
+    stmt = (
+        select(Message).where(Message.recipient_user_id == user.id, Message.seq > after,
+                              Message.team_id.in_(teams))
         .order_by(Message.seq).limit(_clamp(limit, 1, INBOX_LIMIT_MAX))
         .execution_options(populate_existing=True)
     )
@@ -438,36 +600,71 @@ def inbox(session: Session, agent: Agent, *, after: int = 0, limit: int = 100,
     return messages, (messages[-1].seq if messages else after)
 
 
-def list_conversations(session: Session, agent: Agent, *, limit: int = 50) -> list[dict]:
-    """``[{id, peer, last_seq, last_at, unacked}]`` newest first, for conversations ``agent`` is in."""
-    peer = aliased(Agent)
+def person_ack(session: Session, user: User, message_id: uuid.UUID | str) -> tuple[Message, bool]:
+    """A person marks a message addressed to them ``received`` (§16.4). Idempotent."""
+    msg = get_message_for_person(session, user, message_id)
+    if msg.recipient_user_id != user.id:
+        raise MessagingError(403, "forbidden", "only the recipient can do this")
+    updated = session.execute(
+        update(Message).where(Message.id == msg.id, Message.acked_at.is_(None))
+        .values(acked_at=func.now(), delivery_state=func.coalesce(func.nullif(Message.delivery_state, "stored"),
+                                                                  "received"),
+                delivery_updated_at=func.now())
+        .returning(Message.id)
+    ).scalar()
+    if updated is not None:
+        session.add(DeliveryEvent(message_id=msg.id, state="received", reported_by=None))
+        session.flush()
+    return _load_message(session, msg.id), updated is not None
+
+
+def conversation_endpoint(session: Session, conv: Conversation, side: str) -> Endpoint:
+    user_id = getattr(conv, f"{side}_user_id")
+    if user_id is not None:
+        return Endpoint("person", user=session.get(User, user_id))
+    agent = session.get(Agent, conv.agent_a_id if side == "a" else conv.agent_b_id)
+    name = getattr(conv, f"{side}_agent_name")
+    return Endpoint("agent", agent=agent, name=name) if name else Endpoint("machine", agent=agent)
+
+
+def _conversation_rows(session: Session, where, mine, unacked_where, limit: int) -> list[dict]:
+    """``[{id, peer, peer_endpoint, last_seq, last_at, unacked}]`` newest first. ``mine(conv)`` returns
+    the viewer's side (``"a"`` or ``"b"``)."""
     stats = (
-        select(
-            Message.conversation_id.label("cid"),
-            func.max(Message.seq).label("last_seq"),
-            func.max(Message.created_at).label("last_at"),
-            func.count().filter(
-                and_(Message.recipient_agent_id == agent.id, Message.acked_at.is_(None))
-            ).label("unacked"),
-        )
-        .where(or_(Message.sender_agent_id == agent.id, Message.recipient_agent_id == agent.id))
-        .group_by(Message.conversation_id)
-        .subquery()
+        select(Message.conversation_id.label("cid"), func.max(Message.seq).label("last_seq"),
+               func.max(Message.created_at).label("last_at"),
+               func.count().filter(and_(unacked_where, Message.acked_at.is_(None))).label("unacked"))
+        .group_by(Message.conversation_id).subquery()
     )
-    peer_id = func.coalesce(
-        func.nullif(Conversation.agent_a_id, agent.id), Conversation.agent_b_id)
     rows = session.execute(
-        select(Conversation.id, peer.handle, stats.c.last_seq, stats.c.last_at, stats.c.unacked)
-        .join(stats, stats.c.cid == Conversation.id)
-        .join(peer, peer.id == peer_id)
-        .where(or_(Conversation.agent_a_id == agent.id, Conversation.agent_b_id == agent.id))
-        .order_by(stats.c.last_seq.desc())
-        .limit(_clamp(limit, 1, CONVERSATIONS_LIMIT_MAX))
+        select(Conversation, stats.c.last_seq, stats.c.last_at, stats.c.unacked)
+        .join(stats, stats.c.cid == Conversation.id).where(where)
+        .order_by(stats.c.last_seq.desc()).limit(_clamp(limit, 1, CONVERSATIONS_LIMIT_MAX))
     )
-    return [
-        {"id": str(cid), "peer": handle, "last_seq": last_seq, "last_at": iso(last_at), "unacked": unacked}
-        for cid, handle, last_seq, last_at, unacked in rows
-    ]
+    out = []
+    for conv, last_seq, last_at, unacked in rows:
+        peer = conversation_endpoint(session, conv, "b" if mine(conv) == "a" else "a")
+        out.append({"id": str(conv.id), "peer": peer.label(), "peer_endpoint": peer.json(), "last_seq": last_seq,
+                    "last_at": iso(last_at), "unacked": unacked})
+    return out
+
+
+def list_conversations(session: Session, agent: Agent, *, limit: int = 50) -> list[dict]:
+    """Conversations the machine is in (as a machine or as one of its agents), newest first."""
+    return _conversation_rows(
+        session, or_(Conversation.agent_a_id == agent.id, Conversation.agent_b_id == agent.id),
+        lambda conv: "a" if conv.agent_a_id == agent.id else "b",
+        Message.recipient_agent_id == agent.id, limit)
+
+
+def list_person_conversations(session: Session, user: User, *, limit: int = 50) -> list[dict]:
+    """The person's conversations: those with the person as an endpoint, in teams they belong to (§16.4)."""
+    teams = select(Membership.team_id).where(Membership.user_id == user.id)
+    return _conversation_rows(
+        session, and_(or_(Conversation.a_user_id == user.id, Conversation.b_user_id == user.id),
+                      Conversation.team_id.in_(teams)),
+        lambda conv: "a" if conv.a_user_id == user.id else "b",
+        Message.recipient_user_id == user.id, limit)
 
 
 def get_conversation(session: Session, agent: Agent, conversation_id: uuid.UUID | str) -> Conversation:
@@ -478,16 +675,33 @@ def get_conversation(session: Session, agent: Agent, conversation_id: uuid.UUID 
     return conv
 
 
-def conversation_messages(session: Session, agent: Agent, conversation_id: uuid.UUID | str, *,
-                          after: int = 0, limit: int = 100) -> tuple[list[Message], int]:
-    """Messages of a conversation ``agent`` participates in (404 otherwise). Returns ``(messages, cursor)``."""
-    conv = get_conversation(session, agent, conversation_id)
+def get_person_conversation(session: Session, user: User, conversation_id: uuid.UUID | str) -> Conversation:
+    cid = parse_uuid(conversation_id, "conversation id", not_found=True)
+    conv = session.get(Conversation, cid)
+    if conv is None or user.id not in (conv.a_user_id, conv.b_user_id) or \
+            session.get(Membership, (conv.team_id, user.id)) is None:
+        raise MessagingError(404, "not_found", "conversation not found")
+    return conv
+
+
+def _messages_of(session: Session, conv: Conversation, after: int, limit: int) -> tuple[list[Message], int]:
     messages = list(session.scalars(
         select(Message).where(Message.conversation_id == conv.id, Message.seq > after)
         .order_by(Message.seq).limit(_clamp(limit, 1, INBOX_LIMIT_MAX))
         .execution_options(populate_existing=True)
     ))
     return messages, (messages[-1].seq if messages else after)
+
+
+def conversation_messages(session: Session, agent: Agent, conversation_id: uuid.UUID | str, *,
+                          after: int = 0, limit: int = 100) -> tuple[list[Message], int]:
+    """Messages of a conversation ``agent`` participates in (404 otherwise). Returns ``(messages, cursor)``."""
+    return _messages_of(session, get_conversation(session, agent, conversation_id), after, limit)
+
+
+def person_conversation_messages(session: Session, user: User, conversation_id: uuid.UUID | str, *,
+                                 after: int = 0, limit: int = 100) -> tuple[list[Message], int]:
+    return _messages_of(session, get_person_conversation(session, user, conversation_id), after, limit)
 
 
 def delivery_events(session: Session, agent: Agent, message_id: uuid.UUID | str) -> list[DeliveryEvent]:
@@ -502,13 +716,16 @@ class SendRequest:
     """Validated agent-API send body (protocol §3 "Send")."""
 
     id: str
-    to: str
+    to: object
     body: str
     conversation_id: str | None
     in_reply_to: str | None
     attachments: list[tuple[str, bytes]]
+    from_agent: str | None = None
+    kind: str = "message"
 
-    ALLOWED = frozenset({"id", "to", "body", "conversation_id", "in_reply_to", "attachments", "from", "sender"})
+    ALLOWED = frozenset({"id", "to", "body", "conversation_id", "in_reply_to", "attachments", "from", "sender",
+                         "from_agent", "kind"})
 
     @classmethod
     def parse(cls, data: object, caller_handle: str) -> "SendRequest":
@@ -528,8 +745,13 @@ class SendRequest:
                 raise ValueError
         except ValueError:
             raise _invalid("id must be a uuid4 string") from None
-        if not isinstance(to, str):
-            raise _invalid("to must be a handle")
+        if not isinstance(to, (str, dict)):
+            raise _invalid('to must be a handle or an endpoint object (§16.1)')
+        from_agent, kind = data.get("from_agent"), data.get("kind", "message")
+        if from_agent is not None and not isinstance(from_agent, str):
+            raise _invalid("from_agent must be a string")
+        if not isinstance(kind, str):
+            raise _invalid("kind must be a string")
         if not isinstance(body, str):
             raise _invalid("body must be a string")
         conv, reply = data.get("conversation_id"), data.get("in_reply_to")
@@ -537,7 +759,7 @@ class SendRequest:
             if value is not None and not isinstance(value, str):
                 raise _invalid(f"{name} must be a UUID string or null")
         return cls(id=msg_id, to=to, body=body, conversation_id=conv, in_reply_to=reply,
-                   attachments=_decode_attachments(data.get("attachments")))
+                   attachments=_decode_attachments(data.get("attachments")), from_agent=from_agent, kind=kind)
 
 
 def _decode_attachments(value: object) -> list[tuple[str, bytes]]:
