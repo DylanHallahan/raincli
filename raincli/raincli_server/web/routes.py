@@ -20,9 +20,11 @@ from raincli_server.markdown import render as render_markdown
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
-from raincli_server import identity, security
+from sqlalchemy import select
+
+from raincli_server import identity, messaging, security
 from raincli_server.config import Settings
-from raincli_server.models import Agent, Team
+from raincli_server.models import Agent, HandoffCode, Message, PersonSession, Team, User
 from raincli_server.web import auth, queries
 from raincli_server.web.middleware import WebSecurityMiddleware
 
@@ -53,13 +55,14 @@ NOTICES = {
     "revoked": "Agent revoked. Its credentials stopped working immediately.",
     "invite-revoked": "Invitation revoked. The link no longer works.",
     "member-removed": "Member removed. Their agents in this team were revoked and they were signed out.",
+    "app-signed-out": "Signed out of that app. Its person session stopped working immediately.",
 }
 _NEXT_RE = re.compile(r"^/app(/[A-Za-z0-9/_.-]*)?$")
 
 
 class WebError(Exception):
-    def __init__(self, status: int, title: str, message: str) -> None:
-        self.status, self.title, self.message = status, title, message
+    def __init__(self, status: int, title: str, message: str, link: str | None = None) -> None:
+        self.status, self.title, self.message, self.link = status, title, message, link
 
 
 class LoginRequired(Exception):
@@ -143,6 +146,10 @@ def render(
         "csrf": csrf if csrf is not None else (viewer.csrf if viewer else ""),
         "path": _route_path(request),
         "notice": NOTICES.get(request.query_params.get("notice", "")),
+        "product_name": settings.product_name,
+        "product_logo": settings.product_logo,
+        "layout": "base_app.html" if viewer is not None and viewer.app_mode else "base.html",
+        "website_url": settings.public_url + root,
         **ctx,
     }
     response = templates.TemplateResponse(request, name, context, status_code=status)
@@ -165,9 +172,20 @@ def require_csrf(request: Request, submitted: str, viewer: auth.Viewer | None) -
         raise WebError(403, "Form expired", "This form is missing a valid security token. Reload the page and try again.")
 
 
-def app_viewer(request: Request, db: Session, csrf_token: str | None = None) -> auth.Viewer:
-    """Authenticated viewer; for POSTs also enforces the per-session CSRF token."""
+def app_viewer(request: Request, db: Session, csrf_token: str | None = None, *,
+               app_mode_ok: bool = False) -> auth.Viewer:
+    """Authenticated viewer; for POSTs also enforces the per-session CSRF token.
+
+    App-mode sessions (§16.12 C2) carry only the person scopes: they may use the inbox,
+    conversations, compose and reply, attachments, the agent directory and picker, and
+    ``/app/local/*``. Every other route refuses them with a link to the website.
+    """
     viewer = require_viewer(request, db)
+    if viewer.app_mode and not app_mode_ok:
+        settings = _settings(request)
+        raise WebError(403, "Open the website",
+                       "This page isn't available in the app. Open it on the website in your browser.",
+                       link=settings.public_url + settings.root_path + _route_path(request))
     if request.method != "GET":
         require_csrf(request, csrf_token or "", viewer)
     return viewer
@@ -281,9 +299,79 @@ def logout(request: Request, csrf_token: str = Form(""), db: Session = Depends(g
 
 # Account --------------------------------------------------------------------------
 
+def _account_page(request: Request, db: Session, viewer: auth.Viewer, **ctx) -> HTMLResponse:
+    return render(request, "app/account.html", viewer=viewer,
+                  apps=identity.person_sessions_for(db, viewer.user), **ctx)
+
+
 @router.get("/app/account", response_class=HTMLResponse)
 def account(request: Request, db: Session = Depends(get_db)):
-    return render(request, "app/account.html", viewer=app_viewer(request, db))
+    return _account_page(request, db, app_viewer(request, db))
+
+
+@router.post("/app/account/apps/{session_id}/revoke")
+def revoke_app(request: Request, session_id: str, csrf_token: str = Form(""), db: Session = Depends(get_db)):
+    """The Signed-in apps list (§16.3, §16.12 C6): the owner signs one app out."""
+    viewer = app_viewer(request, db, csrf_token)
+    sid = queries.parse_uuid(session_id)
+    if sid is None or sid not in {ps.id for ps, _ in identity.person_sessions_for(db, viewer.user)}:
+        raise not_found()
+    identity.revoke_person_sessions(db, session_id=sid)
+    db.commit()
+    return redirect(request, "/app/account?notice=app-signed-out#apps")
+
+
+# The app handoff and local pages (protocol §16.10, §16.12 C2, C3) ------------------------------
+
+_HANDOFF_ERROR = ("This sign-in link can't be used", "It has expired, was already used, or didn't come from the app. "
+                  "Open the window again from the app.")
+
+
+@router.get("/app/handoff", response_class=HTMLResponse)
+def app_handoff(request: Request, code: str = "", db: Session = Depends(get_db)):
+    """Consume a single-use handoff code and start an app-mode session in its own ``raincli_app`` cookie.
+
+    Only a top-level navigation the user agent started itself is accepted (``Sec-Fetch-Site: none``,
+    ``Sec-Fetch-Mode: navigate``), so another site can't sign a browser in (login CSRF). Anything else
+    consumes nothing and shows one generic error.
+    """
+    headers = request.headers
+    if headers.get("sec-fetch-site") != "none" or headers.get("sec-fetch-mode") != "navigate":
+        raise WebError(400, *_HANDOFF_ERROR)
+    if not code.startswith(security.HANDOFF_CODE_PREFIX) or len(code) > 200:
+        raise WebError(400, *_HANDOFF_ERROR)
+    found = db.execute(
+        select(HandoffCode, PersonSession).join(PersonSession, PersonSession.id == HandoffCode.person_session_id)
+        .where(HandoffCode.code_hash == security.hash_token(code)).with_for_update(of=HandoffCode)
+    ).first()
+    if found is None:
+        raise WebError(400, *_HANDOFF_ERROR)
+    hc, ps = found
+    user = db.get(User, ps.user_id)
+    machine = db.get(Agent, ps.machine_agent_id)
+    valid = (hc.used_at is None and hc.expires_at > identity.now() and ps.revoked_at is None and user is not None
+             and user.is_active and machine is not None and machine.revoked_at is None
+             and identity.now() < identity.person_session_expires_at(ps))
+    if not valid:
+        raise WebError(400, *_HANDOFF_ERROR)
+    existing = auth.app_session_user(db, request)
+    if existing is not None and existing != user.id:  # never replace another user's app session
+        raise WebError(400, *_HANDOFF_ERROR)
+    hc.used_at = identity.now()
+    response = redirect(request, "/app/inbox")
+    auth.start_app_session(db, ps, user, response, _settings(request))
+    response.headers["Referrer-Policy"] = "no-referrer"
+    db.commit()
+    return response
+
+
+@router.get("/app/local/{page}", response_class=HTMLResponse)
+def app_local(request: Request, page: str, db: Session = Depends(get_db)):
+    """A sentinel the Windows app intercepts to show its bundled page; a browser explains that."""
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", page):
+        raise not_found()
+    viewer = auth.load_viewer(db, request)
+    return render(request, "app_mode/local.html", viewer=viewer, page=page.replace("-", " "))
 
 
 @router.post("/app/account/password")
@@ -296,7 +384,7 @@ def account_password(
     ip, email = _client_ip(request), viewer.user.email
 
     def fail(status: int, message: str):
-        return render(request, "app/account.html", viewer=viewer, status=status, error=message)
+        return _account_page(request, db, viewer, status=status, error=message)
 
     if limiter.blocked(ip, email):
         return fail(429, "Too many attempts. Wait a few minutes and try again.")
@@ -373,105 +461,137 @@ def invite_accept(
 
 # App: inbox and conversations -----------------------------------------------------------
 
+def _directory(db: Session, viewer: auth.Viewer) -> dict:
+    machines, people = queries.team_directory(db, viewer.user, _team_ids(viewer))
+    return {"machines": machines, "people": people, "teams": viewer.teams}
+
+
 @router.get("/app", response_class=HTMLResponse)
-def inbox(request: Request, agent: str = "", db: Session = Depends(get_db)):
-    viewer = app_viewer(request, db)
+@router.get("/app/inbox", response_class=HTMLResponse)
+def inbox(request: Request, db: Session = Depends(get_db)):
+    viewer = app_viewer(request, db, app_mode_ok=True)
     team_ids = _team_ids(viewer)
-    mine = queries.my_agents(db, viewer.user, team_ids)
-    selected = queries.parse_uuid(agent)
-    if selected is not None and selected not in {r.agent.id for r in mine}:
-        raise not_found()
-    rows = queries.list_conversations(db, viewer.user, team_ids, only_agent=selected)
-    return render(
-        request, "app/inbox.html", viewer=viewer, conversations=rows, agents=mine, selected=selected,
-        pending=queries.pending_for_user(db, viewer.user, team_ids),
-    )
+    rows = queries.list_conversations(db, viewer.user, team_ids)
+    template = "app_mode/inbox.html" if viewer.app_mode else "app/inbox.html"
+    return render(request, template, viewer=viewer, conversations=rows,
+                  machines_owned=bool(queries.my_agents(db, viewer.user, team_ids)),
+                  pending=queries.pending_for_user(db, viewer.user, team_ids))
 
 
 @router.get("/app/conversations/{conversation_id}", response_class=HTMLResponse)
 def conversation(request: Request, conversation_id: str, reply_to: str = "", db: Session = Depends(get_db)):
-    viewer = app_viewer(request, db)
+    viewer = app_viewer(request, db, app_mode_ok=True)
     view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id)
     if view is None:
         raise not_found()
-    return _conversation_page(request, viewer, view, reply_to=reply_to)
+    if queries.ack_viewed(db, viewer.user, view):  # viewing acks messages to the person (§16.4)
+        db.commit()
+        view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id)
+    return _conversation_page(request, db, viewer, view, reply_to=reply_to)
+
+
+def _reply_target(db: Session, viewer: auth.Viewer, view: queries.ConversationView, parent: Message | None) -> str:
+    """Where the person's message goes: the parent's other participant, else the conversation's peer."""
+    if parent is None:
+        return view.peer.label
+    other = messaging.recipient_endpoint(db, parent) if parent.sender_user_id == viewer.user.id else \
+        messaging.sender_endpoint(db, parent)
+    return other.label()
 
 
 def _conversation_page(
-    request: Request, viewer: auth.Viewer, view: queries.ConversationView, *, reply_to: str = "",
+    request: Request, db: Session, viewer: auth.Viewer, view: queries.ConversationView, *, reply_to: str = "",
     status: int = 200, **ctx,
 ) -> HTMLResponse:
     parent = None
     rid = queries.parse_uuid(reply_to)
     if rid is not None:
         parent = next((m for m in view.messages if m.id == rid), None)
-    active_mine = [a for a in view.mine if a.revoked_at is None]
-    if parent is not None:  # a reply is sent by the parent's other participant
-        active_mine = [a for a in active_mine if a.id in (parent.sender_agent_id, parent.recipient_agent_id)]
-    return render(
-        request, "app/conversation.html", viewer=viewer, status=status, view=view, parent=parent,
-        senders=active_mine, can_send=bool(active_mine) and view.peer.revoked_at is None,
-        message_id=str(uuid.uuid4()), **ctx,
-    )
+    to_label = _reply_target(db, viewer, view, parent)
+    common = dict(viewer=viewer, status=status, view=view, parent=parent, fixed_to=to_label, to_label=to_label,
+                  conversation_id=view.conversation.id, message_id=str(uuid.uuid4()), form={}, **ctx)
+    if viewer.app_mode:
+        return render(request, "app_mode/conversation.html",
+                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)), **common)
+    return render(request, "app/conversation.html", **common)
 
 
 @router.get("/app/compose", response_class=HTMLResponse)
-def compose(request: Request, from_agent: str = "", to: str = "", db: Session = Depends(get_db)):
-    viewer = app_viewer(request, db)
-    return _compose_page(request, db, viewer, form={"from_agent": from_agent, "to": to[:32], "body": ""})
+def compose(request: Request, to: str = "", db: Session = Depends(get_db)):
+    viewer = app_viewer(request, db, app_mode_ok=True)
+    return _compose_page(request, db, viewer, form={"to": to[:140], "body": "", "team": ""})
 
 
 def _compose_page(request, db, viewer, *, form, status: int = 200, error: str | None = None) -> HTMLResponse:
-    team_ids = _team_ids(viewer)
-    senders = [r for r in queries.my_agents(db, viewer.user, team_ids) if r.active]
-    return render(
-        request, "app/compose.html", viewer=viewer, status=status, error=error, form=form, senders=senders,
-        handles=queries.active_handles(db, team_ids), message_id=str(uuid.uuid4()),
-    )
+    ctx = dict(viewer=viewer, status=status, error=error, form=form, draft=form.get("body", ""),
+               message_id=str(uuid.uuid4()), conversation_id=None, **_directory(db, viewer))
+    if viewer.app_mode:
+        return render(request, "app_mode/compose.html",
+                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)), **ctx)
+    return render(request, "app/compose.html", **ctx)
 
 
 @router.post("/app/conversations/{conversation_id}/send", response_class=HTMLResponse)
 def send_message(
     request: Request, conversation_id: str, csrf_token: str = Form(""), message_id: str = Form(""),
-    from_agent: str = Form(""), to: str = Form(""), body: str = Form(""), in_reply_to: str = Form(""),
+    to: str = Form(""), team: str = Form(""), body: str = Form(""), in_reply_to: str = Form(""),
     files: list[UploadFile] = File(default=[]), db: Session = Depends(get_db),
 ):
-    """Send as one of the viewer's agents; ``conversation_id`` is "new" from the compose page."""
-    viewer = app_viewer(request, db, csrf_token)
+    """Send as the person (§16.9); ``conversation_id`` is "new" from the compose page."""
+    viewer = app_viewer(request, db, csrf_token, app_mode_ok=True)
     team_ids = _team_ids(viewer)
     view = None
     if conversation_id != "new":
         view = queries.get_conversation(db, viewer.user, team_ids, conversation_id)
         if view is None:
             raise not_found()
-    sender = queries.owned_agent(db, viewer.user, team_ids, from_agent)
-    if sender is None:  # only the viewer's own agents can send; others are indistinguishable from absent
-        raise not_found()
     mid = queries.parse_uuid(message_id) or uuid.uuid4()
     parent_id = queries.parse_uuid(in_reply_to) if in_reply_to else None
     body = body.replace("\r\n", "\n")
+    if view is not None:
+        team_obj = view.team
+        parent = next((m for m in view.messages if m.id == parent_id), None) if parent_id else None
+        to = _reply_target(db, viewer, view, parent)
+        conv_for_send = view.conversation.id if view.me.endpoint.kind == "person" and parent is None and \
+            to == view.peer.label else None
+    else:
+        team_obj = _choose_team(viewer, team)
+        conv_for_send = None
+
+    def fail(status: int, message: str):
+        db.rollback()
+        if view is not None:
+            fresh = queries.get_conversation(db, viewer.user, team_ids, conversation_id)
+            return _conversation_page(request, db, viewer, fresh, reply_to=in_reply_to, status=status,
+                                      error=message, draft=body)
+        return _compose_page(request, db, viewer, status=status, error=message,
+                             form={"to": to[:140], "body": body, "team": team})
+
+    if team_obj is None:
+        return fail(400, "Choose one of your teams.")
+    retry = request.app.state.web_send_limiter.check(("user", viewer.user.id))  # §16.3: per-user web limit
+    if retry is not None:
+        return fail(429, f"You're sending too fast. Wait {retry} seconds and try again.")
     try:
         attachments = _read_uploads(files)
-        msg, created = queries.send_as(
-            db, sender, id=mid, to_handle=to.strip(), body=body,
-            conversation_id=view.conversation.id if view else None, in_reply_to=parent_id,
+        msg, created = queries.send_as_person(
+            db, viewer.user, team_obj, id=mid, to=queries.endpoint_from_text(to), body=body,
+            conversation_id=conv_for_send, in_reply_to=parent_id,
             max_pending=_settings(request).max_pending, attachments=attachments,
         )
     except queries.SendError as exc:
-        db.rollback()
         status = 429 if exc.code == "inbox_full" else 409 if exc.code == "id_conflict" else 400
-        if view is not None:
-            view = queries.get_conversation(db, viewer.user, team_ids, conversation_id)
-            return _conversation_page(
-                request, viewer, view, reply_to=in_reply_to, status=status, error=exc.message, draft=body,
-            )
-        return _compose_page(
-            request, db, viewer, status=status, error=exc.message,
-            form={"from_agent": from_agent, "to": to[:32], "body": body},
-        )
+        return fail(status, exc.message)
     db.commit()
     notice = "sent" if created else "duplicate"
     return redirect(request, f"/app/conversations/{msg.conversation_id}?notice={notice}#m-{msg.id}")
+
+
+def _choose_team(viewer: auth.Viewer, slug: str) -> Team | None:
+    teams = [team for team, _ in viewer.teams]
+    if len(teams) == 1:
+        return teams[0]
+    return next((t for t in teams if t.slug == slug), None)
 
 
 def _read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
@@ -485,7 +605,7 @@ def _read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
 
 @router.get("/app/messages/{message_id}/attachments/{attachment_id}")
 def download_attachment(request: Request, message_id: str, attachment_id: str, db: Session = Depends(get_db)):
-    viewer = app_viewer(request, db)
+    viewer = app_viewer(request, db, app_mode_ok=True)
     att = queries.attachment_for_user(db, viewer.user, _team_ids(viewer), message_id, attachment_id)
     if att is None:
         raise not_found()
@@ -522,7 +642,9 @@ def _token_page(request: Request, viewer: auth.Viewer, agent: Agent, team: Team,
 
 @router.get("/app/agents", response_class=HTMLResponse)
 def agents(request: Request, db: Session = Depends(get_db)):
-    viewer = app_viewer(request, db)
+    viewer = app_viewer(request, db, app_mode_ok=True)
+    if viewer.app_mode:  # the directory and picker only; machine management stays on the website (C2)
+        return render(request, "app_mode/agents.html", viewer=viewer, **_directory(db, viewer))
     return _agents_page(request, db, viewer, form={})
 
 
@@ -714,6 +836,9 @@ def install(app: FastAPI) -> None:
     settings: Settings = app.state.settings
     if not hasattr(app.state, "web_login_limiter"):  # create_app shares one with the API sign-in
         app.state.web_login_limiter = auth.LoginLimiter()
+    from raincli_server.api import RateLimiter
+
+    app.state.web_send_limiter = RateLimiter(settings.rate_limit_per_min)  # per user (§16.3)
     app.add_middleware(WebSecurityMiddleware, root_path=settings.root_path, cookie_secure=settings.cookie_secure)
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
@@ -724,7 +849,7 @@ def install(app: FastAPI) -> None:
         finally:
             db.close()
         return render(request, "error.html", viewer=viewer, status=exc.status, code=exc.status,
-                      title=exc.title, message=exc.message)
+                      title=exc.title, message=exc.message, link=exc.link)
 
     @app.exception_handler(WebError)
     async def _web_error(request: Request, exc: WebError):

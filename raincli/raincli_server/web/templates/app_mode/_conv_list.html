@@ -1,0 +1,19 @@
+{% from "_state.html" import time %}
+<section class="rc-list" aria-labelledby="conv-list-title">
+  <div class="rc-list-head">
+    <h1 id="conv-list-title">Inbox</h1>
+    <a class="rc-btn" href="{{ url('/app/compose') }}">New</a>
+  </div>
+  {% if conversations %}
+  <ul>
+    {% for row in conversations %}
+    <li><a class="rc-conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}" {% if current_id == row.conversation.id %}aria-current="page"{% endif %}>
+      <span class="rc-conv-top"><span class="rc-conv-name">{{ row.peer.display }}</span>{% if row.unacked %}<span class="rc-count" title="Not yet read">{{ row.unacked }}</span>{% endif %}<span class="rc-conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span></span>
+      {% if row.last %}<span class="rc-conv-preview"><span class="sr-only">Last message from </span>{{ row.last_sender }}: {{ row.last.body[:120] }}</span>{% endif %}
+    </a></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="rc-empty">No conversations yet.</p>
+  {% endif %}
+</section>

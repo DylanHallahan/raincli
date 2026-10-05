@@ -1,23 +1,24 @@
 {% extends "base.html" %}
 {% from "_state.html" import state_badge, time %}
-{% block title %}{{ view.peer.handle }} · RainCLI{% endblock %}
+{% block title %}{{ view.peer.display }} · {{ product_name }}{% endblock %}
 {% block main %}
 <section class="wrap wrap-thread page-pad">
   <p class="crumbs"><a href="{{ url('/app') }}">Inbox</a> <span aria-hidden="true">/</span> conversation</p>
   <div class="page-head">
     <div>
-      <h1 class="conv-title"><span class="handle">{{ view.mine|map(attribute='handle')|join(' + ') }}</span> <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> <span class="handle">{{ view.peer.handle }}</span></h1>
-      <p class="muted">{{ view.team.name }} · {{ view.messages|length }} message{{ '' if view.messages|length == 1 else 's' }}{% if view.peer.revoked_at %} · {{ view.peer.handle }} has been revoked{% endif %}</p>
+      <h1 class="conv-title"><span class="handle">{{ view.me.display }}</span> <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> <span class="handle">{{ view.peer.display }}</span></h1>
+      <p class="muted">{{ view.peer.label }} · {{ view.team.name }} · {{ view.lines|length }} message{{ '' if view.lines|length == 1 else 's' }}{% if not view.peer.active %} · {{ view.peer.display }} is no longer active{% endif %}</p>
     </div>
   </div>
   {% if view.truncated %}<p class="flash">Showing the most recent {{ view.messages|length }} messages.</p>{% endif %}
 
   <ol class="thread">
-    {% for m in view.messages %}
-    {% set outgoing = view.agents[m.sender_agent_id] in view.mine %}
+    {% for line in view.lines %}{% set m = line.message %}{% set outgoing = line.outgoing %}
     <li class="msg {{ 'msg-out' if outgoing else 'msg-in' }}" id="m-{{ m.id }}">
       <div class="msg-meta">
-        <span class="nowrap"><strong>{{ view.agents[m.sender_agent_id].handle }}</strong> → <strong>{{ view.agents[m.recipient_agent_id].handle }}</strong></span>
+        <span class="nowrap"><strong>{{ line.sender.display }}</strong> → <strong>{{ line.recipient.display }}</strong></span>
+        {% if m.sender_agent_name %}<span class="nowrap">· via {{ m.sender_agent_name }} (stated by the machine)</span>{% endif %}
+        {% if m.kind == 'escalation' %}<span class="badge">Escalation</span>{% endif %}
         {% if m.in_reply_to %}<span class="nowrap">· <a href="#m-{{ m.in_reply_to }}">reply</a></span>{% endif %}
         <span class="nowrap">· {{ time(m.created_at) }}</span>
       </div>
@@ -32,11 +33,11 @@
       </ul>
       {% endif %}
       <div class="msg-foot">
-        {{ state_badge(m.delivery_state) }}
+        {{ state_badge(line.shown_state) }}
         {% set evs = view.events.get(m.id, []) %}
-        {% if evs and evs[-1].detail %}<span class="state-detail">{{ evs[-1].detail }}</span>{% endif %}
+        {% if line.hold_reason %}<span class="state-detail">{{ line.hold_reason|replace('_', ' ') }}</span>{% elif evs and evs[-1].detail %}<span class="state-detail">{{ evs[-1].detail }}</span>{% endif %}
         <span class="msg-times">updated {{ time(m.delivery_updated_at) }}{% if m.acked_at %} · received {{ time(m.acked_at) }}{% endif %}</span>
-        {% if not outgoing and can_send %}<a class="btn btn-quiet btn-small reply-link" href="?reply_to={{ m.id }}#compose">Reply</a>{% endif %}
+        {% if not outgoing and view.can_send %}<a class="btn btn-quiet btn-small reply-link" href="?reply_to={{ m.id }}#compose">Reply</a>{% endif %}
       </div>
       {% if evs %}
       <details class="events">
@@ -50,9 +51,9 @@
     {% endfor %}
   </ol>
 
-  {% if can_send %}
+  {% if view.can_send %}
   <form id="compose" method="post" action="{{ url('/app/conversations/' ~ view.conversation.id ~ '/send') }}" enctype="multipart/form-data" class="card form composer">
-    <h2 class="h3">{% if parent %}Reply to {{ view.agents[parent.sender_agent_id].handle }}{% else %}Send a message{% endif %}</h2>
+    <h2 class="h3">{% if parent %}Reply to {{ to_label }}{% else %}Send a message{% endif %}</h2>
     {% if error %}<p class="flash flash-error" role="alert">{{ error }}</p>{% endif %}
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <input type="hidden" name="message_id" value="{{ message_id }}">
@@ -61,32 +62,14 @@
     <blockquote class="quote">{{ parent.body[:300] }}{% if parent.body|length > 300 %}…{% endif %}</blockquote>
     <p class="small"><a href="{{ url('/app/conversations/' ~ view.conversation.id) }}#compose">Cancel reply</a></p>
     {% endif %}
-    {% if senders|length > 1 %}
-    <label for="from_agent">Send as</label>
-    <select id="from_agent" name="from_agent">
-      {% for a in senders %}<option value="{{ a.id }}">{{ a.handle }}</option>{% endfor %}
-    </select>
-    {% set other = view.peer %}
-    {% else %}
-    <input type="hidden" name="from_agent" value="{{ senders[0].id }}">
-    {% endif %}
-    {% if senders|length == 1 %}
-    {% set to_handle = view.agents[view.conversation.agent_a_id].handle if senders[0].id == view.conversation.agent_b_id else view.agents[view.conversation.agent_b_id].handle %}
-    <input type="hidden" name="to" value="{{ to_handle }}">
-    <p class="muted small">As <strong>{{ senders[0].handle }}</strong> to <strong>{{ to_handle }}</strong>. The recipient's connector may hold it until their session is ready.</p>
-    {% else %}
-    <label for="to">To</label>
-    <select id="to" name="to">
-      {% for a in view.agents.values() %}<option value="{{ a.handle }}">{{ a.handle }}</option>{% endfor %}
-    </select>
-    {% endif %}
+    <p class="muted small">As <strong>you ({{ viewer.user.display_name }})</strong> to <strong>{{ to_label }}</strong>. An agent's connector may hold it until its session is ready.</p>
     <label for="body">Message</label>
     <textarea id="body" name="body" rows="5" maxlength="16000" required>{{ draft or '' }}</textarea>
     {% include "app/_attach_input.html" %}
-    <div class="form-row"><span class="help">Plain text, up to 16,000 characters. The server can read message content.</span><button class="btn" type="submit">Send</button></div>
+    <div class="form-row"><span class="help">Markdown, up to 16,000 characters. The server can read message content.</span><button class="btn" type="submit">Send</button></div>
   </form>
   {% else %}
-  <p class="card muted">You can't send in this conversation because {% if view.peer.revoked_at %}the other agent{% else %}your agent{% endif %} has been revoked.</p>
+  <p class="card muted">You can't send in this conversation because {{ view.peer.display }} is no longer active.</p>
   {% endif %}
 </section>
 {% endblock %}

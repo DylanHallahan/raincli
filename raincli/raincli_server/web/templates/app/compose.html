@@ -1,33 +1,31 @@
 {% extends "base.html" %}
-{% block title %}Compose · RainCLI{% endblock %}
+{% block title %}Compose · {{ product_name }}{% endblock %}
 {% block main %}
 <section class="wrap narrow page-pad">
   <h1>New message</h1>
-  {% if not senders %}
-  <div class="card empty">
-    <p class="muted">You need an active machine address before you can send messages.</p>
-    <p class="actions"><a class="btn" href="{{ url('/app/agents') }}#add-machine">Add a machine</a></p>
-  </div>
-  {% else %}
   <form method="post" action="{{ url('/app/conversations/new/send') }}" enctype="multipart/form-data" class="card form">
     {% if error %}<p class="flash flash-error" role="alert">{{ error }}</p>{% endif %}
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <input type="hidden" name="message_id" value="{{ message_id }}">
-    <label for="from_agent">Send as</label>
-    <select id="from_agent" name="from_agent" aria-describedby="from-help">
-      {% for row in senders %}<option value="{{ row.agent.id }}" {% if form.from_agent == row.agent.id|string %}selected{% endif %}>{{ row.agent.handle }} ({{ row.team.slug }})</option>{% endfor %}
+    <p class="muted small">Sent as <strong>you ({{ viewer.user.display_name }})</strong>.</p>
+    {% if teams|length > 1 %}
+    <label for="team">Team</label>
+    <select id="team" name="team">
+      {% for team, role in teams %}<option value="{{ team.slug }}" {% if form.team == team.slug %}selected{% endif %}>{{ team.name }} ({{ team.slug }})</option>{% endfor %}
     </select>
-    <p id="from-help" class="help">Only your own agents are listed. The recipient sees this agent as the sender.</p>
-    <label for="to">To (agent handle in the same team)</label>
-    <input id="to" name="to" list="handles" required maxlength="32" pattern="[a-z][a-z0-9-]{1,31}" autocomplete="off" spellcheck="false" value="{{ form.to }}">
-    <datalist id="handles">
-      {% for slug, handle in handles %}<option value="{{ handle }}">{{ slug }}</option>{% endfor %}
+    {% endif %}
+    <label for="to">To</label>
+    <input id="to" name="to" list="recipients" required maxlength="140" autocomplete="off" spellcheck="false" value="{{ form.to }}" aria-describedby="to-help">
+    <p id="to-help" class="help">A machine (<code>alice-laptop</code>, delivered to its inbox), an agent on it (<code>alice-laptop/reviewer</code>) or a teammate (<code>@alice@example.com</code>). Only agents that can receive messages are suggested.</p>
+    <datalist id="recipients">
+      {% for m in machines %}<option value="{{ m.agent.handle }}">{{ m.agent.handle }} · inbox · {{ m.team.slug }}</option>
+      {% for a in m.agents if a.deliverable %}<option value="{{ m.agent.handle }}/{{ a.name }}">{{ a.type }} · {{ a.reachability }}</option>{% endfor %}{% endfor %}
+      {% for team, person in people %}<option value="@{{ person.email }}">{{ person.display_name }} · {{ team.slug }}</option>{% endfor %}
     </datalist>
     <label for="body">Message</label>
     <textarea id="body" name="body" rows="8" maxlength="16000" required>{{ form.body }}</textarea>
     {% include "app/_attach_input.html" %}
-    <div class="form-row"><span class="help">Plain text, up to 16,000 characters. The server can read message content.</span><button class="btn" type="submit">Send</button></div>
+    <div class="form-row"><span class="help">Markdown, up to 16,000 characters. The server can read message content.</span><button class="btn" type="submit">Send</button></div>
   </form>
-  {% endif %}
 </section>
 {% endblock %}

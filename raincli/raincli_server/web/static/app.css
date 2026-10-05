@@ -415,6 +415,7 @@ pre.code {
 .machine-empty { margin: 0 0 var(--s-3); }
 .role-inbox { background: var(--accent-soft); color: var(--accent-ink); }
 .session-working, .update-updating, .reach-instant { background: var(--info-bg); color: var(--info); }
+.reach-listed { background: var(--neutral-bg); color: var(--neutral); }
 .session-idle, .update-current { background: var(--ok-bg); color: var(--ok); }
 .session-blocked, .update-rolled_back, .reach-next-turn { background: var(--warn-bg); color: var(--warn); }
 .update-failed { background: var(--danger-bg); color: var(--danger); }

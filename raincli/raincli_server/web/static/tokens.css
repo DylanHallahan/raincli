@@ -1,0 +1,62 @@
+/* Neutral design tokens (protocol §16.9), shared by the website's app mode and the Windows app's
+   local pages. Rebranding means changing this file, the product name setting and the logo file.
+   Every colour, type size, spacing step, radius and shadow is a --rc-* custom property. */
+
+:root {
+  --rc-bg: #ffffff;
+  --rc-surface: #f7f7f8;
+  --rc-surface-2: #efeff1;
+  --rc-surface-3: #e4e4e7;
+  --rc-text: #18181b;
+  --rc-text-2: #3f3f46;
+  --rc-muted: #5b5b66;
+  --rc-border: #e4e4e7;
+  --rc-border-strong: #a1a1aa;
+  --rc-accent: #2563eb;
+  --rc-accent-hover: #1d4ed8;
+  --rc-accent-soft: #e8efff;
+  --rc-on-accent: #ffffff;
+  --rc-focus: #2563eb;
+  --rc-ok: #15803d; --rc-ok-bg: #e7f6ec;
+  --rc-warn: #a16207; --rc-warn-bg: #fdf4dc;
+  --rc-danger: #b91c1c; --rc-danger-bg: #fdecec;
+  --rc-info: #1d4ed8; --rc-info-bg: #e8efff;
+  --rc-out-bg: #f1f5ff;
+
+  --rc-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif;
+  --rc-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --rc-fs-xs: .75rem; --rc-fs-sm: .875rem; --rc-fs-base: .9375rem; --rc-fs-md: 1rem; --rc-fs-lg: 1.125rem;
+  --rc-fs-xl: 1.375rem;
+  --rc-s-1: 4px; --rc-s-2: 8px; --rc-s-3: 12px; --rc-s-4: 16px; --rc-s-5: 24px; --rc-s-6: 32px; --rc-s-7: 48px;
+  --rc-radius-sm: 6px; --rc-radius: 10px; --rc-radius-lg: 14px;
+  --rc-shadow-sm: 0 1px 2px rgba(0, 0, 0, .06);
+  --rc-shadow: 0 1px 2px rgba(0, 0, 0, .05), 0 8px 24px rgba(0, 0, 0, .06);
+  --rc-rail-width: 280px;
+  --rc-nav-width: 64px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rc-bg: #111113;
+    --rc-surface: #18181b;
+    --rc-surface-2: #222226;
+    --rc-surface-3: #2c2c31;
+    --rc-text: #f4f4f5;
+    --rc-text-2: #d4d4d8;
+    --rc-muted: #a1a1aa;
+    --rc-border: #2c2c31;
+    --rc-border-strong: #52525b;
+    --rc-accent: #7aa2ff;
+    --rc-accent-hover: #9bb8ff;
+    --rc-accent-soft: #1d2740;
+    --rc-on-accent: #0b1020;
+    --rc-focus: #7aa2ff;
+    --rc-ok: #6ad48c; --rc-ok-bg: #12261a;
+    --rc-warn: #f2c25b; --rc-warn-bg: #2a2210;
+    --rc-danger: #f58b8b; --rc-danger-bg: #2c1414;
+    --rc-info: #9bb8ff; --rc-info-bg: #1d2740;
+    --rc-out-bg: #1a2133;
+    --rc-shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+    --rc-shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .35);
+  }
+}

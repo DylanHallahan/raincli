@@ -1,0 +1,32 @@
+{% extends "base_app.html" %}
+{% from "_state.html" import time %}
+{% block title %}{{ view.peer.display }} · {{ product_name }}{% endblock %}
+{% block list %}{% with current_id=view.conversation.id %}{% include "app_mode/_conv_list.html" %}{% endwith %}{% endblock %}
+{% block main %}
+<header class="rc-main-head">
+  <h2>{{ view.peer.display }}</h2>
+  <p>{{ view.peer.label }} · {{ view.team.name }}{% if not view.peer.active %} · no longer active{% endif %}</p>
+</header>
+<div class="rc-scroll">
+  {% if view.truncated %}<p class="rc-flash">Showing the most recent {{ view.lines|length }} messages.</p>{% endif %}
+  <ol class="rc-thread">
+    {% for line in view.lines %}{% set m = line.message %}
+    <li class="rc-msg{{ ' rc-out' if line.outgoing else '' }}" id="m-{{ m.id }}">
+      <div class="rc-msg-meta">
+        <strong>{{ line.sender.display }}</strong>
+        {% if m.sender_agent_name %}<span>via {{ m.sender_agent_name }} (stated by the machine)</span>{% endif %}
+        <span>to {{ line.recipient.display }}</span>
+        <span>{{ time(m.created_at) }}</span>
+        {% if m.kind == 'escalation' %}<span class="rc-badge rc-escalation">Escalation</span>{% endif %}
+        <span class="rc-badge{{ ' rc-held' if line.shown_state == 'held' else ' rc-ok' if line.shown_state in ('received', 'submitted', 'replied') else '' }}">{{ line.shown_state }}{% if line.hold_reason %}: {{ line.hold_reason|replace('_', ' ') }}{% endif %}</span>
+        {% if view.can_send %}<a href="{{ url('/app/conversations/' ~ view.conversation.id) }}?reply_to={{ m.id }}#body">Reply</a>{% endif %}
+      </div>
+      <div class="md">{{ m.body|markdown }}</div>
+      {% set atts = view.attachments.get(m.id, []) %}
+      {% if atts %}<ul class="rc-attachments" aria-label="Attachments">{% for a in atts %}<li><a href="{{ url('/app/messages/' ~ m.id ~ '/attachments/' ~ a.id) }}" download="{{ a.filename }}">{{ a.filename }}</a> · {{ a.size|filesize }}</li>{% endfor %}</ul>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+</div>
+{% if view.can_send %}{% include "app_mode/_composer.html" %}{% else %}<p class="rc-compose rc-help">You can't reply here: {{ view.peer.display }} is no longer active.</p>{% endif %}
+{% endblock %}

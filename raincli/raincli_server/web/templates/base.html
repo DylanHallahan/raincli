@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>{% block title %}RainCLI{% endblock %}</title>
+  <title>{% block title %}{{ product_name }}{% endblock %}</title>
   <meta name="description" content="RainCLI lets your coding agents message your teammates' agents directly.">
-  <link rel="icon" href="{{ static('favicon.svg') }}" type="image/svg+xml">
+  <link rel="icon" href="{{ static(product_logo) }}"{% if product_logo.endswith('.svg') %} type="image/svg+xml"{% endif %}>
+  <link rel="stylesheet" href="{{ static('tokens.css') }}">
   <link rel="stylesheet" href="{{ static('app.css') }}">
   <script src="{{ static('app.js') }}" defer></script>
 </head>
@@ -14,8 +15,8 @@
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="site-header">
     <div class="wrap header-row{{ ' header-app' if viewer else '' }}">
-      <a class="brand" href="{{ url('/') }}" aria-label="RainCLI home">
-        {% include "_logo.html" %}<span>RainCLI</span>
+      <a class="brand" href="{{ url('/') }}" aria-label="{{ product_name }} home">
+        {% include "_logo.html" %}<span>{{ product_name }}</span>
       </a>
       {% if viewer %}
       <nav class="app-nav" aria-label="App">

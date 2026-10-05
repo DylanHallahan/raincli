@@ -1,12 +1,13 @@
-{% extends "base.html" %}
-{% block title %}{{ title }} · RainCLI{% endblock %}
+{% extends layout|default("base.html") %}
+{% block title %}{{ title }} · {{ product_name }}{% endblock %}
 {% block main %}
 <section class="wrap narrow page-pad">
   <div class="card center">
     <p class="eyebrow">Error {{ code }}</p>
     <h1>{{ title }}</h1>
     <p class="muted">{{ message }}</p>
-    <p class="actions"><a class="btn" href="{{ url('/app') }}">Go to the app</a> <a class="btn btn-quiet" href="{{ url('/') }}">Home</a></p>
+    {% if link %}<p class="actions"><a class="btn" href="{{ link }}" target="_blank" rel="noopener noreferrer">Open on the website</a></p>
+    {% else %}<p class="actions"><a class="btn" href="{{ url('/app') }}">Go to the app</a> <a class="btn btn-quiet" href="{{ url('/') }}">Home</a></p>{% endif %}
   </div>
 </section>
 {% endblock %}

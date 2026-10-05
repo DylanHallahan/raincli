@@ -13,6 +13,7 @@ import hmac
 import secrets
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -24,9 +25,10 @@ from sqlalchemy.orm import Session
 
 from raincli_server import identity, security
 from raincli_server.config import Settings
-from raincli_server.models import Team, User, WebSession
+from raincli_server.models import Agent, PersonSession, Team, User, WebSession
 
 SESSION_COOKIE = "raincli_session"
+APP_COOKIE = "raincli_app"  # app-mode sessions from a handoff (§16.12 C3): SameSite=Strict, Path=/app/
 PRE_CSRF_COOKIE = "raincli_csrf"
 SESSION_TTL = timedelta(days=14)
 PRE_CSRF_TTL = 60 * 60 * 12
@@ -37,6 +39,11 @@ class Viewer:
     user: User
     web_session: WebSession
     teams: list[tuple[Team, str]] = field(default_factory=list)
+
+    @property
+    def app_mode(self) -> bool:
+        """An app-mode session: person scopes only, limited routes (§16.12 C2)."""
+        return bool(self.web_session.app_mode)
 
     @property
     def csrf(self) -> str:
@@ -86,20 +93,60 @@ def start_session(db: Session, user: User, response: Response, settings: Setting
     return ws
 
 
-def load_viewer(db: Session, request: Request) -> Viewer | None:
-    token = request.cookies.get(SESSION_COOKIE)
+def _session_from(db: Session, token: str | None, *, app_mode: bool) -> tuple[WebSession, User] | None:
     if not token or len(token) > 200:
         return None
     row = db.execute(
         select(WebSession, User).join(User, User.id == WebSession.user_id)
-        .where(WebSession.token_hash == security.hash_token(token))
+        .where(WebSession.token_hash == security.hash_token(token), WebSession.app_mode.is_(app_mode))
     ).first()
     if row is None:
         return None
     ws, user = row
     if ws.revoked_at is not None or ws.expires_at <= identity.now() or not user.is_active:
         return None
+    if app_mode:
+        # An app-mode session ends no later than its person session, and with it (§16.12 C2, C6).
+        ps = db.get(PersonSession, ws.person_session_id)
+        machine = db.get(Agent, ps.machine_agent_id) if ps else None
+        if (ps is None or ps.revoked_at is not None or machine is None or machine.revoked_at is not None
+                or identity.now() >= identity.person_session_expires_at(ps)):
+            return None
+    return ws, user
+
+
+def load_viewer(db: Session, request: Request) -> Viewer | None:
+    """The browser's web session; otherwise an app-mode session from the ``raincli_app`` cookie, which
+    is sent only under ``/app/`` and only same-site."""
+    found = _session_from(db, request.cookies.get(SESSION_COOKIE), app_mode=False) or \
+        _session_from(db, request.cookies.get(APP_COOKIE), app_mode=True)
+    if found is None:
+        return None
+    ws, user = found
     return Viewer(user=user, web_session=ws, teams=identity.teams_for_user(db, user))
+
+
+def start_app_session(db: Session, ps: PersonSession, user: User, response: Response, settings: Settings) -> WebSession:
+    """An app-mode web session for a consumed handoff code (§16.10, §16.12 C2, C3)."""
+    token = security.new_token()
+    ws = WebSession(user_id=user.id, token_hash=security.hash_token(token), csrf_token=secrets.token_urlsafe(32),
+                    expires_at=identity.person_session_expires_at(ps), app_mode=True, person_session_id=ps.id)
+    db.add(ws)
+    db.flush()
+    max_age = max(1, int((ws.expires_at - identity.now()).total_seconds()))
+    response.set_cookie(APP_COOKIE, token, max_age=max_age, path=app_cookie_path(settings),
+                        secure=settings.cookie_secure, httponly=True, samesite="strict")
+    return ws
+
+
+def app_cookie_path(settings: Settings) -> str:
+    return (settings.root_path or "") + "/app/"
+
+
+def app_session_user(db: Session, request: Request) -> uuid.UUID | None:
+    """The user of a still-valid ``raincli_app`` session in this browser, if any."""
+    found = _session_from(db, request.cookies.get(APP_COOKIE), app_mode=True)
+    return found[1].id if found else None
 
 
 def end_session(db: Session, viewer: Viewer | None, response: Response, settings: Settings) -> None:

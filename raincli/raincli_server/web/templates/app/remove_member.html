@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Remove {{ member.display_name }} · RainCLI{% endblock %}
+{% block title %}Remove {{ member.display_name }} · {{ product_name }}{% endblock %}
 {% block main %}
 <section class="wrap narrow page-pad">
   <p class="crumbs"><a href="{{ url('/app/teams/' ~ team.slug) }}">{{ team.name }}</a> <span aria-hidden="true">/</span> remove member</p>
