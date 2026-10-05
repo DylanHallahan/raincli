@@ -108,8 +108,11 @@ class WebSession(Base):
     # person scopes, end no later than the person session and are revoked with it.
     app_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     person_session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("person_sessions.id", ondelete="CASCADE"))
+    # §16.14 S3: sha256 of the app install token; every app-mode request must carry that token.
+    app_install_hash: Mapped[str | None] = mapped_column(String(64))
     __table_args__ = (
         CheckConstraint("app_mode = (person_session_id IS NOT NULL)", name="ck_web_sessions_app_mode"),
+        CheckConstraint("app_mode = (app_install_hash IS NOT NULL)", name="ck_web_sessions_app_install"),
     )
 
 
@@ -140,6 +143,7 @@ class HandoffCode(Base):
     created_at: Mapped[datetime] = _created()
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    install_hash: Mapped[str] = mapped_column(String(64), nullable=False)  # §16.14 S3
 
 
 class Agent(Base):

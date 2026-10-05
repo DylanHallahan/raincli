@@ -93,7 +93,8 @@ def start_session(db: Session, user: User, response: Response, settings: Setting
     return ws
 
 
-def _session_from(db: Session, token: str | None, *, app_mode: bool) -> tuple[WebSession, User] | None:
+def _session_from(db: Session, token: str | None, *, app_mode: bool,
+                  user_agent: str | None = None) -> tuple[WebSession, User] | None:
     if not token or len(token) > 200:
         return None
     row = db.execute(
@@ -106,6 +107,9 @@ def _session_from(db: Session, token: str | None, *, app_mode: bool) -> tuple[We
     if ws.revoked_at is not None or ws.expires_at <= identity.now() or not user.is_active:
         return None
     if app_mode:
+        # §16.14 S3: only the app install it was handed to may use it; the cookie alone is useless.
+        if not security.same_install(ws.app_install_hash, user_agent):
+            return None
         # An app-mode session ends no later than its person session, and with it (§16.12 C2, C6).
         ps = db.get(PersonSession, ws.person_session_id)
         machine = db.get(Agent, ps.machine_agent_id) if ps else None
@@ -119,18 +123,21 @@ def load_viewer(db: Session, request: Request) -> Viewer | None:
     """The browser's web session; otherwise an app-mode session from the ``raincli_app`` cookie, which
     is sent only under ``/app/`` and only same-site."""
     found = _session_from(db, request.cookies.get(SESSION_COOKIE), app_mode=False) or \
-        _session_from(db, request.cookies.get(APP_COOKIE), app_mode=True)
+        _session_from(db, request.cookies.get(APP_COOKIE), app_mode=True, user_agent=request.headers.get("user-agent"))
     if found is None:
         return None
     ws, user = found
     return Viewer(user=user, web_session=ws, teams=identity.teams_for_user(db, user))
 
 
-def start_app_session(db: Session, ps: PersonSession, user: User, response: Response, settings: Settings) -> WebSession:
-    """An app-mode web session for a consumed handoff code (§16.10, §16.12 C2, C3)."""
+def start_app_session(db: Session, ps: PersonSession, user: User, response: Response, settings: Settings,
+                      install_hash: str) -> WebSession:
+    """An app-mode web session for a consumed handoff code (§16.10, §16.12 C2, C3), bound to the app
+    install the code was bound to (§16.14 S3)."""
     token = security.new_token()
     ws = WebSession(user_id=user.id, token_hash=security.hash_token(token), csrf_token=secrets.token_urlsafe(32),
-                    expires_at=identity.person_session_expires_at(ps), app_mode=True, person_session_id=ps.id)
+                    expires_at=identity.person_session_expires_at(ps), app_mode=True, person_session_id=ps.id,
+                    app_install_hash=install_hash)
     db.add(ws)
     db.flush()
     max_age = max(1, int((ws.expires_at - identity.now()).total_seconds()))
@@ -145,7 +152,8 @@ def app_cookie_path(settings: Settings) -> str:
 
 def app_session_user(db: Session, request: Request) -> uuid.UUID | None:
     """The user of a still-valid ``raincli_app`` session in this browser, if any."""
-    found = _session_from(db, request.cookies.get(APP_COOKIE), app_mode=True)
+    found = _session_from(db, request.cookies.get(APP_COOKIE), app_mode=True,
+                          user_agent=request.headers.get("user-agent"))
     return found[1].id if found else None
 
 

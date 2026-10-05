@@ -46,6 +46,10 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-conv-time { color: var(--rc-muted); font-size: var(--rc-fs-xs); white-space: nowrap; }
 .rc-conv-preview { display: block; color: var(--rc-muted); font-size: var(--rc-fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rc-count { background: var(--rc-accent); color: var(--rc-on-accent); border-radius: var(--rc-radius-pill); padding: 0 7px; font-size: var(--rc-fs-xs); font-weight: 600; }
+.rc-whoami { margin: 0; padding: var(--rc-s-2) var(--rc-s-2) 0; border-top: 1px solid var(--rc-border); color: var(--rc-muted);
+  font-size: var(--rc-fs-xs); overflow-wrap: anywhere; }
+.rc-whoami strong { color: var(--rc-text); font-weight: 600; }
+.rc-main > .rc-whoami { border-top: 0; border-bottom: 1px solid var(--rc-border); padding: var(--rc-s-2) var(--rc-s-5); }
 .rc-empty { padding: var(--rc-s-6) var(--rc-s-3); color: var(--rc-muted); text-align: center; }
 
 /* Main pane: header, thread, composer */

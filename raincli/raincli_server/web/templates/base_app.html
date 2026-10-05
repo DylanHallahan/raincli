@@ -26,6 +26,7 @@
   </nav>
   {% block list %}{% endblock %}
   <main class="rc-main" id="main" tabindex="-1">
+    {% if 'no-list' in self.body_class() and viewer %}{% include "app_mode/_whoami.html" %}{% endif %}
     {% if notice %}<p class="rc-flash" role="status">{{ notice }}</p>{% endif %}
     {% block main %}{% endblock %}
   </main>

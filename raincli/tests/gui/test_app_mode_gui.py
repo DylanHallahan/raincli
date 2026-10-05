@@ -8,6 +8,7 @@ Screenshots (light and dark) go to ``RAINCLI_GUI_ARTIFACTS`` or the test's tempo
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -93,11 +94,24 @@ def sign_in(base, email, machine):
                                             "person_session": True})
 
 
+# §16.14 S3: the app's webview appends its install token to the browser's own User-Agent.
+APP_TOKEN = "gui-test-install-token-" + "x" * 24
+INSTALL_HASH = hashlib.sha256(APP_TOKEN.encode()).hexdigest()
+
+
+def app_user_agent(browser):
+    probe = browser.new_page()
+    try:
+        return probe.evaluate("navigator.userAgent") + " RainCLIApp/" + APP_TOKEN
+    finally:
+        probe.close()
+
+
 def open_app(browser, base, person, scheme="light"):
     """A fresh 'webview' profile, signed in through the handoff exactly as the app does."""
-    context = browser.new_context(color_scheme=scheme, accept_downloads=True)
+    context = browser.new_context(color_scheme=scheme, accept_downloads=True, user_agent=app_user_agent(browser))
     page = context.new_page()
-    page.goto(api(base, "/api/v1/app/handoff", {}, person)["url"])
+    page.goto(api(base, "/api/v1/app/handoff", {"app_install_hash": INSTALL_HASH}, person)["url"])
     assert page.url.endswith("/app/inbox"), page.url
     return context, page
 
@@ -221,6 +235,22 @@ def test_agents_picker_and_listed_agents(people, browser, artifacts):
 
 
 # The sentinel and app-mode refusals ------------------------------------------------------------
+
+def test_a_stolen_app_cookie_does_nothing_in_a_normal_browser(people, browser):
+    """§16.14 S3: the raincli_app cookie only works with the app install's User-Agent token."""
+    base = people["base"]
+    context, page = open_app(browser, base, people["alice"]["person_session"])
+    assert "Signed in as" in page.inner_text(".rc-whoami") and "(alice@example.test)" in page.inner_text(".rc-whoami")
+    stolen = [c for c in context.cookies() if c["name"] == "raincli_app"]
+    assert stolen
+    thief = browser.new_context()
+    thief.add_cookies(stolen)
+    page2 = thief.new_page()
+    page2.goto(base + "/app/inbox")
+    assert page2.locator(".rc-nav").count() == 0 and "/login" in page2.url
+    thief.close()
+    context.close()
+
 
 def test_local_sentinel_and_refused_pages(people, browser):
     base = people["base"]

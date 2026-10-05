@@ -70,6 +70,35 @@ def test_allowed_links_get_rel_and_handoff_paths_stay_text():
         assert "<a " not in str(render(source))
 
 
+# §16.14 S2: the review's forms, and more encodings of them. None may become a link.
+EXCLUDED_LINKS = [
+    "/app/conversations/../handoff?code=rch_secret", "/app/conversations/%2e%2e/handoff?code=rch_x",
+    "/app/conversations/%2E%2E/local/settings", "/app/conversations/&#x2e;&#x2e;/handoff?code=rch_x",
+    "/app/conversations/&#46;&#46;/local/settings", "/app/conversations/%252e%252e/handoff",
+    "/app/conversations/%25252e%25252e/handoff", "/app/conversations/.%2e/handoff", "/app/conversations/%2e./handoff",
+    "/app/conversations/x/../../handoff", "/app/conversations/x%2f..%2f..%2fhandoff",
+    "/app/conversations/x%5c..%5c..%5chandoff", "/app/conversations/./../local/x",
+    "https://raincli.com/app/handoff?code=rch_secret", "HTTPS://RAINCLI.COM/APP/HANDOFF?code=rch_x",
+    "https://raincli.com/app/local/settings", "https://raincli.com/root/app/handoff?code=rch_x",
+    "https://raincli.com/app/conversations/../handoff?code=rch_x", "https://raincli.com/app/%68andoff?code=rch_x",
+    "https://raincli.com/app%2fhandoff?code=rch_x", "https://raincli.com/app/./local/settings",
+    "https://raincli.com:443/app/handoff", "http://raincli.com/app/local/x", "<https://raincli.com/app/handoff?code=rch_x>",
+]
+
+
+@pytest.mark.parametrize("target", EXCLUDED_LINKS)
+def test_handoff_and_local_paths_never_become_links_in_any_encoding(target):
+    source = target if target.startswith("<") else f"[x]({target})"
+    assert "<a " not in str(render(source)), target
+
+
+def test_encoded_but_harmless_links_still_work():
+    for source, href in (("[c](/app/conversations/abc/./x)", "/app/conversations/abc/./x"),
+                         ("[e](https://example.com/a%20b?q=wait...)", "https://example.com/a%20b?q=wait..."),
+                         ("[s](https://raincli.com/app/conversations/123)", "https://raincli.com/app/conversations/123")):
+        assert f'href="{href}"' in str(render(source)), source
+
+
 def test_images_show_alt_text_only_and_linkify_is_off():
     assert str(render("![a *diagram*](https://example.com/d.png)")).strip() == "<p>a diagram</p>"
     assert "<a " not in str(render("see https://example.com and www.example.com"))

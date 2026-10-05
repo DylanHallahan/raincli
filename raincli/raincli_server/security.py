@@ -11,6 +11,10 @@ AGENT_TOKEN_PREFIX = "rca_"
 INVITE_TOKEN_PREFIX = "rci_"
 PERSON_TOKEN_PREFIX = "rps_"
 HANDOFF_CODE_PREFIX = "rch_"
+# §16.14 S3: the app's webview sends "RainCLIApp/<app_install_token>" in its User-Agent; the server only
+# ever keeps sha256(token) (lowercase hex), never the token, and never logs the User-Agent.
+_APP_UA_TOKEN = re.compile(r"(?:^|\s)RainCLIApp/([A-Za-z0-9_-]{32,128})(?=\s|$)")
+INSTALL_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 HANDLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,39}$")
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,189}\.[^@\s]{2,}$")
@@ -142,3 +146,19 @@ def attachment_content_problem(data: bytes) -> str | None:
 
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def app_install_hash(user_agent: str | None) -> str | None:
+    """sha256 (hex) of the one ``RainCLIApp/<token>`` in a User-Agent, or None when there is none or
+    more than one."""
+    if not user_agent or len(user_agent) > 1024:
+        return None
+    found = _APP_UA_TOKEN.findall(user_agent)
+    if len(found) != 1:
+        return None
+    return hashlib.sha256(found[0].encode("ascii")).hexdigest()
+
+
+def same_install(expected: str | None, user_agent: str | None) -> bool:
+    got = app_install_hash(user_agent)
+    return bool(expected) and got is not None and hmac.compare_digest(got, expected)

@@ -339,8 +339,9 @@ def app_handoff(request: Request, code: str = "", db: Session = Depends(get_db))
     """Consume a single-use handoff code and start an app-mode session in its own ``raincli_app`` cookie.
 
     Only a top-level navigation the user agent started itself is accepted (``Sec-Fetch-Site: none``,
-    ``Sec-Fetch-Mode: navigate``), so another site can't sign a browser in (login CSRF). Anything else
-    consumes nothing and shows one generic error.
+    ``Sec-Fetch-Mode: navigate``), so another site can't sign a browser in (login CSRF), and only from the
+    app install the code is bound to: its User-Agent carries ``RainCLIApp/<token>`` (§16.14 S3). Anything
+    else consumes nothing and shows one generic error.
     """
     headers = request.headers
     if headers.get("sec-fetch-site") != "none" or headers.get("sec-fetch-mode") != "navigate":
@@ -354,6 +355,8 @@ def app_handoff(request: Request, code: str = "", db: Session = Depends(get_db))
     if found is None:
         raise WebError(400, *_HANDOFF_ERROR)
     hc, ps = found
+    if not security.same_install(hc.install_hash, headers.get("user-agent")):
+        raise WebError(400, *_HANDOFF_ERROR)
     user = db.get(User, ps.user_id)
     machine = db.get(Agent, ps.machine_agent_id)
     valid = (hc.used_at is None and hc.expires_at > identity.now() and ps.revoked_at is None and user is not None
@@ -366,7 +369,7 @@ def app_handoff(request: Request, code: str = "", db: Session = Depends(get_db))
         raise WebError(400, *_HANDOFF_ERROR)
     hc.used_at = identity.now()
     response = redirect(request, "/app/inbox")
-    auth.start_app_session(db, ps, user, response, _settings(request))
+    auth.start_app_session(db, ps, user, response, _settings(request), hc.install_hash)
     response.headers["Referrer-Policy"] = "no-referrer"
     db.commit()
     return response
