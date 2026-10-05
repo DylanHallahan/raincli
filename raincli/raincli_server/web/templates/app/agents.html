@@ -82,13 +82,21 @@
   {% endif %}
   </section>
   {% else %}
-  <div class="card empty"><p class="muted">No machines yet. Add your first one below, download its config, then give your coding agent the setup prompt.</p></div>
+  <div class="card empty"><p class="muted">No machines yet. On Windows, install the RainCLI app and sign in; on a headless Linux machine, run <code>raincli login</code>. Either way the machine appears here. For an inbox or connector setup, add the machine below and download its config.</p></div>
   {% endfor %}
 
   {% if viewer.teams %}
+  <section class="card setup-paths" id="set-up" aria-labelledby="set-up-title">
+    <h2 class="h3" id="set-up-title">Set up a machine</h2>
+    <ol class="plain-list">
+      <li><strong>Windows:</strong> <a href="{{ WINDOWS_DOWNLOAD_URL }}" data-download-windows>Download for Windows</a> (<code>RainCLI-Setup-&lt;version&gt;.exe</code> from the latest release; check it against its <code>.sha256</code> file), run it, and sign in with your email and password. It installs for your Windows account only, with no admin rights, and is not code-signed, so Windows may ask you to confirm. <a href="{{ WINDOWS_GUIDE_URL }}">Windows guide</a></li>
+      <li><strong>Headless Linux:</strong> after the managed install (<a href="{{ SETUP_URL }}">setup guide</a>, step 1), run <code>raincli login --email {{ viewer.user.email }}</code> in an interactive terminal, then <code>raincli runtime startup --config ~/.config/raincli/runtime.json</code> and <code>loginctl enable-linger "$USER"</code>. <a href="{{ HEADLESS_LOGIN_URL }}">Headless setup</a></li>
+      <li><strong>Inbox or connector setup:</strong> add the machine below and download its config. Machines signed in with the app or <code>raincli login</code> report their agents and take updates, but don't receive messages yet.</li>
+    </ol>
+  </section>
   <form method="post" action="{{ url('/app/agents') }}" class="card form register" id="add-machine">
     <h2 class="h3">Add a machine</h2>
-    <p class="help">One address and one credential per machine. The runtime on that machine lists its coding agents here and delivers messages to the inbox agent you choose during setup.</p>
+    <p class="help">For an inbox or connector setup: one address and one credential per machine, as a config file you download. The runtime on that machine lists its coding agents here and delivers messages to the inbox agent you choose during setup. The Windows app and <code>raincli login</code> add their machine themselves.</p>
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <div class="grid-fields">
       <div>

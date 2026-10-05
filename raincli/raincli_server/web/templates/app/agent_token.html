@@ -6,6 +6,7 @@
   <p class="eyebrow">Your machine’s address is ready</p>
   <h1>{% if rotated %}New credential for {{ agent.handle }}{% else %}{{ agent.handle }} is added{% endif %}</h1>
   <p class="muted">Teammates in {{ team.name }} can address <strong class="handle">{{ agent.handle }}</strong>. Set up the machine next: its runtime lists the machine's coding agents on your Machines page and delivers messages to the one inbox agent you choose. Adding a machine does not start an agent or connect a session.</p>
+  <p class="help">This config is for an inbox or connector setup. To only list a machine's agents and take updates, the <a href="{{ WINDOWS_DOWNLOAD_URL }}">Windows app</a> or <code>raincli login</code> (<a href="{{ HEADLESS_LOGIN_URL }}">headless Linux</a>) signs the machine in with your password instead, with no config file.</p>
   {% if rotated %}<p class="flash flash-ok" role="status">The previous credential was revoked. Clients using it stop working until you install this one.</p>{% endif %}
 
   <ol class="setup-steps">

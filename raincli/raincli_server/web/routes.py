@@ -124,6 +124,13 @@ templates.env.filters["ts"] = fmt_ts
 templates.env.filters["iso"] = iso_ts
 templates.env.filters["filesize"] = lambda n: f"{n} B" if n < 1024 else f"{n / 1024:.1f} KiB"
 templates.env.globals["STATE_LABELS"] = STATE_LABELS
+# Public links. Release assets carry the version in their names, so the download goes to the latest
+# release page rather than one installer file.
+templates.env.globals["WINDOWS_DOWNLOAD_URL"] = "https://github.com/DylanHallahan/raincli/releases/latest"
+templates.env.globals["SETUP_URL"] = "https://github.com/DylanHallahan/raincli/blob/main/SETUP.md"
+templates.env.globals["HEADLESS_LOGIN_URL"] = (
+    "https://github.com/DylanHallahan/raincli/blob/main/SETUP.md#headless-linux-raincli-login")
+templates.env.globals["WINDOWS_GUIDE_URL"] = "https://github.com/DylanHallahan/raincli/blob/main/docs/windows-client.md"
 templates.env.globals["CONNECTION_LABELS"] = CONNECTION_LABELS
 
 
