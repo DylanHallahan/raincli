@@ -28,6 +28,7 @@ On its first run the tray asks for your RainCLI **email and password** and a **m
 - **"That name is taken"**: a teammate uses it, or a revoked machine had it. Choose another name.
 - **"You already have a machine with that name"**: signing in again on the same computer replaces its credential automatically. From another computer, the app asks you to confirm **replace machine <name>**, and that works only for a machine that has never received a message or had an inbox. Otherwise revoke the old machine on the website, then choose a new name.
 - After several wrong passwords, sign-in pauses for a few minutes, on the website too.
+- You can have up to 20 active machines in a team. Past that, sign-in says so; revoke one on the website first.
 
 Sign-in stores the machine credential in `%USERPROFILE%\.config\raincli\agent.json`, encrypted with Windows DPAPI for your Windows account (`token_dpapi`) and protected by an owner-only ACL. DPAPI protects the file at rest; it does not protect against other programs running as you. Copied to another account or computer, it fails with "sign in again".
 
@@ -58,20 +59,34 @@ Run the installer. Its first run finds, in this order:
 It keeps your **handle, credential, connector configs and queues**: no new sign-in, no new machine and no new handle. It converts the token to DPAPI, keeps or writes a connector-mode `runtime.json` so delivery continues, starts the new runtime and checks that it's ready, and only then disables the old startup entry (recorded, not deleted). The old install's files stay where they are, but the old pip `raincli` command stops working; use the app's `raincli`. If an old connector window is still running, the app asks you to **close the old RainCLI window** to finish, and never kills it. Everything is logged, without secrets, to `migration.log` in the app's state directory.
 
 ### Uninstall
-Use **Uninstall RainCLI** in the Start menu or Windows Settings. It asks whether to **sign this computer out** too (default **No**). Yes revokes the machine and deletes its credential; if that fails, the credential is kept and you're told.
+Use **Uninstall RainCLI** in the Start menu or Windows Settings. It first stops the app (`RainCLI.exe --quit`); if the app doesn't stop within two minutes, the uninstaller says so and changes nothing. It then removes the hook entries marked `raincli` from Claude Code and Codex, using the runtime config the app runs (from `app.json`, or the default). Then it asks whether to **sign this computer out** too (default **No**). Yes revokes the machine and deletes its credential; if that fails, the credential is kept and you're told. For a silent uninstall, pass `/SIGNOUT=yes` or `/SIGNOUT=no`, for example `unins000.exe /VERYSILENT /SIGNOUT=yes`.
 
-- **Removed:** the Run value, the `PATH` entry and the `raincli` command, the Start menu entries, every installed version, `RainCLI.exe`, `install.json`, and the hook entries marked `raincli`.
-- **Kept:** `agent.json` (unless you signed out), your queues, `machine-salt`, `migration.log`, `installer-record.log`, and any old startup entry that migration disabled (it is not restored).
+What happens to each file (protocol §15.8 M10):
+
+| Removed | Kept |
+|---|---|
+| the `RainCLI` Run value (only if it starts this app) | `agent.json`, unless you signed out |
+| the `bin` entry on your user `PATH`, and `bin\` with the `raincli` command | your connector configs and queues |
+| the Start menu entries | the runtime's state directory: `machine-salt`, status, `runtime.log` and connector logs |
+| `versions\` (every installed version) | `migration.log` |
+| the stub, `RainCLI.exe`, with its `_internal\` | `installer-record.log` |
+| `install.json` and `install.json.new` | `app.json` (which configs the app runs) and `update-mode.json` (your manual or automatic choice), so a reinstall resumes as before |
+| `heartbeat.json`, `update-state.json`, `update-lock\`, `app-lock\` and `state\downloads\` | `state\runtime.log` |
+| the hook entries marked `raincli` | an old startup entry that migration disabled (recorded, not restored) |
+
+A reinstall over a running app first stops it the same way (`RainCLI.exe --quit`) and then replaces the stub and the `raincli` command too, so a full install can repair them. If the app won't stop, Setup stops with a message and changes nothing. An update pushed by your team (`/UPDATE`) never replaces the stub or the `raincli` command.
 
 ### Install layout
 ```
 %LOCALAPPDATA%\Programs\RainCLI\
-  RainCLI.exe              stable stub: starts the current version and owns rollback; never updated in place
-  bin\raincli.exe          the CLI on PATH; runs the current version's raincli.exe
-  versions\<X.Y.Z>\        each version: RainCLI-app.exe (tray) and raincli.exe (CLI)
-  install.json             {"current", "previous", "probation"}
-  installer-record.log     startup entries found before the first change
+  RainCLI.exe, _internal\   the stub: starts the current version and owns rollback; replaced only by a full install
+  bin\raincli.exe, bin\_internal\   the CLI on PATH; runs the current version's raincli.exe
+  versions\<X.Y.Z>\          each version: RainCLI-app.exe (tray) and raincli.exe (CLI)
+  install.json               {"current", "previous", "probation"}
+  app.json                   the agent and runtime config the app runs
+  installer-record.log       startup entries found before the first change
 ```
+Every part is a folder build: nothing runs from `%TEMP%`.
 
 ## Python client (existing and advanced installs)
 
@@ -166,4 +181,4 @@ Run from the repository root. The script uses a disposable temporary directory a
 
 ## Windows app verification
 
-[Manual Windows app build](../.github/workflows/windows-app-build.yml) builds the installer and its checksum on `windows-2022` and uploads them as a workflow artifact only; it fails if the bundle contains any test hook. [Manual Windows app e2e](../.github/workflows/windows-app-e2e.yml) builds 0.4.0 and 0.4.1 test installers from the same source and checks, against a throwaway in-job server: a silent per-user install, sign-in through `raincli login` on a pseudo console, the Run value, presence, a pushed upgrade and an explicit downgrade through the installer assets, sign-out and uninstall, and migration of a pip-installed v0.2.0 client with a connector config and queue. Its fake release endpoint answers on the real GitHub hostnames through a hosts-file entry and a test root CA on that disposable runner; the shipped app has no override. Both workflows are manual only and use no secrets. See [release testing](release-testing.md).
+[Manual Windows app build](../.github/workflows/windows-app-build.yml) builds the installer and its checksum on `windows-2022` and uploads them as a workflow artifact only; it fails if the bundle contains any test hook. [Manual Windows app e2e](../.github/workflows/windows-app-e2e.yml) builds 0.4.0 and 0.4.1 test installers from the same source and checks, against a throwaway in-job server: a silent per-user install, sign-in through `raincli login` on a pseudo console, the Run value, presence, a pushed upgrade, a rollback of a version whose tray never starts, and an explicit downgrade through the installer assets, uninstall with and without sign-out, and migration of both a pip-installed v0.2.0 foreground connector and a managed v0.3.2 install. Its fake release endpoint answers on the real GitHub hostnames through a hosts-file entry and a test root CA on that disposable runner; the shipped app has no override. Both workflows are manual only and use no secrets. See [release testing](release-testing.md).

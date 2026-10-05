@@ -7,11 +7,11 @@ executable's archive and checks:
 - no ``_build_test`` module or file, and no test package;
 - no code object naming ``TEST_RELEASE_BASE``, ``TEST_CERT_SHA256`` or ``_build_test``;
 - no server, test-runner or build-tool module;
-- the version folder freezes the real tray and CLI (``raincli_agent.app`` and
-  ``raincli_agent.cli``), and the stub freezes ``raincli_agent.app.stub``, unless
-  ``--allow-placeholder`` is given for a dry run (a release build never passes it).
+- the tray executable freezes ``raincli_agent.app.tray`` and its GUI modules (``pystray``,
+  ``PIL``, ``tkinter``), the CLI freezes ``raincli_agent.cli``, the stub freezes
+  ``raincli_agent.app.stub``, and the PATH shim freezes no client code at all.
 
-Usage: python verify_bundle.py <dist-dir> --version X.Y.Z [--allow-placeholder]
+Usage: python verify_bundle.py <dist-dir> --version X.Y.Z
 Exit status 0 when clean; 1 with one line per problem otherwise.
 """
 import argparse
@@ -21,7 +21,6 @@ import types
 
 FORBIDDEN_NAMES = ("TEST_RELEASE_BASE", "TEST_CERT_SHA256", "_build_test")
 FORBIDDEN_MODULES = ("raincli_server", "pytest", "PyInstaller", "fastapi", "sqlalchemy", "uvicorn")
-PLACEHOLDER_MARK = "RAINCLI-PLACEHOLDER-APP"
 
 
 def frozen_modules(exe):
@@ -69,7 +68,7 @@ def code_strings(code):
             yield from code_strings(const)
 
 
-def check_modules(label, modules, required, allow_placeholder):
+def check_modules(label, modules, required):
     problems = []
     for name, code in modules.items():
         short = name.removeprefix("<script>")
@@ -82,8 +81,6 @@ def check_modules(label, modules, required, allow_placeholder):
             for bad in FORBIDDEN_NAMES:
                 if any(bad in s for s in strings):
                     problems.append(f"{label}: {short} refers to {bad}")
-            if PLACEHOLDER_MARK in strings and not allow_placeholder:
-                problems.append(f"{label}: {short} is the build placeholder, not the real app")
     for name in required:
         if name not in modules:
             problems.append(f"{label}: {name} is not frozen in")
@@ -103,14 +100,14 @@ def check_files(dist):
     return problems
 
 
-def verify(dist, version, allow_placeholder=False):
+def verify(dist, version):
     dist = Path(dist)
     folder = dist / f"RainCLI-{version}"
     problems = check_files(dist)
     targets = [
-        (folder / "RainCLI-app.exe", ["raincli_agent.app"]),
+        (folder / "RainCLI-app.exe", ["raincli_agent.app.tray", "pystray", "PIL", "tkinter"]),
         (folder / "raincli.exe", ["raincli_agent.cli"]),
-        (dist / "RainCLI.exe", ["raincli_agent.app.stub"]),
+        (dist / "stub" / "RainCLI.exe", ["raincli_agent.app.stub"]),
         (dist / "bin" / "raincli.exe", []),
     ]
     for exe, required in targets:
@@ -118,7 +115,7 @@ def verify(dist, version, allow_placeholder=False):
             problems.append(f"{exe.relative_to(dist)} is missing")
             continue
         modules = frozen_modules(exe)
-        problems += check_modules(str(exe.relative_to(dist)), modules, required, allow_placeholder)
+        problems += check_modules(str(exe.relative_to(dist)), modules, required)
         if exe.parent.name == "bin" and any(m.startswith("raincli_agent") for m in modules):
             problems.append("bin/raincli.exe must not bundle the client; it only forwards to the current version")
     return problems
@@ -128,10 +125,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("dist")
     parser.add_argument("--version", required=True)
-    parser.add_argument("--allow-placeholder", action="store_true",
-                        help="accept the build placeholder tray and stub (a dry run, never a release)")
     args = parser.parse_args(argv)
-    problems = verify(args.dist, args.version, args.allow_placeholder)
+    problems = verify(args.dist, args.version)
     for problem in problems:
         print("BUNDLE CHECK FAILED: " + problem)
     if not problems:

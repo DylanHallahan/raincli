@@ -452,6 +452,9 @@ def _sign_in_machine(session: Session, user, machine_name: str, team_slug: str |
                                                          previous_token=previous_token, replace=replace)
     except identity.NameTaken:
         return ApiError(409, "name_taken", "that machine name is taken in this team; choose another")
+    except identity.MachineLimit:
+        return ApiError(409, "machine_limit", f"you already have {identity.MACHINE_LIMIT} active machines in this "
+                                              "team; revoke one on the website first")
     except identity.NameInUse:
         return ApiError(409, "name_in_use", "you already have a machine with that name")
     log.info("app sign-in: machine %s in team %s %s", agent.handle, team.slug, "rotated" if rotated else "created")

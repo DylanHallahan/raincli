@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -300,6 +300,13 @@ class NameTaken(IdentityError):
     """The machine name belongs to another member, or to a revoked machine (protocol §15.1)."""
 
 
+class MachineLimit(IdentityError):
+    """The user already has MACHINE_LIMIT active machines in the team (protocol §15.9)."""
+
+
+MACHINE_LIMIT = 20
+
+
 class NameInUse(IdentityError):
     """The user's own active machine has that name, and the request lacks proof to replace it (§15.8 H2)."""
 
@@ -321,13 +328,20 @@ def sign_in_machine(session: Session, team: Team, user: User, machine_name: str,
     for a machine with no delivery history. Without proof this raises ``NameInUse``. Any other holder
     of the name, or a revoked machine, raises ``NameTaken``.
     """
-    if membership(session, team.id, user.id) is None:
+    # Locking the membership row serializes this user's sign-ins in this team, so the cap holds.
+    member = session.scalar(select(Membership).where(Membership.team_id == team.id, Membership.user_id == user.id)
+                            .with_for_update())
+    if member is None:
         raise PermissionDenied("you are not a member of that team")
     if not security.valid_handle(machine_name):
         raise IdentityError("machine_name must match ^[a-z][a-z0-9-]{1,31}$")
     existing = session.scalar(select(Agent).where(Agent.team_id == team.id, Agent.handle == machine_name)
                               .with_for_update().execution_options(populate_existing=True))
     if existing is None:
+        active = session.scalar(select(func.count()).select_from(Agent).where(
+            Agent.team_id == team.id, Agent.owner_user_id == user.id, Agent.revoked_at.is_(None)))
+        if active >= MACHINE_LIMIT:
+            raise MachineLimit(f"you already have {MACHINE_LIMIT} active machines in this team")
         agent = Agent(team_id=team.id, owner_user_id=user.id, handle=machine_name, display_name=machine_name,
                       signed_in_from=machine_name)
         try:

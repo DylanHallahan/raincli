@@ -1,21 +1,22 @@
-; RainCLI Windows app installer (protocol §15.5, amended by §15.8 H5, H6, H7, M6, M10 and L2).
+; RainCLI Windows app installer (protocol §15.5, amended by §15.8 H5, H6, H7, M6, M10, L2 and §15.9).
 ; Built by build.py:  ISCC /DAppVersion=X.Y.Z /DDistDir=<PyInstaller dist> RainCLI.iss
 ;
 ; A full install (no /UPDATE) goes to %LOCALAPPDATA%\Programs\RainCLI (no admin rights) and:
 ;   - records any existing RainCLI Run value, Startup-folder entry or Scheduled Task that starts
 ;     raincli in installer-record.log BEFORE writing anything (H7), and never overwrites an
 ;     unrecorded value: it writes the Run value only when none exists or it already names our stub;
-;     otherwise the app's migration (H6 step 5) takes it over once the new runtime is ready;
-;   - installs versions\X.Y.Z, the stable stub RainCLI.exe and the PATH shim bin\raincli.exe (the
-;     stub and the shim only if absent: they never change in place);
+;     otherwise the app's migration takes it over (§15.6, H6, §15.9);
+;   - stops a running app with `RainCLI.exe --quit` and continues only if that exits 0 (§15.9);
+;   - installs versions\X.Y.Z, and the stable stub RainCLI.exe and the PATH shim bin\raincli.exe,
+;     both onedir with their own _internal (§15.9);
 ;   - writes install.json {current, previous, probation} atomically (M6);
 ;   - puts <root>\bin first on the user PATH, adds the Start menu entries and starts the tray,
 ;     whose first run signs in or migrates an older install (§15.6, H6).
 ; /UPDATE /DIR=<root>\versions\X.Y.Z (the app's updater) installs only that version folder: no
-; uninstaller or uninstall key, no Run value, PATH, shortcuts, install.json or launch (H5).
-; The uninstaller stops the app through the stub, optionally signs out (default no), removes the
-; raincli-marked hooks, our Run value, the PATH entry, the shortcuts, versions\*, the stub, the shim
-; and install.json, and keeps agent.json, the queues, machine-salt and the logs (M10).
+; uninstaller or uninstall key, no stub, shim, Run value, PATH, shortcuts, install.json or launch (H5).
+; The uninstaller stops the app (it refuses while the app keeps running), removes the raincli-marked
+; hooks, then signs out if asked (/SIGNOUT=yes, or Yes to its question; default no), and removes what
+; M10 lists. What it removes and keeps is listed in docs/windows-client.md (Uninstall).
 
 #ifndef AppVersion
   #error Define AppVersion (X.Y.Z), as build.py does
@@ -56,8 +57,9 @@ UninstallDisplayIcon={app}\RainCLI.exe
 
 [Files]
 Source: "{#DistDir}\RainCLI-{#AppVersion}\*"; DestDir: "{code:VersionDir}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#DistDir}\RainCLI.exe"; DestDir: "{app}"; Flags: onlyifdoesntexist; Check: not IsUpdate
-Source: "{#DistDir}\bin\raincli.exe"; DestDir: "{app}\bin"; Flags: onlyifdoesntexist; Check: not IsUpdate
+; The stub and the shim: full installs only, after a successful --quit (PrepareToInstall).
+Source: "{#DistDir}\stub\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: not IsUpdate
+Source: "{#DistDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: not IsUpdate
 
 [Icons]
 Name: "{userprograms}\RainCLI\RainCLI"; Filename: "{app}\RainCLI.exe"; Check: not IsUpdate
@@ -67,12 +69,18 @@ Name: "{userprograms}\RainCLI\Uninstall RainCLI"; Filename: "{uninstallexe}"; Ch
 Filename: "{app}\RainCLI.exe"; Parameters: "--background"; Flags: nowait; Check: not IsUpdate
 
 [UninstallDelete]
+; M10, removed: every version, the stub, the shim, install.json, and the app's transient state.
 Type: filesandordirs; Name: "{app}\versions"
+Type: filesandordirs; Name: "{app}\_internal"
 Type: files; Name: "{app}\RainCLI.exe"
-Type: files; Name: "{app}\bin\raincli.exe"
-Type: dirifempty; Name: "{app}\bin"
+Type: filesandordirs; Name: "{app}\bin"
 Type: files; Name: "{app}\install.json"
 Type: files; Name: "{app}\install.json.new"
+Type: files; Name: "{app}\heartbeat.json"
+Type: files; Name: "{app}\update-state.json"
+Type: filesandordirs; Name: "{app}\update-lock"
+Type: filesandordirs; Name: "{app}\app-lock"
+Type: filesandordirs; Name: "{app}\state\downloads"
 Type: dirifempty; Name: "{userprograms}\RainCLI"
 
 [Code]
@@ -86,7 +94,7 @@ const
 var
   SignOutOnUninstall: Boolean;
 
-function MoveFileEx(ExistingName, NewName: String; Flags: DWORD): BOOL;
+function MoveFileEx(ExistingName, NewName: String; Flags: DWORD): Boolean;
   external 'MoveFileExW@kernel32.dll stdcall';
 
 function IsUpdate: Boolean;
@@ -97,6 +105,17 @@ begin
   for I := 1 to ParamCount do
     if CompareText(ParamStr(I), '/UPDATE') = 0 then
       Result := True;
+end;
+
+{ The value of a /NAME=value parameter, lowercased, or ''. }
+function ParamValue(Name: String): String;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 1 to ParamCount do
+    if CompareText(Copy(ParamStr(I), 1, Length(Name) + 2), '/' + Name + '=') = 0 then
+      Result := Lowercase(Copy(ParamStr(I), Length(Name) + 3, Length(ParamStr(I))));
 end;
 
 function VersionDir(Param: String): String;
@@ -151,10 +170,12 @@ begin
   Result := Result and (Dots = 2);
 end;
 
-{ The string value of "Key" in a flat JSON object written by the app or this installer, or ''. }
-function JsonString(Json, Key: String): String;
+{ The string value of "Key" in a flat JSON object written by the app or this installer, with the
+  escapes \\, \/ and \" undone; '' when absent, not a string, or using any other escape. }
+function JsonText(Json, Key: String): String;
 var
   P: Integer;
+  C: String;
 begin
   Result := '';
   P := Pos('"' + Key + '"', Json);
@@ -167,20 +188,40 @@ begin
   Json := Trim(Copy(Json, P + 1, Length(Json)));
   if (Length(Json) = 0) or (Json[1] <> '"') then
     Exit;
-  Json := Copy(Json, 2, Length(Json));
-  P := Pos('"', Json);
-  if P > 0 then
-    Result := Copy(Json, 1, P - 1);
+  P := 2;
+  while P <= Length(Json) do
+  begin
+    C := Json[P];
+    if C = '"' then
+      Exit;
+    if C = '\' then
+    begin
+      P := P + 1;
+      if P > Length(Json) then
+        Break;
+      C := Json[P];
+      if (C <> '\') and (C <> '/') and (C <> '"') then
+        Break;
+    end;
+    Result := Result + C;
+    P := P + 1;
+  end;
+  Result := '';  { unterminated or an unsupported escape }
+end;
+
+function JsonVersion(Json, Key: String): String;
+begin
+  Result := JsonText(Json, Key);
   if not IsVersion(Result) then
     Result := '';
 end;
 
-function ReadInstallJson: String;
+function ReadRootFile(Name: String): String;
 var
   Raw: AnsiString;
 begin
   Result := '';
-  if LoadStringFromFile(RootDir + '\install.json', Raw) then
+  if LoadStringFromFile(RootDir + '\' + Name, Raw) then
     Result := String(Raw);
 end;
 
@@ -221,27 +262,30 @@ begin
   end;
 end;
 
+{ Scheduled Tasks whose action mentions raincli, through Get-ScheduledTask: locale-independent (B9). }
 procedure RecordScheduledTasks(var Lines: TArrayOfString);
 var
   Output: TArrayOfString;
-  Tmp, Name: String;
+  Script, Listing: String;
   I, Code: Integer;
 begin
-  Tmp := ExpandConstant('{tmp}\schtasks.txt');
-  if not Exec(ExpandConstant('{cmd}'), '/c schtasks /query /fo LIST /v > "' + Tmp + '" 2>nul', '',
-              SW_HIDE, ewWaitUntilTerminated, Code) or not LoadStringsFromFile(Tmp, Output) then
+  Script := ExpandConstant('{tmp}\raincli-tasks.ps1');
+  Listing := ExpandConstant('{tmp}\raincli-tasks.txt');
+  if not SaveStringToFile(Script,
+      '$ErrorActionPreference = "Stop"' + #13#10 +
+      '$found = foreach ($t in Get-ScheduledTask) { foreach ($a in $t.Actions) {' + #13#10 +
+      '  $line = "$($a.Execute) $($a.Arguments)"' + #13#10 +
+      '  if ($line -match "raincli") { "scheduled task: $($t.TaskPath)$($t.TaskName) runs $line" } } }' + #13#10 +
+      'Set-Content -LiteralPath $args[0] -Value (@("ok") + @($found)) -Encoding UTF8' + #13#10, False) or
+     not Exec('powershell.exe', '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '" "' +
+              Listing + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) or
+     not LoadStringsFromFile(Listing, Output) or (GetArrayLength(Output) = 0) then
   begin
     AddLine(Lines, 'scheduled tasks: could not be listed');
     Exit;
   end;
-  Name := '';
-  for I := 0 to GetArrayLength(Output) - 1 do
-  begin
-    if Pos('TaskName:', Output[I]) = 1 then
-      Name := Trim(Copy(Output[I], 10, Length(Output[I])))
-    else if (Pos('Task To Run:', Output[I]) = 1) and Contains(Output[I], 'raincli') then
-      AddLine(Lines, 'scheduled task: ' + Name + ' runs ' + Trim(Copy(Output[I], 13, Length(Output[I]))));
-  end;
+  for I := 1 to GetArrayLength(Output) - 1 do
+    AddLine(Lines, Output[I]);
 end;
 
 procedure RecordExistingStartup;
@@ -280,9 +324,9 @@ procedure WriteInstallJson;
 var
   Old, Current, Previous, Json, Path: String;
 begin
-  Old := ReadInstallJson;
-  Current := JsonString(Old, 'current');
-  Previous := JsonString(Old, 'previous');
+  Old := ReadRootFile('install.json');
+  Current := JsonVersion(Old, 'current');
+  Previous := JsonVersion(Old, 'previous');
   if (Current <> '') and (Current <> '{#AppVersion}') then
     Previous := Current;
   if Previous = '{#AppVersion}' then
@@ -344,15 +388,19 @@ begin
     RegWriteExpandStringValue(HKCU, EnvKey, 'Path', WithoutEntry(Value, ExpandConstant('{app}') + '\bin'));
 end;
 
-{ -- install ------------------------------------------------------------------------------ }
+{ -- stopping the app (§15.9) ------------------------------------------------------------- }
 
-procedure StopRunningApp;
+{ True when no app is installed here, or `RainCLI.exe --quit` stopped it (exit code 0). }
+function StopRunningApp: Boolean;
 var
   Code: Integer;
 begin
+  Result := True;
   if FileExists(RootDir + '\RainCLI.exe') then
-    Exec(RootDir + '\RainCLI.exe', '--quit', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    Result := Exec(RootDir + '\RainCLI.exe', '--quit', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
 end;
+
+{ -- install ------------------------------------------------------------------------------ }
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
@@ -371,7 +419,8 @@ begin
     Result := 'RainCLI could not record the existing startup entries: ' + GetExceptionMessage;
     Exit;
   end;
-  StopRunningApp;
+  if not StopRunningApp then
+    Result := 'RainCLI is still running and did not stop. Quit it from its tray icon, then run Setup again.';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -387,19 +436,41 @@ end;
 { -- uninstall ---------------------------------------------------------------------------- }
 
 function InitializeUninstall: Boolean;
+var
+  Choice: String;
 begin
-  SignOutOnUninstall := SuppressibleMsgBox(
-    'Also sign this computer out of RainCLI?' + #13#10#13#10 +
-    'Yes revokes this machine''s credential on the server and deletes it here. ' +
-    'No keeps it, so a reinstall picks up where you left off.',
-    mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
-  Result := True;
+  Result := StopRunningApp;
+  if not Result then
+  begin
+    SuppressibleMsgBox('RainCLI is still running and did not stop. Quit it from its tray icon, then ' +
+                       'uninstall again.', mbError, MB_OK, IDOK);
+    Exit;
+  end;
+  Choice := ParamValue('SIGNOUT');
+  if Choice = 'yes' then
+    SignOutOnUninstall := True
+  else if Choice = 'no' then
+    SignOutOnUninstall := False
+  else
+    SignOutOnUninstall := SuppressibleMsgBox(
+      'Also sign this computer out of RainCLI?' + #13#10#13#10 +
+      'Yes revokes this machine''s credential on the server and deletes it here. ' +
+      'No keeps it, so a reinstall picks up where you left off.',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
 end;
 
 procedure RunCli(Cli, Params: String; var Code: Integer);
 begin
   if not Exec(Cli, Params, '', SW_HIDE, ewWaitUntilTerminated, Code) then
     Code := -1;
+end;
+
+{ The runtime config the app runs: app.json's runtime_config, else the default (B5). }
+function RuntimeConfig: String;
+begin
+  Result := JsonText(ReadRootFile('app.json'), 'runtime_config');
+  if Result = '' then
+    Result := ExpandConstant('{%USERPROFILE}\.config\raincli\runtime.json');
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -409,11 +480,17 @@ var
 begin
   if CurUninstallStep <> usUninstall then
     Exit;
-  StopRunningApp;
-  Current := JsonString(ReadInstallJson, 'current');
+  Current := JsonVersion(ReadRootFile('install.json'), 'current');
   Cli := ExpandConstant('{app}\versions\') + Current + '\raincli.exe';
   if (Current <> '') and FileExists(Cli) then
   begin
+    { Hooks first: signing out deletes a machine-mode runtime.json, which names the hooks' state. }
+    Runtime := RuntimeConfig;
+    if FileExists(Runtime) then
+    begin
+      RunCli(Cli, 'hooks install --remove --claude --config "' + Runtime + '"', Code);
+      RunCli(Cli, 'hooks install --remove --codex --config "' + Runtime + '"', Code);
+    end;
     if SignOutOnUninstall then
     begin
       RunCli(Cli, 'logout --yes', Code);
@@ -421,12 +498,6 @@ begin
         SuppressibleMsgBox('Sign-out did not complete, so this machine''s credential was kept. ' +
                            'Revoke the machine on the RainCLI website if you no longer need it.',
                            mbError, MB_OK, IDOK);
-    end;
-    Runtime := ExpandConstant('{%USERPROFILE}\.config\raincli\runtime.json');
-    if FileExists(Runtime) then
-    begin
-      RunCli(Cli, 'hooks install --remove --claude --config "' + Runtime + '"', Code);
-      RunCli(Cli, 'hooks install --remove --codex --config "' + Runtime + '"', Code);
     end;
   end;
   if RegQueryStringValue(HKCU, RunKey, RunName, Existing) and (CompareText(Existing, StubCommand) = 0) then

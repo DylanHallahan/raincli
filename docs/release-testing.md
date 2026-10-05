@@ -79,17 +79,34 @@ From v0.4.0, a release also carries the Windows app installer: `RainCLI-Setup-<X
 4. Publish the release as **stable** (non-draft, non-prerelease) only after both assets are attached.
 
 ## The synthetic app e2e (any ref, before a release)
-**Actions → Manual Windows app e2e → Run workflow**, with the inputs left empty, builds 0.4.0 and 0.4.1 test installers from the same ref and runs `scripts/windows-app-e2e.py --installers dist/e2e` on a disposable `windows-2022` runner, against a throwaway in-job server (the same PostgreSQL and server setup as the managed e2e above). It checks, printing a `PASS:` line each:
-1. a silent per-user install with no admin: the layout, `install.json`, the HKCU Run value and uninstall key (none under HKLM), the shim first on the user `PATH`, the Start menu entries, and `installer-record.log`;
-2. sign-in through the installed `raincli login`, with the password typed into a pseudo console (ConPTY) at the no-echo prompt, never argv or the environment; `agent.json` holds `token_dpapi` only and `runtime.json` is machine mode;
-3. launching exactly the Run value's command line, then presence reporting the version, `automatic` and `current`;
-4. a pushed upgrade 0.4.0 → 0.4.1 through the installer assets: the release resolved, both assets fetched from the API asset URL with `Accept: application/octet-stream` and redirected to `objects.githubusercontent.com` and `release-assets.githubusercontent.com`, `/UPDATE` changing neither the Run value nor the uninstall key, `install.json` swapped, and the tray relaunched from `versions\0.4.1`;
-5. the downgrade refused, then allowed with `--allow-downgrade`, then the target cleared;
-6. `raincli logout --yes` through the PATH shim (the machine is revoked), then a silent uninstall that removes what §15.8 M10 lists and keeps the installer record;
-7. migration of a **pip-installed v0.2.0** client (installed from its release archive) with a connector config that omits `agent_config`, a runtime config and a queue: after a fresh install the handle and credential are unchanged, no machine is added, the token is DPAPI-protected, `runtime.json` is connector mode, a message sent after migration is delivered, and `migration.log` holds no token;
-8. an uninstall without sign-out that keeps `agent.json`, the connector config, the queue and `migration.log`.
+**Actions → Manual Windows app e2e → Run workflow**, with the inputs left empty, builds 0.4.0 and 0.4.1 test installers from the same ref and runs `scripts/windows-app-e2e.py --installers dist/e2e` on a disposable GitHub-hosted `windows-2022` runner, against a throwaway in-job server (the same PostgreSQL and server setup as the managed e2e above). It also builds a third installer, **0.4.2, from a staging copy of the client whose tray exits 1**. That patch exists only in the job's temporary copy; the shipped source has no hook. It prints a `PASS:` line for each check:
+
+**A. A fresh install, signed in from the CLI**
+1. A silent per-user install with no admin: the onedir layout, `install.json`, the HKCU Run value and uninstall key (none under HKLM), the shim first on the user `PATH`, the Start menu entries, and `installer-record.log` with the Run value and the Scheduled Tasks.
+2. `RainCLI.exe --quit` exits 0 with nothing left running. Then sign-in through the installed `raincli login`, with the password typed into a pseudo console (ConPTY) at the no-echo prompt, never argv or the environment. `agent.json` holds `token_dpapi` only, and `runtime.json` is machine mode.
+3. Launching exactly the Run value's command line, then presence reporting the version, `automatic` and `current`.
+4. A pushed upgrade 0.4.0 → 0.4.1 through the installer assets: both assets fetched from the API asset URL with `Accept: application/octet-stream` and redirected to `objects.githubusercontent.com` and `release-assets.githubusercontent.com`. `/UPDATE` changes neither the Run value nor the uninstall key, `install.json` is swapped, and the tray relaunches from `versions\0.4.1`.
+5. A pushed 0.4.2 whose tray never starts: the stub's probation rolls it back, the server shows `rolled_back` (`first_start_failed`), and 0.4.1 runs again.
+6. The downgrade refused, then allowed with `--allow-downgrade`, then the target cleared.
+7. An uninstall with `/SIGNOUT=yes`: the machine is revoked, its credential deleted, and what §15.8 M10 removes is gone. The installer record is kept.
+
+**B. An old pip client's foreground connector**
+A **pip-installed v0.2.0** client (installed from its release archive) runs `raincli connector run` in its own console. Its connector config omits `agent_config` and has a relative `state_dir`, and there is no `runtime.json`.
+- The app install starts while it runs. For 45 seconds the migration must wait and touch nothing (§15.8 M7).
+- Once the old connector is closed, the handle and credential are unchanged, no machine is added, the token is DPAPI-protected, `runtime.json` is connector mode, the Run value starts the stub, a message sent after migration is delivered, and `migration.log` holds no token.
+- An uninstall with `/SIGNOUT=no` keeps `agent.json`, the connector config, the queue and `migration.log`.
+
+**C. A managed v0.3.2 install**
+A **managed v0.3.2** install is installed through the real updater, and its runtime runs through its launcher with logon start in the HKCU Run value.
+- The app installer records that Run value.
+- The app's migration sends the launcher's stop request; the launcher exits.
+- The Run value then starts the stub, and the same handle keeps delivering.
+
+The script refuses to run anywhere but a GitHub-hosted Actions Windows runner (`GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT=github-hosted`).
+
+**Pinned tools.** `build.py` downloads Inno Setup 6.7.3 from its GitHub release, checks its SHA-256, installs it into the build directory and checks `ISCC.exe`'s version. The Python wheels are hash-pinned, and `build.py` prints the exact Python it ran on. It also times `bin\raincli.exe --version` against `raincli.exe --version` in an assembled install root, so the build log shows the PATH shim's start-up cost: the cost of every hook call.
 
 **How the fake release endpoint is reached.** The shipped app has no release-host override (§15.8 M11): `HOSTS`, `API` and `REPO` are constants, `raincli/tests/agent/test_release_constants.py` checks that, and the build refuses test hooks. So the e2e serves its fake release endpoint on the **real hostnames**, on that runner only: a hosts-file entry maps `api.github.com`, `github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com` to `127.0.0.1`, and a throwaway test root CA in the runner's LocalMachine Root store signs a certificate for exactly those names on port 443. The script removes both when it ends, and refuses to run anywhere but a GitHub Actions Windows runner.
 
 ## The real-release app e2e (after attaching the assets)
-Once two stable releases carry the installer assets, for example `v0.4.0` and `v0.4.1`, run **Manual Windows app e2e** with `real_from` = `v0.4.0` and `real_to` = `v0.4.1`. It builds nothing, adds no hosts entry and no test CA. It downloads both releases' installers, checks them against their published checksums, and runs the same eight phases with real GitHub: the pushed upgrade and downgrade fetch the **published** assets through the exact allowlist. A missing asset fails with `release vX.Y.Z has no asset …; attach it first`. Record the `PASS` lines and the run URL in the release notes, as for the managed e2e.
+Once two stable releases carry the installer assets, for example `v0.4.0` and `v0.4.1`, run **Manual Windows app e2e** with `real_from` = `v0.4.0` and `real_to` = `v0.4.1`. It builds nothing, adds no hosts entry and no test CA, and skips the rollback case (A5). It downloads both releases' installers, checks them against their published checksums, and runs the remaining phases with real GitHub: the pushed upgrade and downgrade fetch the **published** assets through the exact allowlist. A missing asset fails with `release vX.Y.Z has no asset …; attach it first`. Record the `PASS` lines and the run URL in the release notes, as for the managed e2e.

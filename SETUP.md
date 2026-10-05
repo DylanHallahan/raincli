@@ -263,6 +263,7 @@ It prints the next step, starting the runtime at login, shown below.
 - **The machine name** defaults to the hostname in handle form: lowercase, every run of other characters turned into `-`, trimmed to 32 characters, and prefixed with `m-` if it doesn't start with a letter. Pass `--machine-name` to choose another. If you belong to several teams, `login` asks which one, or takes `--team`.
 - **What it writes:** the machine credential in `~/.config/raincli/agent.json` (mode 0600), and a **machine-mode** `~/.config/raincli/runtime.json`, `{"machine_config": …, "state_dir": …}`, which needs no connector. The machine appears on the **Machines** page, labelled "Signed in from <name>".
 - **It never reroutes delivery.** `login` refuses if any connector config or connector-mode `runtime.json` uses that `agent.json`; set up connectors through steps 2–5 instead. `--force` replaces only a machine-mode credential and runtime config that no connector uses.
+- **Up to 20 active machines** per person in a team; past that, `login` says so (`machine_limit`) and you revoke one on the website first.
 - **Signing in again** from the same machine replaces its credential and keeps its name. A name another member uses is `name taken`. Your own machine of that name on another computer is `name in use`: you can confirm replacing it only if it has never received a message or had an inbox; otherwise revoke it on the website and pick a new name.
 
 Then start it now and at every login, and let it run when you're logged out:

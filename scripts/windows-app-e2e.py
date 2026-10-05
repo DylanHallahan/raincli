@@ -1,36 +1,44 @@
 """Windows app end to end, against a throwaway in-job server and a local fake release endpoint.
 
-Runs ONLY on a disposable GitHub Actions Windows runner (it edits the runner's hosts file,
-LocalMachine Root store, HKCU Run value and user PATH, and installs into its profile). It
+Runs ONLY on a disposable GitHub-hosted Actions Windows runner (it edits the runner's hosts
+file, LocalMachine Root store, HKCU Run value and user PATH, and installs into its profile). It
 takes two installers built from the same source as 0.4.0 and 0.4.1 by
-packaging/windows/build.py, and checks (protocol §15, §15.8):
+packaging/windows/build.py, builds a third, 0.4.2, from a staging copy whose tray exits 1, and
+checks (protocol §15, §15.8, §15.9):
 
-1. a silent per-user install with no admin: the layout, install.json, the HKCU Run value and
-   uninstall key, the shim first on the user PATH, the Start menu entries, the H7 record;
-2. first-run sign-in through the installed CLI's login (`raincli.exe login`), with the
-   password typed into a ConPTY prompt, never argv or the environment; the credential is
-   stored DPAPI-protected and the runtime config is machine mode;
-3. launching exactly what the Run value names; presence reports 0.4.0, automatic, current;
-4. a pushed upgrade to 0.4.1 through the installer-asset path: the release resolved from the
-   canonical repository, both assets fetched through the API asset URL and redirected to the
-   exact GitHub download hosts, /UPDATE changing neither the Run value nor the uninstall key,
-   install.json swapped and the app relaunched from versions\\0.4.1;
-5. the downgrade to 0.4.0 refused, then allowed with --allow-downgrade;
-6. sign-out through the PATH shim, then uninstall: what M10 removes is gone;
-7. migration from an old pip-installed client (0.2.0 from its release archive) with a
-   connector config that omits agent_config and a queue: a fresh install's first run keeps
-   the handle and credential (no new machine) and connector delivery continues;
-8. uninstall without sign-out: agent.json, the connector config and the queue are kept.
+A. A fresh app install, signed in from the CLI:
+   1. a silent per-user install with no admin: the layout, install.json, the HKCU Run value and
+      uninstall key, the shim first on the user PATH, the Start menu entries, the H7 record;
+   2. `RainCLI.exe --quit` stops the installer-started app (exit 0, nothing left running), then
+      sign-in through the installed CLI's `raincli login`, with the password typed into a ConPTY
+      prompt, never argv or the environment; DPAPI credential, machine-mode runtime config;
+   3. launching exactly what the Run value names; presence reports 0.4.0, automatic, current;
+   4. a pushed upgrade to 0.4.1 through the installer-asset path (API asset URL, exact download
+      hosts), /UPDATE changing neither the Run value nor the uninstall key, install.json swapped,
+      the tray relaunched from versions\0.4.1;
+   5. a pushed 0.4.2 whose tray exits 1: the stub's probation rolls back, `rolled_back` is
+      reported and 0.4.1 runs again;
+   6. the downgrade to 0.4.0 refused, then allowed with --allow-downgrade;
+   7. an uninstall that signs out (/SIGNOUT=yes): the machine is revoked and M10's removals hold.
+B. Migration of an old pip-installed client (0.2.0 from its release archive) running as a
+   foreground `raincli connector run` with no runtime.json, no agent_config and a relative
+   state_dir: the install waits while the old connector holds its queue, then, once it is closed,
+   keeps the handle and credential (no new machine), writes a connector-mode runtime.json, and
+   delivery continues. An uninstall without sign-out keeps the credential and connector state.
+C. Migration of a managed v0.3.2 install whose runtime runs through its launcher and starts from
+   the HKCU Run value: the installer records that value, the app sends the launcher's stop request
+   and points the Run value at the stub, and delivery continues on the same handle.
 
 Release traffic goes to the REAL hostnames (api.github.com, github.com,
 objects.githubusercontent.com, release-assets.githubusercontent.com): a hosts-file entry points
 them at 127.0.0.1:443, where a fake release endpoint serves a certificate from a test root CA
-added to the runner's LocalMachine Root store (§15.8 M11). The shipped client has no override.
+added to the runner's LocalMachine Root store (§15.8 M11). The shipped client has no override, and
+the 0.4.2 rollback build is patched only in this job's staging copy.
 Every credential is generated here and never printed. See docs/release-testing.md.
 
 With ``--real FROM TO`` (for example ``--real v0.4.0 v0.4.1``) it skips the fake endpoint, the
-hosts file and the test CA: it downloads both versions' installer assets from the published
-releases of the canonical repository, and the pushed update fetches the real assets from GitHub.
+hosts file, the test CA and the rollback build: it downloads both versions' installer assets from
+the published releases of the canonical repository, and the pushed update fetches the real assets.
 """
 import argparse
 import contextlib
@@ -64,9 +72,10 @@ Failure, SECRETS, say, wait_for, tail = (release_e2e.Failure, release_e2e.SECRET
                                          release_e2e.wait_for, release_e2e.tail)
 
 TEAM, EMAIL = "app-e2e", "app-e2e@example.invalid"
-MACHINE, OBSERVER, OLD_MACHINE = "e2e-app-machine", "e2e-observer", "e2e-pip-machine"
-OLD, NEW = "0.4.0", "0.4.1"
-OLD_PIP = "v0.2.0"
+MACHINE, OBSERVER, OLD_MACHINE, MANAGED_MACHINE = "e2e-app-machine", "e2e-observer", "e2e-pip-machine", \
+    "e2e-managed-machine"
+OLD, NEW, BROKEN = "0.4.0", "0.4.1", "0.4.2"
+OLD_PIP, OLD_MANAGED = "v0.2.0", "v0.3.2"
 HOSTS = ("api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
 HOSTS_FILE = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "drivers" / "etc" / "hosts"
 HOSTS_MARK = "# raincli-app-e2e"
@@ -199,30 +208,37 @@ class HostsEntry:
 class FakeGitHub:
     """GitHub's release API and download hosts for two stable releases, on 127.0.0.1:443."""
 
-    def __init__(self, work, installers):
+    def __init__(self, work, installers, versions):
         self.work = work
         self.requests = []  # (host, method, path, accept)
         self.assets = {}  # id -> (name, bytes, download host)
         self.releases = {}
-        for n, version in enumerate((OLD, NEW)):
-            setup = installers / f"RainCLI-Setup-{version}.exe"
-            checksum = installers / f"RainCLI-Setup-{version}.exe.sha256"
-            data, line = setup.read_bytes(), checksum.read_bytes()
-            if line != f"{hashlib.sha256(data).hexdigest()}  {setup.name}\n".encode():
-                raise Failure(f"{checksum.name} is not '<sha256>  {setup.name}'")
-            ids = (1000 + 2 * n, 1001 + 2 * n)
-            self.assets[ids[0]] = (setup.name, data, "objects.githubusercontent.com")
-            self.assets[ids[1]] = (checksum.name, line, "release-assets.githubusercontent.com")
-            tag = "v" + version
-            self.releases[tag] = {
-                "id": 50 + n, "tag_name": tag, "name": f"RainCLI {version}", "draft": False, "prerelease": False,
-                "assets": [{"id": i, "name": self.assets[i][0], "size": len(self.assets[i][1]),
-                            "url": f"https://api.github.com/repos/{updates.REPO}/releases/assets/{i}",
-                            "browser_download_url":
-                                f"https://github.com/{updates.REPO}/releases/download/{tag}/{self.assets[i][0]}"}
-                           for i in ids]}
-        self.commits = {tag: hashlib.sha1(tag.encode()).hexdigest() for tag in self.releases}
+        self.commits = {}
         self.server = None
+        for version in versions:
+            self.add_release(installers, version)
+
+    def add_release(self, installers, version):
+        if installers is None:
+            return
+        setup = Path(installers) / f"RainCLI-Setup-{version}.exe"
+        checksum = Path(installers) / f"RainCLI-Setup-{version}.exe.sha256"
+        data, line = setup.read_bytes(), checksum.read_bytes()
+        if line != f"{hashlib.sha256(data).hexdigest()}  {setup.name}\n".encode():
+            raise Failure(f"{checksum.name} is not '<sha256>  {setup.name}'")
+        n = len(self.releases)
+        ids = (1000 + 2 * n, 1001 + 2 * n)
+        self.assets[ids[0]] = (setup.name, data, "objects.githubusercontent.com")
+        self.assets[ids[1]] = (checksum.name, line, "release-assets.githubusercontent.com")
+        tag = "v" + version
+        self.releases[tag] = {
+            "id": 50 + n, "tag_name": tag, "name": f"RainCLI {version}", "draft": False, "prerelease": False,
+            "assets": [{"id": i, "name": self.assets[i][0], "size": len(self.assets[i][1]),
+                        "url": f"https://api.github.com/repos/{updates.REPO}/releases/assets/{i}",
+                        "browser_download_url":
+                            f"https://github.com/{updates.REPO}/releases/download/{tag}/{self.assets[i][0]}"}
+                       for i in ids]}
+        self.commits[tag] = hashlib.sha1(tag.encode()).hexdigest()
 
     def start(self, cert, key, port=443):
         fake = self
@@ -251,7 +267,8 @@ class FakeGitHub:
                     release = fake.releases.get(self.path.rsplit("/", 1)[1])
                     return self.send(200, json.dumps(release).encode()) if release else self.send(404, b"{}")
                 if host == "api.github.com" and self.path == repo + "/releases/latest":
-                    return self.send(200, json.dumps(fake.releases["v" + NEW]).encode())
+                    latest = max(fake.releases, key=updates.version_key)
+                    return self.send(200, json.dumps(fake.releases[latest]).encode())
                 if host == "api.github.com" and self.path.startswith(repo + "/commits/"):
                     sha = fake.commits.get(self.path.rsplit("/", 1)[1])
                     return self.send(200, json.dumps({"sha": sha}).encode()) if sha else self.send(404, b"{}")
@@ -321,9 +338,16 @@ class App:
     def stub(self, *args, check=False):
         return run([self.root / "RainCLI.exe", *args], check=check, timeout=180)
 
-    def quit(self):
-        if (self.root / "RainCLI.exe").is_file():
-            self.stub("--quit")
+    def quit(self, required=True):
+        """`RainCLI.exe --quit` (§15.9): exit 0 and nothing of the app left running."""
+        if not (self.root / "RainCLI.exe").is_file():
+            return
+        result = self.stub("--quit")
+        if not required:
+            return
+        check(result.returncode == 0, f"RainCLI.exe --quit exited {result.returncode}")
+        left = [p for p in running_app_exes() if str(p).casefold().startswith(str(self.root).casefold())]
+        check(not left, f"still running after --quit: {left}")
 
     def cli(self, *args, check=True, timeout=300):
         return run([self.root / "bin" / "raincli.exe", *args], check=check, timeout=timeout)
@@ -343,12 +367,12 @@ class App:
         app = self.root / "versions" / version / "RainCLI-app.exe"
         return any(str(p).casefold() == str(app).casefold() for p in exes)
 
-    def uninstall(self):
+    def uninstall(self, signout):
         uninstaller = self.root / "unins000.exe"
         if not uninstaller.is_file():
             raise Failure("no uninstaller at the install root")
-        run([uninstaller, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", f"/LOG={self.work / 'uninstall.log'}"],
-            timeout=600)
+        run([uninstaller, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", f"/SIGNOUT={'yes' if signout else 'no'}",
+             f"/LOG={self.work / 'uninstall.log'}"], timeout=600)
         # The uninstaller re-runs itself from TEMP; wait until it has removed its own key and file.
         wait_for("the uninstaller to finish",
                  lambda: reg_values(UNINSTALL_KEY) is None and not uninstaller.exists(), timeout=300)
@@ -482,13 +506,84 @@ def download_release_installers(work):
     return target
 
 
+def prepare_managed_install(work):
+    """A managed v0.3.2 install in %USERPROFILE%\\.raincli\\client through the real updater (done
+    before the hosts file changes; it fetches the canonical release from GitHub)."""
+    root = profile() / ".raincli" / "client"
+    check(not root.exists(), f"{root} already exists on this runner")
+    try:
+        release = updates.resolve(OLD_MANAGED)
+    except updates.ReleaseNotFound:
+        raise Failure(f"release {OLD_MANAGED} not found in {updates.REPO}") from None
+    result = updates.install(root, release)
+    check(result.get("status") == "installed", f"managed install of {OLD_MANAGED} returned {result.get('status')}")
+    return root
+
+
+def build_rollback_installer(work):
+    """0.4.2 from a STAGING COPY of the client whose tray exits 1 when started in the background, so
+    the stub's probation must roll it back. The shipped source is untouched (§15.8 M11)."""
+    spec = importlib.util.spec_from_file_location("raincli_build", ROOT / "packaging" / "windows" / "build.py")
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+    staging = work / "rollback-source" / "raincli_agent"
+    shutil.copytree(build.CLIENT, staging, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    tray = staging / "app" / "tray.py"
+    text = tray.read_text("utf-8")
+    head = "def main(argv=None):\n"
+    check(text.count(head) == 1, "raincli_agent/app/tray.py has no single main(argv=None) to patch")
+    tray.write_text(text.replace(head, head + '    if (sys.argv[1:] if argv is None else list(argv)) == ["--background"]:\n'
+                                               '        return 1  # this e2e\'s rollback build only\n'), "utf-8")
+    out = work / "rollback-installer"
+    setup = build.build(BROKEN, work / "rollback-build", out, source=staging)
+    say(f"PASS: rollback build {BROKEN} from a patched staging copy: {setup.name}")
+    return out
+
+
+def start_console(args, log):
+    """A process in its own console window, as a user would have started it."""
+    with open(log, "ab") as out:
+        return subprocess.Popen([str(a) for a in args], stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+
+def end(process, timeout=60):
+    if process is not None and process.poll() is None:
+        process.terminate()  # what closing its console window does
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=timeout)
+        if process.poll() is None:
+            process.kill()
+
+
+def fresh_slate(app):
+    """Between parts: no app, no Run value and no test configs left from the previous part."""
+    check(not (app.root / "RainCLI.exe").exists() and app.run_value() is None, "the previous part left the app")
+    for path in (app.root, profile() / ".config" / "raincli"):
+        if path.exists():
+            shutil.rmtree(path)
+
+
+def register(server, name):
+    staged = server.work / f"{name}.json"
+    server.admin("register-agent", "--team", TEAM, "--owner", EMAIL, "--handle", name, "--out", str(staged))
+    issued = json.loads(staged.read_text())
+    staged.unlink()
+    return issued["api_url"], SECRETS.add(issued["token"])
+
+
 def run_e2e(args, work, stack):
     installers = download_release_installers(work) if args.real else Path(args.installers).resolve()
     server = release_e2e.Server(work / "server", args.server_python)
     server.work.mkdir()
     server.prepare()
+    # Everything that needs the real GitHub happens before the hosts file changes.
     old_venv = prepare_old_pip_client(work)
     say(f"PASS: old pip client {OLD_PIP} installed from its release archive")
+    managed = prepare_managed_install(work)
+    stack.callback(lambda: release_e2e.kill_marked({str(managed)}))
+    say(f"PASS: managed {OLD_MANAGED} installed in {managed} through the real updater")
+    rollback = None if args.real else build_rollback_installer(work)
     pg = Path(tempfile.gettempdir()) / f"raincli-app-pg-{secrets.token_hex(6)}"
     pg.mkdir()
     stack.callback(shutil.rmtree, pg, True)
@@ -501,10 +596,7 @@ def run_e2e(args, work, stack):
     password = SECRETS.add(secrets.token_urlsafe(18))
     server.admin("create-user", "--email", EMAIL, "--name", "App E2E", input=password + "\n")
     server.admin("create-team", "--slug", TEAM, "--name", "App E2E", "--owner", EMAIL)
-    staged = work / "observer.json"
-    server.admin("register-agent", "--team", TEAM, "--owner", EMAIL, "--handle", OBSERVER, "--out", str(staged))
-    observer = SECRETS.add(json.loads(staged.read_text())["token"])
-    staged.unlink()
+    observer = register(server, OBSERVER)[1]
     say(f"PASS: throwaway server on {server.url}; user, team {TEAM} and observer {OBSERVER}")
 
     fake = None
@@ -514,7 +606,8 @@ def run_e2e(args, work, stack):
         ca = TestCA(work)
         ca.create()
         stack.callback(ca.remove)
-        fake = FakeGitHub(work, installers)
+        fake = FakeGitHub(work, installers, (OLD, NEW))
+        fake.add_release(rollback, BROKEN)
         fake.start(str(work / "leaf.pem"), str(work / "leaf.key"))
         stack.callback(fake.stop)
         hosts = HostsEntry()
@@ -528,48 +621,51 @@ def run_e2e(args, work, stack):
 
     app = App(work)
     stack.callback(lambda: release_e2e.kill_marked({str(app.root)}))
-    stack.callback(app.quit)
+    stack.callback(lambda: app.quit(required=False))
     check(not app.root.exists() and app.run_value() is None, "the runner already has a RainCLI app install")
+    menu = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "RainCLI"
+    stub_command = f'"{app.root}\\RainCLI.exe" --background'
 
-    # 1. silent per-user install
+    # == A. a fresh install, signed in from the CLI ==========================================
+    # A1. silent per-user install
     app.install(OLD, installers, "first")
-    layout = [app.root / "RainCLI.exe", app.root / "bin" / "raincli.exe", app.root / "unins000.exe",
+    layout = [app.root / "RainCLI.exe", app.root / "_internal", app.root / "bin" / "raincli.exe",
+              app.root / "bin" / "_internal", app.root / "unins000.exe",
               app.root / "versions" / OLD / "RainCLI-app.exe", app.root / "versions" / OLD / "raincli.exe"]
-    check(all(p.is_file() for p in layout), f"missing after install: {[str(p) for p in layout if not p.is_file()]}")
+    check(all(p.exists() for p in layout), f"missing after install: {[str(p) for p in layout if not p.exists()]}")
     check(app.install_json() == {"current": OLD, "previous": None, "probation": None},
           f"install.json is {app.install_json()}")
-    stub_command = f'"{app.root}\\RainCLI.exe" --background'
     check(app.run_value() == stub_command, f"Run value is {app.run_value()!r}")
     check(reg_values(UNINSTALL_KEY) is not None, "no per-user (HKCU) uninstall key")
     import winreg
     check(reg_values(UNINSTALL_KEY, winreg.HKEY_LOCAL_MACHINE) is None, "a machine-wide uninstall key was written")
     check(user_path_entries()[:1] == [str(app.root / "bin")], f"user PATH starts {user_path_entries()[:1]}")
-    menu = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "RainCLI"
     check((menu / "RainCLI.lnk").is_file() and (menu / "Uninstall RainCLI.lnk").is_file(), "Start menu entries missing")
     record = (app.root / "installer-record.log").read_text("utf-8")
-    check("run value" in record and "none" in record, "installer-record.log did not record the Run value first")
+    check("run value" in record and ": none" in record and "scheduled tasks: could not be listed" not in record,
+          "installer-record.log did not record the Run value and the Scheduled Tasks first")
     check(app.cli("--version").stdout.strip() == f"raincli {OLD}", "the PATH shim does not run the current CLI")
-    say(f"PASS: 1. silent per-user install of {OLD}: layout, install.json, HKCU Run value and uninstall key, "
-        "shim first on PATH, Start menu, H7 record")
+    say(f"PASS: A1. silent per-user install of {OLD}: onedir layout, install.json, HKCU Run value and uninstall "
+        "key, shim first on PATH, Start menu, H7 record (Run value and Scheduled Tasks)")
 
-    # 2. first-run sign-in through the login functions (the installed CLI), password on a pseudo console
-    app.quit()  # the installer started the tray; sign in from the CLI instead of its dialog
+    # A2. --quit, then sign-in through the installed CLI with the password on a pseudo console
+    app.quit()
     login_through_conpty(app, server, password, MACHINE)
     agent_config = json.loads(default_agent_config().read_text("utf-8"))
     check("token_dpapi" in agent_config and "token" not in agent_config, "agent.json is not in the DPAPI form")
     runtime = json.loads((default_agent_config().parent / "runtime.json").read_text("utf-8"))
     check(runtime.get("machine_config") and not runtime.get("connectors"), "runtime.json is not machine mode")
     check(MACHINE in handles(server, observer), "the server has no signed-in machine")
-    say(f"PASS: 2. raincli login through a pseudo console: machine {MACHINE} created, DPAPI credential, machine mode")
+    say(f"PASS: A2. RainCLI.exe --quit exited 0 with nothing left running; raincli login through a pseudo console "
+        f"created {MACHINE} with a DPAPI credential and a machine-mode runtime config")
 
-    # 3. what the Run value names, then presence
-    launched = app.launch_run_value()
-    check(launched == stub_command, "the launched command is not the Run value")
+    # A3. what the Run value names, then presence
+    check(app.launch_run_value() == stub_command, "the launched command is not the Run value")
     wait_for(f"presence {OLD} automatic current", lambda: shows(server, observer, MACHINE, OLD), timeout=240)
     check(app.runs(OLD), f"RainCLI-app.exe from versions\\{OLD} is not running")
-    say(f"PASS: 3. launched the Run value; presence reports {OLD}, automatic, current")
+    say(f"PASS: A3. launched the Run value; presence reports {OLD}, automatic, current")
 
-    # 4. pushed upgrade through the installer assets
+    # A4. pushed upgrade through the installer assets
     run_before, key_before = app.run_value(), reg_values(UNINSTALL_KEY)
     server.admin("set-client-version", "--team", TEAM, "v" + NEW)
     wait_for(f"the pushed update to {NEW}", lambda: shows(server, observer, MACHINE, NEW))
@@ -588,11 +684,22 @@ def run_e2e(args, work, stack):
                                   for r in asset_calls),
               "assets were not fetched through the API asset URL with Accept: application/octet-stream")
         check(all(r[0] in HOSTS for r in fake.requests), "a request named a host outside the allowlist")
-    say(f"PASS: 4. pushed {NEW} through the {'published' if args.real else 'fake'} release assets"
+    say(f"PASS: A4. pushed {NEW} through the {'published' if args.real else 'fake'} release assets"
         f"{'' if args.real else ' (API asset URL, exact download hosts)'}: /UPDATE left the Run value and "
         "uninstall key alone, install.json swapped, relaunched from the new version")
 
-    # 5. downgrade refused, then allowed
+    # A5. a version whose tray never starts is rolled back by the stub
+    if rollback is not None:
+        server.admin("set-client-version", "--team", TEAM, "v" + BROKEN)
+        wait_for(f"the rollback from {BROKEN}", lambda: shows(server, observer, MACHINE, NEW, "rolled_back",
+                                                              "first_start_failed"), timeout=WAIT)
+        wait_for(f"RainCLI-app.exe from versions\\{NEW} after the rollback", lambda: app.runs(NEW), timeout=240)
+        state = app.install_json()
+        check(state.get("current") == NEW and not state.get("probation"), f"install.json after the rollback: {state}")
+        say(f"PASS: A5. pushed {BROKEN}, whose tray exits 1: the stub rolled back, the server shows rolled_back, "
+            f"and {NEW} runs again")
+
+    # A6. downgrade refused, then allowed
     server.admin("set-client-version", "--team", TEAM, "v" + OLD)
     wait_for("the refused downgrade", lambda: shows(server, observer, MACHINE, NEW, "failed", "downgrade_not_allowed"),
              timeout=240)
@@ -602,78 +709,114 @@ def run_e2e(args, work, stack):
     wait_for(f"the allowed downgrade to {OLD}", lambda: shows(server, observer, MACHINE, OLD))
     wait_for(f"RainCLI-app.exe from versions\\{OLD}", lambda: app.runs(OLD), timeout=240)
     server.admin("set-client-version", "--team", TEAM, "--clear")
-    say(f"PASS: 5. downgrade to {OLD} refused, then allowed with --allow-downgrade; target cleared")
+    say(f"PASS: A6. downgrade to {OLD} refused, then allowed with --allow-downgrade; target cleared")
 
-    # 6. sign out through the PATH shim, then uninstall
-    app.cli("logout", "--yes")
-    check(not default_agent_config().exists(), "logout left the credential")
+    # A7. uninstall that signs out
+    app.uninstall(signout=True)
     check((entry(server, observer, MACHINE) or {}).get("active") is False, "sign-out did not revoke the machine")
-    app.uninstall()
-    gone = [app.root / "RainCLI.exe", app.root / "bin" / "raincli.exe", app.root / "versions", app.root / "install.json",
-            menu]
+    check(not default_agent_config().exists(), "the uninstall's sign-out left the credential")
+    gone = [app.root / "RainCLI.exe", app.root / "_internal", app.root / "bin", app.root / "versions",
+            app.root / "install.json", app.root / "heartbeat.json", app.root / "app-lock", menu]
     check(not [p for p in gone if p.exists()], f"uninstall left {[str(p) for p in gone if p.exists()]}")
     check(app.run_value() is None and str(app.root / "bin") not in user_path_entries(),
           "uninstall left the Run value or the PATH entry")
     check((app.root / "installer-record.log").is_file(), "uninstall removed the installer record")
-    say("PASS: 6. signed out through the shim; uninstall removed the Run value, PATH entry, shortcuts, versions, "
-        "stub, shim and install.json, and kept the record")
+    say("PASS: A7. uninstall with /SIGNOUT=yes revoked the machine and deleted its credential, and removed the Run "
+        "value, PATH entry, shortcuts, versions, stub, shim and install.json; the installer record is kept")
 
-    # 7. migration from an old pip client with a connector config and a queue
-    staged = work / "old-agent.json"
-    server.admin("register-agent", "--team", TEAM, "--owner", EMAIL, "--handle", OLD_MACHINE, "--out", str(staged))
-    issued = json.loads(staged.read_text())
-    old_token = SECRETS.add(issued["token"])
-    staged.unlink()
+    # == B. an old pip client's foreground connector ============================================
+    fresh_slate(app)
+    api_url, pip_token = register(server, OLD_MACHINE)
     config_dir = default_agent_config().parent
-    write_private(default_agent_config(), {"api_url": issued["api_url"], "token": old_token})
+    write_private(default_agent_config(), {"api_url": api_url, "token": pip_token})
     connector = config_dir / "connector.json"
-    queue = work / "old-queue"
     write_private(connector, {"herdr_agent": "e2e-inbox", "herdr_bin": "raincli-e2e-no-herdr",
-                              "state_dir": str(queue), "poll_wait": 1})  # no agent_config: the default path
-    write_private(config_dir / "runtime.json", {"connectors": [str(connector)], "state_dir": str(work / "old-state")})
+                              "state_dir": "old-queue", "poll_wait": 1})  # no agent_config; a relative state_dir
+    queue = config_dir / "old-queue"
     old_raincli = old_venv / "Scripts" / "raincli.exe"
-    with open(work / "old-runtime.log", "ab") as out:
-        old_runtime = subprocess.Popen([old_raincli, "runtime", "run", "--config", config_dir / "runtime.json"],
-                                       stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    old_connector = start_console([old_raincli, "connector", "run", "--config", connector], work / "old-connector.log")
+    stack.callback(end, old_connector)
     first = send(server, observer, OLD_MACHINE, "before migration")
     wait_for("the old pip connector to take a message", lambda: delivered(server, observer, first), timeout=240)
-    run([old_raincli, "runtime", "stop", "--config", config_dir / "runtime.json"], check=False)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        old_runtime.wait(timeout=150)
-    if old_runtime.poll() is None:
-        old_runtime.kill()
     before = handles(server, observer)
     queue_files = sorted(p.name for p in queue.rglob("*") if p.is_file())
-    app.install(NEW, installers, "migration")  # its last step starts the tray, whose first run migrates
+    check(queue_files, "the old connector wrote nothing under its relative state_dir")
+    app.install(NEW, installers, "pip-migration")  # its last step starts the tray, whose first run migrates
+    time.sleep(45)  # the old connector still holds its queue: migration must wait, touching nothing
+    untouched = json.loads(default_agent_config().read_text("utf-8"))
+    check(untouched.get("token") and "token_dpapi" not in untouched and not (config_dir / "runtime.json").exists(),
+          "migration changed the configs while the old connector was still running")
+    end(old_connector)  # the user closes the old RainCLI window
     wait_for("the migrated machine's presence", lambda: shows(server, observer, OLD_MACHINE, NEW), timeout=300)
     migrated = json.loads(default_agent_config().read_text("utf-8"))
     check("token_dpapi" in migrated and "token" not in migrated, "migration did not convert the token to DPAPI")
     check(handles(server, observer) == before, "migration created or removed a machine")
-    check(api(server, old_token, "/api/v1/me")["agent"]["handle"] == OLD_MACHINE, "the old credential stopped working")
+    check(api(server, pip_token, "/api/v1/me")["agent"]["handle"] == OLD_MACHINE, "the old credential stopped working")
     runtime = json.loads((config_dir / "runtime.json").read_text("utf-8"))
     check(runtime.get("connectors") and not runtime.get("machine_config"), "runtime.json is not in connector mode")
+    check(app.run_value() == stub_command, "the Run value does not start the app after migration")
     second = send(server, observer, OLD_MACHINE, "after migration")
     wait_for("delivery after migration", lambda: delivered(server, observer, second), timeout=240)
     check(set(queue_files) <= {p.name for p in queue.rglob("*") if p.is_file()}, "migration dropped queue files")
-    logs = list(app.root.rglob("migration.log")) + list(config_dir.rglob("migration.log")) + \
-        list((work / "old-state").rglob("migration.log"))
-    check(logs and old_token not in logs[0].read_text("utf-8", errors="replace"), "no migration.log, or it holds the token")
-    say(f"PASS: 7. migrated pip {OLD_PIP} with a connector config (no agent_config) and queue: same handle "
-        f"{OLD_MACHINE} and credential, DPAPI, connector mode, delivery continues, no new machine")
-
-    # 8. uninstall without sign-out keeps the credential and the connector state
-    app.uninstall()
+    logs = [p for base in (app.root, config_dir) for p in base.rglob("migration.log")]
+    check(logs and pip_token not in logs[0].read_text("utf-8", errors="replace"),
+          "no migration.log, or it holds the token")
+    say(f"PASS: B. pip {OLD_PIP} foreground connector (no runtime.json, no agent_config, relative state_dir): "
+        f"migration waited for the old window, then kept {OLD_MACHINE} and its credential (DPAPI), wrote a "
+        "connector-mode runtime.json, and delivery continues; no new machine")
+    app.uninstall(signout=False)
     check(default_agent_config().is_file() and connector.is_file() and queue.is_dir() and logs[0].is_file(),
           "uninstall without sign-out removed agent.json, the connector config, the queue or migration.log")
-    check(api(server, old_token, "/api/v1/me")["agent"]["handle"] == OLD_MACHINE, "uninstall signed the machine out")
-    say("PASS: 8. uninstall without sign-out kept agent.json, the connector config, the queue and migration.log")
+    check(api(server, pip_token, "/api/v1/me")["agent"]["handle"] == OLD_MACHINE, "uninstall signed the machine out")
+    say("PASS: B. uninstall with /SIGNOUT=no kept agent.json, the connector config, the queue and migration.log")
+
+    # == C. a managed v0.3 install started from the Run value =====================================
+    fresh_slate(app)
+    api_url, managed_token = register(server, MANAGED_MACHINE)
+    write_private(default_agent_config(), {"api_url": api_url, "token": managed_token})
+    connector = config_dir / "connector.json"
+    write_private(connector, {"agent_config": str(default_agent_config()), "herdr_agent": "e2e-inbox",
+                              "herdr_bin": "raincli-e2e-no-herdr", "state_dir": str(work / "managed-queue"),
+                              "poll_wait": 1})
+    runtime_json = config_dir / "runtime.json"
+    write_private(runtime_json, {"connectors": [str(connector)], "state_dir": str(work / "managed-state")})
+    launcher = managed / "launch.py"
+    run([sys.executable, launcher, "runtime", "startup", "--config", runtime_json], timeout=300)
+    old_value = app.run_value()
+    check(old_value and "launch.py" in old_value, f"the managed install's Run value is {old_value!r}")
+    with open(work / "managed-launcher.log", "ab") as out:
+        old_launcher = subprocess.Popen([sys.executable, str(launcher), "runtime", "run", "--config", str(runtime_json)],
+                                        stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    stack.callback(end, old_launcher)
+    wait_for(f"the managed {OLD_MANAGED} runtime's presence",
+             lambda: shows(server, observer, MANAGED_MACHINE, OLD_MANAGED[1:]), timeout=300)
+    before = handles(server, observer)
+    app.install(NEW, installers, "managed-migration")
+    record = (app.root / "installer-record.log").read_text("utf-8")
+    check(old_value in record, "the installer did not record the managed install's Run value")
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        old_launcher.wait(timeout=300)
+    check(old_launcher.poll() is not None, "the managed launcher did not stop on the app's stop request")
+    wait_for("the migrated managed machine's presence", lambda: shows(server, observer, MANAGED_MACHINE, NEW),
+             timeout=300)
+    wait_for("the Run value pointing at the stub", lambda: app.run_value() == stub_command, timeout=120)
+    check(handles(server, observer) == before, "migration created or removed a machine")
+    check(api(server, managed_token, "/api/v1/me")["agent"]["handle"] == MANAGED_MACHINE,
+          "the managed credential stopped working")
+    third = send(server, observer, MANAGED_MACHINE, "after managed migration")
+    wait_for("delivery after the managed migration", lambda: delivered(server, observer, third), timeout=240)
+    say(f"PASS: C. managed {OLD_MANAGED}: the installer recorded its Run value, its launcher stopped on the stop "
+        f"request, the Run value now starts the stub, and {MANAGED_MACHINE} keeps delivering; no new machine")
+    app.uninstall(signout=False)
+    check(app.run_value() is None, "the final uninstall left the Run value")
 
 
 def diagnose(work):
     say("===== DIAGNOSTICS (secrets redacted) =====")
     root = app_root()
     for path in [root / "install.json", root / "installer-record.log", *sorted(root.rglob("*.log")),
-                 *sorted(work.glob("install-*.log")), work / "uninstall.log", work / "old-runtime.log",
+                 *sorted(work.glob("install-*.log")), work / "uninstall.log", work / "old-connector.log",
+                 work / "managed-launcher.log",
                  work / "server" / "server.log", default_agent_config().parent / "runtime.json"]:
         if path.is_file():
             say(f"--- {path} ---\n{tail(path, 6000)}")
@@ -683,6 +826,7 @@ def diagnose(work):
 
 
 def main(argv=None):
+    global OLD, NEW
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--installers",
@@ -691,16 +835,16 @@ def main(argv=None):
                         help="published releases vX.Y.Z (v0.4.0 or later) whose installer assets to use")
     parser.add_argument("--server-python", help="an existing Python with raincli/requirements.lock installed")
     args = parser.parse_args(argv)
-    global OLD, NEW
     if args.real:
         tags = args.real
         if (not all(updates.TAG_RE.fullmatch(t) for t in tags) or updates.version_key(tags[0]) < (0, 4, 0)
                 or updates.version_key(tags[0]) >= updates.version_key(tags[1])):
             parser.error("--real takes two release tags vX.Y.Z, v0.4.0 or later, oldest first")
         OLD, NEW = tags[0][1:], tags[1][1:]
-    if os.name != "nt" or os.environ.get("GITHUB_ACTIONS") != "true":
+    if (os.name != "nt" or os.environ.get("GITHUB_ACTIONS") != "true"
+            or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
         parser.error("this e2e changes the hosts file, the trusted roots, the Run value and the user PATH; "
-                     "it runs only on a disposable GitHub Actions Windows runner")
+                     "it runs only on a disposable GitHub-hosted Actions Windows runner")
     work = Path(tempfile.mkdtemp(prefix="raincli-app-e2e-"))
     say(f"Windows app e2e: {OLD} -> {NEW}; work dir {work}")
     ok = False

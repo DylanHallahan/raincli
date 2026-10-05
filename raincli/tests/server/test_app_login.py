@@ -194,6 +194,39 @@ def test_disabled_user_cannot_sign_in(client, world, session):
     assert r.status_code == 401 and err(r) == "invalid_credentials"
 
 
+# The machine cap (§15.9) ---------------------------------------------------------------
+
+def test_machine_limit(client, world, session, app):
+    from raincli_server.identity import MACHINE_LIMIT
+
+    # alice already owns alice-agent (added on the website); it counts towards the cap.
+    tokens = [app_login(client, machine_name=f"m-{i:02d}").json()["token"] for i in range(MACHINE_LIMIT - 1)]
+    r = app_login(client, machine_name="one-too-many")
+    assert r.status_code == 409 and err(r) == "machine_limit"
+    assert session.scalar(select(Agent).where(Agent.handle == "one-too-many")) is None
+    # Re-signing in to an existing machine is not a creation.
+    assert app_login(client, machine_name="m-00", previous_token=tokens[0]).status_code == 200
+    # A refusal after a correct password is a success for the limiter.
+    for _ in range(8):
+        assert app_login(client, machine_name="one-too-many").status_code == 409
+    assert web_login(client).status_code == 303
+    # Other members and revoked machines are not counted.
+    assert app_login(client, email="bob@example.test", machine_name="bob-pc").status_code == 201
+    assert client.post("/api/v1/app/sign-out", headers=auth(tokens[-1])).status_code == 200
+    assert app_login(client, machine_name="one-too-many").status_code == 201
+
+
+def test_machine_limit_is_per_team(client, world, session):
+    from raincli_server.identity import MACHINE_LIMIT
+
+    identity.add_member(session, world["teams"]["globex"], world["users"]["alice"])
+    session.commit()
+    for i in range(MACHINE_LIMIT - 1):
+        assert app_login(client, machine_name=f"m-{i:02d}", team="acme").status_code == 201
+    assert app_login(client, machine_name="extra", team="acme").status_code == 409
+    assert app_login(client, machine_name="extra", team="globex").status_code == 201
+
+
 # The shared limiter ----------------------------------------------------------------------
 
 def test_one_limiter_object_is_shared(client, world, app):
