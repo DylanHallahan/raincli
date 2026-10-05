@@ -733,27 +733,31 @@ def test_processes_under_finds_a_process_from_the_root(tmp_path):
 
 # -- review 3 ----------------------------------------------------------------------------------------
 
-def test_tray_already_running_exits_3_not_0(app):
+def test_tray_already_running_exits_76_not_0(app):
     """N1: a second tray must not look like a quit to its stub."""
     from raincli_agent.app import tray as tray_mod
     lock = winapp.tray_lock(app)
     try:
         fake = type("T", (), {"root_dir": app})()
-        assert tray_mod.Tray.run(fake) == winapp.ALREADY_RUNNING_EXIT == 3
+        assert tray_mod.Tray.run(fake) == winapp.ALREADY_RUNNING_EXIT == 76
     finally:
         os.close(lock)
 
 
 def test_stub_waits_and_retries_a_tray_that_is_already_running(app):
-    """N1: exit 3 means wait 10 s and retry (logged, a fixed wait), never quit."""
-    clock, codes, sleeps = Clock(), [3, 3, 0], []
+    """N1, D1: exit 76 while tray.lock is held means wait 10 s and retry (logged, a fixed wait), never quit."""
+    clock, codes, sleeps = Clock(), [76, 76, 0], []
+    surviving = winapp.tray_lock(app)  # a tray that outlived its stub
 
     def sleep(seconds):
         sleeps.append(seconds)
         clock.sleep(seconds)
     stub = winapp.Stub(app, popen=lambda argv, **kw: Process(code=codes.pop(0)), sleep=sleep, clock=clock,
                        wall=lambda: 0)
-    assert stub.run() == 0 and codes == []
+    try:
+        assert stub.run() == 0 and codes == []
+    finally:
+        os.close(surviving)
     assert sleeps == [1] * 20  # two fixed 10 s waits, no growing backoff
     log = (app / "app-lock" / "stub.log").read_text()
     assert log.count("already running") == 2
@@ -765,8 +769,12 @@ def test_stub_answers_a_quit_while_waiting_for_a_running_tray(app):
     def sleep(seconds):
         clock.sleep(seconds)
         (app / "app-lock" / "quit").write_bytes(b"")
-    stub = winapp.Stub(app, popen=lambda argv, **kw: Process(code=3), sleep=sleep, clock=clock, wall=lambda: 0)
-    assert stub.run() == 0
+    surviving = winapp.tray_lock(app)
+    stub = winapp.Stub(app, popen=lambda argv, **kw: Process(code=76), sleep=sleep, clock=clock, wall=lambda: 0)
+    try:
+        assert stub.run() == 0
+    finally:
+        os.close(surviving)
 
 
 def test_quit_refusal_names_its_blockers(app):
@@ -790,16 +798,58 @@ def test_quit_refusal_names_its_blockers(app):
 def test_already_running_during_probation_is_not_a_failed_start(app):
     add_version(app, "0.4.1")
     winapp.write_install(app, "0.4.1", "0.4.0", probation="0.4.1")
-    clock, codes = Clock(), [3, 0]
+    clock, codes = Clock(), [76, 0]
+    surviving = winapp.tray_lock(app)
 
     def popen(argv, **kw):
         code = codes.pop(0)
         if code == 0:
-            winapp.beat(app, "0.4.1")  # the retried tray starts and reports
+            os.close(surviving)  # the old tray has gone; the retried one starts and reports
+            winapp.beat(app, "0.4.1")
         return Process(code=code)
     stub = winapp.Stub(app, popen=popen, sleep=clock.sleep, clock=clock, wall=lambda: 0)
     assert stub.run() == 0
     assert winapp.read_install(app) == {"current": "0.4.1", "previous": "0.4.0", "probation": None}
+
+
+# -- review 4 D1: exit 3 is abort()/Py_FatalError; 76 needs the lock really held ------------------------
+
+@pytest.mark.parametrize("code", [76, 3])
+def test_fatal_exit_in_probation_rolls_back(app, code):
+    """76 with tray.lock free, or 3 (a fatal crash), on probation: a failed start, rolled back."""
+    add_version(app, "0.4.1")
+    winapp.write_install(app, "0.4.1", "0.4.0", probation="0.4.1")
+    updates.write_update_state(app, {"state": "updating", "target": {"version": "v0.4.1", "set_at": "t"}})
+    clock, started = Clock(), []
+
+    def popen(argv, **kw):
+        version = Path(argv[0]).parent.name
+        started.append(version)
+        return Process(code=code if version == "0.4.1" else 0)
+    assert winapp.Stub(app, popen=popen, sleep=clock.sleep, clock=clock, wall=lambda: 0).run() == 0
+    assert started == ["0.4.1", "0.4.0"]
+    assert winapp.read_install(app) == {"current": "0.4.0", "previous": "0.4.1", "probation": None}
+    assert updates.read_update_state(app)["state"] == "rolled_back"
+
+
+@pytest.mark.parametrize("code", [76, 3])
+def test_fatal_exit_outside_probation_backs_off_and_stops_at_the_cap(app, code):
+    """Not on probation: the normal crash backoff (growing, bounded) and the cap of 8 restarts."""
+    clock, starts, waits = Clock(), [], []
+
+    def popen(argv, **kw):
+        starts.append(clock.now)
+        return Process(code=code)
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+    stub = winapp.Stub(app, popen=popen, sleep=sleep, clock=clock, wall=lambda: 0)
+    assert stub.run() == code
+    assert len(starts) == 9  # the 9th consecutive failed start exceeds the cap of 8
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert gaps == [2 ** n for n in range(1, 9)]  # 2, 4, ... 256 s: growing and bounded (at most 300)
+    if code == 76:
+        assert "tray.lock is free" in (app / "app-lock" / "stub.log").read_text()
 
 
 # -- e2e run 37250440832, A7: the uninstaller is not a blocker ----------------------------------------

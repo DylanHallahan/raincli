@@ -68,7 +68,10 @@ SETTINGS = "app.json"
 HEARTBEAT = "heartbeat.json"
 INSTALL_TIMEOUT = 600
 SWITCH_EXIT = 75  # the tray asks the stub to start install.json's current version
-ALREADY_RUNNING_EXIT = 3  # another tray holds tray.lock: the stub waits and retries (review 3 N1)
+# Another tray holds tray.lock: the stub waits and retries (review 3 N1). Not 3, which
+# abort() and Py_FatalError also return on Windows (review 4 D1); and only believed
+# while tray.lock really is held.
+ALREADY_RUNNING_EXIT = 76
 ALREADY_RUNNING_WAIT = 10
 PROBATION = 120  # seconds for a new version's first heartbeat (15.8 H4)
 GRACEFUL_STOP = 120
@@ -749,9 +752,21 @@ class Stub:
                 return True
             if process.poll() is not None or quit_requested(self.root):
                 # A quit, or another tray already running (retried), is not a failed start.
-                return quit_requested(self.root) or process.poll() == ALREADY_RUNNING_EXIT
+                return quit_requested(self.root) or self.already_running(process.poll())
             self.sleep(1)
         return heartbeat_since(self.root, version, since)
+
+    def already_running(self, code):
+        """Exit 76 counts as "another tray runs" only while tray.lock is actually held;
+        if the stub can take the lock, it was a failed start (review 4 D1)."""
+        if code != ALREADY_RUNNING_EXIT:
+            return False
+        lock = tray_lock(self.root)
+        if lock is None:
+            return True
+        os.close(lock)
+        self.log(f"tray exited {code} but tray.lock is free: a failed start")
+        return False
 
     def log(self, text):
         """``<root>\\app-lock\\stub.log``: short lines, kept under 64 KiB with one ``.1``."""
@@ -811,7 +826,7 @@ class Stub:
             if code == SWITCH_EXIT:
                 failures = 0
                 continue
-            if code == ALREADY_RUNNING_EXIT:
+            if self.already_running(code):
                 # A tray that outlived its stub still runs: wait for it, a fixed 10 s at a
                 # time, answering a quit request; never treat this as a quit.
                 self.log(f"tray {version} already running; retrying in {ALREADY_RUNNING_WAIT} s")
