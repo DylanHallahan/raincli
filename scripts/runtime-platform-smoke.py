@@ -35,6 +35,7 @@ def wait_for(action, timeout=45):
 
 def scrub(text):
     # Nothing here should hold a credential; redact token-shaped text regardless.
+    text = re.sub(r"rps_[A-Za-z0-9_-]{8,}", "rps_<redacted>", text)
     return re.sub(r"rca_[A-Za-z0-9_-]{8,}", "rca_<redacted>", text)
 
 
@@ -144,8 +145,10 @@ def headless_login_and_machine_mode(root, server):
         from raincli_agent import login
         from raincli_agent.config import Secret
         login.login("smoke@example.test", Secret(PASSWORD), api_url=server.url, config_path=str(agent),
-                    machine_name="smoke-machine")
-    assert json.loads(runtime.read_text()) == {"machine_config": str(agent), "state_dir": "runtime-state"}
+                    machine_name="smoke-machine", person_session=True)  # as `raincli login` and the app ask
+    assert json.loads(runtime.read_text()) == {"machine_config": str(agent), "state_dir": "runtime-state",
+                                               "owner_email": "smoke@example.test"}
+    person_session_checks(machine, agent, server)
     log = root / "runtime-machine.log"
     with open(log, "wb") as output:
         process = subprocess.Popen([sys.executable, "-m", "raincli_agent", "runtime", "run", "--config", str(runtime)],
@@ -168,6 +171,41 @@ def headless_login_and_machine_mode(root, server):
     return agent, runtime
 
 
+def person_session_checks(machine, agent, server):
+    """§16.3: sign-in stored a person session beside agent.json (DPAPI on Windows, 0600
+    elsewhere); `me sign-out` ends only it; `login --person` adds it again without rotating."""
+    from raincli_agent import person
+    stored = json.loads((machine / "person.json").read_text())
+    assert set(stored) == ({"person_session_dpapi"} if os.name == "nt" else {"person_session"}), set(stored)
+    if os.name != "nt":
+        assert (machine / "person.json").stat().st_mode & 0o777 == 0o600
+    session = person.load_session(str(agent)).reveal()
+    assert session in server.state.person_sessions
+    machine_token = server.state.tokens.copy()
+    out = subprocess.run([sys.executable, "-m", "raincli_agent", "--config", str(agent), "me", "sign-out"],
+                         capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0 and session not in out.stdout + out.stderr, out.stderr
+    assert person.load_session(str(agent)) is None and session not in server.state.person_sessions
+    if sys.platform.startswith("linux"):
+        status, transcript = login_on_pty([sys.executable, "-m", "raincli_agent", "--config", str(agent), "login",
+                                           "--person", "--email", "smoke@example.test"], PASSWORD)
+        assert status == 0 and "added a person session" in transcript, scrub(transcript)
+        assert PASSWORD not in transcript
+    else:
+        from raincli_agent.config import Secret
+        person.add_session(str(agent), "smoke@example.test", Secret(PASSWORD))
+    again = person.load_session(str(agent)).reveal()
+    assert again in server.state.person_sessions and server.state.tokens == machine_token  # no rotation
+    assert again not in json.dumps(server.state.login_bodies)
+    for path in machine.rglob("*"):
+        if path.is_file():
+            data = path.read_bytes()
+            assert PASSWORD.encode() not in data
+            assert path.name == "person.json" or again.encode() not in data
+    print("PASS: person session: stored beside the credential, me sign-out ends it, login --person adds it "
+          "(no rotation, no password or session anywhere else)", flush=True)
+
+
 def herdr_stage(server):
     """Real Herdr delivery (Phase 2): see scripts/herdr_smoke.py."""
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -182,7 +220,17 @@ def codex_stage(server):
     return codex_smoke.run_stage(ROOT, server, wait_for, show, kill_tree)
 
 
+def person_stage():
+    """The person CLI against a real throwaway server (Linux with a test database): see scripts/person_smoke.py."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import person_smoke
+    return person_smoke.run_stage(ROOT, login_on_pty, scrub, show)
+
+
 def main():
+    if "--person-only" in sys.argv[1:]:
+        person_stage()
+        return
     if "--herdr-only" in sys.argv[1:]:
         with FakeApi() as server:
             herdr_stage(server)
@@ -195,6 +243,7 @@ def main():
         codex_stage(server)
     with FakeApi() as server:
         herdr_stage(server)
+    person_stage()
     with tempfile.TemporaryDirectory(prefix="raincli-runtime-") as tmp, FakeApi() as server:
         root = Path(tmp)
         identity = root / "agent.json"

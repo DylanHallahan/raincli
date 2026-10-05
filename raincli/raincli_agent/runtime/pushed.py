@@ -65,6 +65,7 @@ class PushedUpdates:
             self.root = Path(root or managed_root_of(self.python) or updates.default_root()).expanduser().resolve()
         self.clock = clock
         self.machine_mode = False  # set by the runtime; machine mode refuses targets below v0.4.0 (15.8 H8)
+        self.state_dir = None  # set by the runtime: where routing-capable.json is recorded (§16.12 C1)
         self.pruned = False
         if self.app is not None:
             self.resolve = resolve or winapp.resolve
@@ -102,7 +103,11 @@ class PushedUpdates:
         return winapp.update_mode(self.root) if self.app is not None else updates.update_mode(self.root)
 
     def floor(self):
-        """The lowest target this install accepts."""
+        """The lowest target this install accepts: v0.5.0 once its connector has polled
+        with routing=1 (§16.12 C1), v0.4.0 for the app and machine mode (§15.8 H8)."""
+        from . import floors
+        if self.state_dir is not None and floors.routing_capable(self.state_dir):
+            return floors.ROUTING_FLOOR
         return winapp.MIN_VERSION if (self.app is not None or self.machine_mode) else updates.MIN_TARGET
 
     def client(self):

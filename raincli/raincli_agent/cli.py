@@ -88,7 +88,11 @@ def format_message(m):
     the body can never forge the frame or inject terminal sequences."""
     mid = escape_line(str(m.get("id", "")))
     lines = [f"--- message {mid} [{MESSAGE_LABEL}] ---"]
-    head = (f"from: {escape_line(str(m.get('from', '')))}  to: {escape_line(str(m.get('to', '')))}"
+    from .person import endpoint_label
+    head = (f"from: {escape_line(endpoint_label(m.get('from_endpoint') or m.get('from', '')))}"
+            + (f" (agent \"{escape_line(str(m['from_agent']))}\")" if m.get("from_agent")
+               and not (m.get("from_endpoint") or {}).get("agent") else "")
+            + f"  to: {escape_line(endpoint_label(m.get('to_endpoint') or m.get('to', '')))}"
             f"  seq: {escape_line(str(m.get('seq', '')))}  at: {escape_line(str(m.get('created_at', '')))}")
     lines.append(head)
     state = escape_line(str(m.get("delivery_state", "")))
@@ -250,6 +254,11 @@ def _send_surfacing_id(args, mid, action):
 
 
 def cmd_send(args):
+    if (args.endpoint is None) == (args.to is None):
+        raise UsageError("give one recipient: raincli send ENDPOINT --body-file F|- (or the older --to HANDLE)")
+    if args.endpoint is not None:
+        from .cli_me import cmd_send_endpoint
+        return cmd_send_endpoint(args)
     body = read_body(args)
     mid = message_id(args.id) if args.id else str(uuid.uuid4())  # fixed before any request
     files = att.load_for_send(args.attach)
@@ -258,7 +267,7 @@ def cmd_send(args):
     def action(state):
         state["sent"] = True
         return api.send(args.to, body, message_id=mid, conversation_id=args.conversation,
-                        attachments=files)
+                        attachments=files, from_agent=args.from_agent)
 
     message, created = _send_surfacing_id(args, mid, action)
     report_send(message, created, args.json)
@@ -272,11 +281,12 @@ def cmd_reply(args):
     api = client(args)
 
     def action(state):
+        from .cli_me import reply_endpoint
         parent = api.get_message(args.message_id)
-        me = api.me()["agent"]["handle"]
-        to = parent["to"] if parent["from"] == me else parent["from"]
+        to = reply_endpoint(parent, api.me()["agent"]["handle"])  # a person, a named agent or a machine (§16.4)
         state["sent"] = True
-        return api.send(to, body, message_id=mid, in_reply_to=parent["id"], attachments=files)
+        return api.send(to, body, message_id=mid, in_reply_to=parent["id"], attachments=files,
+                        from_agent=args.from_agent)
 
     message, created = _send_surfacing_id(args, mid, action)
     report_send(message, created, args.json)
@@ -298,10 +308,14 @@ def cmd_conversations(args):
 
 
 def cmd_inbox(args):
+    """Machine-endpoint messages; with ``--agent NAME`` those to that named agent of
+    this machine instead (§16.14 S1)."""
     api = client(args)
     after, messages = args.after, []
     while True:
-        page, cursor = api.inbox(after=after, limit=args.limit, include_acked=args.all)
+        page, cursor = api.inbox(after=after, limit=args.limit, include_acked=args.all,
+                                 routing=bool(args.agent))
+        page = [m for m in page if _addressed_to(m, args.agent)]
         messages.extend(page)
         if len(page) < args.limit or int(cursor) <= after:
             break
@@ -310,8 +324,20 @@ def cmd_inbox(args):
     return EXIT_OK
 
 
+def _addressed_to(message, agent):
+    """Whether a message is to this machine's endpoint (``agent`` None) or to that named agent."""
+    to = message.get("to_endpoint") if isinstance(message.get("to_endpoint"), dict) else {}
+    return to.get("agent") == agent if agent else to.get("agent") is None
+
+
 def cmd_show(args):
-    message = client(args).get_message(args.message_id)
+    api = client(args)
+    message = api.get_message(args.message_id)
+    to = message.get("to_endpoint") if isinstance(message.get("to_endpoint"), dict) else {}
+    if to.get("agent") and to.get("agent") != args.agent and message.get("from") != api.me()["agent"]["handle"]:
+        raise UsageError(f"message {escape_line(args.message_id)} is addressed to the agent "
+                         f"{escape_line(to['agent'])} on this machine; show it with --agent "
+                         f"{escape_line(to['agent'])}")
     if args.json:
         out_json({"message": message})
     else:
@@ -492,7 +518,8 @@ def cmd_connector_status(args):
         records = queue.all()
         escalations = queue.escalations()
     trusted = sorted(set(cfg.trusted_senders) | set(queue.trusted()))
-    esc_target = cfg.escalation.herdr_agent if cfg.escalation else None
+    esc_target = (("owner" if cfg.escalation.to_owner else cfg.escalation.herdr_agent)
+                  if cfg.escalation else None)
     if args.json:
         out_json({"state_dir": queue.state_dir, "herdr_agent": cfg.herdr_agent or None,
                   "inbox": ({"hook": cfg.inbox_hook[0], "name": cfg.inbox_hook[1], "reachability": "next-turn"}
@@ -561,7 +588,8 @@ def cmd_connector_escalate(args):
     record, created = ops.escalate(queue, cfg, args.message_id, body, esc_id)
     status = "recorded" if created else "already recorded"
     out(f"escalation {record['id']} {status} ({record['state']}); "
-        f"the running connector delivers it to {escape_line(cfg.escalation.herdr_agent)}")
+        + ("the running connector sends it to you (your person inbox)" if cfg.escalation.to_owner
+           else f"the running connector delivers it to {escape_line(cfg.escalation.herdr_agent)}"))
     return EXIT_OK
 
 
@@ -638,10 +666,9 @@ def cmd_runtime_update(args):
         # Machine mode needs v0.4.0 or later (15.8 H8): the given config, the default one, or the
         # one the managed install's login startup runs (review 1a F8).
         from .runtime.startup import installed_config
+        from .runtime import floors
         candidates = [args.config, runtime_config_path(default_config_path()), installed_config()]
-        machine = any(runtime_mode(c) == "machine" for c in candidates if c)
-        result = updates.configure(args.root, mode=mode, rollback=args.rollback,
-                                   floor=winapp.MIN_VERSION if machine else None)
+        result = updates.configure(args.root, mode=mode, rollback=args.rollback, floor=floors.floor_for(candidates))
     elif args.install:
         result = updates.install(args.root)
     else:
@@ -674,6 +701,9 @@ def cmd_login(args):
     import getpass
     from . import login
     from .config import Secret, validate_api_url
+    if args.person:
+        from .cli_me import login_person
+        return login_person(args)
     _need_tty("raincli login")
     api_url = validate_api_url(args.api_url)
     plan = login.prepare(args.agent_config, force=args.force)
@@ -689,7 +719,7 @@ def cmd_login(args):
     while True:
         try:
             result = login.login(email, password, plan=plan, machine_name=name, team=team, replace=replace,
-                                 api_url=api_url)
+                                 api_url=api_url, person_session=True)
             break
         except login.TeamChoiceRequired as exc:
             if not exc.teams:
@@ -725,11 +755,13 @@ def cmd_login(args):
     if result["rotated"]:
         out("this machine's previous credential was revoked and replaced")
     out(f"wrote {result['config']} ({protection}) for {result['api_url']}")
+    if result.get("person_session"):
+        out("added a person session for you (raincli me ...; the app uses it)")
     if result["server_api_url"] and result["server_api_url"] != result["api_url"]:
         out(f"note: the server names its API as {result['server_api_url']}; this config keeps {result['api_url']}")
     if result["runtime_written"]:
-        out(f"wrote {result['runtime_config']} (machine mode: presence, version and agent directory; "
-            "messages to this machine stay stored until message routing arrives)")
+        out(f"wrote {result['runtime_config']} (machine mode: presence, version, the agent directory and "
+            "delivery to your named agents; messages to the machine itself stay stored)")
         out(login.logon_start_hint(result["runtime_config"]))
     else:
         out(f"kept {result['runtime_config']}: this machine's connector delivery continues unchanged")
@@ -919,7 +951,9 @@ def build_parser():
                     "with --force rotates this machine's credential (its current one is sent as proof). It never "
                     "replaces a credential or runtime config that connector delivery uses, except to rotate "
                     "that same machine. In machine mode the runtime publishes presence, the client version and "
-                    "the agent directory; messages to the machine stay stored until message routing arrives.")
+                    "the agent directory, and delivers teammates' messages to your named agents (§16.7); messages "
+                    "to the machine itself stay stored. It also adds a person session for raincli me and the "
+                    "app; --person adds only that to a machine already signed in.")
     login_parser.add_argument("--email", help="account email (asked for when omitted)")
     login_parser.add_argument("--machine-name", metavar="NAME",
                               help="this machine's handle (default: the computer name in handle form)")
@@ -928,6 +962,9 @@ def build_parser():
                               help="server (default https://raincli.com; https unless the host is loopback)")
     login_parser.add_argument("--force", action="store_true",
                               help="sign in again over an existing machine-mode credential")
+    login_parser.add_argument("--person", action="store_true",
+                              help="add a person session to this signed-in machine (for raincli me and the app); "
+                                   "rotates nothing")
     login_parser.set_defaults(func=cmd_login)
     logout_parser = sub.add_parser(
         "logout", help="sign this machine out: revoke it and delete its local credential",
@@ -992,6 +1029,9 @@ def build_parser():
         sp.add_argument("--json", action="store_true", help="print JSON")
         return sp
 
+    from . import cli_me
+    cli_me.register(sub, _Parser)
+
     with_json(sub.add_parser("whoami", help="show this agent's identity")).set_defaults(func=cmd_whoami)
     with_json(sub.add_parser("agents", help="list the team's machines and the agent sessions each reports "
                                         "(inbox marked; client version and update state)")).set_defaults(func=cmd_agents)
@@ -1005,14 +1045,20 @@ def build_parser():
                         help="attach a Markdown (.md) file; repeatable (not the message text)")
         with_json(sp)
 
-    send = sub.add_parser("send", help="send a message")
-    send.add_argument("--to", required=True, metavar="HANDLE")
+    send = sub.add_parser("send", help="send a message to a machine, handle/agent or @email")
+    send.add_argument("endpoint", nargs="?", metavar="ENDPOINT",
+                      help="handle, handle/agent or @email (§16.1); the body then comes from --body-file only")
+    send.add_argument("--to", metavar="HANDLE", help=argparse.SUPPRESS)
     send.add_argument("--conversation", metavar="CONV_ID", help=argparse.SUPPRESS)
+    send.add_argument("--from-agent", metavar="NAME",
+                      help="the name of this machine's agent that writes the message (§16.1)")
     body_args(send)
     send.set_defaults(func=cmd_send)
 
     reply = sub.add_parser("reply", help="reply to a message")
     reply.add_argument("message_id", metavar="MSG_ID")
+    reply.add_argument("--from-agent", metavar="NAME",
+                       help="the name of this machine's agent that writes the reply (§16.1), so answers come back to it")
     body_args(reply)
     reply.set_defaults(func=cmd_reply)
 
@@ -1024,6 +1070,8 @@ def build_parser():
 
     inbox = with_json(sub.add_parser("inbox", help="list received messages (unacked by default)"))
     inbox.add_argument("--all", action="store_true", help="include acknowledged messages")
+    inbox.add_argument("--agent", metavar="NAME",
+                       help="messages to that named agent of this machine, instead of the machine's inbox")
     inbox.add_argument("--after", type=int, default=0, help=argparse.SUPPRESS)
     inbox.add_argument("--limit", type=int, default=100, choices=range(1, 501), metavar="N",
                        help=argparse.SUPPRESS)
@@ -1031,6 +1079,7 @@ def build_parser():
 
     show = with_json(sub.add_parser("show", help="show one message"))
     show.add_argument("message_id", metavar="MSG_ID")
+    show.add_argument("--agent", metavar="NAME", help="allow a message to that named agent of this machine")
     show.set_defaults(func=cmd_show)
 
     thread = with_json(sub.add_parser("thread", help="show a conversation"))

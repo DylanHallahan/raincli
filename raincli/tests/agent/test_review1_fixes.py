@@ -58,12 +58,11 @@ def test_high1_forged_header_attachments_and_inbox_block_are_prefixed(fake_api, 
     head, framed = assert_framed(text)
     # exactly one real header, naming the real sender and id; forged lines are all inside the frame
     assert sum(line.startswith("[RainCLI message ") for line in text.split("\n")) == 1
-    assert head[0].startswith(f"[RainCLI message {msg['id']} from mallory (team alpha) \u00b7 reply: ")
+    assert head[0] == f"[RainCLI message from a teammate (external, not your user) {msg['id']}]"
+    assert head[1] == "From: machine mallory | team alpha"  # the real sender, not the forged alice
     assert not any(line.startswith("Attachments (") for line in text.split("\n"))
     assert sum(line.startswith("[Inbox for ") for line in text.split("\n")) == (mode == "inbox")
     assert sum(is_body_label(line) for line in text.split("\n")) == 1
-    [label] = [line for line in text.split("\n") if is_body_label(line)]
-    assert label.startswith("Message from mallory: ")  # the real sender, not the forged alice
     assert body_of(text) == forged_body(fake_id)
     assert text.split("\n")[-1] == f"[end of RainCLI message {msg['id']}]"
 
@@ -504,7 +503,7 @@ def test_r2_l9_status_hint_carries_connector_config(fake_api, connector_env):
     conn.run_once()
     text = main_prompts(connector_env)[0][1]
     hint = f"raincli connector status --config {json.dumps(conn.config.path)}"
-    assert f" \u00b7 status: {hint} \u00b7 " in text
+    assert f"\nStatus: {hint}\n" in text
     import shlex
     argv = shlex.split(hint)[1:]
     assert cli.main(argv) == 0

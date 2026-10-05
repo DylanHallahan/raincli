@@ -50,8 +50,11 @@ def herdr_entries(salt, herdr, inbox):
             continue
         is_inbox = inbox_name is not None and name == inbox_name and not seen_inbox and agent.get("name")
         seen_inbox = seen_inbox or bool(is_inbox)
-        out.append(entry(salt, source_id, name, kind, status, "herdr",
-                         "inbox" if is_inbox else None, "instant" if is_inbox else None))
+        item = entry(salt, source_id, name, kind, status, "herdr",
+                     "inbox" if is_inbox else None, "instant" if is_inbox else None)
+        if not agent.get("name"):
+            item["_unnamed"] = True  # listed only: nothing can address it by name
+        out.append(item)
     if inbox_name and not seen_inbox:
         # The mapped inbox is not live (or Herdr could not be read): list it anyway.
         out.append(entry(salt, "herdr:" + inbox_name, inbox_name, "other", "offline" if ok else "unknown",
@@ -273,4 +276,31 @@ def discover(state_dir, salt, herdr, inbox, now=None, include_scan=True):
     hooked, scanned = without_duplicates(hooked, scanned, herdr_ok, processes, inbox)
     for h in hooked:
         h.pop("_pid", None)  # local only: never reported
-    return normalize(herdr_found + hooked + scanned)
+    return normalize(with_reachability(herdr_found + hooked + scanned))
+
+
+def with_reachability(entries):
+    """§16.2: every entry says how it can be reached by name. A named Herdr agent is
+    ``instant``, a hook session ``next-turn``, anything else (an unnamed Herdr agent,
+    a scanned process) ``listed``. A name carried by more than one deliverable entry
+    is ``listed`` with ``ambiguous: true``. The inbox entry keeps its §14 marking."""
+    out = []
+    for item in entries:
+        item = dict(item)
+        unnamed = item.pop("_unnamed", False)
+        if item["role"] != "inbox":
+            if item["source"] == "herdr" and not unnamed:
+                item["reachability"] = "instant"
+            elif item["source"] == "hook":
+                item["reachability"] = "next-turn"
+            else:
+                item["reachability"] = "listed"
+        out.append(item)
+    deliverable = {}
+    for item in out:
+        if item["reachability"] in ("instant", "next-turn"):
+            deliverable[item["name"]] = deliverable.get(item["name"], 0) + 1
+    for item in out:
+        if item["role"] != "inbox" and item["reachability"] != "listed" and deliverable[item["name"]] > 1:
+            item["reachability"], item["ambiguous"] = "listed", True
+    return out

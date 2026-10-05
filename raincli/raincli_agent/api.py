@@ -147,7 +147,9 @@ class ApiClient:
                 code = payload["error"].get("code")
                 message = payload["error"].get("message") or message
                 code = self._redact(code) if isinstance(code, str) else None
-            raise error_for(status, code, self._redact(message), retry_after=retry_after)
+            error = error_for(status, code, self._redact(message), retry_after=retry_after)
+            error.payload = payload if isinstance(payload, dict) else {}  # team_required teams, C10 reason
+            raise error
         if raw:
             return status, body, resp_headers
         if not isinstance(payload, dict):
@@ -194,7 +196,7 @@ class ApiClient:
         return self.request("GET", "/agents")[1]["agents"]
 
     def send(self, to, body, *, message_id=None, conversation_id=None, in_reply_to=None,
-             attachments=None):
+             attachments=None, from_agent=None, kind=None):
         """Send a message. Returns ``(message, created)``.
 
         The id is fixed before the first attempt, so every retry is the same
@@ -207,13 +209,21 @@ class ApiClient:
             payload["in_reply_to"] = in_reply_to
         if attachments:
             payload["attachments"] = attachments  # from attachments.load_for_send
+        if from_agent:
+            payload["from_agent"] = from_agent  # §16.1: which of this machine's agents wrote it
+        if kind:
+            payload["kind"] = kind
         _, data = self.request("POST", "/messages", body=payload)
         return data["message"], bool(data.get("created"))
 
-    def inbox(self, *, after=0, limit=100, wait=0, include_acked=False, timeout=None):
+    def inbox(self, *, after=0, limit=100, wait=0, include_acked=False, timeout=None, routing=False):
+        """``routing=True`` (``?routing=1``, §16.2) also returns messages to named agents
+        and from people. Only the delivering connector sends it (§16.14 S1)."""
         wait = max(0, min(int(wait), MAX_WAIT))
         query = {"after": int(after), "limit": int(limit), "wait": wait,
                  "include_acked": "true" if include_acked else "false"}
+        if routing:
+            query["routing"] = 1
         if timeout is None:
             timeout = max(self.timeout, wait + 15)
         data = self.request("GET", "/inbox", query=query, timeout=timeout)[1]

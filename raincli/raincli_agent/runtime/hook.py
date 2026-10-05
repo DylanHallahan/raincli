@@ -128,14 +128,21 @@ def handle(agent_type, event, name, state_dir, stdin, stdout, now=None):
     sessions.write_record(state_dir, record)
     if event not in CLAIM_EVENTS:
         return "recorded"
-    texts, ids = sessions.claim(state_dir, key, agent_type)
-    if not ids:
+    # The configured inbox's box, then this session name's box (§16.7), one budget.
+    used = [0, 0, 0]
+    claims = []
+    for box in (key, sessions.name_box(record["name"])):
+        texts, ids = sessions.claim(state_dir, box, agent_type, used)
+        if ids:
+            claims.append((box, texts, ids))
+    if not claims:
         return "recorded"
-    output = {"hookSpecificOutput": {"hookEventName": event,
-                                     "additionalContext": sessions.SEPARATOR.join(texts)}}
+    output = {"hookSpecificOutput": {"hookEventName": event, "additionalContext": sessions.SEPARATOR.join(
+        text for _, texts, _ in claims for text in texts)}}
     stdout.write(json.dumps(output).encode("utf-8") + b"\n")
     stdout.flush()
-    sessions.write_receipts(state_dir, key, ids)
+    for box, _, ids in claims:
+        sessions.write_receipts(state_dir, box, ids)
     return "claimed"
 
 

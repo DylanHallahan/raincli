@@ -24,6 +24,7 @@ KEYS = {"agent_config", "herdr_agent", "expect_pane_id", "expect_cwd", "state_di
 INBOX_KEYS = {"hook", "name"}
 INBOX_HOOK_TYPES = ("claude", "codex")
 ESCALATION_KEYS = {"herdr_agent", "expect_pane_id", "expect_cwd", "notify"}
+OWNER_ESCALATION_KEYS = {"to"}
 MODES = ("direct", "inbox")
 TRUST_MODES = ("list", "team")
 
@@ -34,6 +35,7 @@ class EscalationTarget:
     expect_pane_id: str = ""
     expect_cwd: str = ""
     notify: bool = True
+    to_owner: bool = False  # {"to": "owner"} (§16.8): a kind=escalation message to the owner's person endpoint
 
 
 @dataclass(frozen=True)
@@ -56,10 +58,19 @@ class ConnectorConfig:
     shareable_context: tuple = field(default_factory=tuple)
     escalation: EscalationTarget = None
     inbox_hook: tuple = None  # (type, session name) for a next-turn inbox, else None
+    machine: bool = False  # built from a machine-mode runtime.json: named agents only (§16.7)
+    owner_email: str = ""  # the machine's owner as a person: always trusted (§16.12 C5)
     path: str = ""
 
     @property
+    def has_inbox(self):
+        """False for a machine-mode connector (§16.7): named agents only."""
+        return bool(self.herdr_agent or self.inbox_hook)
+
+    @property
     def target_label(self):
+        if not self.has_inbox:
+            return "named agents (no inbox mapping)"
         return self.herdr_agent or "%s hook session %s" % self.inbox_hook
 
 
@@ -109,6 +120,60 @@ def _handles(data, key):
     if not isinstance(value, list) or not all(isinstance(h, str) and HANDLE_RE.match(h) for h in value):
         raise ConfigError(f"connector config: {key} must be a list of agent handles")
     return tuple(value)
+
+
+EMAIL_RE = re.compile(r"^@?[^@\s/\\]{1,64}@[^@\s/\\]{1,190}$")
+
+
+def sender_key(value):
+    """A trust entry or sender in one comparable form: a machine handle, or a person
+    as ``@email`` in lower case (§16.7: a person is matched by email, case-insensitively)."""
+    if isinstance(value, str) and "@" in value:
+        return "@" + value.lstrip("@").lower()
+    return value
+
+
+def _senders(data, key, what="connector config"):
+    """Machine handles and person emails (``alice@example.com`` or ``@alice@example.com``)."""
+    value = data.get(key, [])
+    if not isinstance(value, list) or not all(
+            isinstance(h, str) and (HANDLE_RE.match(h) or EMAIL_RE.match(h)) for h in value):
+        raise ConfigError(f"{what}: {key} must be a list of machine handles and @emails")
+    return tuple(sender_key(h) for h in value)
+
+
+MACHINE_KEYS = {"machine_config", "state_dir", "herdr_bin", "herdr_session", "trust_mode", "trusted_senders",
+                "blocked_senders", "owner_email"}
+
+
+def machine_connector(path, data):
+    """The connector a machine-mode runtime starts (§16.7): no inbox mapping, so it
+    delivers only to named agents. Trust (§16.12 C5, revised): ``team`` by default;
+    ``list`` holds every sender outside ``trusted_senders`` (the owner always passes)."""
+    unknown = sorted(set(data) - MACHINE_KEYS)
+    if unknown:
+        raise ConfigError(f"runtime config: unknown keys {', '.join(unknown)}")
+    base = os.path.dirname(os.path.abspath(path))
+    machine_config = data.get("machine_config")
+    if not isinstance(machine_config, str) or not machine_config:
+        raise ConfigError("runtime config: machine_config must be the machine's agent config")
+    state = data.get("state_dir", "runtime-state")
+    if not isinstance(state, str) or not state:
+        raise ConfigError("runtime config: state_dir must be a path")
+    trust_mode = data.get("trust_mode", "team")
+    if trust_mode not in TRUST_MODES:
+        raise ConfigError('runtime config: trust_mode must be "team" or "list"')
+    owner = data.get("owner_email", "")
+    if owner and (not isinstance(owner, str) or not EMAIL_RE.match(owner)):
+        raise ConfigError("runtime config: owner_email must be an email")
+    return ConnectorConfig(
+        agent_config=os.path.join(base, os.path.expanduser(machine_config)),
+        state_dir=os.path.join(base, os.path.expanduser(state), "queue"),
+        trusted_senders=_senders(data, "trusted_senders", "runtime config"),
+        blocked_senders=_senders(data, "blocked_senders", "runtime config"),
+        trust_mode=trust_mode, poll_wait=25, prompt_timeout=30.0,
+        herdr_bin=_herdr_bin(data, "runtime config"), herdr_session=_herdr_session(data, "runtime config"),
+        machine=True, owner_email=sender_key(owner) if owner else "", path=os.path.abspath(path))
 
 
 def _abs_path(value, what):
@@ -161,6 +226,14 @@ def _escalation(data, inbox):
         return None
     if not isinstance(esc, dict):
         raise ConfigError("connector config: escalation must be an object")
+    if "to" in esc:
+        if esc["to"] != "owner":
+            raise ConfigError('connector config: escalation.to must be "owner"')
+        unknown = sorted(set(esc) - OWNER_ESCALATION_KEYS)
+        if unknown:
+            raise ConfigError(f"connector config: an escalation to the owner takes no other keys "
+                              f"({', '.join(unknown)})")
+        return EscalationTarget(herdr_agent="", notify=False, to_owner=True)
     unknown = sorted(set(esc) - ESCALATION_KEYS)
     if unknown:
         raise ConfigError(f"connector config: unknown escalation keys {', '.join(unknown)}")
@@ -208,6 +281,8 @@ def load_connector_config(path):
         raise ConfigError(f"connector config {path} is not valid JSON") from None
     if not isinstance(data, dict):
         raise ConfigError("connector config must be a JSON object")
+    if "machine_config" in data:
+        return machine_connector(path, data)
     unknown = sorted(set(data) - KEYS)
     if unknown:
         raise ConfigError(f"connector config: unknown keys {', '.join(unknown)}")
@@ -225,7 +300,7 @@ def load_connector_config(path):
     elif not isinstance(herdr_agent, str) or not HERDR_NAME_RE.match(herdr_agent):
         raise ConfigError("connector config: herdr_agent must be a Herdr agent name "
                           "(^[a-z][a-z0-9_-]{0,31}$), not a pane id")
-    trusted = _handles(data, "trusted_senders")
+    trusted = _senders(data, "trusted_senders")
     mode = data.get("mode", "direct")
     if mode not in MODES:
         raise ConfigError('connector config: mode must be "direct" or "inbox"')
@@ -252,7 +327,7 @@ def load_connector_config(path):
         trusted_senders=trusted,
         mode=mode,
         trust_mode=trust_mode,
-        blocked_senders=_handles(data, "blocked_senders"),
+        blocked_senders=_senders(data, "blocked_senders"),
         shareable_context=_shareable_context(data),
         escalation=escalation,
         inbox_hook=inbox_hook,

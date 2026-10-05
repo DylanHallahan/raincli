@@ -560,6 +560,21 @@ def _clamp(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, value))
 
 
+ROUTING_CLIENT = (0, 5, 0)
+
+
+def reports_routing_client(session: Session, agent: Agent) -> bool:
+    """§16.14 S1: a machine becomes routing-capable only when its last presence
+    reported a client of v0.5.0 or later (so no other tool on an old install can)."""
+    from raincli_server.models import AgentPresence
+    row = session.get(AgentPresence, agent.id)
+    version = row.client_version if row is not None else None
+    try:
+        return version is not None and tuple(int(x) for x in version.split(".")) >= ROUTING_CLIENT
+    except ValueError:
+        return False
+
+
 def inbox(session: Session, agent: Agent, *, after: int = 0, limit: int = 100,
           include_acked: bool = False, routing_capable: bool = False) -> tuple[list[Message], int]:
     """Messages to ``agent`` with ``seq > after``, ascending. Returns ``(messages, cursor)``.
@@ -568,7 +583,7 @@ def inbox(session: Session, agent: Agent, *, after: int = 0, limit: int = 100,
     messages from a person are not returned (a v0.4 connector would deliver them to its inbox, or skip
     them as malformed). With it, the machine is recorded as routing-capable.
     """
-    if routing_capable and agent.routing_capable_at is None:
+    if routing_capable and agent.routing_capable_at is None and reports_routing_client(session, agent):
         agent.routing_capable_at = func.now()
         session.flush()
     stmt = (

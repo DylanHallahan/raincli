@@ -116,6 +116,25 @@ def _version_or_none(value):
     return value if isinstance(value, str) and VERSION_RE.fullmatch(value) else None
 
 
+INSTALL_KEPT = ("install_stamp", "stub")  # written by a full install; an update keeps them
+
+
+def _raw_install(root):
+    try:
+        data = json.loads(retry_sharing(lambda: (Path(root) / INSTALL).read_bytes()))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def install_identity(root):
+    """``(current, install_stamp)``: what an app install token is created under (§16.15).
+    Either changes on a full install, and ``current`` on every update."""
+    data = _raw_install(root)
+    stamp = data.get("install_stamp")
+    return _version_or_none(data.get("current")), stamp if isinstance(stamp, str) and len(stamp) <= 200 else None
+
+
 def read_install(root):
     """``install.json`` as ``{"current", "previous", "probation"}`` (each a version or
     None). Invalid content reads as all None. A sharing violation is retried."""
@@ -153,10 +172,10 @@ def write_install(root, current, previous, probation=None):
         raise ConfigError("install.json needs a current version")
     target = Path(root) / INSTALL
     new = target.with_name(INSTALL + ".new")
-    record = {"current": current, "previous": previous, "probation": probation}
-    record.update({k: v for k, v in read_install_meta(root).items() if v is not None})
+    data = {k: v for k, v in _raw_install(root).items() if k in INSTALL_KEPT}  # the installer's keys (§16.15)
+    data.update(current=current, previous=previous, probation=probation)
     with open(new, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(record, fh, sort_keys=True)
+        json.dump(data, fh, sort_keys=True)
         fh.write("\n")
         fh.flush()
         os.fsync(fh.fileno())
@@ -256,6 +275,16 @@ def update_mode(root):
     return saved["update_mode"] if saved else "automatic"
 
 
+def app_floor(root):
+    """v0.4.0, or v0.5.0 once the app's runtime has polled with routing=1 (§16.12 C1)."""
+    from . import floors
+    try:
+        floor = floors.floor_for([paths(root)[1]])
+    except Exception:  # noqa: BLE001 - an unreadable config keeps the base floor
+        floor = None
+    return max(MIN_VERSION, floor or MIN_VERSION)
+
+
 def configure(root, mode=None, rollback=False):
     """``runtime update --automatic|--manual|--rollback`` for an app install. An
     explicit rollback makes the previous version current and sets ``manual``; a
@@ -268,8 +297,9 @@ def configure(root, mode=None, rollback=False):
             previous = state["previous"]
             if previous is None or not (version_dir(root, previous) / APP_EXE).is_file():
                 raise ConfigError("no previous app version is available")
-            if version_key(previous) < MIN_VERSION:
-                raise ConfigError("rollback below v0.4.0 is refused: that version cannot run this machine")
+            floor = app_floor(root)
+            if version_key(previous) < floor:
+                raise ConfigError("rollback below v%d.%d.%d is refused: that version cannot run this machine" % floor)
             write_install(root, previous, state["current"])
             mode = "manual"
         if mode is not None:
@@ -699,7 +729,7 @@ def rollback(root, failed):
     state = read_install(root)
     previous = state["previous"]
     if (state["current"] != failed or previous is None or previous == failed
-            or version_key(previous) < MIN_VERSION or not (version_dir(root, previous) / APP_EXE).is_file()):
+            or version_key(previous) < app_floor(root) or not (version_dir(root, previous) / APP_EXE).is_file()):
         return False
     write_install(root, previous, failed, probation=None)
     update = updates.read_update_state(root)

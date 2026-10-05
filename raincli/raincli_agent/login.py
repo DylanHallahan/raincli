@@ -25,6 +25,8 @@ from .fsutil import atomic_write_json
 from .text import escape_text
 
 DEFAULT_API_URL = "https://raincli.com"
+TRUST_KEYS = {"trust_mode", "trusted_senders", "blocked_senders"}
+MACHINE_KEYS = {"machine_config", "state_dir", "herdr_bin", "herdr_session", "owner_email"} | TRUST_KEYS
 HANDLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 TIMEOUT = 30.0
 
@@ -125,9 +127,27 @@ def runtime_config_path(agent_config):
     return str(Path(agent_config).absolute().parent / "runtime.json")
 
 
-def machine_runtime(agent_config):
-    """The machine-mode runtime config (15.4) for an agent config."""
-    return {"machine_config": str(Path(agent_config).absolute()), "state_dir": "runtime-state"}
+def machine_runtime(agent_config, owner_email=None, keep=None):
+    """The machine-mode runtime config (15.4) for an agent config. ``keep`` is the
+    previous machine-mode config, whose trust settings (§16.12 C5) survive a sign-in."""
+    data = {k: v for k, v in (keep or {}).items() if k in TRUST_KEYS}
+    data.update(machine_config=str(Path(agent_config).absolute()), state_dir="runtime-state")
+    if owner_email:
+        data["owner_email"] = owner_email.strip().lower()
+    return data
+
+
+def record_owner(agent_config, email):
+    """Remember the owner's email in this machine's machine-mode runtime config, for
+    ``"escalation": {"to": "owner"}`` (§16.8) and owner trust (§16.12 C5)."""
+    runtime_path = runtime_config_path(agent_config)
+    data = read_runtime_json(runtime_path)
+    if runtime_mode(runtime_path) != "machine" or not _same(
+            Path(runtime_path).parent / Path(data["machine_config"]).expanduser(), agent_config):
+        return False
+    data["owner_email"] = email.strip().lower()
+    atomic_write_json(runtime_path, data)
+    return True
 
 
 def read_runtime_json(path):
@@ -220,7 +240,7 @@ def runtime_mode(runtime_path):
     data = read_runtime_json(runtime_path)
     if data is None:
         return None
-    if set(data) <= {"machine_config", "state_dir"} and isinstance(data.get("machine_config"), str):
+    if set(data) <= MACHINE_KEYS and isinstance(data.get("machine_config"), str):
         return "machine"
     if isinstance(data.get("connectors"), list) and data["connectors"]:
         return "connector"
@@ -301,7 +321,8 @@ def _teams(payload):
     return out
 
 
-def request_login(api_url, email, password, machine_name, team=None, *, previous_token=None, replace=False):
+def request_login(api_url, email, password, machine_name, team=None, *, previous_token=None, replace=False,
+                  person_session=False):
     """``POST /api/v1/app/login``. Returns the validated reply; raises a ``LoginError``
     for the codes a user acts on (15.1), or the transport's ``ApiError``."""
     if not isinstance(password, Secret):
@@ -314,30 +335,13 @@ def request_login(api_url, email, password, machine_name, team=None, *, previous
         body["previous_token"] = previous_token.reveal()
     if replace:
         body["replace"] = True
+    if person_session:
+        body["person_session"] = True  # §16.12 C15: only when asked
     secrets = [password.reveal()] + ([previous_token.reveal()] if previous_token is not None else [])
     try:
         status, reply = _post(api_url, "/app/login", body, secrets=secrets)
     except ApiError as exc:
-        payload, code = getattr(exc, "payload", {}), exc.code
-        if code == "invalid_credentials" or exc.status == 401:
-            raise InvalidCredentials("the email or password is not correct") from None
-        if code == "rate_limited" or exc.status == 429:
-            wait = f"; try again in {exc.retry_after} s" if exc.retry_after else "; try again later"
-            raise RateLimited("too many sign-in attempts" + wait, retry_after=exc.retry_after) from None
-        if code == "team_choice_required":
-            raise TeamChoiceRequired("you are a member of several teams; choose one", _teams(payload)) from None
-        if code == "name_in_use":
-            raise NameInUse(f"you already have a machine named {machine_name}. Replace it (its old credential "
-                            "is revoked), or choose another name. A machine that has received messages can only "
-                            "be replaced from that machine, or revoked on the website") from None
-        if code == "name_taken":
-            raise NameTaken(f"the machine name {machine_name} is taken in this team (another member's "
-                            "machine, or a revoked one); choose another name") from None
-        if code == "mfa_required":
-            raise MfaRequired("this account needs multi-factor sign-in, which this client does not support "
-                              "yet; sign in on the website") from None
-        if code == "invalid" or exc.status == 400:
-            raise InvalidRequest(f"the server refused the sign-in request: {exc}") from None
+        _login_error(exc, machine_name)
         raise
     finally:
         body.clear()
@@ -352,9 +356,65 @@ def request_login(api_url, email, password, machine_name, team=None, *, previous
         reply_url = validate_api_url(reply["api_url"]) if reply.get("api_url") else None
     except (ConfigError, KeyError, AttributeError):
         raise ApiError("the server's sign-in reply is malformed", code="bad_response", status=status) from None
+    person = None
+    if person_session:
+        from .person import validate_session
+        try:
+            person = validate_session(reply.get("person_session"))
+        except ConfigError:
+            raise ApiError("the server's sign-in reply is malformed", code="bad_response", status=status) from None
     return {"token": token, "handle": handle, "rotated": bool(reply.get("rotated")),
             "team": {"slug": team_info["slug"], "name": str(team_info.get("name") or team_info["slug"])},
-            "api_url": reply_url, "status": status}
+            "api_url": reply_url, "status": status, "person_session": person}
+
+
+def _login_error(exc, machine_name=None):
+    """Raise the ``LoginError`` a sign-in error reply maps to (15.1); return otherwise."""
+    payload, code = getattr(exc, "payload", {}), exc.code
+    if code == "invalid_credentials" or exc.status == 401:
+        raise InvalidCredentials("the email or password is not correct") from None
+    if code == "rate_limited" or exc.status == 429:
+        wait = f"; try again in {exc.retry_after} s" if exc.retry_after else "; try again later"
+        raise RateLimited("too many sign-in attempts" + wait, retry_after=exc.retry_after) from None
+    if code == "team_choice_required":
+        raise TeamChoiceRequired("you are a member of several teams; choose one", _teams(payload)) from None
+    if code == "name_in_use":
+        raise NameInUse(f"you already have a machine named {machine_name}. Replace it (its old credential "
+                        "is revoked), or choose another name. A machine that has received messages can only "
+                        "be replaced from that machine, or revoked on the website") from None
+    if code == "name_taken":
+        raise NameTaken(f"the machine name {machine_name} is taken in this team (another member's "
+                        "machine, or a revoked one); choose another name") from None
+    if code == "mfa_required":
+        raise MfaRequired("this account needs multi-factor sign-in, which this client does not support "
+                          "yet; sign in on the website") from None
+    if code == "invalid" or exc.status == 400:
+        raise InvalidRequest(f"the server refused the sign-in request: {exc}") from None
+
+
+def request_person_only(api_url, email, password, machine_token):
+    """``POST /api/v1/app/login`` with ``person_only`` (§16.3): a person session for the
+    owner of the machine whose current credential is ``machine_token``. It rotates
+    nothing. Returns the session as a ``Secret``."""
+    if not isinstance(password, Secret):
+        raise TypeError("password must be a Secret")
+    body = {"email": email, "password": password.reveal(), "previous_token": machine_token.reveal(),
+            "person_only": True}
+    try:
+        status, reply = _post(api_url, "/app/login", body, secrets=[password.reveal(), machine_token.reveal()])
+    except ApiError as exc:
+        if exc.code == "invalid" or exc.status == 400:
+            raise InvalidRequest("the server refused a person session for this machine: sign in with the "
+                                 "email and password of the machine's owner, or sign in again") from None
+        _login_error(exc)
+        raise
+    finally:
+        body.clear()
+    from .person import validate_session
+    try:
+        return validate_session(reply.get("person_session"))
+    except ConfigError:
+        raise ApiError("the server's sign-in reply is malformed", code="bad_response", status=status) from None
 
 
 def request_sign_out(config):
@@ -424,7 +484,7 @@ def prepare(config_path=None, force=False, *, identity=existing_identity):
 
 
 def login(email, password, *, plan=None, machine_name=None, team=None, replace=False, api_url=DEFAULT_API_URL,
-          force=False, config_path=None):
+          force=False, config_path=None, person_session=False):
     """Sign this machine in; write its config and, in machine mode, its runtime config.
 
     Returns ``{"handle", "team", "rotated", "config", "runtime_config", "api_url", ...}``.
@@ -439,7 +499,8 @@ def login(email, password, *, plan=None, machine_name=None, team=None, replace=F
             raise ConnectorMachine(f"this machine's connector delivery uses the handle {plan['handle']}; "
                                    "signing in again may only rotate that same machine")
     previous = plan["previous_token"] if machine_name == plan["handle"] else None
-    reply = request_login(api_url, email, password, machine_name, team, previous_token=previous, replace=replace)
+    reply = request_login(api_url, email, password, machine_name, team, previous_token=previous, replace=replace,
+                          person_session=person_session)
     if not plan["write_runtime"] and reply["handle"] != plan["handle"]:
         raise ConnectorMachine("the server did not rotate this machine; the connector credential was left unchanged")
     config_path, runtime_path = plan["config"], plan["runtime_config"]
@@ -447,10 +508,19 @@ def login(email, password, *, plan=None, machine_name=None, team=None, replace=F
     # api_url is advisory (a different public URL is reported, never followed).
     write_config(config_path, api_url, reply["token"], force=True)
     if plan["write_runtime"]:
-        atomic_write_json(runtime_path, machine_runtime(config_path))
+        keep = read_runtime_json(runtime_path) if runtime_mode(runtime_path) == "machine" else None
+        atomic_write_json(runtime_path, machine_runtime(config_path, email, keep))
+    # A new machine credential ends this machine's person sessions on the server (§16.12 C6);
+    # either way the install token is rotated (§16.14 S3: sign-in again).
+    from . import person
+    if reply["person_session"] is not None:
+        person.save_session(config_path, reply["person_session"])
+    else:
+        person.clear_session(config_path)
     result = {"handle": reply["handle"], "team": reply["team"], "rotated": reply["rotated"],
               "config": config_path, "runtime_config": runtime_path, "runtime_written": plan["write_runtime"],
-              "api_url": api_url, "server_api_url": reply["api_url"]}
+              "api_url": api_url, "server_api_url": reply["api_url"],
+              "person_session": reply["person_session"] is not None}
     from .runtime import winapp
     root = winapp.app_root()
     if root is not None:
@@ -521,6 +591,9 @@ def logout(config_path=None, *, local_only=False):
         result["startup"] = "error:" + type(exc).__name__
     os.unlink(config_path)
     result["removed"].append(config_path)
+    from . import person
+    if person.clear_session(config_path):  # revoked with the machine (§16.3); install token rotated (§16.14 S3)
+        result["removed"].append(str(person.person_path(config_path)))
     if uses:
         os.unlink(runtime_path)
         result["removed"].append(runtime_path)

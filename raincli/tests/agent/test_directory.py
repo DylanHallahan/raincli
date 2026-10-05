@@ -373,13 +373,13 @@ def test_codex_hooks_install_only_when_supported(tmp_path, state):
 
 
 def test_codex_probe_parses_features_list(monkeypatch):
-    monkeypatch.setattr(hooks_install.shutil, "which", lambda name: "/bin/codex")
     def run(argv, **kw):
         out = "codex-cli 0.159.2\n" if argv[-1] == "--version" else "apps  stable  true\nhooks   stable   true\n"
         return subprocess.CompletedProcess(argv, 0, out, "")
-    assert hooks_install.codex_support(run) == (True, "codex-cli 0.159.2: feature hooks stable true")
+    find = lambda: "/bin/codex"  # noqa: E731
+    assert hooks_install.codex_support(run, find) == (True, "codex-cli 0.159.2: feature hooks stable true")
     off = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "hooks  experimental  false\n", "")
-    assert hooks_install.codex_support(off)[0] is False
+    assert hooks_install.codex_support(off, find)[0] is False
 
 
 @POSIX

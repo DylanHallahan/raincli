@@ -73,7 +73,8 @@ def test_new_machine_writes_config_and_machine_runtime(account, home):
     assert cfg.api_url == account.url  # the origin signed in to, not the reply's advisory api_url
     assert account.state.tokens[cfg.token.reveal()]
     runtime = json.loads((config_path(home).parent / "runtime.json").read_text())
-    assert runtime == {"machine_config": str(config_path(home)), "state_dir": "runtime-state"}
+    assert runtime == {"machine_config": str(config_path(home)), "state_dir": "runtime-state",
+                       "owner_email": EMAIL}  # §16.8, §16.12 C5
     assert result["runtime_written"] and result["server_api_url"] == "https://raincli.example"
     assert oct(config_path(home).stat().st_mode & 0o777) == "0o600"
     assert PASSWORD not in config_path(home).read_text()

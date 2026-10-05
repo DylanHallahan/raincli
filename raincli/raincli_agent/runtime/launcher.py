@@ -205,12 +205,35 @@ def update_unlock(fd):
 MACHINE_FLOOR = (0, 4, 0)  # machine mode needs v0.4.0 or later (15.8 H8)
 
 
+ROUTING_FLOOR = (0, 5, 0)  # a runtime that has polled with routing=1 (§16.12 C1)
+
+
 def machine_mode(config):
     """Whether the runtime config this launcher runs is in machine mode."""
     try:
         return config is not None and "machine_config" in json.loads(read_text(Path(config)))
     except (OSError, ValueError, TypeError):
         return False
+
+
+def rollback_floor(config):
+    """The lowest version a rollback may restore for this runtime config (a standalone
+    copy of runtime/floors.py: this launcher imports nothing from the client)."""
+    try:
+        data = json.loads(read_text(Path(config))) if config else None
+    except (OSError, ValueError, TypeError):
+        data = None
+    if not isinstance(data, dict):
+        return None
+    state = data.get("state_dir", "runtime-state")
+    if isinstance(state, str) and state:
+        try:
+            marker = json.loads(read_text(Path(config).parent / Path(state).expanduser() / "routing-capable.json"))
+            if isinstance(marker, dict) and marker.get("routing_capable") is True:
+                return ROUTING_FLOOR
+        except (OSError, ValueError):
+            pass
+    return MACHINE_FLOOR if "machine_config" in data else None
 
 
 def tag_key(tag):
@@ -364,8 +387,7 @@ def supervise(root, args, config, command, own=None, probation_enabled=True):
                     probation = False
                 elif on_probation(root, pointer):
                     # Never wait on the lock here: a stop must stay prompt (review 2, O9).
-                    result = roll_back(root, pointer, timeout=0,
-                                       floor=MACHINE_FLOOR if machine_mode(config) else None)
+                    result = roll_back(root, pointer, timeout=0, floor=rollback_floor(config))
                     if result == "busy":
                         rollback_pending = True
                         time.sleep(1)

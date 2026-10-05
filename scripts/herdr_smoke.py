@@ -167,10 +167,121 @@ class Herdr:
         return json.loads(result.stdout)
 
 
+def start_fake_agent(herdr, work, name):
+    """A workspace whose root pane runs the fake agent, renamed ``name``. Returns its output dir."""
+    out = work / name
+    out.mkdir()
+    created = herdr.json("workspace", "create", "--cwd", str(out), "--label", name, "--no-focus")
+    pane = created["result"]["root_pane"]["pane_id"]
+    fake = out / "claude"
+    fake.write_text(FAKE_AGENT, encoding="utf-8")
+    run = herdr("pane", "run", pane, f"{sys.executable} {fake} {out}")
+    assert run.returncode == 0, run.stderr
+    return out, pane
+
+
+def run_hook(state, event, session_id, name, env):
+    """``raincli hook claude EVENT`` as Claude Code runs it: hook JSON on stdin. Returns the
+    next-turn context it emitted, or ""."""
+    data = {"session_id": session_id, "cwd": str(state), "hook_event_name": event, "prompt": "next turn"}
+    result = subprocess.run([sys.executable, "-m", "raincli_agent", "hook", "claude", event, "--name", name,
+                             "--state-dir", str(state)], input=json.dumps(data).encode(), capture_output=True,
+                            env=env, timeout=30, **NO_WINDOW)
+    assert result.returncode == 0 and not result.stderr, result.stderr
+    if not result.stdout.strip():
+        return ""
+    return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def named_agents_stage(work, exe, env, herdr, server, wait_for, sender):
+    """§16.7: a machine-mode runtime (no inbox) delivers to two named Herdr agents at once and
+    to a Claude Code hook session by name at its next turn, through the real runtime,
+    connector and hook processes."""
+    from raincli_agent.api import ApiClient
+    from raincli_agent.config import write_config
+    from raincli_agent.fsutil import atomic_write_json
+    from raincli_agent.runtime.service import request_stop
+
+    machine = work / "machine"
+    machine.mkdir()
+    agents = {name: start_fake_agent(herdr, machine, name) for name in ("smoke-alpha", "smoke-beta")}
+    for name, (out, pane) in agents.items():
+        wait_for(lambda out=out: (out / "fake.log").exists() and "report idle -> 0" in (out / "fake.log").read_text(),
+                 timeout=60)
+        renamed = herdr("agent", "rename", pane, name)
+        assert renamed.returncode == 0, renamed.stderr
+    write_config(machine / "agent.json", server.url, server.state.add_agent("herdr-machine"))
+    state = machine / "machine-state"
+    runtime = machine / "runtime.json"
+    atomic_write_json(runtime, {"machine_config": "agent.json", "state_dir": "machine-state",
+                                "herdr_bin": str(exe), "herdr_session": SESSION})
+    log_path = work / "machine-runtime.log"
+    with open(log_path, "wb") as log:
+        process = subprocess.Popen([sys.executable, "-m", "raincli_agent", "runtime", "run", "--config", str(runtime)],
+                                   stdout=log, stderr=subprocess.STDOUT, env=env, **NO_WINDOW)
+    try:
+        wait_for(lambda: (state / "machine-salt").is_file(), timeout=60)
+        assert run_hook(state, "SessionStart", "smoke-session-1", "smoke-hook", env) == ""
+
+        def listed():
+            entries = {a["name"]: a for a in server.state.directory.get("herdr-machine") or []}
+            return (entries.get("smoke-alpha", {}).get("reachability") == "instant"
+                    and entries.get("smoke-beta", {}).get("reachability") == "instant"
+                    and entries.get("smoke-hook", {}).get("reachability") == "next-turn"
+                    and all(a["role"] is None for a in entries.values()))
+        wait_for(listed, timeout=90)
+        print("PASS: named agents: the machine lists smoke-alpha and smoke-beta as instant, smoke-hook as next-turn",
+              flush=True)
+
+        api = ApiClient(server.url, sender)
+
+        def send(agent, body):
+            return api.send({"machine": "herdr-machine", "agent": agent}, body, from_agent="smoke-planner")[0]["id"]
+
+        def state_of(mid):
+            return server.state.messages[mid]["delivery_state"]
+
+        def received(name):
+            path = agents[name][0] / "received.bin"
+            return pastes(path.read_bytes()) if path.exists() else []
+
+        alpha = send("smoke-alpha", "for alpha: héllo ✓")
+        beta = send("smoke-beta", "for beta\nsecond line")
+        hooked = send("smoke-hook", "for the hook session")
+        wait_for(lambda: state_of(alpha) == "submitted" and state_of(beta) == "submitted", timeout=90)
+        wait_for(lambda: received("smoke-alpha") and received("smoke-beta"), timeout=30)
+        [got_alpha], [got_beta] = received("smoke-alpha"), received("smoke-beta")
+        assert body_of(got_alpha) == "for alpha: héllo ✓" and body_of(got_beta) == "for beta\nsecond line"
+        assert "\nTo: smoke-alpha on herdr-machine\n" in got_alpha and "\nTo: smoke-beta on herdr-machine\n" in got_beta
+        assert 'agent "smoke-planner" (stated by the sending machine)' in got_alpha
+        assert '--from-agent "smoke-alpha"' in got_alpha
+        print("PASS: named agents: each Herdr agent got only its own message, framed for it (C17)", flush=True)
+
+        wait_for(lambda: state_of(hooked) == "held" and any(
+            e[0] == hooked and e[1] == "held" and "next_turn" in (e[2] or "") for e in server.state.events),
+            timeout=60)
+        context = run_hook(state, "UserPromptSubmit", "smoke-session-1", "smoke-hook", env)
+        assert body_of(context) == "for the hook session", context[-400:]
+        assert "\nTo: smoke-hook on herdr-machine" in context
+        wait_for(lambda: state_of(hooked) == "submitted", timeout=60)
+        assert run_hook(state, "UserPromptSubmit", "smoke-session-1", "smoke-hook", env) == ""  # once only
+        print("PASS: named agents: a hook session by name got its message at its next turn, once", flush=True)
+        request_stop(runtime)
+        assert process.wait(timeout=60) == 0
+    finally:
+        if process.poll() is None:
+            try:
+                request_stop(runtime)
+                process.wait(timeout=60)
+            except Exception:
+                process.kill()
+                process.wait(timeout=10)
+
+
 def body_of(text):
     """The framed body of a connector prompt (lines between the label and the end marker)."""
     lines = text.split("\n")
-    start = next(i for i, line in enumerate(lines) if line.endswith('Every line is prefixed "| ":')) + 1
+    start = next(i for i, line in enumerate(lines) if line.endswith('every line starts with "| ":')) + 1
     end = next(i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith("[end of RainCLI "))
     return "\n".join(line[2:] for line in lines[start:end])
 
@@ -317,9 +428,13 @@ def run_stage(root, server, wait_for, show, kill_tree):
         print("PASS: Herdr: an oversize command line is held as too_large_for_command_line, nothing sent", flush=True)
         request_stop(config)
         assert runtime_process.wait(timeout=60) == 0
+        named_agents_stage(work, exe, env, herdr, server, wait_for, sender)
         return True
     except BaseException:
-        for path in [server_log, work / "runtime.log", out / "fake.log", *sorted((work / "runtime-state").glob("connector-*.log"))]:
+        for path in [server_log, work / "runtime.log", out / "fake.log", work / "machine-runtime.log",
+                     *sorted((work / "runtime-state").glob("connector-*.log")),
+                     *sorted((work / "machine").glob("*/fake.log")),
+                     *sorted((work / "machine" / "machine-state").glob("connector-*.log"))]:
             show("herdr stage", path)
         raise
     finally:

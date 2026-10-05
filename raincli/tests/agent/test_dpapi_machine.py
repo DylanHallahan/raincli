@@ -112,7 +112,8 @@ def machine_setup(tmp_path, fake_api, token):
 def test_runtime_config_needs_exactly_one_mode(tmp_path, fake_api):
     agent, runtime = machine_setup(tmp_path, fake_api, fake_api.alice)
     path, state, configs = load_runtime(runtime)
-    assert machine_mode(configs) and configs[0][0] == str(agent) and state == tmp_path / "state"
+    assert machine_mode(configs) and configs[0][0] == str(runtime) and state == tmp_path / "state"
+    assert configs[0][1].agent_config == str(agent) and not configs[0][1].has_inbox  # §16.7
     for bad in ({"machine_config": "agent.json", "connectors": ["c.json"]}, {"state_dir": "x"},
                 {"machine_config": ""}, {"connectors": []}, {"machine_config": "agent.json", "extra": 1}):
         runtime.write_text(json.dumps(bad))
@@ -135,7 +136,9 @@ def test_machine_mode_publishes_ready_client_and_directory_without_inbox(tmp_pat
     run(runtime, once=True, pushed=driver)
     bodies = [b for h, b in fake_api.state.presence_bodies if h == "alice"]
     first, last = bodies[0], bodies[-1]
-    assert first["status"] == "ready" and first["client"]["update_mode"] == "manual"
+    # §16.7: machine mode runs a connector for named agents; ready once it confirms (a
+    # single --once tick reports offline until then).
+    assert first["status"] in ("offline", "ready") and first["client"]["update_mode"] == "manual"
     assert all(a["role"] is None for a in first["agents"])
     assert ("project", "claude", "working") in [(a["name"], a["type"], a["status"]) for a in first["agents"]]
     assert last == {"status": "offline", "agents": []}
@@ -191,12 +194,15 @@ def test_startup_digest_and_unit_for_machine_mode(tmp_path, fake_api):
     assert str(runtime.resolve()) in startup.systemd_unit(runtime)
 
 
-def test_machine_config_change_retires_and_republishes(tmp_path, fake_api):
-    from raincli_agent.runtime.service import MachineWorker, load_machine
-    agent, _ = machine_setup(tmp_path, fake_api, fake_api.alice)
-    path, _, identity, binding = load_machine(agent)
-    worker = MachineWorker(path, identity, tmp_path, binding)
-    assert worker.tick(0)["status"] == "ready"
+def test_machine_config_change_retires_and_republishes(tmp_path, fake_api, monkeypatch):
+    from raincli_agent.runtime import service
+    from .test_runtime import FakeProcess
+    monkeypatch.setattr(service.subprocess, "Popen", FakeProcess)
+    agent, runtime = machine_setup(tmp_path, fake_api, fake_api.alice)
+    path, state, configs = service.load_runtime(runtime)
+    state.mkdir(mode=0o700)
+    [worker] = service.Supervisor(path, state, configs, service.file_sha256(path)).workers
+    assert worker.tick(0)["status"] == "offline"  # started; not yet confirmed
     write_config(str(agent), fake_api.url, fake_api.bob, force=True)
     report = worker.tick(1)
     assert report["error"] == "config_changed" and worker.retired

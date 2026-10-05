@@ -21,7 +21,8 @@ from urllib.parse import parse_qs, urlsplit
 from raincli_agent import attachments as att
 from raincli_agent.text import body_problem
 
-SEND_KEYS = {"id", "to", "body", "conversation_id", "in_reply_to", "from", "sender", "attachments"}
+SEND_KEYS = {"id", "to", "body", "conversation_id", "in_reply_to", "from", "sender", "attachments",
+             "from_agent", "kind"}
 EVENT_STATES = {"held", "submitted", "submission_uncertain", "rejected"}
 
 
@@ -50,7 +51,7 @@ def presence_problem(body):
         return "agents"
     keys, inboxes = set(), 0
     for a in agents:
-        if not isinstance(a, dict) or set(a) != AGENT_KEYS:
+        if not isinstance(a, dict) or not AGENT_KEYS <= set(a) or set(a) - AGENT_KEYS - {"ambiguous"}:
             return "agent keys"
         if not isinstance(a["key"], str) or not re.fullmatch(r"[a-z0-9]{8,64}", a["key"]) or a["key"] in keys:
             return "agent key"
@@ -66,8 +67,12 @@ def presence_problem(body):
             return "agent status"
         if a["source"] not in {"herdr", "hook", "scan"} or (a["source"] == "scan" and a["status"] != "unknown"):
             return "agent source"
-        if a["role"] not in (None, "inbox") or (a["role"] is None) != (a["reachability"] is None):
+        # §16.2 / migration 0006: reachability on any agent; an inbox must be deliverable;
+        # "ambiguous" only as true, with "listed".
+        if a["role"] not in (None, "inbox") or a["reachability"] not in (None, "instant", "next-turn", "listed"):
             return "agent role"
+        if "ambiguous" in a and (a["ambiguous"] is not True or a["reachability"] != "listed"):
+            return "ambiguous"
         if a["role"] == "inbox":
             inboxes += 1
             if a["reachability"] not in ("instant", "next-turn"):
@@ -119,6 +124,10 @@ class FakeState:
         self.delivered = set()  # agent ids with delivery history (they rotate only with previous_token)
         self.login_failures = {}  # email -> failures
         self.login_bodies = []  # every /app/login body received (tests check what was sent)
+        self.inbox_queries = []  # (handle, routing=1?) for every inbox poll
+        self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id} (§16.3)
+        self.person_inbox = {}  # email -> [message JSON] for the notification feed tests
+        self.routing = {}  # agent id -> "all" | "inbox-only" (§16.5)
 
     # -- setup -----------------------------------------------------------
 
@@ -139,7 +148,8 @@ class FakeState:
     def app_login(self, body):
         """15.1 as amended by 15.8: generic errors, team choice, name rules, rotation with proof."""
         if not isinstance(body, dict) or set(body) - {"email", "password", "machine_name", "team",
-                                                      "previous_token", "replace"}:
+                                                      "previous_token", "replace", "person_session",
+                                                      "person_only"}:
             raise ApiFail(400, "invalid")
         user = self.users.get(body.get("email"))
         if self.login_failures.get(body.get("email"), 0) >= 5:
@@ -147,6 +157,11 @@ class FakeState:
         if user is None or body.get("password") != user["password"]:
             self.login_failures[body.get("email")] = self.login_failures.get(body.get("email"), 0) + 1
             raise ApiFail(401, "invalid_credentials")
+        if body.get("person_only") is True:  # §16.3: a person session for the proven machine's owner
+            machine = self.tokens.get(body.get("previous_token") or "")
+            if "machine_name" in body or machine is None or self.owners.get(machine) != body["email"]:
+                raise ApiFail(400, "invalid")
+            return 200, {"person_session": self.new_person_session(body["email"], machine)}
         teams = user["teams"]
         team = body.get("team")
         if team is None:
@@ -178,14 +193,44 @@ class FakeState:
             token = self.add_agent(name, team=team)
             self.owners[self.tokens[token]] = body["email"]
             status = 201
-        return status, {"api_url": "https://raincli.example", "token": token, "handle": name,
-                        "team": {"slug": team, "name": self.teams[team]}, "rotated": rotated}
+        machine = self.tokens[token]
+        for ps in [t for t, s in self.person_sessions.items() if s["machine"] == machine]:
+            del self.person_sessions[ps]  # §16.12 C6: a rotation ends the machine's person sessions
+        reply = {"api_url": "https://raincli.example", "token": token, "handle": name,
+                 "team": {"slug": team, "name": self.teams[team]}, "rotated": rotated}
+        if body.get("person_session") is True:
+            reply["person_session"] = self.new_person_session(body["email"], machine)
+        return status, reply
+
+    def new_person_session(self, email, machine):
+        token = "rps_" + secrets.token_urlsafe(32)
+        self.person_sessions[token] = {"email": email, "machine": machine}
+        return token
 
     def sign_out(self, caller):
+        for ps in [t for t, s in self.person_sessions.items() if s["machine"] == caller["id"]]:
+            del self.person_sessions[ps]
         caller["active"] = False
         for token in [t for t, aid in self.tokens.items() if aid == caller["id"]]:
             del self.tokens[token]
         return 200, {"signed_out": True}
+
+    def person_message(self, recipient_handle, email, display_name, body, agent=None, team="alpha"):
+        """A message from a person (the website or app) to a machine or one of its agents."""
+        recipient = self.agent_by_handle(team, recipient_handle)
+        self.seq += 1
+        ts = now()
+        mid = str(uuid.uuid4())
+        conv = str(uuid.uuid4())
+        self.conversations[conv] = {"pair": frozenset((recipient["id"],)), "team": team}
+        self.messages[mid] = {"id": mid, "conversation_id": conv, "in_reply_to": None, "sender": recipient["id"],
+                              "person": {"email": email, "display_name": display_name}, "agent": agent,
+                              "from_agent": None, "kind": "message", "recipient": recipient["id"], "body": body,
+                              "created_at": ts, "seq": self.seq, "acked_at": None, "delivery_state": "stored",
+                              "delivery_updated_at": ts, "attachments": []}
+        with self.lock:
+            self.lock.notify_all()
+        return mid
 
     def fail(self, method, path_regex, action, times=1):
         self.faults.append([method, re.compile(path_regex), action, times])
@@ -197,8 +242,15 @@ class FakeState:
         return None
 
     def render(self, m):
+        person = m.get("person")  # {"email", "display_name"} for a person sender (§16.1)
+        sender = "@" + person["email"] if person else self.agents[m["sender"]]["handle"]
+        to_handle = self.agents[m["recipient"]]["handle"]
+        to_endpoint = {"machine": to_handle, **({"agent": m["agent"]} if m.get("agent") else {})}
+        from_endpoint = ({"person": person["email"], "display_name": person["display_name"]} if person
+                         else {"machine": sender})
         return {"id": m["id"], "conversation_id": m["conversation_id"], "in_reply_to": m["in_reply_to"],
-                "from": self.agents[m["sender"]]["handle"], "to": self.agents[m["recipient"]]["handle"],
+                "from": sender, "to": to_handle, "from_endpoint": from_endpoint, "to_endpoint": to_endpoint,
+                "from_agent": m.get("from_agent"), "kind": m.get("kind", "message"), "hold_reason": None,
                 "body": m["body"], "created_at": m["created_at"], "seq": m["seq"],
                 "acked_at": m["acked_at"], "delivery_state": m["delivery_state"],
                 "delivery_updated_at": m["delivery_updated_at"],
@@ -226,8 +278,15 @@ class FakeState:
         text = body.get("body")
         if body_problem(text):
             raise ApiFail(400, "invalid", body_problem(text))
-        recipient = self.agent_by_handle(caller["team"], body.get("to"))
-        if recipient is None or not recipient["active"] or recipient["id"] == caller["id"]:
+        to, agent_name = body.get("to"), None
+        if isinstance(to, dict) and set(to) == {"person"}:
+            return self.send_to_person(caller, body, mid, text, to["person"])
+        if isinstance(to, dict):  # §16.1 endpoint objects (machine, or machine and agent)
+            if set(to) - {"machine", "agent"} or "machine" not in to:
+                raise ApiFail(400, "invalid", "unsupported endpoint in the fake")
+            to, agent_name = to["machine"], to.get("agent")
+        recipient = self.agent_by_handle(caller["team"], to)
+        if recipient is None or not recipient["active"] or (recipient["id"] == caller["id"] and not agent_name):
             raise ApiFail(400, "invalid", "unknown recipient")
         pair = frozenset((caller["id"], recipient["id"]))
         in_reply_to = body.get("in_reply_to")
@@ -266,6 +325,7 @@ class FakeState:
         self.seq += 1
         ts = now()
         m = {"id": mid, "conversation_id": conv, "in_reply_to": in_reply_to, "sender": caller["id"],
+             "agent": agent_name, "from_agent": body.get("from_agent"), "kind": body.get("kind", "message"),
              "recipient": recipient["id"], "body": text, "created_at": ts, "seq": self.seq,
              "acked_at": None, "delivery_state": "stored", "delivery_updated_at": ts,
              "attachments": [dict(f, id=str(uuid.uuid4()), media_type="text/markdown") for f in files]}
@@ -277,6 +337,28 @@ class FakeState:
                 parent["delivery_state"], parent["delivery_updated_at"] = "replied", ts
         self.lock.notify_all()
         return 201, {"message": self.render(m), "created": True}
+
+    def send_to_person(self, caller, body, mid, text, email):
+        """A machine's message to a person (§16.1), kept in ``person_inbox``. C11: an escalation
+        goes only to the machine's own owner."""
+        kind = body.get("kind", "message")
+        if email not in self.users or caller["team"] not in self.users[email]["teams"]:
+            raise ApiFail(400, "invalid", "unknown recipient")
+        if kind == "escalation" and self.owners.get(caller["id"]) != email:
+            raise ApiFail(400, "invalid", "an escalation goes only from a machine to its own owner")
+        inbox = self.person_inbox.setdefault(email, [])
+        for m in inbox:
+            if m["id"] == mid:
+                if (m["body"], m["kind"], m["from"]) != (text, kind, caller["handle"]):
+                    raise ApiFail(409, "id_conflict")
+                return 200, {"message": m, "created": False}
+        self.seq += 1
+        m = {"id": mid, "seq": self.seq, "kind": kind, "body": text, "from": caller["handle"],
+             "to": "@" + email, "from_agent": body.get("from_agent"), "from_endpoint": {"machine": caller["handle"]},
+             "to_endpoint": {"person": email}, "conversation_id": str(uuid.uuid4()), "in_reply_to": None,
+             "created_at": now(), "acked_at": None, "delivery_state": "stored", "attachments": []}
+        inbox.append(m)
+        return 201, {"message": m, "created": True}
 
     def decode_attachments(self, items):
         if items is None:
@@ -321,10 +403,14 @@ class FakeState:
         limit = min(int(query.get("limit", ["100"])[0]), 500)
         wait = min(float(query.get("wait", ["0"])[0]), 25)
         include_acked = query.get("include_acked", ["false"])[0] == "true"
+        routing = query.get("routing", ["0"])[0] == "1"
+        self.inbox_queries.append((caller["handle"], routing))
 
         def matches():
+            # §16.2 capability gate: without routing=1, no named-agent or person-sent messages.
             return sorted((m for m in self.messages.values()
                            if m["recipient"] == caller["id"] and m["seq"] > after
+                           and (routing or (not m.get("agent") and not m.get("person")))
                            and (include_acked or m["acked_at"] is None)),
                           key=lambda m: m["seq"])[:limit]
 
@@ -474,6 +560,9 @@ class _Handler(BaseHTTPRequestHandler):
                 st.login_bodies.append(body)
                 return st.app_login(body)
         auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer rps_") and (route.startswith("/person/") or route == "/app/handoff"):
+            with st.lock:
+                return self._person_route(method, route, query, raw, st.person_sessions.get(auth[7:]), auth[7:])
         with st.lock:
             agent_id = st.tokens.get(auth[7:]) if auth.startswith("Bearer ") else None
             if agent_id is None:
@@ -512,6 +601,13 @@ class _Handler(BaseHTTPRequestHandler):
                                          "agents": [{k: v for k, v in e.items() if k != "key"}
                                                     for e in st.directory.get(a["handle"], [])]}
                                         for a in st.agents.values() if a["team"] == caller["team"]]}
+            if route == "/routing" and method in ("GET", "PUT"):
+                if method == "PUT":
+                    if not isinstance(body, dict) or set(body) != {"routing"} or \
+                            body["routing"] not in ("all", "inbox-only"):
+                        raise ApiFail(400, "invalid")
+                    st.routing[caller["id"]] = body["routing"]
+                return 200, {"routing": st.routing.get(caller["id"], "all")}
             if method == "POST" and route == "/messages":
                 return st.send(caller, body)
             if method == "GET" and route == "/inbox":
@@ -533,6 +629,32 @@ class _Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/conversations/([0-9a-f-]{36})/messages", route)
             if m and method == "GET":
                 return st.conversation_messages(caller, m.group(1), query)
+        raise ApiFail(404, "not_found")
+
+    def _person_route(self, method, route, query, raw, session, token):
+        """A small part of the person API (§16.4) for client tests; the real server is
+        exercised by tests/e2e/test_person_cli.py."""
+        st = self.state
+        if session is None:
+            raise ApiFail(401, "unauthorized")
+        email = session["email"]
+        if method == "GET" and route == "/person/me":
+            user = st.users[email]
+            return 200, {"user": {"display_name": email.split("@")[0].title(), "email": email},
+                         "teams": [{"slug": t, "name": st.teams[t]} for t in user["teams"]],
+                         "session": {"created_at": "t", "expires_at": "t"}}
+        if method == "GET" and route == "/person/inbox":
+            after = int(query.get("after", ["0"])[0])
+            page = [m for m in st.person_inbox.get(email, []) if m["seq"] > after]
+            return 200, {"messages": page, "cursor": page[-1]["seq"] if page else after}
+        if method == "POST" and route == "/person/sign-out":
+            del st.person_sessions[token]
+            return 200, {"signed_out": True}
+        if method == "POST" and route == "/app/handoff":
+            body = json.loads(raw) if raw else {}
+            if not isinstance(body, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(body.get("app_install_hash"))):
+                raise ApiFail(400, "invalid")
+            return 200, {"code": "rhc_x", "expires_at": "t", "url": "https://raincli.example/app/handoff?code=rhc_x"}
         raise ApiFail(404, "not_found")
 
     def do_GET(self):

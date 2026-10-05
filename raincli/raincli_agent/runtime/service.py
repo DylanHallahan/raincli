@@ -76,12 +76,13 @@ def _read_runtime(path):
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ConfigError(f"cannot read runtime config: {exc}") from None
-    if not isinstance(data, dict) or set(data) - {"connectors", "machine_config", "state_dir", "herdr_bin",
-                                                  "herdr_session"}:
+    machine_only = {"herdr_bin", "herdr_session", "trust_mode", "trusted_senders", "blocked_senders", "owner_email"}
+    if not isinstance(data, dict) or set(data) - {"connectors", "machine_config", "state_dir"} - machine_only:
         raise ConfigError("runtime config supports only connectors, machine_config, state_dir, "
-                          "herdr_bin and herdr_session")
-    if ({"herdr_bin", "herdr_session"} & set(data)) and "machine_config" not in data:
-        raise ConfigError("runtime herdr_bin and herdr_session apply to machine mode; connectors set their own")
+                          "herdr_bin, herdr_session, trust_mode, trusted_senders, blocked_senders and owner_email")
+    if (machine_only & set(data)) and "machine_config" not in data:
+        raise ConfigError("runtime herdr_bin, herdr_session and trust settings apply to machine mode; "
+                          "connectors set their own")
     def absolute(p):
         return (path.parent / Path(p).expanduser()).resolve()
     entries, machine = data.get("connectors"), data.get("machine_config")
@@ -111,15 +112,10 @@ def machine_options(runtime_path):
     return {"herdr_bin": _herdr_bin(data, "runtime config"), "herdr_session": _herdr_session(data, "runtime config")}
 
 
-def load_machine(machine_path):
-    """Machine mode (15.4): the machine credential, bound to the bytes it was loaded from."""
-    machine_path = str(machine_path)
-    sha = file_sha256(machine_path)
-    identity = load_config(machine_path)
-    binding = fingerprint(machine_path, machine_path)
-    if sha is None or binding["config_sha256"] != sha:
-        raise ConfigError("machine config changed while loading; retry")
-    return machine_path, None, identity, binding
+def load_machine(runtime_path):
+    """Machine mode (15.4, §16.7): a connector with no inbox mapping, built from the
+    runtime config itself and supervised like any other (it delivers to named agents)."""
+    return (str(runtime_path), *load_bound(str(runtime_path)))
 
 
 def load_runtime(path):
@@ -129,7 +125,7 @@ def load_runtime(path):
     path, entries, absolute, machine, state = _read_runtime(path)
     if machine is not None:
         machine_options(path)  # validated with the rest of the runtime config
-        return path, state, [load_machine(machine)]
+        return path, state, [load_machine(path)]
     paths = [str(absolute(p)) for p in entries]
     if len(set(map(os.path.normcase, paths))) != len(paths):
         raise ConfigError("runtime connector paths must be unique")
@@ -150,7 +146,7 @@ def load_runtime(path):
 
 
 def machine_mode(configs):
-    return len(configs) == 1 and configs[0][1] is None
+    return len(configs) == 1 and (configs[0][1] is None or getattr(configs[0][1], "machine", False))
 
 
 HOOK_PRESENCE = {"idle": "ready", "working": "busy", "blocked": "blocked"}
@@ -158,7 +154,7 @@ HOOK_PRESENCE = {"idle": "ready", "working": "busy", "blocked": "blocked"}
 
 def inbox_spec(cfg):
     """How the directory marks this connector's inbox (14.3); None in machine mode."""
-    if cfg is None:
+    if cfg is None or not cfg.has_inbox:
         return None
     return ("hook", *cfg.inbox_hook) if cfg.inbox_hook else ("herdr", cfg.herdr_agent)
 
@@ -166,6 +162,8 @@ def inbox_spec(cfg):
 def availability(cfg, herdr, running, state_dir=None):
     if not running:
         return "offline"
+    if not cfg.has_inbox:
+        return "ready"  # machine mode: the connector runs; named agents report their own status
     if cfg.inbox_hook:
         # Next-turn inbox: the single live hook session of that type and name.
         live = sessions.live_sessions(state_dir, *cfg.inbox_hook) if state_dir else []
@@ -535,6 +533,18 @@ def stop_requested(state, instance):
     return isinstance(request, dict) and request.get("instance") == instance
 
 
+def notification_feed(configs):
+    """Machine mode with a person session: long-poll the person inbox into the app's
+    notification queue (§16.10). The feed idles while there is no session."""
+    cfg = configs[0][1] if configs else None
+    if cfg is None or not getattr(cfg, "machine", False) or not cfg.agent_config:
+        return None
+    from .. import person
+    feed = person.NotificationFeed(cfg.agent_config, log=lambda text: print(text, file=sys.stderr, flush=True))
+    feed.start()
+    return feed
+
+
 def run(path, once=False, pushed=None):
     from .pushed import PushedUpdates
     from . import updates
@@ -548,13 +558,14 @@ def run(path, once=False, pushed=None):
     sessions.sessions_dir(str(state), create=True)
     pushed = pushed or PushedUpdates()
     pushed.machine_mode = machine_mode(configs)
+    pushed.state_dir = state
     if pushed.managed():
         notice = updates.migrate_mode(pushed.root)
         if notice:
             print(notice, file=sys.stderr, flush=True)  # the runtime log or journal keeps it
     stop = threading.Event()
     previous = {}
-    supervisor = None
+    supervisor = feed = None
     instance = uuid.uuid4().hex
 
     def record(status, connectors):
@@ -575,10 +586,12 @@ def run(path, once=False, pushed=None):
         # made during startup targets it rather than a previous run.
         record("starting", [])
         supervisor = Supervisor(path, state, configs, runtime_sha, salt)
+        feed = None if once else notification_feed(configs)
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
             while not stop.is_set():
                 supervisor.refresh(pool)
-                pushed.machine_mode = bool(supervisor.workers) and all(w.cfg is None for w in supervisor.workers)
+                pushed.machine_mode = bool(supervisor.workers) and all(
+                    w.cfg is None or getattr(w.cfg, "machine", False) for w in supervisor.workers)
                 directories = supervisor.directories()
                 client = pushed.client()
                 futures = [pool.submit(w.tick, time.monotonic(), directories.get(id(w)), client)
@@ -605,6 +618,8 @@ def run(path, once=False, pushed=None):
                     if supervisor.changed():
                         break
     finally:
+        if feed is not None:
+            feed.stop.set()
         if stop.is_set() and not once and pushed.managed():
             # Asked to stop (a signal or `runtime stop`): tell the launcher this
             # exit is not a failed first start (review 2, O10).
