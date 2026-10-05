@@ -223,3 +223,18 @@ def test_known_agents_are_upserted_and_pruned(client, world, session):
     assert set(session.scalars(select(KnownAgent.name))) == {"writer"}
     # A v0.4 report (reachability only on the inbox) stays valid.
     report(client, tok, [entry("raincli-inbox", "e" * 32, role="inbox"), entry("other", "f" * 32, reachability=None)])
+
+
+# C1: the operator is warned before pinning routing-capable machines below v0.5.0 -----------------
+
+def test_set_client_version_warns_for_routing_capable_teams(client, world, database_url):
+    from test_directory import run
+
+    code, out, errs = run(database_url, "set-client-version", "--team", "acme", "v0.4.0")
+    assert code == 0 and "route messages to named agents" not in errs
+    client.get("/api/v1/inbox?routing=1", headers=auth(world["tokens"]["bob"]))  # bob becomes routing-capable
+    code, out, errs = run(database_url, "set-client-version", "--team", "acme", "v0.4.1")
+    assert code == 0 and "1 machine(s) in acme already route messages to named agents" in errs
+    assert "client target for acme is v0.4.1" in out
+    code, out, errs = run(database_url, "set-client-version", "--team", "acme", "v0.5.0")
+    assert code == 0 and "route messages" not in errs

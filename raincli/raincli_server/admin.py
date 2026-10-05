@@ -242,6 +242,9 @@ def _dispatch(args, session: Session, env, stdin, stdout, stderr, prompt) -> Non
         _client_status(session, _team(session, args.team), stdout)
 
 
+ROUTING_MIN_CLIENT = (0, 5, 0)  # the first routing-capable client (protocol §16.12 C1)
+
+
 def _set_client_version(session: Session, team: Team, args, stdout, stderr) -> None:
     if args.clear:
         if args.allow_downgrade:
@@ -263,6 +266,14 @@ def _set_client_version(session: Session, team: Team, args, stdout, stderr) -> N
     if args.allow_downgrade:
         print(f"warning: --allow-downgrade lets machines in {team.slug} newer than {version} install it; "
               "it applies only while this target is set", file=stderr)
+    if numeric < ROUTING_MIN_CLIENT:
+        capable = session.scalar(select(func.count()).select_from(Agent).where(
+            Agent.team_id == team.id, Agent.revoked_at.is_(None), Agent.routing_capable_at.is_not(None)))
+        if capable:
+            # §16.12 C1: those machines refuse targets below v0.5.0, so they would report failures.
+            print(f"warning: {capable} machine(s) in {team.slug} already route messages to named agents and "
+                  f"refuse targets below v0.5.0; they will stay on their version and report the target as failed",
+                  file=stderr)
     # set_at changes on every upsert, so a runtime may retry a target it rolled back (protocol §14.7).
     values = {"version": version, "allow_downgrade": args.allow_downgrade, "set_at": func.now()}
     session.execute(insert(ClientTarget).values(team_id=team.id, **values)
