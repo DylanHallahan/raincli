@@ -1090,3 +1090,10 @@ The teammate's words follow; every line starts with "| ":
 - the person, machine, `from_agent` and escalation variants.
 
 The reviewer checks the framing specifically in every Phase 2 round.
+
+### 16.13 Lead decisions after the server build (binding)
+1. **Person-sent messages to old clients.** The capability gate (§16.2) also covers messages with a `sender_user_id`. A v0.4 connector would skip their `@email` sender as a bad sender, so they are not returned without `routing=1`, and senders see `held: client_update_needed`.
+2. **Attachments on the person API.** `GET /api/v1/person/messages/{id}/attachments/{ref}` accepts the attachment id or a 1-based position.
+3. **The `person_only` reply** is exactly `200 {"person_session": "rps_…"}`.
+4. **A C10 fallback reply** to the machine endpoint goes into the default conversation of that endpoint pair, not the parent's conversation.
+5. **Sign-in by a user with no team** stays `400 invalid`, as in §15.
