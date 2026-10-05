@@ -20,8 +20,14 @@ def entry(name, key, reachability="instant", role=None, source="herdr", status="
             "reachability": reachability, "source": source, **extra}
 
 
-def report(client, token, agents):
-    r = client.put("/api/v1/presence", headers=auth(token), json={"status": "ready", "agents": agents})
+CLIENT_050 = {"version": "0.5.0", "update_mode": "manual", "update_state": "current"}
+
+
+def report(client, token, agents, client_block=CLIENT_050):
+    body = {"status": "ready", "agents": agents}
+    if client_block is not None:
+        body["client"] = client_block
+    r = client.put("/api/v1/presence", headers=auth(token), json=body)
     assert r.status_code == 200, r.text
 
 
@@ -232,9 +238,30 @@ def test_set_client_version_warns_for_routing_capable_teams(client, world, datab
 
     code, out, errs = run(database_url, "set-client-version", "--team", "acme", "v0.4.0")
     assert code == 0 and "route messages to named agents" not in errs
+    report(client, world["tokens"]["bob"], [])  # a v0.5.0 runtime (§16.14 S1)
     client.get("/api/v1/inbox?routing=1", headers=auth(world["tokens"]["bob"]))  # bob becomes routing-capable
     code, out, errs = run(database_url, "set-client-version", "--team", "acme", "v0.4.1")
     assert code == 0 and "1 machine(s) in acme already route messages to named agents" in errs
     assert "client target for acme is v0.4.1" in out
     code, out, errs = run(database_url, "set-client-version", "--team", "acme", "v0.5.0")
     assert code == 0 and "route messages" not in errs
+
+
+
+# §16.14 S1: only a machine whose last presence reported v0.5.0+ becomes routing-capable --------------
+
+@pytest.mark.parametrize("presence", [None, {"version": "0.4.0", "update_mode": "automatic",
+                                             "update_state": "current"}, "no-client-block"])
+def test_routing_capable_needs_a_v050_presence(client, world, session, presence):
+    bob = world["tokens"]["bob"]
+    if presence == "no-client-block":
+        report(client, bob, [], client_block=None)
+    elif presence is not None:
+        report(client, bob, [], client_block=presence)
+    poll(client, bob, routing=True)
+    session.expire_all()
+    assert session.scalar(select(Agent.routing_capable_at).where(Agent.handle == BOB)) is None
+    report(client, bob, [])  # now a v0.5.0 client
+    poll(client, bob, routing=True)
+    session.expire_all()
+    assert session.scalar(select(Agent.routing_capable_at).where(Agent.handle == BOB)) is not None

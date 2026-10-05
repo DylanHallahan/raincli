@@ -221,7 +221,7 @@ def test_windows_codex_entry(tmp_path, monkeypatch):
         assert entry["commandWindows"] == entry["command"] == expected
 
 
-@pytest.mark.parametrize("bad", ["C:\\100%\\state", "C:\\a^b", "C:\\a&b", "C:\\a|b", "C:\\a<b", "C:\\a>b",
+@pytest.mark.parametrize("bad", ["C:\\wow!\\state", "C:\\100%\\state", "C:\\a^b", "C:\\a&b", "C:\\a|b", "C:\\a<b", "C:\\a>b",
                                  'C:\\a"b', "C:\\state\\"])
 def test_cmd_special_characters_are_refused(tmp_path, monkeypatch, bad):
     with pytest.raises(ConfigError, match="cmd.exe"):
@@ -254,3 +254,41 @@ def test_installer_never_bypasses_trust():
     source = Path(hooks_install.__file__).read_text()
     assert "dangerously" not in source and "trusted_hash\"" not in source.replace("trusted_hash", "trusted_hash")
     assert '"trusted_hash"' not in source and "'trusted_hash'" not in source
+
+
+# -- §16.14 K1-K3 -----------------------------------------------------------------------------------
+
+def make_exe(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    path.chmod(0o755)
+    return path
+
+
+def test_codex_probe_never_runs_one_from_the_current_directory(tmp_path, monkeypatch):
+    """K1: absolute PATH entries only, by absolute path; codex.cmd allowed on Windows."""
+    planted = make_exe(tmp_path / "repo" / "codex")
+    make_exe(tmp_path / "repo" / "codex.cmd")
+    monkeypatch.chdir(tmp_path / "repo")
+    env = {"PATH": os.pathsep.join(["", ".", "repo", "./x"])}
+    assert hooks_install.find_codex(env, windows=False) is None
+    assert hooks_install.find_codex(env, windows=True) is None
+    good = make_exe(tmp_path / "bin" / "codex")
+    found = hooks_install.find_codex({"PATH": os.pathsep.join([".", str(good.parent)])}, windows=False)
+    assert found == str(good) and os.path.isabs(found) and found != str(planted)
+    npm = make_exe(tmp_path / "npm" / "codex.cmd")
+    assert hooks_install.find_codex({"PATH": str(npm.parent)}, windows=True) == str(npm)
+    native = make_exe(tmp_path / "npm" / "codex.exe")
+    assert hooks_install.find_codex({"PATH": str(npm.parent)}, windows=True) == str(native)  # .exe first
+    ran = []
+    hooks_install.codex_support(lambda argv, **kw: ran.append(argv) or
+                                types.SimpleNamespace(stdout="hooks stable true\n"), lambda: str(good))
+    assert all(argv[0] == str(good) for argv in ran)
+
+
+@pytest.mark.parametrize("exe", ["codex", "codex.exe", "C:\\dl\\codex-x86_64-pc-windows-msvc.exe",
+                                 "/opt/codex-aarch64-unknown-linux-musl"])
+def test_codex_release_binaries_count_as_codex(exe):
+    """K2: liveness treats codex and codex-* executables as Codex."""
+    assert procinfo.kind_of(exe) == "codex"
+    assert procinfo.kind_of("C:\\x\\codexx.exe") is None

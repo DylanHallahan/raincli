@@ -299,10 +299,14 @@ def cmd_conversations(args):
 
 
 def cmd_inbox(args):
+    """Machine-endpoint messages; with ``--agent NAME`` those to that named agent of
+    this machine instead (§16.14 S1)."""
     api = client(args)
     after, messages = args.after, []
     while True:
-        page, cursor = api.inbox(after=after, limit=args.limit, include_acked=args.all)
+        page, cursor = api.inbox(after=after, limit=args.limit, include_acked=args.all,
+                                 routing=bool(args.agent))
+        page = [m for m in page if _addressed_to(m, args.agent)]
         messages.extend(page)
         if len(page) < args.limit or int(cursor) <= after:
             break
@@ -311,8 +315,20 @@ def cmd_inbox(args):
     return EXIT_OK
 
 
+def _addressed_to(message, agent):
+    """Whether a message is to this machine's endpoint (``agent`` None) or to that named agent."""
+    to = message.get("to_endpoint") if isinstance(message.get("to_endpoint"), dict) else {}
+    return to.get("agent") == agent if agent else to.get("agent") is None
+
+
 def cmd_show(args):
-    message = client(args).get_message(args.message_id)
+    api = client(args)
+    message = api.get_message(args.message_id)
+    to = message.get("to_endpoint") if isinstance(message.get("to_endpoint"), dict) else {}
+    if to.get("agent") and to.get("agent") != args.agent and message.get("from") != api.me()["agent"]["handle"]:
+        raise UsageError(f"message {escape_line(args.message_id)} is addressed to the agent "
+                         f"{escape_line(to['agent'])} on this machine; show it with --agent "
+                         f"{escape_line(to['agent'])}")
     if args.json:
         out_json({"message": message})
     else:
@@ -639,10 +655,9 @@ def cmd_runtime_update(args):
         # Machine mode needs v0.4.0 or later (15.8 H8): the given config, the default one, or the
         # one the managed install's login startup runs (review 1a F8).
         from .runtime.startup import installed_config
+        from .runtime import floors
         candidates = [args.config, runtime_config_path(default_config_path()), installed_config()]
-        machine = any(runtime_mode(c) == "machine" for c in candidates if c)
-        result = updates.configure(args.root, mode=mode, rollback=args.rollback,
-                                   floor=winapp.MIN_VERSION if machine else None)
+        result = updates.configure(args.root, mode=mode, rollback=args.rollback, floor=floors.floor_for(candidates))
     elif args.install:
         result = updates.install(args.root)
     else:
@@ -1029,6 +1044,8 @@ def build_parser():
 
     inbox = with_json(sub.add_parser("inbox", help="list received messages (unacked by default)"))
     inbox.add_argument("--all", action="store_true", help="include acknowledged messages")
+    inbox.add_argument("--agent", metavar="NAME",
+                       help="messages to that named agent of this machine, instead of the machine's inbox")
     inbox.add_argument("--after", type=int, default=0, help=argparse.SUPPRESS)
     inbox.add_argument("--limit", type=int, default=100, choices=range(1, 501), metavar="N",
                        help=argparse.SUPPRESS)
@@ -1036,6 +1053,7 @@ def build_parser():
 
     show = with_json(sub.add_parser("show", help="show one message"))
     show.add_argument("message_id", metavar="MSG_ID")
+    show.add_argument("--agent", metavar="NAME", help="allow a message to that named agent of this machine")
     show.set_defaults(func=cmd_show)
 
     thread = with_json(sub.add_parser("thread", help="show a conversation"))

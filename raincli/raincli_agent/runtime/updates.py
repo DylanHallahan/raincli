@@ -312,7 +312,7 @@ def configure(root=None, mode=None, rollback=False, floor=None):
                 raise ConfigError("no previous managed release is available")
             if floor is not None and version_key(previous["tag"]) < floor:
                 raise ConfigError("rollback below v%d.%d.%d is refused: that version cannot run this machine's "
-                                  "machine-mode runtime" % floor)
+                                  "runtime (machine mode, or messages to named agents)" % floor)
             current = {**previous, "previous": {k: current[k] for k in ("tag", "commit", "python")}}
             mode = "manual"
         if mode is not None:

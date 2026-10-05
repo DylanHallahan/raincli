@@ -429,7 +429,7 @@ def test_second_connector_publishes_only_its_inbox(tmp_path):
         herdr = FakeHerdr()
         for n in ("main-inbox", "second-inbox", "helper"):
             herdr.add(n)
-        cfg = type("Cfg", (), {"inbox_hook": None, "herdr_agent": name})
+        cfg = type("Cfg", (), {"inbox_hook": None, "herdr_agent": name, "has_inbox": True})
         return type("W", (), {"cfg": cfg, "herdr": herdr, "retired": False})()
     supervisor = service.Supervisor(tmp_path / "runtime.json", state, [], "x", salt)
     first, second = worker("main-inbox"), worker("second-inbox")

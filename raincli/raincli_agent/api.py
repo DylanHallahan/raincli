@@ -214,10 +214,14 @@ class ApiClient:
         _, data = self.request("POST", "/messages", body=payload)
         return data["message"], bool(data.get("created"))
 
-    def inbox(self, *, after=0, limit=100, wait=0, include_acked=False, timeout=None):
+    def inbox(self, *, after=0, limit=100, wait=0, include_acked=False, timeout=None, routing=False):
+        """``routing=True`` (``?routing=1``, §16.2) also returns messages to named agents
+        and from people. Only the delivering connector sends it (§16.14 S1)."""
         wait = max(0, min(int(wait), MAX_WAIT))
         query = {"after": int(after), "limit": int(limit), "wait": wait,
                  "include_acked": "true" if include_acked else "false"}
+        if routing:
+            query["routing"] = 1
         if timeout is None:
             timeout = max(self.timeout, wait + 15)
         data = self.request("GET", "/inbox", query=query, timeout=timeout)[1]

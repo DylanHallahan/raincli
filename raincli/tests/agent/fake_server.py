@@ -21,7 +21,8 @@ from urllib.parse import parse_qs, urlsplit
 from raincli_agent import attachments as att
 from raincli_agent.text import body_problem
 
-SEND_KEYS = {"id", "to", "body", "conversation_id", "in_reply_to", "from", "sender", "attachments"}
+SEND_KEYS = {"id", "to", "body", "conversation_id", "in_reply_to", "from", "sender", "attachments",
+             "from_agent", "kind"}
 EVENT_STATES = {"held", "submitted", "submission_uncertain", "rejected"}
 
 
@@ -123,6 +124,7 @@ class FakeState:
         self.delivered = set()  # agent ids with delivery history (they rotate only with previous_token)
         self.login_failures = {}  # email -> failures
         self.login_bodies = []  # every /app/login body received (tests check what was sent)
+        self.inbox_queries = []  # (handle, routing=1?) for every inbox poll
 
     # -- setup -----------------------------------------------------------
 
@@ -191,6 +193,23 @@ class FakeState:
             del self.tokens[token]
         return 200, {"signed_out": True}
 
+    def person_message(self, recipient_handle, email, display_name, body, agent=None, team="alpha"):
+        """A message from a person (the website or app) to a machine or one of its agents."""
+        recipient = self.agent_by_handle(team, recipient_handle)
+        self.seq += 1
+        ts = now()
+        mid = str(uuid.uuid4())
+        conv = str(uuid.uuid4())
+        self.conversations[conv] = {"pair": frozenset((recipient["id"],)), "team": team}
+        self.messages[mid] = {"id": mid, "conversation_id": conv, "in_reply_to": None, "sender": recipient["id"],
+                              "person": {"email": email, "display_name": display_name}, "agent": agent,
+                              "from_agent": None, "kind": "message", "recipient": recipient["id"], "body": body,
+                              "created_at": ts, "seq": self.seq, "acked_at": None, "delivery_state": "stored",
+                              "delivery_updated_at": ts, "attachments": []}
+        with self.lock:
+            self.lock.notify_all()
+        return mid
+
     def fail(self, method, path_regex, action, times=1):
         self.faults.append([method, re.compile(path_regex), action, times])
 
@@ -201,8 +220,15 @@ class FakeState:
         return None
 
     def render(self, m):
+        person = m.get("person")  # {"email", "display_name"} for a person sender (§16.1)
+        sender = "@" + person["email"] if person else self.agents[m["sender"]]["handle"]
+        to_handle = self.agents[m["recipient"]]["handle"]
+        to_endpoint = {"machine": to_handle, **({"agent": m["agent"]} if m.get("agent") else {})}
+        from_endpoint = ({"person": person["email"], "display_name": person["display_name"]} if person
+                         else {"machine": sender})
         return {"id": m["id"], "conversation_id": m["conversation_id"], "in_reply_to": m["in_reply_to"],
-                "from": self.agents[m["sender"]]["handle"], "to": self.agents[m["recipient"]]["handle"],
+                "from": sender, "to": to_handle, "from_endpoint": from_endpoint, "to_endpoint": to_endpoint,
+                "from_agent": m.get("from_agent"), "kind": m.get("kind", "message"), "hold_reason": None,
                 "body": m["body"], "created_at": m["created_at"], "seq": m["seq"],
                 "acked_at": m["acked_at"], "delivery_state": m["delivery_state"],
                 "delivery_updated_at": m["delivery_updated_at"],
@@ -230,8 +256,13 @@ class FakeState:
         text = body.get("body")
         if body_problem(text):
             raise ApiFail(400, "invalid", body_problem(text))
-        recipient = self.agent_by_handle(caller["team"], body.get("to"))
-        if recipient is None or not recipient["active"] or recipient["id"] == caller["id"]:
+        to, agent_name = body.get("to"), None
+        if isinstance(to, dict):  # §16.1 endpoint objects (machine, or machine and agent)
+            if set(to) - {"machine", "agent"} or "machine" not in to:
+                raise ApiFail(400, "invalid", "unsupported endpoint in the fake")
+            to, agent_name = to["machine"], to.get("agent")
+        recipient = self.agent_by_handle(caller["team"], to)
+        if recipient is None or not recipient["active"] or (recipient["id"] == caller["id"] and not agent_name):
             raise ApiFail(400, "invalid", "unknown recipient")
         pair = frozenset((caller["id"], recipient["id"]))
         in_reply_to = body.get("in_reply_to")
@@ -270,6 +301,7 @@ class FakeState:
         self.seq += 1
         ts = now()
         m = {"id": mid, "conversation_id": conv, "in_reply_to": in_reply_to, "sender": caller["id"],
+             "agent": agent_name, "from_agent": body.get("from_agent"), "kind": body.get("kind", "message"),
              "recipient": recipient["id"], "body": text, "created_at": ts, "seq": self.seq,
              "acked_at": None, "delivery_state": "stored", "delivery_updated_at": ts,
              "attachments": [dict(f, id=str(uuid.uuid4()), media_type="text/markdown") for f in files]}
@@ -325,10 +357,14 @@ class FakeState:
         limit = min(int(query.get("limit", ["100"])[0]), 500)
         wait = min(float(query.get("wait", ["0"])[0]), 25)
         include_acked = query.get("include_acked", ["false"])[0] == "true"
+        routing = query.get("routing", ["0"])[0] == "1"
+        self.inbox_queries.append((caller["handle"], routing))
 
         def matches():
+            # §16.2 capability gate: without routing=1, no named-agent or person-sent messages.
             return sorted((m for m in self.messages.values()
                            if m["recipient"] == caller["id"] and m["seq"] > after
+                           and (routing or (not m.get("agent") and not m.get("person")))
                            and (include_acked or m["acked_at"] is None)),
                           key=lambda m: m["seq"])[:limit]
 

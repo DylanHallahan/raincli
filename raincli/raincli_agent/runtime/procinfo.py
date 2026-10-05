@@ -32,7 +32,10 @@ def exe_name(path):
     parts = (path or "").replace("\\", "/").rstrip("/").split("/")
     if len(parts) >= 3 and parts[-2] == "versions" and parts[-3] == "claude":
         return "claude"
-    return plain(parts[-1] if parts else "")
+    name = plain(parts[-1] if parts else "")
+    if name.startswith("codex-"):
+        return "codex"  # a release binary as shipped, e.g. codex-x86_64-pc-windows-msvc.exe (§16.14 K2)
+    return name
 
 
 def kind_of(exe, comm=""):

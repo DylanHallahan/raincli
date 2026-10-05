@@ -139,6 +139,7 @@ class Connector:
         self._clock = clock
         # Repeated agent_not_ready (Herdr's pane is not running the agent): back off (review H4).
         self._not_ready_count, self._not_ready_until = 0, 0.0
+        self._routing_recorded = False
         self.started = False
         self.stop_requested = lambda: False  # set by a supervisor (runtime mode)
 
@@ -187,12 +188,18 @@ class Connector:
                     self.log(f"escalation {esc['id']} is submission_uncertain (restart during submission)")
 
     def trusted(self):
-        return set(self.config.trusted_senders) | set(self.queue.trusted())
+        from .config import sender_key
+        out = {sender_key(s) for s in self.config.trusted_senders} | {sender_key(s) for s in self.queue.trusted()}
+        if self.config.owner_email:
+            out.add(sender_key(self.config.owner_email))  # the owner, as a person, always (§16.12 C5)
+        return out
 
     def policy_hold(self, record, trusted):
-        """The policy hold reason for a message, or None if it may be delivered."""
-        sender = record["sender"]
-        if sender in self.config.blocked_senders:
+        """The policy hold reason for a message, or None if it may be delivered.
+        Senders are compared as handles, or as ``@email`` without case (§16.7)."""
+        from .config import sender_key
+        sender = sender_key(record["sender"])
+        if sender in {sender_key(s) for s in self.config.blocked_senders}:
             return "sender_blocked"  # whatever the trust mode, and even if approved
         if self.config.trust_mode == "team":
             return None  # the server guarantees every sender is in our team
@@ -215,7 +222,8 @@ class Connector:
     def poll(self, wait=0):
         after = self.queue.cursor()
         while True:
-            messages, cursor = self.api.inbox(after=after, wait=wait, limit=100)
+            messages, cursor = self.api.inbox(after=after, wait=wait, limit=100, routing=True)
+            self._record_routing_capable()
             for message in messages:
                 problem = message_problem(message)
                 if problem:
@@ -231,6 +239,20 @@ class Connector:
             if len(messages) < 100:
                 return
             wait = 0
+
+    def _record_routing_capable(self):
+        """§16.12 C1: once this runtime's connector has polled with routing=1, its
+        runtime refuses update targets and rollbacks below v0.5.0."""
+        if self._routing_recorded:
+            return
+        from ..runtime import floors
+        for directory in (self.sessions_state, self.queue.state_dir):
+            if directory:
+                try:
+                    floors.record_routing_capable(directory)
+                except OSError:
+                    return  # retried on the next poll
+        self._routing_recorded = True
 
     def ingest(self, message):
         """Store the message durably, then (and only then) ack it."""

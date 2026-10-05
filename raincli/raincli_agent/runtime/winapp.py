@@ -237,6 +237,16 @@ def update_mode(root):
     return saved["update_mode"] if saved else "automatic"
 
 
+def app_floor(root):
+    """v0.4.0, or v0.5.0 once the app's runtime has polled with routing=1 (§16.12 C1)."""
+    from . import floors
+    try:
+        floor = floors.floor_for([paths(root)[1]])
+    except Exception:  # noqa: BLE001 - an unreadable config keeps the base floor
+        floor = None
+    return max(MIN_VERSION, floor or MIN_VERSION)
+
+
 def configure(root, mode=None, rollback=False):
     """``runtime update --automatic|--manual|--rollback`` for an app install. An
     explicit rollback makes the previous version current and sets ``manual``; a
@@ -249,8 +259,9 @@ def configure(root, mode=None, rollback=False):
             previous = state["previous"]
             if previous is None or not (version_dir(root, previous) / APP_EXE).is_file():
                 raise ConfigError("no previous app version is available")
-            if version_key(previous) < MIN_VERSION:
-                raise ConfigError("rollback below v0.4.0 is refused: that version cannot run this machine")
+            floor = app_floor(root)
+            if version_key(previous) < floor:
+                raise ConfigError("rollback below v%d.%d.%d is refused: that version cannot run this machine" % floor)
             write_install(root, previous, state["current"])
             mode = "manual"
         if mode is not None:
@@ -680,7 +691,7 @@ def rollback(root, failed):
     state = read_install(root)
     previous = state["previous"]
     if (state["current"] != failed or previous is None or previous == failed
-            or version_key(previous) < MIN_VERSION or not (version_dir(root, previous) / APP_EXE).is_file()):
+            or version_key(previous) < app_floor(root) or not (version_dir(root, previous) / APP_EXE).is_file()):
         return False
     write_install(root, previous, failed, probation=None)
     update = updates.read_update_state(root)

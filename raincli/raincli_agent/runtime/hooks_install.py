@@ -51,7 +51,7 @@ CODEX_SESSION_END_TIMEOUT = 3
 CODEX_MIN_WINDOWS = (0, 145, 0)
 # cmd.exe interprets these inside `cmd /C "…"` (Codex runs Windows hooks that way:
 # codex-rs/hooks/src/engine/command_runner.rs, build_command), so no path may contain them.
-CMD_SPECIAL = set('%^&|<>"')
+CMD_SPECIAL = set('%^&|<>"!')  # "!": cmd delayed expansion (§16.14 K3)
 TRUST_NOTE = ("Codex runs these hooks only after you trust them once in Codex: open /hooks and trust the "
               "raincli hooks. Trust again after any reinstall that changes the command (a new state "
               "directory or install path).")
@@ -170,9 +170,27 @@ def load(path):
     return raw, data
 
 
-def codex_support(run=subprocess.run):
+def find_codex(env=None, windows=None):
+    """The first ``codex`` in the absolute PATH entries, as an absolute path, or None
+    (§16.14 K1). The current directory is never searched. On Windows ``codex.exe``,
+    then the npm shim ``codex.cmd`` (its arguments are constant), per entry."""
+    env = os.environ if env is None else env
+    windows = os.name == "nt" if windows is None else windows
+    names = ("codex.exe", "codex.cmd") if windows else ("codex",)
+    for entry in (env.get("PATH") or "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry or entry == "." or not os.path.isabs(entry):
+            continue
+        for name in names:
+            candidate = os.path.join(entry, name)
+            if os.path.isfile(candidate) and (windows or os.access(candidate, os.X_OK)):
+                return candidate
+    return None
+
+
+def codex_support(run=subprocess.run, find=find_codex):
     """Feature probe (14.7 M8): ``codex features list`` must show ``hooks`` enabled."""
-    binary = shutil.which("codex")
+    binary = find()
     if not binary:
         return False, "codex not found on PATH"
     try:
