@@ -125,6 +125,11 @@ class FakeServices:
     def machine_handle(self):
         return "alice-laptop"
 
+    install_token = "install-token-1"
+
+    def app_install_token(self):
+        return self.install_token
+
     def sign_in(self, email, password, **kwargs):
         assert isinstance(password, Secret)
         self.sign_ins.append((email, password.reveal(), kwargs))
@@ -294,7 +299,8 @@ def test_native_hook_cancels_before_loading(tmp_path):
     app, win, opened = make(tmp_path)
     starting, completed = Events(), Events()
     win.native = types.SimpleNamespace(browser=types.SimpleNamespace(
-        webview=types.SimpleNamespace(NavigationStarting=starting, NavigationCompleted=completed)))
+        webview=types.SimpleNamespace(NavigationStarting=starting, NavigationCompleted=completed,
+                                      CoreWebView2InitializationCompleted=Events())))
     assert app.attach_native() is True
     args = types.SimpleNamespace(Uri="https://evil.example/", Cancel=False)
     starting.handlers[0](None, args)
@@ -576,3 +582,40 @@ def test_without_webview2_the_app_never_opens_a_window_and_links_the_runtime(tmp
     assert t.icon.notes[-1] == ("Waiting for the old window to close.", "RainCLI")
     t.window.destroy()
     assert opened[-1] == "stopped"
+
+
+# -- §16.14 S3: the install token rides only in the User-Agent, only to the service ------------------------
+
+def test_user_agent_carries_the_install_token_to_the_service_only(tmp_path):
+    app, win, _ = make(tmp_path)
+    init, requested = Events(), Events()
+    control = types.SimpleNamespace(NavigationStarting=Events(), NavigationCompleted=Events(),
+                                    CoreWebView2InitializationCompleted=init)
+    win.native = types.SimpleNamespace(browser=types.SimpleNamespace(webview=control))
+    app.attach_native()
+    core = types.SimpleNamespace(Settings=types.SimpleNamespace(UserAgent="Mozilla/5.0 Edg/131.0"),
+                                 WebResourceRequested=requested)
+    init.handlers[0](types.SimpleNamespace(CoreWebView2=core), None)
+    assert core.Settings.UserAgent == "Mozilla/5.0 Edg/131.0 RainCLIApp/install-token-1"
+
+    def request(url):
+        headers = {}
+        req = types.SimpleNamespace(Uri=url, Headers=types.SimpleNamespace(SetHeader=headers.__setitem__))
+        requested.handlers[0](None, types.SimpleNamespace(Request=req))
+        return headers
+    app.services.install_token = "install-token-2"  # sign-in or sign-out rotated it
+    app.refresh_install_token()
+    assert request(SERVICE + "/app/inbox") == {"User-Agent": "Mozilla/5.0 Edg/131.0 RainCLIApp/install-token-2"}
+    assert request(LOCAL + "settings.html") == {} and request("https://example.org/") == {}
+
+
+def test_handoff_refreshes_the_token_and_sign_in_starts_a_new_app_session(tmp_path):
+    services = FakeServices()
+    app, win, _ = make(tmp_path, services)
+    app.home()
+    assert app.handed_off and app.install_token == "install-token-1"
+    services.install_token = "install-token-2"
+    app.load(LOCAL + "sign-in.html")
+    app.on_loaded()
+    app.api.sign_in(nonce_of(win), {"email": "a@example.test", "machine_name": "alice-laptop", "again": True}, "pw")
+    assert app.install_token == "install-token-2" and services.handoffs == 2

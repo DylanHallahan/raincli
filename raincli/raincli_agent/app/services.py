@@ -102,14 +102,24 @@ class Services:
 
     # -- the hosted site -------------------------------------------------------------------------------
 
+    def app_install_token(self):
+        """This install's ``app_install_token`` (§16.14 S3), kept by the client beside ``person.json``, or
+        None. The window sends it only in its User-Agent; it is never logged or put in a URL."""
+        try:
+            return _person().app_install_token(self.agent_config)
+        except Exception:  # noqa: BLE001 - not signed in yet
+            return None
+
     def handoff_url(self, path=None):
-        """A single-use handoff URL for this person session (§16.10), optionally followed by ``path``."""
+        """A single-use handoff URL for this person session (§16.10), bound to this app install by
+        ``sha256(app_install_token)`` (§16.14 S3)."""
+        import hashlib
         token = _person().load_session(self.agent_config)
-        if token is None:
+        install = self.app_install_token()
+        if token is None or not install:
             raise ServiceError("this computer has no person session; sign in again")
-        reply = self._client(token=token).request("POST", "/app/handoff", body={})
-        url = reply["url"]
-        return url
+        body = {"app_install_hash": hashlib.sha256(install.encode("ascii")).hexdigest()}
+        return self._client(token=token).request("POST", "/app/handoff", body=body)["url"]
 
     def service_url(self):
         return self._config().api_url

@@ -166,6 +166,8 @@ class AppWindow:
         self.handed_off = False  # an app-mode session exists in the profile (this run)
         self.load_timer = None
         self.quitting = False
+        self.install_token = None  # §16.14 S3: sent as "RainCLIApp/<token>" to the service origin only
+        self._ua_base = None
         self.api = Api(self)
 
     # -- set-up ---------------------------------------------------------------------------------------
@@ -188,12 +190,20 @@ class AppWindow:
         else:
             self.gate.navigation = self.navigation
 
+    def refresh_install_token(self):
+        self.install_token = self.services.app_install_token()
+
+    def user_agent(self, base):
+        """The webview's own User-Agent plus ``RainCLIApp/<app_install_token>`` (§16.14 S3)."""
+        return f"{base} RainCLIApp/{self.install_token}" if self.install_token else base
+
     def create(self):
         """The window, hidden until ``show``; the first page is a local one."""
         wv = self._webview
         for key, value in pywebview_settings().items():
             wv.settings[key] = value
         self.refresh_navigation()
+        self.refresh_install_token()
         self.window = wv.create_window(TITLE, url=str(LOCAL_DIR / "sign-in.html"), js_api=self.api,
                                        width=1180, height=780, min_size=(760, 520), hidden=True,
                                        text_select=True)
@@ -218,7 +228,21 @@ class AppWindow:
         control.NavigationStarting += lambda sender, args: self._native_starting(args)
         control.NavigationCompleted += lambda sender, args: self.on_navigation_completed(
             bool(args.IsSuccess), int(getattr(args, "HttpStatusCode", 0) or 0))
+        control.CoreWebView2InitializationCompleted += lambda sender, args: self._core_ready(sender.CoreWebView2)
         return True
+
+    def _core_ready(self, core):
+        """WebView2 is up (UI thread): add the install token to its User-Agent, and keep every request to
+        the service origin on the current token, which sign-in and sign-out rotate."""
+        self._ua_base = str(core.Settings.UserAgent)
+        core.Settings.UserAgent = self.user_agent(self._ua_base)
+        core.WebResourceRequested += lambda sender, args: self._native_request(args.Request)
+
+    def _native_request(self, request):
+        if self._ua_base is None or self.navigation is None:
+            return
+        if policy.same_origin(str(request.Uri), self.service_url()):
+            request.Headers.SetHeader("User-Agent", self.user_agent(self._ua_base))
 
     def _native_starting(self, args):
         if self.before_navigate(str(args.Uri)):
@@ -319,6 +343,7 @@ class AppWindow:
         self.refresh_navigation()
         if thread_id is not None:
             path = f"/app/conversations/{thread_id}"
+        self.refresh_install_token()
         if self.handed_off:
             url = self.service_base() + path
             self.last_hosted = url
@@ -396,6 +421,7 @@ class AppWindow:
             password = None  # noqa: F841 - drop the reference
         self.services.host.resume()
         self.refresh_navigation()
+        self.handed_off = False  # sign-in rotates the install token: the old app session is gone
         self.open_hosted("/app/inbox")
         return _result(message="Signed in.")
 
@@ -411,6 +437,7 @@ class AppWindow:
             return _result(False, f"Signing out failed, so the credential was kept: {exc}")
         self.clear_profile()
         self.handed_off = False
+        self.refresh_install_token()  # rotated by sign-out (§16.14 S3)
         self.load(self.local_url("sign-in"))
         return _result(message="Signed out.")
 
