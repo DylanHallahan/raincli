@@ -769,3 +769,11 @@ Client and server share test vectors.
 **L4.** Migration takes a lock and is idempotent.
 
 **L5. Detecting an app install.** The client is an app install when it runs as a frozen executable under `<root>\versions\<v>\` and `<root>\RainCLI.exe` exists. That decision is never taken from the server or from configs.
+
+### 15.9 Lead decisions after review rounds 1a and 1b (binding)
+- **Stub control.** `RainCLI.exe --quit` asks the running stub to stop gracefully, by creating `<root>\app-lock\quit`. The stub stops the tray, which stops the runtime first. The `--quit` invocation waits up to 120 s for the stub's lock to be released, then exits 0. It exits 1 when the app is still running after that. The installer checks the exit code. A full install may replace `RainCLI.exe` and `bin\raincli.exe` only after a successful `--quit`. `/UPDATE` never replaces them.
+- **App self-check.** `RainCLI-app.exe --self-check` imports the tray and its GUI modules, then exits 0, without a desktop. The build runs it.
+- **No onefile executables.** The stub and the PATH shim are onedir builds, so nothing runs from `%TEMP%`.
+- **Migration Run value.** Once any credential has been converted, the old Run value cannot work. Migration therefore records it and points it at the stub at the end of the conversion step. The "only after ready" rule applies only to migrations that converted nothing.
+- **`raincli migrate`** runs only on Windows app installs. Elsewhere it reports that there is nothing to migrate.
+- **Machine cap.** `/app/login` creates at most 20 active machines per user per team. Past that it returns `409 machine_limit`, and the user revokes one on the website. A creation after a correct password still counts as a success for the limiter.
