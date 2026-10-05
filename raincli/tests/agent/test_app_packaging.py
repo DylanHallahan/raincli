@@ -138,6 +138,7 @@ def test_full_install_records_the_v05_stub_and_a_fresh_install_stamp():
     body = iss[iss.index("procedure WriteInstallJson;"):iss.index("{ -- L2 and H6")]
     assert '"stub": 2, "install_stamp": "\' + InstallStamp' in body and "GetSHA256OfString(" in iss[iss.index("function InstallStamp"):]
     assert "IntToHex" not in iss and "Random(" not in iss  # not in Inno's Pascal Script
+    assert "external 'GetTickCount@kernel32.dll stdcall'" in iss
     icon = next(line for line in iss.splitlines() if line.startswith('Name: "{userprograms}\\RainCLI\\RainCLI";'))
     assert "Parameters" not in icon
     assert "WriteInstallJson" in iss[iss.index("procedure CurStepChanged"):]
