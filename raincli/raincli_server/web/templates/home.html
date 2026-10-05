@@ -99,7 +99,7 @@
         <p>On a server or over SSH, do step 1 of the <a href="{{ SETUP_URL }}">setup guide</a> (the managed install), then in an interactive terminal:</p>
         <pre class="code"><code>raincli login --email you@example.com
 raincli runtime startup --config ~/.config/raincli/runtime.json
-loginctl enable-linger "$USER"</code></pre>
+loginctl enable-linger "$USER"   # (may need an administrator)</code></pre>
         <p><code>raincli login</code> asks for your password with no echo and registers the machine. The runtime then starts at login through a systemd user unit and takes automatic updates; enabling lingering keeps it running while you&rsquo;re logged out. <a href="{{ HEADLESS_LOGIN_URL }}">Headless setup</a></p>
       </div>
       <div>

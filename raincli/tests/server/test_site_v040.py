@@ -31,6 +31,7 @@ def test_home_page_offers_the_windows_download_and_headless_login(client):
     assert "sign in with your RainCLI email and password" in page
     for step in LOGIN_STEPS:
         assert step in page
+    assert 'loginctl enable-linger "$USER"   # (may need an administrator)' in page
     assert f'href="{HEADLESS}"' in r.text and f'href="{WINDOWS_GUIDE}"' in r.text
     assert "download its config" in page  # the connector path stays documented
     for word in NEVER:
@@ -53,6 +54,7 @@ def test_machines_page_puts_the_app_and_login_first(client, world):
     assert "raincli login --email alice@example.test" in page
     for step in LOGIN_STEPS[1:]:
         assert step in page
+    assert 'enable-linger "$USER"</code> (may need an administrator)' in page
     assert page.index('id="set-up"') < page.index('id="add-machine"')
     assert "For an inbox or connector setup" in page  # the config download is the alternative
     for word in NEVER:
