@@ -572,6 +572,23 @@ def register(server, name):
     return issued["api_url"], SECRETS.add(issued["token"])
 
 
+def migrated(config_dir):
+    """True once migration converted the token and runtime.json is in connector mode."""
+    try:
+        agent = json.loads((config_dir / "agent.json").read_text("utf-8"))
+        runtime = json.loads((config_dir / "runtime.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return False
+    return ("token_dpapi" in agent and "token" not in agent and bool(runtime.get("connectors"))
+            and not runtime.get("machine_config"))
+
+
+def runtime_state_dir(config_dir):
+    runtime = json.loads((config_dir / "runtime.json").read_text("utf-8"))
+    state = Path(runtime.get("state_dir") or "runtime-state")
+    return state if state.is_absolute() else config_dir / state
+
+
 def run_e2e(args, work, stack):
     installers = download_release_installers(work) if args.real else Path(args.installers).resolve()
     server = release_e2e.Server(work / "server", args.server_python)
@@ -746,21 +763,19 @@ def run_e2e(args, work, stack):
     untouched = json.loads(default_agent_config().read_text("utf-8"))
     check(untouched.get("token") and "token_dpapi" not in untouched and not (config_dir / "runtime.json").exists(),
           "migration changed the configs while the old connector was still running")
-    end(old_connector)  # the user closes the old RainCLI window
+    end(old_connector)  # the user closes the old RainCLI window; the tray's migration then continues by itself
+    wait_for("migration to finish (DPAPI token, connector-mode runtime.json)",
+             lambda: migrated(config_dir), timeout=300)
     wait_for("the migrated machine's presence", lambda: shows(server, observer, OLD_MACHINE, NEW), timeout=300)
-    migrated = json.loads(default_agent_config().read_text("utf-8"))
-    check("token_dpapi" in migrated and "token" not in migrated, "migration did not convert the token to DPAPI")
     check(handles(server, observer) == before, "migration created or removed a machine")
     check(api(server, pip_token, "/api/v1/me")["agent"]["handle"] == OLD_MACHINE, "the old credential stopped working")
-    runtime = json.loads((config_dir / "runtime.json").read_text("utf-8"))
-    check(runtime.get("connectors") and not runtime.get("machine_config"), "runtime.json is not in connector mode")
     check(app.run_value() == stub_command, "the Run value does not start the app after migration")
     second = send(server, observer, OLD_MACHINE, "after migration")
     wait_for("delivery after migration", lambda: delivered(server, observer, second), timeout=240)
     check(set(queue_files) <= {p.name for p in queue.rglob("*") if p.is_file()}, "migration dropped queue files")
-    logs = [p for base in (app.root, config_dir) for p in base.rglob("migration.log")]
+    logs = [p for p in [runtime_state_dir(config_dir) / "migration.log"] if p.is_file()]
     check(logs and pip_token not in logs[0].read_text("utf-8", errors="replace"),
-          "no migration.log, or it holds the token")
+          "no migration.log under the runtime state_dir, or it holds the token")
     say(f"PASS: B. pip {OLD_PIP} foreground connector (no runtime.json, no agent_config, relative state_dir): "
         f"migration waited for the old window, then kept {OLD_MACHINE} and its credential (DPAPI), wrote a "
         "connector-mode runtime.json, and delivery continues; no new machine")
@@ -797,8 +812,11 @@ def run_e2e(args, work, stack):
     with contextlib.suppress(subprocess.TimeoutExpired):
         old_launcher.wait(timeout=300)
     check(old_launcher.poll() is not None, "the managed launcher did not stop on the app's stop request")
+    wait_for("migration to finish (DPAPI token, connector-mode runtime.json)",
+             lambda: migrated(config_dir), timeout=300)
     wait_for("the migrated managed machine's presence", lambda: shows(server, observer, MANAGED_MACHINE, NEW),
              timeout=300)
+    check((runtime_state_dir(config_dir) / "migration.log").is_file(), "no migration.log under the runtime state_dir")
     wait_for("the Run value pointing at the stub", lambda: app.run_value() == stub_command, timeout=120)
     check(handles(server, observer) == before, "migration created or removed a machine")
     check(api(server, managed_token, "/api/v1/me")["agent"]["handle"] == MANAGED_MACHINE,
