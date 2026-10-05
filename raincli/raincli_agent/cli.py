@@ -45,8 +45,8 @@ modes (connector config "mode"):
 trust_mode: "list" (trusted_senders / `connector trust`; others need approval) or
 "team" (every agent of this team auto-delivers). blocked_senders are always held.
 target: "herdr_agent" (a Herdr agent name; delivery is instant) or, instead,
-"inbox": {"hook": "claude", "name": NAME}, a Claude Code session outside Herdr
-reporting through `raincli hooks install --claude`. That delivery is next-turn:
+"inbox": {"hook": "claude"|"codex", "name": NAME}, a Claude Code or Codex
+session outside Herdr reporting through `raincli hooks install --claude|--codex`. That delivery is next-turn:
 it waits until the session is next started or prompted, needs `raincli runtime
 run`, and holds messages offline (no such live session) or target_ambiguous
 (more than one); there is never a fallback."""
@@ -961,8 +961,11 @@ def build_parser():
                     "session can be a next-turn inbox. Idempotent; writes a 0600 backup first and touches only "
                     "entries marked raincli. The hook command uses the managed launcher (or the raincli entry "
                     "point) and the runtime's state_dir. Codex hooks are installed only when the installed "
-                    "Codex reports its hooks feature enabled; otherwise Codex sessions stay scan-only, and "
-                    "Codex asks you to review new hooks before they run.")
+                    "Codex reports its hooks feature enabled (on Windows Codex 0.145.0 or later is required; "
+                    "paths may not contain cmd.exe special characters); otherwise Codex sessions stay "
+                    "scan-only. Codex runs them only after you trust them once in its /hooks view, and again "
+                    "after any reinstall that changes the command; raincli never trusts them for you. Codex "
+                    "uses $CODEX_HOME/hooks.json when CODEX_HOME is set.")
     which = hooks_install.add_mutually_exclusive_group(required=True)
     which.add_argument("--claude", action="store_true", help="Claude Code (~/.claude/settings.json)")
     which.add_argument("--codex", action="store_true", help="Codex (~/.codex/hooks.json)")

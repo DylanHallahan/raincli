@@ -85,8 +85,9 @@ def test_config_mapping_is_exclusive_and_validated(tmp_path):
         return load_connector_config(str(path))
     cfg = load({"inbox": {"hook": "claude", "name": "my inbox"}})
     assert cfg.inbox_hook == ("claude", "my inbox") and cfg.herdr_agent == ""
+    assert load({"inbox": {"hook": "codex", "name": "x"}}).inbox_hook == ("codex", "x")  # Phase 2
     for bad in ({"inbox": {"hook": "claude", "name": "x"}, "herdr_agent": "inbox"},
-                {"inbox": {"hook": "codex", "name": "x"}},
+                {"inbox": {"hook": "gemini", "name": "x"}},
                 {"inbox": {"hook": "claude", "name": ""}},
                 {"inbox": {"hook": "claude", "name": " padded"}},
                 {"inbox": {"hook": "claude", "name": "x", "extra": 1}},

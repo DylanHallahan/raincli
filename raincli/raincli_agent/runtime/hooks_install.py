@@ -42,6 +42,11 @@ EVENTS = {
 # approx_token_count; hooks/src/output_spill.rs spills above it, 2,500 when unset). Our
 # Codex claim cap is CLAIM_CAP_BYTES (32 KiB = 8,192 tokens), so 9,000 keeps every claim inline.
 CODEX_CONTEXT_LIMIT = 9000
+# Codex accepts additionalContextLimit only where a hook can emit additionalContext, and
+# clamps SessionEnd timeouts to 3 s (hooks/src/engine/discovery.rs, normalize_command_hook,
+# SESSION_END_MAX_TIMEOUT_SEC); real codex 0.160.0 warns about both otherwise.
+CODEX_CONTEXT_EVENTS = ("SessionStart", "UserPromptSubmit")
+CODEX_SESSION_END_TIMEOUT = 3
 # Windows: quoted hook paths (#33926) and additionalContextLimit (#34393) arrived in 0.145.0.
 CODEX_MIN_WINDOWS = (0, 145, 0)
 # cmd.exe interprets these inside `cmd /C "…"` (Codex runs Windows hooks that way:
@@ -108,7 +113,10 @@ def handler(kind, event, prefix, state_dir, windows=None):
     argv = [*prefix, "hook", kind, event, "--state-dir", str(state_dir)]
     entry = {"type": "command", "timeout": TIMEOUT, "statusMessage": MARKER}
     if kind == "codex":
-        entry["additionalContextLimit"] = CODEX_CONTEXT_LIMIT
+        if event in CODEX_CONTEXT_EVENTS:
+            entry["additionalContextLimit"] = CODEX_CONTEXT_LIMIT
+        if event == "SessionEnd":
+            entry["timeout"] = CODEX_SESSION_END_TIMEOUT
     if windows:
         if kind == "claude":
             # Claude Code's exec form: no shell parses the paths.
@@ -180,10 +188,11 @@ def codex_support(run=subprocess.run):
     return False, f"{version or 'codex'}: no hooks feature"
 
 
-def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_support):
+def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_support, windows=None):
+    windows = os.name == "nt" if windows is None else windows
     if kind not in EVENTS:
         raise ConfigError("hooks install supports --claude or --codex")
-    state_dir = os.path.abspath(state_dir)
+    state_dir = state_dir if windows and os.name != "nt" else os.path.abspath(state_dir)
     link = config_path(kind, home)
     path = Path(os.path.realpath(link)) if link.is_symlink() else link  # edit a dotfile-managed target in place
     result = {"agent": kind, "config": str(path)}
@@ -194,7 +203,7 @@ def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_s
             result.update(status="unsupported", note="Codex sessions stay scan-only (listed, status unknown)")
             return result
         version = codex_version(evidence)
-        if os.name == "nt" and (version is None or version < CODEX_MIN_WINDOWS):
+        if windows and (version is None or version < CODEX_MIN_WINDOWS):
             raise ConfigError(f"Codex hooks on Windows need Codex 0.145.0 or later ({evidence}); update Codex "
                               "(npm install -g @openai/codex) and run raincli hooks install --codex again. Until "
                               "then Codex sessions are listed by the process scan only")
@@ -210,7 +219,7 @@ def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_s
             hooks.setdefault(event, [])
             if not isinstance(hooks[event], list):
                 raise ConfigError(f"{path}: hooks.{event} is not a list; nothing was changed")
-            hooks[event].append({"hooks": [handler(kind, event, prefix, state_dir)]})
+            hooks[event].append({"hooks": [handler(kind, event, prefix, state_dir, windows)]})
     new = {**data, "hooks": hooks}
     if not hooks and "hooks" not in data:
         new.pop("hooks")

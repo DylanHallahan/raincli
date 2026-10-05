@@ -412,6 +412,15 @@ Revoked handles return no agents. The website shows machines → agents: the inb
 - **Name:** `--name` or `RAINCLI_AGENT_NAME` if set; otherwise the **basename** of the session's project directory. Only the basename is kept. Keys are `hash(salt, type + ":" + session_id)`.
 - **Installing:** `raincli hooks install --claude|--codex --config <runtime.json> [--remove]` edits the agent's user config idempotently. It writes a backup first, and only touches entries it owns, which are marked `raincli`.
 - **Codex:** hooks are installed only if the installed Codex's hook API supports the events above. Otherwise Codex sessions are found by process scan and listed only.
+- **Codex hooks, Phase 2 (binding):**
+  - **Config file:** `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`).
+  - **Version:** on Windows, Codex **0.145.0 or later** is required (quoted hook paths, `additionalContextLimit`), and an older Codex is refused with a clear message. Elsewhere an older Codex gets a warning.
+  - **Each entry:** `"type": "command"`, `"statusMessage": "raincli"`, `"timeout": 5` (`SessionEnd`: 3, Codex's cap). `SessionStart`/`UserPromptSubmit` carry `"additionalContextLimit": 9000`. That is the per-handler key in `codex-rs/config/src/hook_config.rs`, counted in approximate tokens (UTF-8 bytes / 4); unset it is 2,500, and above it Codex spills to a file and shows a preview.
+  - **On Windows:** also `"commandWindows"`, the command line `cmd.exe /C "…"` receives (Codex's `command_runner.rs`). Every argument is quoted. A path containing `% ^ & | < > "`, a control character or a trailing backslash is refused. The command is `<root>\bin\raincli.exe` on app installs, otherwise the managed launcher or the `raincli` entry point.
+  - **Trust:** Codex runs a user hook only after the user trusts it in `/hooks`, and again after any change to the command. RainCLI never writes trust state and never bypasses it.
+  - **Next-turn inbox:** `"inbox": {"hook": "codex", "name": …}` is accepted. The hook emits claims for Codex `SessionStart`/`UserPromptSubmit` as `hookSpecificOutput.additionalContext`.
+  - **Claim bound:** 32 KiB of UTF-8 (at most 8,192 tokens, under the configured 9,000); Claude's 10,000-character bound doesn't apply to Codex. A larger framed message is held `too_large_for_hook`.
+  - **Liveness:** passes through `cmd.exe` and raincli's own executables (the PATH shim and the pip launcher) to `codex.exe`.
 
 **Process scan (fallback):**
 - **Linux:** `/proc/*/{comm,cmdline,cwd}` for known agent executables not already reported by Herdr or hooks, as the type plus the cwd basename.

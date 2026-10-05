@@ -175,11 +175,24 @@ def herdr_stage(server):
     return herdr_smoke.run_stage(ROOT, server, wait_for, show, kill_tree)
 
 
+def codex_stage(server):
+    """Codex hooks (Phase 2): see scripts/codex_smoke.py."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import codex_smoke
+    return codex_smoke.run_stage(ROOT, server, wait_for, show, kill_tree)
+
+
 def main():
     if "--herdr-only" in sys.argv[1:]:
         with FakeApi() as server:
             herdr_stage(server)
         return
+    if "--codex-only" in sys.argv[1:]:
+        with FakeApi() as server:
+            codex_stage(server)
+        return
+    with FakeApi() as server:
+        codex_stage(server)
     with FakeApi() as server:
         herdr_stage(server)
     with tempfile.TemporaryDirectory(prefix="raincli-runtime-") as tmp, FakeApi() as server:
