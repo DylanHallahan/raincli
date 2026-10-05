@@ -509,9 +509,11 @@ class Connector:
                     self._hold(record, "offline", f"cannot hand over to the session: {type(exc).__name__}")
                     continue
                 text = self._prompt_text(record)
-                if not sessions.fits_one_turn(text):
-                    self._hold(record, "too_large_for_hook",
-                               f"framed message exceeds the per-turn bound ({sessions.CLAIM_CAP_CHARS} characters)")
+                kind = self.config.inbox_hook[0]
+                if not sessions.fits_one_turn(text, kind):
+                    cap = sessions.char_cap(kind)
+                    bound = f"{cap} characters" if cap else f"{sessions.CLAIM_CAP_BYTES} bytes"
+                    self._hold(record, "too_large_for_hook", f"framed message exceeds the per-turn bound ({bound})")
                     continue
                 record["attempts"] = record.get("attempts", 0) + 1
                 record["handover_key"] = target_key

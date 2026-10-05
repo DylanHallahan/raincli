@@ -36,9 +36,43 @@ EVENTS = {
 }
 
 
+# Codex hooks (Phase 2): the per-handler `additionalContextLimit` (camelCase in hooks.json;
+# codex-rs/config/src/hook_config.rs, HookHandlerConfig::Command, from 0.145.0) is an
+# approximate token threshold, counted as UTF-8 bytes / 4 (codex-rs/utils/string,
+# approx_token_count; hooks/src/output_spill.rs spills above it, 2,500 when unset). Our
+# Codex claim cap is CLAIM_CAP_BYTES (32 KiB = 8,192 tokens), so 9,000 keeps every claim inline.
+CODEX_CONTEXT_LIMIT = 9000
+# Codex accepts additionalContextLimit only where a hook can emit additionalContext, and
+# clamps SessionEnd timeouts to 3 s (hooks/src/engine/discovery.rs, normalize_command_hook,
+# SESSION_END_MAX_TIMEOUT_SEC); real codex 0.160.0 warns about both otherwise.
+CODEX_CONTEXT_EVENTS = ("SessionStart", "UserPromptSubmit")
+CODEX_SESSION_END_TIMEOUT = 3
+# Windows: quoted hook paths (#33926) and additionalContextLimit (#34393) arrived in 0.145.0.
+CODEX_MIN_WINDOWS = (0, 145, 0)
+# cmd.exe interprets these inside `cmd /C "…"` (Codex runs Windows hooks that way:
+# codex-rs/hooks/src/engine/command_runner.rs, build_command), so no path may contain them.
+CMD_SPECIAL = set('%^&|<>"')
+TRUST_NOTE = ("Codex runs these hooks only after you trust them once in Codex: open /hooks and trust the "
+              "raincli hooks. Trust again after any reinstall that changes the command (a new state "
+              "directory or install path).")
+
+
+def codex_home(home=None):
+    """$CODEX_HOME, else ~/.codex (with ``home``, always <home>/.codex)."""
+    if home is None and os.environ.get("CODEX_HOME"):
+        return Path(os.environ["CODEX_HOME"])
+    return (Path(home) if home else Path.home()) / ".codex"
+
+
 def config_path(kind, home=None):
-    home = Path(home) if home else Path.home()
-    return home / ".claude" / "settings.json" if kind == "claude" else home / ".codex" / "hooks.json"
+    if kind == "claude":
+        return (Path(home) if home else Path.home()) / ".claude" / "settings.json"
+    return codex_home(home) / "hooks.json"
+
+
+def codex_version(evidence):
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", evidence or "")
+    return tuple(int(part) for part in match.groups()) if match else None
 
 
 def launcher_prefix():
@@ -61,14 +95,36 @@ def launcher_prefix():
                       "raincli entry point on PATH, then run hooks install again")
 
 
-def handler(kind, event, prefix, state_dir):
+def windows_command_line(argv):
+    """The command line cmd.exe receives as ``cmd /C "<line>"``: every argument quoted.
+    Paths with cmd-special characters are refused (they would be expanded or split)."""
+    for arg in argv:
+        bad = sorted(set(arg) & CMD_SPECIAL) or [ch for ch in arg if ord(ch) < 32]
+        if not bad and arg.endswith("\\"):
+            bad = ["a trailing backslash"]  # it would escape the closing quote
+        if bad:
+            raise ConfigError(f"cannot install Codex hooks: the path {arg!r} contains characters cmd.exe "
+                              f"interprets ({' '.join(bad)}); use a state directory and install path without them")
+    return " ".join(f'"{arg}"' if (" " in arg or not arg or "\\" in arg or "/" in arg) else arg for arg in argv)
+
+
+def handler(kind, event, prefix, state_dir, windows=None):
+    windows = os.name == "nt" if windows is None else windows
     argv = [*prefix, "hook", kind, event, "--state-dir", str(state_dir)]
     entry = {"type": "command", "timeout": TIMEOUT, "statusMessage": MARKER}
-    if os.name == "nt":
-        if kind != "claude":
-            raise ConfigError("Codex hooks are installed on Linux and macOS only; Windows Codex sessions stay scan-only")
-        # Claude Code's exec form: no shell parses the paths.
-        entry.update(command=argv[0], args=argv[1:])
+    if kind == "codex":
+        if event in CODEX_CONTEXT_EVENTS:
+            entry["additionalContextLimit"] = CODEX_CONTEXT_LIMIT
+        if event == "SessionEnd":
+            entry["timeout"] = CODEX_SESSION_END_TIMEOUT
+    if windows:
+        if kind == "claude":
+            # Claude Code's exec form: no shell parses the paths.
+            entry.update(command=argv[0], args=argv[1:])
+        else:
+            # Codex runs %COMSPEC% /C "<command>"; commandWindows wins on Windows.
+            line = windows_command_line(argv)
+            entry.update(command=line, commandWindows=line)
     else:
         # Output to stderr is discarded and the status is always 0: a missing
         # interpreter or any failure can never block the agent (exit 2 would).
@@ -132,10 +188,11 @@ def codex_support(run=subprocess.run):
     return False, f"{version or 'codex'}: no hooks feature"
 
 
-def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_support):
+def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_support, windows=None):
+    windows = os.name == "nt" if windows is None else windows
     if kind not in EVENTS:
         raise ConfigError("hooks install supports --claude or --codex")
-    state_dir = os.path.abspath(state_dir)
+    state_dir = state_dir if windows and os.name != "nt" else os.path.abspath(state_dir)
     link = config_path(kind, home)
     path = Path(os.path.realpath(link)) if link.is_symlink() else link  # edit a dotfile-managed target in place
     result = {"agent": kind, "config": str(path)}
@@ -145,6 +202,14 @@ def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_s
         if not supported:
             result.update(status="unsupported", note="Codex sessions stay scan-only (listed, status unknown)")
             return result
+        version = codex_version(evidence)
+        if windows and (version is None or version < CODEX_MIN_WINDOWS):
+            raise ConfigError(f"Codex hooks on Windows need Codex 0.145.0 or later ({evidence}); update Codex "
+                              "(npm install -g @openai/codex) and run raincli hooks install --codex again. Until "
+                              "then Codex sessions are listed by the process scan only")
+        if version is not None and version < CODEX_MIN_WINDOWS:
+            result["warning"] = ("this Codex ignores additionalContextLimit (0.145.0 or later): a next-turn "
+                                 "message over about 10,000 characters reaches the session only as a preview")
     raw, data = load(path)
     hooks = strip_owned(data.get("hooks", {}))
     if not remove:
@@ -154,7 +219,7 @@ def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_s
             hooks.setdefault(event, [])
             if not isinstance(hooks[event], list):
                 raise ConfigError(f"{path}: hooks.{event} is not a list; nothing was changed")
-            hooks[event].append({"hooks": [handler(kind, event, prefix, state_dir)]})
+            hooks[event].append({"hooks": [handler(kind, event, prefix, state_dir, windows)]})
     new = {**data, "hooks": hooks}
     if not hooks and "hooks" not in data:
         new.pop("hooks")
@@ -166,7 +231,7 @@ def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_s
         if backup is not None:
             result["backup"] = str(backup)
     if kind == "codex" and not remove:
-        result["note"] = "Codex asks you to review new hooks (/hooks) before they run"
+        result["note"] = TRUST_NOTE
     return result
 
 

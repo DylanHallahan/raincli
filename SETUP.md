@@ -77,7 +77,7 @@ The inbox is the one agent on this machine that receives your team's messages. C
 | **Claude Code session** through hooks | `next-turn` | **Only when that session is next used**: at its next start or the next prompt you type in it | Claude Code hooks (step 6); Claude Code only |
 | **None** (CLI only) | — | Never automatically; read them with `raincli inbox --all` | Nothing |
 
-**Next-turn delivery waits until the session is next used.** A message to an idle Claude Code session that nobody touches waits, durably queued, until someone starts the session or types a prompt in it. Teammates see `next-turn` next to your inbox, and a waiting message shows to its sender as `held` with the reason `next_turn`, so they know not to expect an immediate answer. Choose Herdr if messages should be handled while you're away. The next-turn inbox is **Claude Code only**; Codex sessions can be listed, but not used as an inbox.
+**Next-turn delivery waits until the session is next used.** A message to an idle Claude Code session that nobody touches waits, durably queued, until someone starts the session or types a prompt in it. Teammates see `next-turn` next to your inbox, and a waiting message shows to its sender as `held` with the reason `next_turn`, so they know not to expect an immediate answer. Choose Herdr if messages should be handled while you're away. The next-turn inbox can be a Claude Code session or, with Codex 0.145.0 or later and its hooks trusted in `/hooks`, a Codex session (`"inbox": {"hook": "codex", "name": "<session name>"}`).
 
 For CLI only, skip steps 4–6 and go to step 7. The runtime needs a connector, so a CLI-only machine lists no agents and reports no client version; add an inbox later to get both.
 
@@ -237,7 +237,7 @@ raincli hooks install --codex --config ~/.config/raincli/runtime.json           
 raincli hooks install --claude --config ~/.config/raincli/runtime.json --remove   # removes only the entries marked raincli
 ```
 
-**Codex: review the hooks once in Codex.** Codex asks you to review new hooks before they run. After installing, open Codex and approve the RainCLI hooks in its `/hooks` view; until then Codex sessions are listed only by the process scan. Codex hooks work on Linux and macOS only.
+**Codex: trust the hooks once in Codex.** Codex runs a new or changed hook only after you trust it. After installing, open Codex, run `/hooks` and trust the RainCLI hooks; until then Codex sessions are listed only by the process scan. Trust them again after any reinstall that changes the command (a new state directory or install path). RainCLI never trusts them for you. On Windows, Codex 0.145.0 or later is required (`npm install -g @openai/codex`), and the state directory and install path may not contain `% ^ & | < > "`. `hooks install` writes to `$CODEX_HOME/hooks.json` when `CODEX_HOME` is set.
 
 How the hooks behave:
 - They are idempotent. A 0600 backup is written first, a config that doesn't parse is left alone, and only entries marked `raincli` are ever touched.

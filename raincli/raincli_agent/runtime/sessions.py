@@ -56,8 +56,20 @@ def context_chars(text):
     return len(text.encode("utf-16-le")) // 2
 
 
-def fits_one_turn(text):
-    return len(text.encode("utf-8")) <= CLAIM_CAP_BYTES and context_chars(text) <= CLAIM_CAP_CHARS
+# Codex (Phase 2): the installed hooks set additionalContextLimit to 9,000 approximate
+# tokens (UTF-8 bytes / 4; hooks_install.CODEX_CONTEXT_LIMIT), above CLAIM_CAP_BYTES
+# (8,192 tokens), so the byte bound alone keeps a claim inline; Claude's character
+# bound does not apply.
+CHAR_CAPS = {"claude": CLAIM_CAP_CHARS, "codex": None}
+
+
+def char_cap(kind):
+    return CHAR_CAPS.get(kind, CLAIM_CAP_CHARS)
+
+
+def fits_one_turn(text, kind="claude"):
+    cap = char_cap(kind)
+    return len(text.encode("utf-8")) <= CLAIM_CAP_BYTES and (cap is None or context_chars(text) <= cap)
 
 
 # -- salt and keys -------------------------------------------------------------
@@ -321,8 +333,8 @@ def _read_regular(path, limit):
         os.close(fd)
 
 
-def claim(state_dir, key):
-    """Claim pending framed messages, oldest first, within the per-turn bound.
+def claim(state_dir, key, kind="claude"):
+    """Claim pending framed messages, oldest first, within ``kind``'s per-turn bound.
 
     Returns ``(texts, ids)``. The caller emits the texts and then calls
     ``write_receipts``. Only regular ``<uuid>.md`` files are considered."""
@@ -339,6 +351,7 @@ def claim(state_dir, key):
             entries.append((st.st_mtime_ns, entry.name, st.st_size))
     entries.sort()
     texts, ids, total_bytes, total_chars = [], [], 0, 0
+    cap_chars = char_cap(kind)
     for _mtime, name, size in entries:
         if size > CLAIM_CAP_BYTES:
             continue  # never emitted; the connector holds such messages too_large_for_hook
@@ -359,7 +372,7 @@ def claim(state_dir, key):
         except UnicodeDecodeError:
             text = None
         extra = context_chars(text) + (context_chars(SEPARATOR) if texts else 0) if text is not None else 0
-        if text is None or total_chars + extra > CLAIM_CAP_CHARS:
+        if text is None or (cap_chars is not None and total_chars + extra > cap_chars):
             try:
                 os.rename(claimed, pending)  # not this turn; nothing was emitted
             except FileNotFoundError:
