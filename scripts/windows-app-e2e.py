@@ -369,15 +369,21 @@ class App:
         app = self.root / "versions" / version / "RainCLI-app.exe"
         return any(str(p).casefold() == str(app).casefold() for p in exes)
 
-    def uninstall(self, signout):
+    def uninstall(self, signout, label):
         uninstaller = self.root / "unins000.exe"
         if not uninstaller.is_file():
             raise Failure("no uninstaller at the install root")
         run([uninstaller, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", f"/SIGNOUT={'yes' if signout else 'no'}",
-             f"/LOG={self.work / 'uninstall.log'}"], timeout=600)
+             f"/LOG={self.work / f'uninstall-{label}.log'}"], timeout=600)
         # The uninstaller re-runs itself from TEMP; wait until it has removed its own key and file.
-        wait_for("the uninstaller to finish",
-                 lambda: reg_values(UNINSTALL_KEY) is None and not uninstaller.exists(), timeout=300)
+        log = self.work / f"uninstall-{label}.log"
+
+        def finished():
+            if log.is_file() and "InitializeUninstall returned False" in log.read_text("utf-8", errors="replace"):
+                raise Failure(f"the uninstaller refused ({label}): RainCLI.exe --quit did not stop the app; "
+                              "see quit-blockers.txt in the diagnostics")
+            return reg_values(UNINSTALL_KEY) is None and not uninstaller.exists()
+        wait_for("the uninstaller to finish", finished, timeout=300)
 
 
 def login_through_conpty(app, server, password, machine):
@@ -816,7 +822,7 @@ def run_e2e(args, work, stack):
     say(f"PASS: A6. downgrade to {OLD} refused, then allowed with --allow-downgrade; target cleared")
 
     # A7. uninstall that signs out
-    app.uninstall(signout=True)
+    app.uninstall(signout=True, label="a7")
     check((entry(server, observer, MACHINE) or {}).get("active") is False, "sign-out did not revoke the machine")
     check(not default_agent_config().exists(), "the uninstall's sign-out left the credential")
     gone = [app.root / "RainCLI.exe", app.root / "_internal", app.root / "bin", app.root / "versions",
@@ -866,7 +872,7 @@ def run_e2e(args, work, stack):
     say(f"PASS: B. pip {OLD_PIP} foreground connector (no runtime.json, no agent_config, relative state_dir): "
         f"migration waited for the old window, then kept {OLD_MACHINE} and its credential (DPAPI), wrote a "
         "connector-mode runtime.json, and delivery continues; no new machine")
-    app.uninstall(signout=False)
+    app.uninstall(signout=False, label="b")
     check(default_agent_config().is_file() and connector.is_file() and queue.is_dir() and logs[0].is_file(),
           "uninstall without sign-out removed agent.json, the connector config, the queue or migration.log")
     check(api(server, pip_token, "/api/v1/me")["agent"]["handle"] == OLD_MACHINE, "uninstall signed the machine out")
@@ -917,7 +923,7 @@ def run_e2e(args, work, stack):
     say(f"PASS: C. managed {OLD_MANAGED} in the documented layout (default runtime.json, started by its Run value): "
         "the installer recorded the Run value, the launcher stopped on the app's stop request, the Run value now "
         f"starts the stub, and {MANAGED_MACHINE} keeps delivering; no new machine")
-    app.uninstall(signout=False)
+    app.uninstall(signout=False, label="c")
     check(app.run_value() is None, "the final uninstall left the Run value")
 
 
@@ -925,7 +931,8 @@ def diagnose(work):
     say("===== DIAGNOSTICS (secrets redacted) =====")
     root = app_root()
     for path in [root / "install.json", root / "installer-record.log", *sorted(root.rglob("*.log")),
-                 *sorted(work.glob("install-*.log")), work / "uninstall.log", work / "old-connector.log",
+                 *sorted(work.glob("install-*.log")), *sorted(work.glob("uninstall-*.log")),
+                 root / "app-lock" / "quit-blockers.txt", work / "old-connector.log",
                  profile() / ".raincli" / "client" / "runtime.log",
                  work / "server" / "server.log", default_agent_config().parent / "runtime.json"]:
         if path.is_file():
