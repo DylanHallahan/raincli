@@ -363,11 +363,13 @@ class Process:
         self.stopped = False
 
     def poll(self):
+        if self.on_wait:  # what happens while the tray runs, before it exits
+            self.on_wait, action = None, self.on_wait
+            action()
         return self.code
 
     def wait(self, timeout=None):
-        if self.on_wait:
-            self.on_wait()
+        self.poll()
         return self.code if self.code is not None else 0
 
 
@@ -558,3 +560,121 @@ def test_tray_imports_gui_libraries_lazily():
                              "assert not {'pystray', 'PIL', 'tkinter'} & set(sys.modules), sys.modules.keys()"],
                             capture_output=True, text=True, cwd=Path(raincli_agent.__file__).parents[1])
     assert result.returncode == 0, result.stderr
+
+
+# -- review 1a ---------------------------------------------------------------------------------------
+
+def test_prune_refuses_without_a_current_version(app):
+    add_version(app, "0.4.1")
+    (app / "install.json").write_text("not json")
+    assert winapp.prune(app, running=app / "elsewhere" / "x.exe") == []
+    assert sorted(p.name for p in (app / "versions").iterdir()) == ["0.4.0", "0.4.1"]
+
+
+def test_stub_quit_with_no_running_stub_exits_0(app):
+    assert winapp.stub_quit(app) == 0
+    assert not (app / "app-lock" / "quit").exists()
+
+
+def test_stub_quit_waits_for_the_stub_lock(app):
+    """15.9: `RainCLI.exe --quit` creates app-lock\\quit and exits 0 once the stub's lock is free."""
+    import threading
+    lock = winapp.single_instance(app)  # the running stub
+    assert lock is not None
+    seen = []
+
+    def running_stub():
+        while not (app / "app-lock" / "quit").exists():
+            threading.Event().wait(0.02)
+        seen.append(True)
+        os.close(lock)  # the tray stopped its runtime and exited; the stub exits 0
+    thread = threading.Thread(target=running_stub)
+    thread.start()
+    assert winapp.stub_quit(app, sleep=lambda s: threading.Event().wait(0.02)) == 0
+    thread.join(5)
+    assert seen and not winapp.quit_requested(app)
+
+
+def test_stub_quit_exits_1_when_the_app_is_still_running(app):
+    lock = winapp.single_instance(app)
+    clock = Clock()
+    try:
+        assert winapp.stub_quit(app, timeout=120, sleep=clock.sleep, clock=clock) == 1
+        assert 120 <= clock.now - 1000.0 <= 122
+    finally:
+        os.close(lock)
+
+
+def test_running_stub_stops_the_tray_on_quit_and_exits_0(app):
+    """The stub sees the request while the tray runs; the tray (host.stop() first) exits; stub returns 0."""
+    clock = Clock()
+
+    class Tray(Process):
+        def poll(self):
+            if winapp.quit_requested(app) and self.code is None:
+                self.code = 0  # Tray.quit: host.stop(), then exit 0
+            return self.code
+    started = []
+
+    def popen(argv, **kw):
+        started.append(argv)
+        return Tray(code=None)
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        if clock.now > 1005:
+            (app / "app-lock").mkdir(exist_ok=True)
+            (app / "app-lock" / "quit").write_bytes(b"")
+    assert winapp.Stub(app, popen=popen, sleep=sleep, clock=clock, wall=lambda: 0).run() == 0
+    assert len(started) == 1
+
+
+def test_running_stub_ends_a_tray_that_ignores_quit(app, monkeypatch):
+    from raincli_agent.runtime import service
+    killed = []
+    monkeypatch.setattr(service, "kill_tree", lambda process: killed.append(process))
+    clock = Clock()
+    (app / "app-lock").mkdir(exist_ok=True)
+    tray = Process(code=None)
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        (app / "app-lock" / "quit").write_bytes(b"")
+    stub = winapp.Stub(app, popen=lambda argv, **kw: tray, sleep=sleep, clock=clock, wall=lambda: 0)
+    assert stub.run() == 0 and killed == [tray] and clock.now - 1000 < winapp.GRACEFUL_STOP + 5
+
+
+def test_stub_main_accepts_only_background_and_quit(app, monkeypatch):
+    from raincli_agent.app import stub
+    monkeypatch.setattr(sys, "executable", str(app / "RainCLI.exe"))
+    assert stub.main(["--quit"]) == 0
+    assert stub.main(["--bogus"]) == 2
+
+
+def test_stub_run_honours_a_quit_request(app):
+    (app / "app-lock").mkdir(exist_ok=True)
+    (app / "app-lock" / winapp.QUIT).write_bytes(b"")
+    assert winapp.Stub(app, popen=lambda *a, **k: pytest.fail("started")).run() == 0
+
+
+def test_app_self_check(monkeypatch, capsys):
+    """15.9: --self-check imports the GUI modules and the tray, no desktop needed."""
+    import types
+    from raincli_agent.app import tray
+    for name in ("pystray", "PIL", "PIL.Image", "PIL.ImageDraw", "tkinter", "tkinter.filedialog", "tkinter.messagebox"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    assert tray.main(["--self-check"]) == 0 and "self-check: ok" in capsys.readouterr().out
+    monkeypatch.setitem(sys.modules, "pystray", None)  # an import that fails
+    assert tray.main(["--self-check"]) == 1 and "cannot import pystray" in capsys.readouterr().err
+    assert tray.main([]) == 2
+
+
+def test_tray_quits_on_request_and_entry_point_exists():
+    import raincli_agent.app as app_package
+    assert callable(app_package.main)
+    source = (Path(raincli_agent.__file__).parent / "app" / "tray.py").read_text()
+    assert "quit_requested" in source and "Sign in again" in source
+
+
+def test_job_object_only_on_windows():
+    assert winapp.kill_on_close_job(object()) is None if os.name != "nt" else True

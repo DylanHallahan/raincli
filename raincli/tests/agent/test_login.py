@@ -365,3 +365,88 @@ def test_cli_login_no_tty_subprocess(home):
                             input=PASSWORD + "\n", capture_output=True, text=True, env=env, timeout=30)
     assert result.returncode == 2 and "interactive terminal" in result.stderr
     assert PASSWORD not in result.stdout + result.stderr
+
+
+# -- review 1a ---------------------------------------------------------------------------------------
+
+def test_shared_slug_vectors():
+    """15.8 L1: the same vectors as the server (tests/machine_slug_vectors.json)."""
+    vectors = json.loads((Path(__file__).parents[1] / "machine_slug_vectors.json").read_text(encoding="utf-8"))
+    assert len(vectors["vectors"]) >= 20
+    for vector in vectors["vectors"]:
+        assert login.slugify_machine_name(vector["name"]) == vector["slug"], vector
+
+
+def test_refuses_when_connectors_name_an_absent_credential(account, home):
+    """F3: no agent.json, but a legacy connector relies on its default path."""
+    path = config_path(home)
+    path.parent.mkdir(parents=True)
+    write_connector(home, None)
+    with pytest.raises(login.ConnectorMachine, match="connector configs still name"):
+        login.prepare(str(path))
+    with pytest.raises(login.ConnectorMachine):
+        login.prepare(str(path), force=True)
+    assert account.state.login_bodies == []
+
+
+def test_logout_warns_about_connector_configs_left(account, home, monkeypatch, capsys):
+    from raincli_agent.runtime import startup
+    monkeypatch.setattr(startup, "remove_for", lambda config: "not_enabled")
+    agent = config_path(home)
+    write_config(str(agent), account.url, account.alice)
+    connector = write_connector(home, agent)
+    assert cli.main(["--config", str(agent), "logout", "--yes"]) == 0
+    assert f"warning: the connector config {connector} still names the deleted credential" in capsys.readouterr().out
+
+
+def test_foreign_blob_machine_mode_can_sign_in_again(account, home):
+    """F9: `login --force` works for a machine-mode credential nobody can read here."""
+    from raincli_agent import config as config_mod, dpapi
+    from .test_dpapi_machine import FakeDpapi
+    dpapi.set_backend(FakeDpapi("other@pc"))
+    try:
+        original = config_mod.protects_tokens
+        config_mod.protects_tokens = lambda: True
+        sign_in(account, home)
+        dpapi.set_backend(FakeDpapi("me@pc"))
+        with pytest.raises(ConfigError, match="sign in again"):
+            load_config(str(config_path(home)))
+        plan = login.prepare(str(config_path(home)), force=True)
+        assert plan["previous_token"] is None and plan["write_runtime"]
+        result = login.login(EMAIL, Secret(PASSWORD), plan=plan, machine_name="new-name", api_url=account.url)
+        assert result["handle"] == "new-name" and load_config(str(config_path(home))).token
+    finally:
+        config_mod.protects_tokens = original
+        dpapi.set_backend(None)
+
+
+def test_foreign_message_names_a_path_for_each_case():
+    from raincli_agent import dpapi
+    assert "raincli login --force" in dpapi.FOREIGN and "Sign in again" in dpapi.FOREIGN
+    assert "raincli config init --force" in dpapi.FOREIGN and "Machines page" in dpapi.FOREIGN
+
+
+def test_cli_migrate_only_on_app_installs(capsys):
+    assert cli.main(["migrate"]) == 0
+    assert "nothing to migrate" in capsys.readouterr().out
+
+
+def test_rollback_floor_from_the_installed_startup_config(tmp_path, home, monkeypatch, capsys):
+    """F8: a machine-mode runtime config the login startup runs, wherever it is."""
+    from raincli_agent.fsutil import atomic_write_json
+    from raincli_agent.runtime import startup
+    runtime = tmp_path / "elsewhere" / "runtime.json"
+    runtime.parent.mkdir()
+    runtime.write_text(json.dumps({"machine_config": "agent.json"}))
+    unit = home / ".config" / "systemd" / "user" / startup.NAME
+    unit.parent.mkdir(parents=True)
+    unit.write_text(startup.systemd_unit(runtime))
+    assert startup.installed_config() == str(runtime.resolve())
+    root = tmp_path / "managed"
+    python = root / "versions" / "old" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    atomic_write_json(root / "current.json", {"tag": "v0.4.0", "commit": "b" * 40, "python": "x",
+                                              "previous": {"tag": "v0.3.2", "commit": "a" * 40, "python": str(python)}})
+    assert cli.main(["runtime", "update", "--root", str(root), "--rollback"]) != 0
+    assert "below v0.4.0" in capsys.readouterr().err

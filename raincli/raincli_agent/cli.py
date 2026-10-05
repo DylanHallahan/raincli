@@ -634,8 +634,11 @@ def cmd_runtime_update(args):
         out_json(result)
         return EXIT_OK
     if args.rollback or mode is not None:
-        # Machine mode needs v0.4.0 or later (15.8 H8).
-        machine = runtime_mode(args.config or runtime_config_path(default_config_path())) == "machine"
+        # Machine mode needs v0.4.0 or later (15.8 H8): the given config, the default one, or the
+        # one the managed install's login startup runs (review 1a F8).
+        from .runtime.startup import installed_config
+        candidates = [args.config, runtime_config_path(default_config_path()), installed_config()]
+        machine = any(runtime_mode(c) == "machine" for c in candidates if c)
         result = updates.configure(args.root, mode=mode, rollback=args.rollback,
                                    floor=winapp.MIN_VERSION if machine else None)
     elif args.install:
@@ -755,12 +758,21 @@ def cmd_logout(args):
     if result["startup"] == "disabled":
         out("disabled this machine's runtime at logon")
     out("connector configs and queues are kept")
+    for path in result.get("connectors_left") or []:
+        out(f"warning: the connector config {path} still names the deleted credential; it cannot deliver "
+            "until you point it at a new one (raincli login refuses while it does)")
     return EXIT_OK
 
 
 def cmd_migrate(args):
     from .migrate import Migration
-    migration = Migration()
+    from .runtime import winapp
+    root = winapp.app_root()
+    if root is None:
+        # Migration moves an install into the Windows app; elsewhere there is nothing to do (review 1a F6).
+        out("nothing to migrate: migration moves an existing install into the RainCLI Windows app and runs there")
+        return EXIT_OK
+    migration = Migration(app_root=root, connector_configs=args.connector_config or ())
     if args.dry_run:
         plan = migration.detect()
         out_json({"status": "nothing_to_migrate"} if plan is None else {"status": "plan", **plan.summary()})
@@ -928,13 +940,15 @@ def build_parser():
     logout_parser.set_defaults(func=cmd_logout)
     migrate_parser = sub.add_parser(
         "migrate", help="move an existing install to this client's credential storage (the Windows app runs it)",
-        description="Keep this machine's handle, credential, connectors and queues, and move them to this "
-                    "client: connector configs are normalized, the runtime config is written or kept, and on "
+        description="Windows app installs only (elsewhere it reports nothing to migrate). Keep this machine's "
+                    "handle, credential, connectors and queues, and move them to this client: connector configs are normalized, the runtime config is written or kept, and on "
                     "Windows tokens are DPAPI-protected (the old pip raincli then cannot read them). An old "
                     "runtime is asked to stop first; a connector running in a window must be closed. It never "
                     "signs in. The app finishes by starting the new runtime and disabling the old Run value. "
                     "Steps are logged to <state_dir>/migration.log.")
     migrate_parser.add_argument("--dry-run", action="store_true", help="only show what would be migrated")
+    migrate_parser.add_argument("--connector-config", action="append", metavar="PATH",
+                                help="a connector config of this machine outside ~/.config/raincli (repeatable)")
     migrate_parser.set_defaults(func=cmd_migrate)
 
     hooks = sub.add_parser("hooks", help="install agent hooks for the machine's agent directory")

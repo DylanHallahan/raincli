@@ -466,7 +466,10 @@ def install(root, tag, *, get=fetch, run=subprocess.run, resolved=None):
 def prune(root, running=None):
     """Remove versions other than current, previous, probation and the running one."""
     root = Path(root)
-    keep = {v for v in read_install(root).values() if v}
+    state = read_install(root)
+    if state["current"] is None:
+        return []  # an unreadable install.json names nothing to keep (review 1a F7)
+    keep = {v for v in state.values() if v}
     running = Path(running or sys.executable).absolute().parent
     removed = []
     versions = root / "versions"
@@ -523,6 +526,7 @@ class AppHost:
         self.clock = clock
         self.request_stop = request_stop or stop_request
         self.process = None
+        self.job = None  # Windows: the runtime dies with the tray, never orphaned (review 1a F10)
         self.paused = False
         self.failures, self.started, self.next_start = 0, 0.0, 0.0
 
@@ -547,6 +551,7 @@ class AppHost:
         finally:
             if output is not subprocess.DEVNULL:
                 os.close(output)
+        self.job = kill_on_close_job(self.process)
         self.started = self.clock()
 
     def stop(self, timeout=GRACEFUL_STOP):
@@ -554,6 +559,7 @@ class AppHost:
         process tree is killed only as a last resort."""
         if not self.running():
             self.process = None
+            self._close_job()
             return
         deadline = self.clock() + timeout
         while self.process.poll() is None and self.clock() < deadline:
@@ -569,6 +575,12 @@ class AppHost:
             from .service import kill_tree
             kill_tree(self.process)
         self.process = None
+        self._close_job()
+
+    def _close_job(self):
+        if self.job is not None:
+            self.job.close()
+            self.job = None
 
     def pause(self):
         self.paused = True
@@ -597,11 +609,60 @@ class AppHost:
             if self.process.poll() is None:
                 return None
             self.process = None
+            self._close_job()
             self.failures = 0 if self.clock() - self.started > 600 else self.failures + 1
             self.next_start = self.clock() + min(300, 2 ** min(self.failures, 8))
         if self.clock() >= self.next_start:
             self.start()
         return None
+
+
+def kill_on_close_job(process):
+    """Windows: put ``process`` (and the connectors it starts) in a Job object that is
+    killed when its last handle closes, so a crashed tray never leaves its runtime
+    running. The handle is kept by the returned object; elsewhere returns None."""
+    if os.name != "nt":
+        return None
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    class Basic(c.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", c.c_int64), ("PerJobUserTimeLimit", c.c_int64),
+                    ("LimitFlags", w.DWORD), ("MinimumWorkingSetSize", c.c_size_t),
+                    ("MaximumWorkingSetSize", c.c_size_t), ("ActiveProcessLimit", w.DWORD),
+                    ("Affinity", c.c_size_t), ("PriorityClass", w.DWORD), ("SchedulingClass", w.DWORD)]
+
+    class Io(c.Structure):
+        _fields_ = [(name, c.c_uint64) for name in ("Read", "Write", "Other", "ReadT", "WriteT", "OtherT")]
+
+    class Extended(c.Structure):
+        _fields_ = [("Basic", Basic), ("Io", Io), ("ProcessMemoryLimit", c.c_size_t),
+                    ("JobMemoryLimit", c.c_size_t), ("PeakProcessMemoryUsed", c.c_size_t),
+                    ("PeakJobMemoryUsed", c.c_size_t)]
+    kernel = c.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.restype = w.HANDLE
+    kernel.CreateJobObjectW.argtypes = [c.c_void_p, w.LPCWSTR]
+    kernel.SetInformationJobObject.argtypes = [w.HANDLE, c.c_int, c.c_void_p, w.DWORD]
+    kernel.AssignProcessToJobObject.argtypes = [w.HANDLE, w.HANDLE]
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    job = kernel.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    info = Extended()
+    info.Basic.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not (kernel.SetInformationJobObject(job, 9, c.byref(info), c.sizeof(info))  # ExtendedLimitInformation
+            and kernel.AssignProcessToJobObject(job, int(process._handle))):
+        kernel.CloseHandle(job)
+        return None
+
+    class Job:
+        handle = job
+
+        def close(self):
+            if self.handle:
+                kernel.CloseHandle(self.handle)
+                self.handle = None
+    return Job()
 
 
 # -- the stub ----------------------------------------------------------------------------------------
@@ -624,6 +685,20 @@ def rollback(root, failed):
     except OSError:
         pass
     return True
+
+
+QUIT = "quit"  # <root>\\app-lock\\quit (15.9)
+
+
+def quit_requested(root):
+    return (Path(root) / "app-lock" / QUIT).exists()
+
+
+def clear_quit(root):
+    try:
+        (Path(root) / "app-lock" / QUIT).unlink()
+    except OSError:
+        pass
 
 
 class Stub:
@@ -670,14 +745,34 @@ class Stub:
                 if state["current"] == version and state["probation"] == version:
                     write_install(self.root, version, state["previous"], probation=None)
                 return True
-            if process.poll() is not None:
-                return False
+            if process.poll() is not None or quit_requested(self.root):
+                return quit_requested(self.root)  # a quit is not a failed start
             self.sleep(1)
         return heartbeat_since(self.root, version, since)
+
+    def wait_or_quit(self, process):
+        """The tray's exit status, or None after a quit request: the tray sees the same
+        request and stops its runtime first (``Tray.quit`` -> ``host.stop()``); a tray
+        that has not exited within ``GRACEFUL_STOP`` seconds has its tree ended."""
+        while True:
+            code = process.poll()
+            if code is not None:
+                return None if quit_requested(self.root) else code
+            if quit_requested(self.root):
+                deadline = self.clock() + GRACEFUL_STOP - 10
+                while process.poll() is None and self.clock() < deadline:
+                    self.sleep(1)
+                if process.poll() is None:
+                    from .service import kill_tree
+                    kill_tree(process)
+                return None
+            self.sleep(1)
 
     def run(self):
         failures = 0
         while True:
+            if quit_requested(self.root):
+                return 0
             state = read_install(self.root)
             version = state["current"]
             if version is None:
@@ -695,7 +790,9 @@ class Stub:
                 if rollback(self.root, version):
                     continue
                 return 1
-            code = process.wait()
+            code = self.wait_or_quit(process)
+            if code is None:
+                return 0  # quit requested: the tray (and so the runtime) is stopped
             if code == SWITCH_EXIT:
                 failures = 0
                 continue
@@ -704,7 +801,10 @@ class Stub:
             failures = 0 if self.clock() - started > 600 else failures + 1
             if failures > 8:
                 return code
-            self.sleep(min(300, 2 ** failures))
+            for _ in range(min(300, 2 ** failures)):
+                if quit_requested(self.root):
+                    return 0
+                self.sleep(1)
 
 
 def single_instance(root):
@@ -726,6 +826,32 @@ def stub_main(root):
     if lock is None:
         return 0  # already running
     try:
+        clear_quit(root)  # a request left by a previous session
         return Stub(root).run()
     finally:
+        clear_quit(root)
         os.close(lock)
+
+
+def stub_quit(root, timeout=GRACEFUL_STOP, sleep=time.sleep, clock=time.monotonic):
+    """``RainCLI.exe --quit`` (15.9): create ``<root>\\app-lock\\quit``, which the running
+    stub answers by stopping the tray (runtime first) and exiting. Waits up to
+    ``timeout`` seconds for the stub's lock: 0 once it is free (or nothing was
+    running), 1 when the app is still running. It never kills anything."""
+    root = Path(root)
+    (root / "app-lock").mkdir(parents=True, exist_ok=True)
+    lock = single_instance(root)
+    if lock is not None:
+        os.close(lock)
+        return 0  # not running
+    (root / "app-lock" / QUIT).write_bytes(b"")
+    deadline = clock() + timeout
+    while True:
+        lock = single_instance(root)
+        if lock is not None:
+            os.close(lock)
+            clear_quit(root)
+            return 0
+        if clock() >= deadline:
+            return 1
+        sleep(1)

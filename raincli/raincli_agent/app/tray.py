@@ -81,6 +81,8 @@ class Tray:
         self.ui.after(200, self.pump)
 
     def supervise(self):
+        if self.root_dir is not None and winapp.quit_requested(self.root_dir):
+            return self.quit(0)  # RainCLI.exe --quit (the uninstaller)
         if not self.migrating:
             code = self.host.step() if self.signed_in() else None
             if code is not None:
@@ -121,6 +123,7 @@ class Tray:
             item("Status", lambda: self.post(self.show_status), default=True),
             item("Open log", lambda: self.post(self.open_log)),
             item(lambda _: "Resume" if self.host.paused else "Pause", lambda: self.post(self.toggle_pause)),
+            item("Sign in again", lambda: self.post(self.sign_in, True)),
             item("Sign out", lambda: self.post(self.sign_out)),
             item("Quit", lambda: self.post(self.quit, 0)))
 
@@ -207,15 +210,17 @@ class Tray:
 
     # -- first run: migration, then sign-in -----------------------------------------------------
 
-    def first_run(self):
+    def first_run(self, connector_configs=()):
+        """Migration only when something is left to do and no new version is on
+        probation; with a credential the runtime starts first (review 1a F5). The
+        sign-in dialog appears only when there is no credential."""
         from ..migrate import Migration
-        self.migrating = True
         stop = threading.Event()
 
         def start(runtime_config):
             self.runtime_config = runtime_config
             self.host.config = str(runtime_config)
-            self.host.start()
+            self.host.resume()
             for _ in range(60):
                 if stop.wait(1):
                     return False
@@ -223,11 +228,22 @@ class Tray:
                     return True
             return False
 
+        def pause():
+            self.host.pause()
+
+        migration = Migration(app_root=self.root_dir, connector_configs=connector_configs,
+                              own_runtime=self.runtime_config, stop_own=pause, restart_own=self.host.resume)
+        on_probation = self.root_dir is not None and winapp.read_install(self.root_dir)["probation"]
+        if self.signed_in():
+            self.host.start()
+        if on_probation or not migration.pending():
+            if not self.signed_in():
+                self.sign_in()
+            return
+        self.migrating = True
+
         def notify(message):
             self.post(self.notice, message, stop)
-
-        def migrate():
-            return Migration(app_root=self.root_dir).run(start, notify=notify, cancelled=stop.is_set)
 
         def done(result, error):
             self.migrating = False
@@ -235,11 +251,24 @@ class Tray:
             self.host.config = str(self.runtime_config)
             if error is not None:
                 self.notice(f"Moving this machine to the app failed: {error}", None)
+            elif result["status"] == "connector_config_required":
+                self.ask_connector_config(result["message"])
             elif result["status"] in ("busy", "waiting"):
                 self.ui.after(10000, self.first_run)  # an old window still runs: try again
             elif not self.signed_in():
                 self.sign_in()
-        self.background(migrate, done=done)
+            elif not self.host.paused and not self.host.running():
+                self.host.resume()
+        self.background(lambda: migration.run(start, notify=notify, cancelled=stop.is_set), done=done)
+
+    def ask_connector_config(self, message):
+        """Review 1a F11: the handle has served as an inbox, so ask where its connector config is."""
+        from tkinter import filedialog, messagebox
+        if not messagebox.askokcancel(TITLE, message.split(" Run:")[0] + "\n\nChoose the connector config file?"):
+            return
+        path = filedialog.askopenfilename(title="Connector config", filetypes=[("JSON", "*.json")])
+        if path:
+            self.first_run(connector_configs=(path,))
 
     def notice(self, message, cancel_event):
         from tkinter import messagebox
@@ -248,9 +277,12 @@ class Tray:
         elif not messagebox.askokcancel(TITLE, message + "\n\nOK keeps waiting; Cancel stops."):
             cancel_event.set()
 
-    def sign_in(self):
+    def sign_in(self, again=False):
+        """``again``: replace this machine's own machine-mode credential (for one that
+        cannot be read here, review 1a F9); a connector machine's is never replaced."""
         if self.dialog is None:
             self.dialog = SignInDialog(self)
+        self.dialog.force = bool(again)
         self.dialog.show()
 
     # -- run -----------------------------------------------------------------------------------------
@@ -275,7 +307,7 @@ class SignInDialog:
     def __init__(self, tray):
         from .. import login
         tk = tray.tk
-        self.tray, self.login, self.team, self.replace = tray, login, None, False
+        self.tray, self.login, self.team, self.replace, self.force = tray, login, None, False, False
         self.top = tk.Toplevel(tray.ui)
         self.top.title("Sign in to RainCLI")
         self.top.protocol("WM_DELETE_WINDOW", self.top.withdraw)
@@ -313,8 +345,12 @@ class SignInDialog:
         root = self.tray.root_dir
         config_path = winapp.read_settings(root).get("agent_config") if root else None
 
+        force = self.force
+
         def work():
-            plan = self.login.prepare(config_path or default_config_path(), force=False)
+            if force:
+                self.tray.host.pause()  # the runtime would otherwise publish with a credential being replaced
+            plan = self.login.prepare(config_path or default_config_path(), force=force)
             return self.login.login(email, password, plan=plan, machine_name=name, team=team or None,
                                     replace=replace)
         self.tray.background(work, done=self.done)
@@ -324,7 +360,10 @@ class SignInDialog:
         login = self.login
         self.button.config(state="normal")
         self.replace = False
+        if error is not None and self.force and self.tray.signed_in():
+            self.tray.host.resume()  # nothing was replaced: the current credential keeps running
         if error is None:
+            self.force = False
             self.top.withdraw()
             self.tray.agent_config, self.tray.runtime_config = winapp.paths(self.tray.root_dir)
             self.tray.host.config = str(self.tray.runtime_config)
@@ -354,10 +393,29 @@ class SignInDialog:
             self.message.set(f"Sign-in failed: {error}")
 
 
+def self_check():
+    """``RainCLI-app.exe --self-check`` (15.9): import the tray and its GUI modules, with
+    no desktop, so a build proves the frozen app can start. 0 on success."""
+    import importlib
+    modules = ("pystray", "PIL.Image", "PIL.ImageDraw", "tkinter", "tkinter.filedialog", "tkinter.messagebox",
+               "raincli_agent.app.status", "raincli_agent.login", "raincli_agent.migrate",
+               "raincli_agent.runtime.service", "raincli_agent.runtime.winapp")
+    for name in modules:
+        try:
+            importlib.import_module(name)
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            print(f"RainCLI-app self-check: cannot import {name}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+    print(f"RainCLI-app self-check: ok ({__version__})")
+    return 0
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--self-check"]:
+        return self_check()
     if argv != ["--background"]:
-        print("usage: RainCLI-app.exe --background", file=sys.stderr)
+        print("usage: RainCLI-app.exe --background | --self-check", file=sys.stderr)
         return 2
     return Tray(winapp.app_root()).run()
 

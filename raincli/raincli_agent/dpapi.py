@@ -14,8 +14,12 @@ from .errors import ConfigError
 ENTROPY = b"raincli-agent-v1"
 CRYPTPROTECT_UI_FORBIDDEN = 0x1
 
-FOREIGN = ("the stored credential was protected for another Windows user or computer "
-           "and cannot be read here; sign in again with: raincli login --force")
+FOREIGN = ("the stored credential was protected for another Windows user or computer and cannot be read "
+           "here. A signed-in machine (machine mode): sign in again, with the app's Sign in again or "
+           "raincli login --force (if the server refuses to replace the name, revoke the machine on the "
+           "website's Machines page and use a new name). A machine that delivers through a connector: revoke "
+           "it on the website's Machines page, add a new machine there and import its credential with "
+           "raincli config init --force")
 
 
 class DpapiError(ConfigError):
@@ -106,7 +110,7 @@ def unprotect_token(text):
     try:
         blob = base64.b64decode(text.encode("ascii"), validate=True)
     except (binascii.Error, ValueError, UnicodeEncodeError):
-        raise DpapiError("token_dpapi is not valid base64; " + FOREIGN.split("; ")[1]) from None
+        raise DpapiError("token_dpapi is not valid base64. " + FOREIGN.split(". ", 1)[1]) from None
     data = backend().unprotect(blob)
     try:
         return data.decode("ascii")
