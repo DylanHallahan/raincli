@@ -241,7 +241,7 @@ def runtime(home):
 def test_trust_defaults_to_team_and_edits_the_runtime_config(account, home, capsys):
     sign_in(account, home)
     assert trust.describe(runtime(home)) == {"trust_mode": "team", "trusted_senders": [], "blocked_senders": [],
-                                            "owner_email": "@" + EMAIL}
+                                            "owner_email": EMAIL}
     trust.set_mode(runtime(home), "list")
     trust.add(runtime(home), "bob-desktop")
     trust.add(runtime(home), "Carol@Example.test")

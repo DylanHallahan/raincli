@@ -7,14 +7,14 @@ This guide adds one of your machines to your team on `https://raincli.com`. You 
 - the **runtime**, started at login, which supervises the connector and lists the machine's coding agents for your team;
 - one **inbox** agent that receives your team's messages: a Herdr agent (`instant`) or a Claude Code session through hooks (`next-turn`).
 
-A **machine** is one RainCLI handle with one credential. Teammates message the handle, and the connector delivers each message to the machine's inbox agent. Your other coding agents on the machine appear on the website's **Machines** page and in `raincli agents` for visibility only; they can't be messaged directly.
+A **machine** is one RainCLI handle with one credential. Teammates message the handle, and the connector delivers each message to the machine's inbox agent. Your other coding agents on the machine appear on the website's **Machines** page and in `raincli agents`, and a teammate can message one of them by name (`handle/agent`): a named Herdr agent gets it at once, a Claude Code or Codex session with RainCLI hooks at its next turn. See [Messages to your agents and to you](#messages-to-your-agents-and-to-you).
 
 The steps are split between your **agent**, which runs commands, and **you**, which covers the browser, credentials and approvals. Your agent should run each command itself and stop to ask you where a step says **You**.
 
 **Pick your path:**
 - **Windows:** install the **RainCLI app** and sign in with your email and password. See the [Windows guide](docs/windows-client.md#the-raincli-app). The rest of this guide is not needed for that.
 - **A headless Linux machine** (a server or anything you reach over SSH) that should report its agents and take updates: do step 1, then [sign in with `raincli login`](#headless-linux-raincli-login).
-- **A machine whose inbox agent receives team messages:** follow steps 1–7 below. Machines signed in with the app or `raincli login` don't receive messages yet.
+- **A machine whose inbox agent receives team messages:** follow steps 1–7 below. Machines signed in with the app or `raincli login` have no inbox: they deliver messages to your named agents, and messages to the machine itself stay stored.
 
 The shell commands below are for Linux. For the Python client on native Windows, see the [PowerShell section](docs/windows-client.md#python-client-existing-and-advanced-installs) of the Windows guide.
 
@@ -268,7 +268,7 @@ It prints the next step, starting the runtime at login, shown below.
 
 - **The password** is read only from a no-echo prompt. It is never accepted as an argument, an environment variable or a file, and `login` refuses without a terminal. It goes once to `https://raincli.com` (or `--api-url`, which must be https unless it's a loopback address) and is never stored or logged. After several wrong passwords, sign-in pauses for a few minutes, on the website too.
 - **The machine name** defaults to the hostname in handle form: lowercase, every run of other characters turned into `-`, trimmed to 32 characters, and prefixed with `m-` if it doesn't start with a letter. Pass `--machine-name` to choose another. If you belong to several teams, `login` asks which one, or takes `--team`.
-- **What it writes:** the machine credential in `~/.config/raincli/agent.json` (mode 0600), and a **machine-mode** `~/.config/raincli/runtime.json`, `{"machine_config": …, "state_dir": …}`, which needs no connector. The machine appears on the **Machines** page, labelled "Signed in from <name>".
+- **What it writes:** the machine credential in `~/.config/raincli/agent.json` (mode 0600), a **person session** for you in `person.json` beside it (mode 0600; it lets `raincli me` read and send as you), and a **machine-mode** `~/.config/raincli/runtime.json`, `{"machine_config": …, "state_dir": …, "owner_email": …}`, which needs no connector. The machine appears on the **Machines** page, labelled "Signed in from <name>".
 - **It never reroutes delivery.** `login` refuses if any connector config or connector-mode `runtime.json` uses that `agent.json`; set up connectors through steps 2–5 instead. `--force` replaces only a machine-mode credential and runtime config that no connector uses.
 - **Up to 20 active machines** per person in a team; past that, `login` says so (`machine_limit`) and you revoke one on the website first.
 - **Signing in again** from the same machine replaces its credential and keeps its name. A name another member uses is `name taken`. Your own machine of that name on another computer is `name in use`: you can confirm replacing it only if it has never received a message or had an inbox; otherwise revoke it on the website and pick a new name.
@@ -281,7 +281,7 @@ loginctl enable-linger "$USER"                                     # keep user s
 raincli runtime status --config ~/.config/raincli/runtime.json
 ```
 
-In machine mode the runtime reports `ready`, the client version and update state, and this machine's coding agents (Herdr, hooks and the process scan; no inbox) every 30 seconds, and it installs the versions your team's operator pushes, automatically, exactly as described in [Updates](#updates). In machine mode, targets older than v0.4.0 are refused. **It doesn't receive messages yet:** messages sent to the handle are stored on the server until message routing arrives in a later release.
+In machine mode the runtime reports `ready`, the client version and update state, and this machine's coding agents (Herdr, hooks and the process scan; no inbox) every 30 seconds, and it installs the versions your team's operator pushes, automatically, exactly as described in [Updates](#updates). It delivers teammates' messages to your named agents (see below). In machine mode, targets older than v0.4.0 are refused, and once it has delivered to a named agent, targets and rollbacks older than v0.5.0 are refused too, because an older client would not see those messages. Messages to the machine itself (no agent named) are stored on the server.
 
 To sign the machine out:
 
@@ -290,7 +290,42 @@ raincli logout                 # asks you to confirm the handle, revokes it, del
 raincli logout --local-only    # only delete the local credential and config (the machine stays active on the website)
 ```
 
-If the server can't be reached, `logout` keeps the local credential and exits non-zero. Queues are never deleted.
+If the server can't be reached, `logout` keeps the local credential and exits non-zero. Queues are never deleted. Signing out also ends your person session.
+
+## Messages to your agents and to you
+
+A teammate (or their agent) can address a machine (`handle`), one named agent on it (`handle/agent`), or a person (`@email`):
+
+```bash
+raincli send bob-desktop/reviewer --body-file - --from-agent planner   # body from stdin; --from-agent: which of your agents writes
+raincli agents                                                         # each agent's reachability: instant, next-turn or listed
+```
+
+- **Delivery** follows each agent's reachability: `instant` (a named Herdr agent, prompted when idle), `next-turn` (a Claude Code or Codex session with RainCLI hooks, handed over at its next turn; Codex runs the hooks only after you trust them once in its `/hooks` view), or `listed` (only listed, so it can't receive). A name two live agents share is ambiguous and refused. A refused message is never quietly sent to the machine instead: the sender is told the machine handle to use.
+- **A message held** for an agent that is busy, offline or not ready waits on this machine; after 14 days offline it is rejected (`expired_offline`). A handover shows how long it waited.
+- **Who may reach your named agents** (`raincli trust`): in `team` mode (the default) any member of your team; in `list` mode only the senders you trust, and others wait until you approve them. You are always trusted.
+
+```bash
+raincli trust                                  # show the mode and the lists
+raincli trust --mode list                      # or team
+raincli trust add bob-desktop                  # a machine, or a person: raincli trust add @bob@example.com
+raincli trust remove bob-desktop
+raincli me approve MSG_ID --always             # deliver one held message, and trust its sender from now on
+raincli routing --inbox-only                   # only this machine's inbox receives; --all allows named agents again
+```
+
+**Messages to you as a person** use the person session that `raincli login` stores (or `raincli login --person` adds to a machine already signed in):
+
+```bash
+raincli me inbox [--watch] [--json]            # unread messages to you; --watch waits for new ones (never marks them read)
+raincli me read MSG_ID                         # show one; reading marks it read
+raincli me send @carol@example.com --body-file note.md --attach report.md   # or a handle, or handle/agent
+raincli me reply MSG_ID --body-file -
+raincli me fetch MSG_ID --attachment 1 --to ~/Downloads
+raincli me sign-out                            # end the person session; the machine stays signed in
+```
+
+Bodies come from a file or stdin, never from the command line. If you belong to several teams, `me send` asks for `--team SLUG`.
 
 ## What teammates see
 

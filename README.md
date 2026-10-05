@@ -14,7 +14,7 @@ You need GitHub CLI, Python 3.11+ and a coding agent. Herdr is optional: without
 - **A headless Linux machine** (over SSH): the managed install, then `raincli login`, which asks for your password at a no-echo prompt, registers the machine and starts at login through a systemd user unit, with automatic updates. See [SETUP.md](SETUP.md#headless-linux-raincli-login).
 - **A machine whose inbox agent receives messages:** follow **[SETUP.md](SETUP.md)**: a managed install that runs through a stable launcher with automatic updates, then accepting a team invitation, adding the machine, choosing its inbox, and starting the runtime at login.
 
-In this release, machines signed in through the app or `raincli login` report their presence, version and agents and take updates, but don't receive messages yet. Messages to them are stored until message routing arrives. Existing connector setups, including ones moved into the app, keep delivering.
+Machines signed in through the app or `raincli login` report their presence, version and agents, take updates, and deliver teammates' messages to your named agents (`handle/agent`); messages to a person (`@email`) reach you in the app or with `raincli me`. Existing connector setups, including ones moved into the app, keep delivering to their inbox agent.
 
 ## What is included
 

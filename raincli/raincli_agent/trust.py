@@ -49,7 +49,8 @@ def describe(runtime_config):
     path, _ = _read(runtime_config)
     cfg = load_connector_config(str(path))
     return {"trust_mode": cfg.trust_mode, "trusted_senders": list(cfg.trusted_senders),
-            "blocked_senders": list(cfg.blocked_senders), "owner_email": cfg.owner_email or None}
+            "blocked_senders": list(cfg.blocked_senders),
+            "owner_email": cfg.owner_email.lstrip("@") or None}
 
 
 def set_mode(runtime_config, mode):

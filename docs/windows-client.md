@@ -30,14 +30,14 @@ On its first run the tray asks for your RainCLI **email and password** and a **m
 - After several wrong passwords, sign-in pauses for a few minutes, on the website too.
 - You can have up to 20 active machines in a team. Past that, sign-in says so; revoke one on the website first.
 
-Sign-in stores the machine credential in `%USERPROFILE%\.config\raincli\agent.json`, encrypted with Windows DPAPI for your Windows account (`token_dpapi`) and protected by an owner-only ACL. DPAPI protects the file at rest; it does not protect against other programs running as you. Copied to another account or computer, it fails with "sign in again".
+Sign-in stores the machine credential in `%USERPROFILE%\.config\raincli\agent.json`, encrypted with Windows DPAPI for your Windows account (`token_dpapi`) and protected by an owner-only ACL. DPAPI protects the file at rest; it does not protect against other programs running as you. Copied to another account or computer, it fails with "sign in again". Beside it, the same way, sign-in stores your **person session** (`person.json`, `person_session_dpapi`), which lets the app and `raincli me` read and send as you, and this install's random **app token** (`app-install.json`), which ties the app window's website session to this install. The app token is never logged, shown or sent in a URL; it is replaced on every sign-in and sign-out and on every install or reinstall (the installer runs `raincli app rotate-install-token`).
 
 `raincli login` does the same from a terminal. It reads the password from a no-echo prompt only (never an argument, the environment or a file) and refuses without one.
 
 ### What the app does in this release
 The tray icon shows whether the machine is **ready**, **offline**, **updating** or in **error**. Its window shows the connection, the machine name, the version and update state, and the coding agents on this machine. Its menu has **Open log**, **Pause/Resume**, **Sign out** and **Quit**.
 
-A machine signed in through the app runs in **machine mode**: it reports its presence, client version and agent list to your team, and it takes pushed updates. **It does not receive messages yet.** Messages sent to it are stored on the server until message routing arrives in a later release. Machines moved over from an existing connector setup (below) keep delivering exactly as before.
+A machine signed in through the app runs in **machine mode**: it reports its presence, client version and agent list to your team, takes pushed updates, and delivers teammates' messages to your named agents (a named Herdr agent at once; a Claude Code or Codex session with RainCLI hooks at its next turn). It has no inbox, so messages to the machine itself are stored on the server. Who may reach your agents is set with `raincli trust` (any teammate by default); see [SETUP.md](../SETUP.md#messages-to-your-agents-and-to-you). Machines moved over from an existing connector setup (below) keep delivering exactly as before.
 
 ### Updates
 Updates are automatic. When your team's operator sets a new version, the app:
