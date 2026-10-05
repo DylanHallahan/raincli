@@ -400,6 +400,31 @@ begin
     Result := Exec(RootDir + '\RainCLI.exe', '--quit', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
 end;
 
+{ Why --quit failed, for the refusal message (review 3 N2): the executables it waited on, one per
+  line of <root>\app-lock\quit-blockers.txt, at most ten; or the tray hint when it wrote none. }
+function QuitRefusal(Retry: String): String;
+var
+  Lines: TArrayOfString;
+  List: String;
+  I, Shown: Integer;
+begin
+  List := '';
+  Shown := 0;
+  if LoadStringsFromFile(RootDir + '\app-lock\quit-blockers.txt', Lines) then
+    for I := 0 to GetArrayLength(Lines) - 1 do
+      if (Trim(Lines[I]) <> '') and (Shown < 10) then
+      begin
+        List := List + #13#10 + '  ' + Trim(Lines[I]);
+        Shown := Shown + 1;
+      end;
+  if List = '' then
+    Result := 'RainCLI is still running and did not stop. Quit it from its tray icon, then ' + Retry + '.'
+  else
+    Result := 'RainCLI could not stop because these programs are still running from its folder:' + List +
+              '' + #13#10 + #13#10 + 'Close them (for example a raincli command still running in a terminal ' +
+              'window), then ' + Retry + '.';
+end;
+
 { -- install ------------------------------------------------------------------------------ }
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -420,7 +445,7 @@ begin
     Exit;
   end;
   if not StopRunningApp then
-    Result := 'RainCLI is still running and did not stop. Quit it from its tray icon, then run Setup again.';
+    Result := QuitRefusal('run Setup again');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -442,8 +467,7 @@ begin
   Result := StopRunningApp;
   if not Result then
   begin
-    SuppressibleMsgBox('RainCLI is still running and did not stop. Quit it from its tray icon, then ' +
-                       'uninstall again.', mbError, MB_OK, IDOK);
+    SuppressibleMsgBox(QuitRefusal('uninstall again'), mbError, MB_OK, IDOK);
     Exit;
   end;
   Choice := ParamValue('SIGNOUT');
