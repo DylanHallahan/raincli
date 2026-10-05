@@ -38,9 +38,13 @@ Sign-in stores the machine credential in `%USERPROFILE%\.config\raincli\agent.js
 ### What the app does in this release
 The RainCLI window shows your **Inbox** and conversations and the **Agents** in your teams, signed in as you, plus two pages of its own: **This computer** (the connection, the machine name, the version and update state, the routing policy and the coding agents on this machine, with Pause, Open log and Sign out) and **Settings** (who may message this computer's agents, trust, and updates). If RainCLI can't be reached, the window says so and offers **Retry**. Links to other sites open in your default browser.
 
-Closing the window keeps RainCLI running in the tray. Opening **RainCLI** from the Start menu again brings the window back. The tray icon shows whether the machine is **ready**, **offline**, **updating** or in **error**, and its menu has **Open RainCLI**, **Pause/Resume**, **Open log**, **Sign in again** and **Quit**. A new message raises a Windows notification that names only the sender ("New message from …" or "Escalation from …"), never the text; clicking it opens the conversation.
+The window opens your inbox through a single-use sign-in link that only this app can use: the link is bound to a random token this installation keeps beside its credential, and the window sends that token to RainCLI with every request. A copied link or cookie does nothing in another browser, and the window always shows **Signed in as <name> (<email>)**. Signing in again or signing out replaces the token.
+
+Closing the window keeps RainCLI running in the tray. Opening **RainCLI** from the Start menu starts the app if it isn't running and brings the window back (`RainCLI.exe` with no arguments, or `RainCLI.exe --open`); at logon it starts with `--background`, in the tray only. On a computer updated from v0.4 without running the installer again, the Start menu entry still starts an older launcher that can't open the window, so the app changes that entry to start RainCLI in the tray (noted in `app-lock\app.log`); open the window from the tray icon. Running the v0.5 installer again restores the entry. The tray icon shows whether the machine is **ready**, **offline**, **updating** or in **error**, and its menu has **Open RainCLI**, **Pause/Resume**, **Open log**, **Sign in again** and **Quit**. A new message raises a Windows notification that names only the sender ("New message from …" or "Escalation from …"), never the text; clicking it opens the conversation.
 
 Signing out (This computer) revokes the machine, deletes its credential and clears the window's private browser profile.
+
+The window uses the **Microsoft Edge WebView2 Runtime** (part of Windows 11, and on most Windows 10 computers). Without it, RainCLI never falls back to the old Internet Explorer engine: the tray and message delivery keep working, and **Open RainCLI** opens Microsoft's download page instead.
 
 A machine signed in through the app runs in **machine mode**: it reports its presence, client version and agent list to your team, and it takes pushed updates. **It does not receive messages yet.** Messages sent to it are stored on the server until message routing arrives in a later release. Machines moved over from an existing connector setup (below) keep delivering exactly as before.
 
@@ -87,7 +91,7 @@ A reinstall over a running app first stops it the same way (`RainCLI.exe --quit`
   RainCLI.exe, _internal\   the stub: starts the current version and owns rollback; replaced only by a full install
   bin\raincli.exe, bin\_internal\   the CLI on PATH; runs the current version's raincli.exe
   versions\<X.Y.Z>\          each version: RainCLI-app.exe (window and tray) and raincli.exe (CLI)
-  install.json               {"current", "previous", "probation"}
+  install.json               {"current", "previous", "probation"}, plus "stub" and "install_stamp" from a full install
   app.json                   the agent and runtime config the app runs
   installer-record.log       startup entries found before the first change
 ```
