@@ -947,3 +947,7 @@ raincli routing [--all|--inbox-only]
 - Bodies are read from a file or stdin, never from argv.
 - Attachments use the existing safe download (§12.4).
 - The CLI stays stdlib.
+- **GUI test boundary (§15.8 M11):**
+  - The CDP remote-debugging switch comes **only** from the test environment: the job sets the standard `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`.
+  - Shipped code never sets or reads `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, `--remote-debugging-port`, `--remote-debugging-pipe` or `--remote-allow-origins`. It passes no debugging option to pywebview or WebView2 (`debug=False`).
+  - The bundle check refuses a build whose frozen code or data contains any of those strings, and a test asserts the same over the source.
