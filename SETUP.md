@@ -139,7 +139,8 @@ The connector never uses the focused pane. If a target is missing or its pins do
 
 Optional Herdr keys:
 - `"herdr_session": "<name>"` sends every Herdr call to that named session (`herdr --session <name> …`). Use it when the inbox runs in a session other than Herdr's default, or when the runtime starts at logon without your shell's `HERDR_SESSION`.
-- `"herdr_bin"`: the Herdr executable. An absolute path wins. On Windows the default prefers `%LOCALAPPDATA%\Programs\Herdr\bin\herdr.exe`, the stable alias Herdr's installer keeps current across `herdr update`; otherwise `PATH` is used. It is resolved again each time the connector starts.
+- `"herdr_bin"`: the Herdr executable. An absolute path wins. On Windows the default prefers `%LOCALAPPDATA%\Programs\Herdr\bin\herdr.exe`, the stable alias Herdr's installer keeps current across `herdr update`; otherwise the absolute `PATH` entries are searched (never the current directory). On Windows only a `.exe` is run: a `herdr.cmd` or `herdr.bat` wrapper is refused, because `cmd.exe` would parse the message. If Herdr isn't found, messages wait as `offline`. It is resolved again each time the connector starts.
+- **Herdr 0.9.3 or later** is required.
 - **On Windows, pin the pane with `expect_pane_id`.** Herdr's live working directory doesn't follow `cd` on native Windows, so an `expect_cwd` pin can hold messages as `target_mismatch`.
 - A message whose prompt would exceed the command-line bound (about 30,000 characters after quoting) is held as `too_large_for_command_line` and never truncated. Ask the sender for a shorter message or an attachment.
 

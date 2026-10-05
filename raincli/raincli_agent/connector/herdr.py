@@ -31,21 +31,63 @@ CMDLINE_CAP = 30_000
 WINDOWS_ALIAS = ("Programs", "Herdr", "bin", "herdr.exe")
 
 
-def resolve_herdr_bin(configured="herdr", env=None, which=shutil.which, windows=None):
-    """The Herdr executable to run. An explicit absolute path wins. On Windows the
-    default name prefers the stable alias %LOCALAPPDATA%\\Programs\\Herdr\\bin\\herdr.exe
-    when it exists; otherwise PATH. Called at each connector start."""
+MIN_VERSION = (0, 9, 3)  # agent_not_ready is a pre-send refusal from this version (src/app/api/agents.rs)
+SCRIPT_SUFFIXES = (".bat", ".cmd")
+
+
+def windows_script(path):
+    """A batch file runs through cmd.exe, whose parsing argv quoting cannot protect
+    (a teammate's message would reach cmd.exe): never accepted as Herdr."""
+    return str(path).lower().endswith(SCRIPT_SUFFIXES)
+
+
+def resolve_herdr_bin(configured="herdr", env=None, windows=None):
+    """The absolute path of the Herdr executable to run (Phase 2, review H1/H2).
+
+    - An explicit absolute path wins; on Windows it must be a ``.exe``.
+    - On Windows the default name prefers the stable alias
+      %LOCALAPPDATA%\\Programs\\Herdr\\bin\\herdr.exe when it exists.
+    - Otherwise the absolute PATH entries are searched, in order, for exactly
+      ``herdr.exe`` (Windows; never through PATHEXT) or an executable ``herdr``.
+      Empty, ``.`` and relative entries are skipped: the current directory is never searched.
+
+    Raises ``HerdrError`` when nothing is found (the message is then held offline);
+    there is no bare-name fallback."""
     env = os.environ if env is None else env
     windows = os.name == "nt" if windows is None else windows
     configured = configured or "herdr"
     expanded = os.path.expanduser(configured)
+    if windows and windows_script(expanded):
+        raise HerdrError(f"herdr_bin {configured!r} is a batch file; on Windows only a .exe is run")
     if os.path.isabs(expanded):
+        if windows and not expanded.lower().endswith(".exe"):
+            raise HerdrError(f"herdr_bin {configured!r} is not a .exe; on Windows only a .exe is run")
         return expanded
-    if windows and configured.lower() in ("herdr", "herdr.exe") and env.get("LOCALAPPDATA"):
-        alias = Path(env["LOCALAPPDATA"]).joinpath(*WINDOWS_ALIAS)
-        if alias.is_file():
-            return str(alias)
-    return which(configured, path=env.get("PATH")) or configured
+    if os.sep in configured or (os.altsep and os.altsep in configured) or "/" in configured:
+        raise HerdrError(f"herdr_bin {configured!r} must be an absolute path or a command name")
+    name = configured
+    if windows:
+        stem = name[:-4] if name.lower().endswith(".exe") else name
+        if "." in stem and not name.lower().endswith(".exe"):
+            raise HerdrError(f"herdr_bin {configured!r}: on Windows only a .exe is run")
+        name = stem + ".exe"
+        if stem.lower() == "herdr" and env.get("LOCALAPPDATA") and os.path.isabs(env["LOCALAPPDATA"]):
+            alias = Path(env["LOCALAPPDATA"]).joinpath(*WINDOWS_ALIAS)
+            if alias.is_file():
+                return str(alias)
+    for entry in (env.get("PATH") or "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry or entry == "." or not os.path.isabs(entry):
+            continue
+        candidate = os.path.join(entry, name)
+        if os.path.isfile(candidate) and (windows or os.access(candidate, os.X_OK)):
+            return candidate
+    raise HerdrError(f"herdr executable {name!r} not found on PATH (absolute entries only)")
+
+
+def parse_version(text):
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    return tuple(int(part) for part in match.groups()) if match else None
 
 
 def command_line_length(argv):
@@ -73,8 +115,9 @@ class HerdrTimeout(HerdrError):
 class HerdrRejected(HerdrError):
     """Herdr refused a prompt before sending any input (definitely not delivered)."""
 
-    def __init__(self, reason, message=""):
+    def __init__(self, reason, message="", code=""):
         super().__init__(message or reason)
+        self.code = code  # Herdr's error code, when there is one
         self.reason = reason  # hold reason: "blocked", "offline" or "too_large_for_command_line"
 
 
@@ -141,33 +184,62 @@ class HerdrCli(HerdrBoundary):
     process group, so a console Ctrl-C never reaches a prompt in flight."""
 
     def __init__(self, binary="herdr", timeout=10.0, own_session=False, session=None, resolve=True):
-        self.binary = resolve_herdr_bin(binary) if resolve else binary
+        self.configured = binary or "herdr"
+        self.binary = None if resolve else binary
+        if resolve:
+            self.resolve()  # once per connector start; a miss is retried at the next call
         self.timeout = timeout
         if session is not None and not SESSION_RE.fullmatch(session):
             raise ValueError("invalid herdr session name")
         self.session = session or None
+        self._version = None
         # POSIX only: keep a terminal Ctrl-C from reaching a prompt in flight; the
         # supervised connector finishes it and then stops. Windows uses a new process group.
         self.own_session = own_session and os.name != "nt"
 
-    def argv(self, args):
-        return [self.binary, *(["--session", self.session] if self.session else []), *args]
+    def resolve(self):
+        """Resolve the executable again (each connector start). Returns the error, if any."""
+        try:
+            self.binary = resolve_herdr_bin(self.configured)
+            self._version = None
+            return None
+        except HerdrError as exc:
+            self.binary = None
+            return exc
+
+    def version(self):
+        """``herdr --version`` as a tuple, cached per connector start (None if unknown)."""
+        if self._version is None:
+            try:
+                proc = self._run(["--version"], self.timeout, plain=True)
+                self._version = parse_version(proc.stdout) or ()
+            except HerdrError:
+                return None
+        return self._version or None
+
+    def argv(self, args, plain=False):
+        session = ["--session", self.session] if self.session and not plain else []
+        return [self.binary or self.configured, *session, *args]
 
     def command_line_fits(self, name, text):
         return command_line_length(self.argv(["agent", "prompt", name, text])) <= CMDLINE_CAP
 
-    def _run(self, argv, timeout):
+    def _run(self, argv, timeout, plain=False):
+        if self.binary is None:
+            error = self.resolve()
+            if error is not None:
+                raise error
         flags = 0
         if os.name == "nt":
             flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         try:
-            return subprocess.run(self.argv(argv), capture_output=True, text=True, encoding="utf-8",
+            return subprocess.run(self.argv(argv, plain), capture_output=True, text=True, encoding="utf-8",
                                   errors="replace", timeout=timeout, shell=False, stdin=subprocess.DEVNULL,
                                   start_new_session=self.own_session, creationflags=flags)
         except subprocess.TimeoutExpired:
-            raise HerdrTimeout(f"herdr {argv[0]} {argv[1]} timed out after {timeout}s") from None
+            raise HerdrTimeout(f"herdr {' '.join(argv[:2])} timed out after {timeout}s") from None
         except (UnicodeDecodeError, ValueError) as exc:
-            raise HerdrError(f"herdr {argv[0]} {argv[1]} output could not be read: {type(exc).__name__}") from None
+            raise HerdrError(f"herdr {' '.join(argv[:2])} output could not be read: {type(exc).__name__}") from None
         except OSError as exc:
             raise HerdrError(f"cannot run herdr: {exc.strerror}") from None
 
@@ -224,9 +296,13 @@ class HerdrCli(HerdrBoundary):
         if proc.returncode == 1 and code == NOT_FOUND_CODE:
             raise HerdrRejected("offline", "herdr rejected the prompt: agent_not_found")
         if proc.returncode == 1 and code == "agent_not_ready":
-            # Herdr 0.9.3 src/app/api/agents.rs: returned before any input is sent, when
-            # the pane's foreground process is not (or no longer) the named agent.
-            raise HerdrRejected("offline", "herdr rejected the prompt: agent_not_ready")
+            version = self.version()
+            if version is not None and version >= MIN_VERSION:
+                # Herdr 0.9.3 src/app/api/agents.rs (handle_agent_prompt): returned before any
+                # input is sent, when the pane's foreground process is not the named agent.
+                raise HerdrRejected("offline", "herdr rejected the prompt: agent_not_ready", code="agent_not_ready")
+            # Older or unknown Herdr: not verified to be a pre-send refusal.
+            raise HerdrError(f"herdr agent prompt failed (agent_not_ready, herdr {version or 'unknown'}): {message}")
         if proc.returncode == 2 and not proc.stdout:
             # Clap usage error: the command was never executed.
             raise HerdrRejected("offline", "herdr rejected the prompt arguments")

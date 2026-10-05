@@ -136,9 +136,15 @@ Message from {sender}: a teammate request. Act on it within your current assignm
 
 **Herdr process rules (Phase 2, binding).**
 - **Session.** An optional connector key `herdr_session` names the Herdr session; it is passed as `--session <name>` on every Herdr call (`agent get/list/prompt`, `notification show`). The name matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, so it can never be read as an option. Without it, Herdr chooses (`HERDR_SOCKET_PATH`, `HERDR_SESSION`, then its default). A machine-mode `runtime.json` may carry `herdr_session` and `herdr_bin` for its agent directory; a connector-mode `runtime.json` may not (each connector sets its own).
-- **Executable.** `herdr_bin` (default `herdr`) is resolved at each connector start: an explicit absolute path wins; on Windows the default name prefers Herdr's stable alias `%LOCALAPPDATA%\Programs\Herdr\bin\herdr.exe` (a junction that Herdr's `install.ps1` keeps pointed at the active release) when it exists; otherwise `PATH`.
+- **Version.** Herdr **0.9.3 or later** is required. `herdr --version` is read once per connector start. `agent_not_ready` is a pre-send refusal from 0.9.3 and holds `offline`; after three in a row the connector waits 30 s, doubling to 10 minutes, before prompting again. With an older or unknown Herdr version, `agent_not_ready` is `submission_uncertain`.
+- **Executable.** `herdr_bin` (default `herdr`) is resolved at each connector start. The resolved Herdr executable is always an absolute path:
+  - an explicit absolute path wins;
+  - on Windows the default name next prefers Herdr's stable alias `%LOCALAPPDATA%\Programs\Herdr\bin\herdr.exe` (a junction that Herdr's `install.ps1` keeps pointed at the active release) when it exists;
+  - otherwise the absolute `PATH` entries are searched, in order, for exactly `herdr.exe` (Windows, never through `PATHEXT`) or an executable `herdr`.
+
+  The current directory is never searched: empty, `.` and relative `PATH` entries are skipped, and when no executable is found the message is held `offline`. On Windows the resolved executable must be a `.exe`; `.bat`/`.cmd` (run through `cmd.exe`) are refused, also when named explicitly. A `herdr_bin` ending in `.bat` or `.cmd` is a config error on every platform.
 - **Output and console.** Herdr output is decoded as UTF-8, with undecodable bytes replaced. On Windows every call runs with `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`.
-- **Command-line bound.** The prompt travels in argv. If the whole command line, as `subprocess.list2cmdline` quotes it and counted in UTF-16 units, would exceed **30,000**, the message is held with reason `too_large_for_command_line` before `submitting`. It is never truncated. The same bound applies on every platform.
+- **Command-line bound.** The prompt (and an escalation, §10) travels in argv. If the whole command line, as `subprocess.list2cmdline` quotes it and counted in UTF-16 units, would exceed **30,000**, the message is held with reason `too_large_for_command_line` before `submitting`. It is never truncated. The same bound applies on every platform.
 - **Pins on Windows.** Herdr's live cwd doesn't follow `cd` on native Windows, so `expect_pane_id` is the recommended pin there; `expect_cwd` is unchanged.
 
 ## 6. Web (browser) rules
@@ -785,3 +791,255 @@ Client and server share test vectors.
 - **`raincli migrate`** runs only on Windows app installs. Elsewhere it reports that there is nothing to migrate.
 - **Machine cap.** `/app/login` creates at most 20 active machines per user per team. Past that it returns `409 machine_limit`, and the user revokes one on the website. A creation after a correct password still counts as a success for the limiter.
 - **Delivery history.** `GET /api/v1/me` includes `"delivery_history": bool` for a machine credential. It is true when the machine has ever published an inbox role or been a message recipient, the same rule as the H2 `replace` check. Migration uses it before choosing machine mode for an existing handle. When the server can't be reached or doesn't send the field, migration treats the answer as unknown and logs it.
+
+## 16. Messaging as a person and send-to-any-agent routing (v1.8, binding)
+
+Phase 2, client v0.5.0. This section amends §1, §5, §6, §10, §13, §14 and §15 where they conflict. In particular it **replaces** §14's "messages go only to the handle; the directory is for visibility only".
+
+### 16.1 Endpoints
+An endpoint is one of three kinds.
+
+| Kind | CLI form | API form | Delivered to |
+| --- | --- | --- | --- |
+| machine | `alice-laptop` | `"alice-laptop"` or `{"machine": "alice-laptop"}` | The machine's `role: inbox` agent, exactly as before |
+| agent | `alice-laptop/reviewer` | `{"machine": "alice-laptop", "agent": "reviewer"}` | The agent of that **name** on that machine |
+| person | `@alice@example.com` | `{"person": "alice@example.com"}` | The person's inbox (website, app, `raincli me`) |
+
+- **Agent names** follow the existing directory name rules (1–64 characters, §14.1) and are compared exactly. A name is the Herdr agent name or the hook session name (§14.3). Directory keys are **never** addresses.
+- **People** are resolved by email (case-insensitive) among members of the sender's team. Every unknown, foreign or inactive case gets the same `400 invalid`. UIs show display names and send emails.
+- **Senders:**
+  - A machine credential sends as its machine. It may add `"from_agent": "<name>"`, a hint naming which of its agents wrote the message, so a reply goes back to that agent. The server checks only the name grammar.
+  - A person session sends as the person (§16.3).
+
+### 16.2 Reachability and routing (server)
+- **Presence (amends §14.1):** every agent entry may carry `reachability`:
+  - `instant`: a named Herdr agent;
+  - `next-turn`: a named hook session;
+  - `listed`: anything else.
+  
+  The runtime reports `listed` plus `"ambiguous": true` when the same name occurs twice among its deliverable agents. At most one agent carries `role: "inbox"`, as before.
+- **Migration `0006`:**
+  - relaxes the reachability checks on `machine_agents` and adds `ambiguous`;
+  - adds `known_agents (agent_id, name, type, reachability, last_seen_at)`, upserted on every presence report for non-ambiguous `instant`/`next-turn` entries and pruned after 30 days;
+  - on `messages`: `recipient_agent_name`, `recipient_user_id`, `sender_user_id`, `sender_agent_name` and `kind` (`message|escalation`), all nullable except `kind`;
+  - conversation endpoints (§16.6).
+- **Sending to an agent endpoint**, checked in this order:
+  1. The machine's `routing` is `inbox-only` (§16.5): `400 routing_inbox_only`.
+  2. A live, non-ambiguous `instant`/`next-turn` entry with that name: **accepted**.
+  3. A live entry that is `listed` or ambiguous: `400 not_deliverable`, with the reason (`listed_only` or `ambiguous`).
+  4. No live entry, but a `known_agents` row (seen within 30 days): **accepted**. The sender sees `held` with the reason `offline` until the recipient reports otherwise.
+  5. Otherwise: `400 unknown_agent`.
+  
+  Machine endpoints behave exactly as before. Person endpoints: §16.4.
+- **Capability gate (old clients):**
+  - `GET /api/v1/inbox` takes `routing=1`, which v0.5.0+ clients always send.
+  - Without it, messages with a `recipient_agent_name` are **not returned**. They stay `stored`, and senders see the derived hold `client_update_needed`.
+  - Messages to the machine endpoint are returned as before.
+- **Holds visible to senders:** the server keeps hold reasons as the `detail` of `held` events (§2). Reasons in this phase:
+  - from §5/§14.4: `offline`, `blocked`, `target_ambiguous`, `too_large_for_hook`, `too_large_for_command_line`, `approval_required`;
+  - new: `client_update_needed`.
+
+### 16.3 Person session
+- **Issuing:**
+  - `POST /api/v1/app/login` (§15.1, §15.8, unchanged throttling) also returns `"person_session": "rps_…"`.
+  - A request with a valid `previous_token` and `"person_only": true` returns **only** a person session for that machine's owner. It does not rotate the credential, does not create or rename a machine, and counts as a limiter success.
+  - The email and password must be the owner's.
+- **Storage:**
+  - The server stores the session hashed, with `user_id`, `machine_agent_id` (the issuing machine), `created_at`, `last_used_at`, scopes `person:read person:send`, and `revoked_at`.
+  - The client stores `person.json` (`{"person_session"}`) beside `agent.json`: `person_session_dpapi` on Windows (§15.3 rules) and mode 0600 elsewhere. It is never in argv, the environment or logs.
+- **Lifetime:** 30 days since last use, 180 days absolute.
+- **Revoked by:**
+  - `POST /api/v1/app/sign-out` (§15.1), which now revokes the machine and its person sessions;
+  - revoking the machine;
+  - a password change;
+  - the website's new "Signed-in apps" list (owner only).
+  
+  `POST /api/v1/person/sign-out` revokes just that session.
+- **Authentication:** `Authorization: Bearer rps_…` is accepted **only** on `/api/v1/person/*` and `/api/v1/app/handoff`. A person session is refused on agent endpoints, and machine credentials are refused on person endpoints. The per-credential rate limit (§3) applies per session. Website sends get the same per-user limit.
+
+### 16.4 Person API (`/api/v1/person`, scopes `person:read`, `person:send`)
+| Method and path | Result |
+| --- | --- |
+| `GET /me` | `{"user": {display_name, email}, "teams": [...], "session": {created_at, expires_at}}` |
+| `GET /inbox?after=&wait=` | Long-poll (≤ 25 s) of messages addressed to the person, in `seq` order, as in §3 |
+| `POST /messages/{id}/ack` | Marks a message to the person `received` (idempotent). Viewing one in the website or app acks it |
+| `GET /conversations`, `GET /conversations/{id}` | The person's conversations, meaning those with the person as an endpoint, newest first |
+| `GET /messages/{id}` | One message the person may see (§16.6 visibility) |
+| `POST /send` | The same body and limits as `POST /api/v1/messages` (§3, §8), with `to` as any endpoint (§16.1), `in_reply_to`, `conversation_id`, `kind` (`message` only) |
+| `GET /messages/{id}/attachments/{n}` | Download, with the §8 headers |
+| `POST /sign-out` | Revokes this session |
+
+- **Recipient events:** messages to a person have no connector, so they have no `held`/`submitted` events. Their states are `stored`, then `received` on ack, then `replied`.
+- **Replies:** a reply to a message sent by a person goes to that person. A reply to a message from a machine goes to its `sender_agent_name` agent when one was given, otherwise to the machine endpoint.
+
+### 16.5 Machine routing policy
+- `raincli routing [--all | --inbox-only] [--config PATH]` sets the machine's policy on the server, with `PUT /api/v1/routing` (machine credential, scope `messages:ack`), and prints it.
+- **Defaults:**
+  - `all` for every machine, including existing ones once they run v0.5.0. A machine that has never reported a v0.5.0 client is gated by §16.2's capability gate, not by this policy.
+  - The release notes must state the change and the opt-out.
+- Under `inbox-only`, agent endpoints on that machine are refused at send time (`routing_inbox_only`). The machine endpoint still works.
+
+### 16.6 Conversations and visibility
+- A conversation has exactly **two endpoints**, each `(kind, id, agent_name?)`, with one default conversation per unordered endpoint pair. Existing conversations migrate to `(machine, machine)` pairs unchanged.
+- **Who sees a message:** a person sees messages where the person is an endpoint, plus messages to or from machines they own (the website's existing view, §6).
+- **Team membership** is re-checked on every read and send.
+
+### 16.7 Delivery on the machine (amends §5, §14.4, §15.4)
+- **One connector per machine credential** delivers messages for the machine endpoint (its configured inbox, exactly as before) **and** for any named agent on that machine:
+  - **A Herdr name:** `herdr agent get/prompt <name>` with the connector's `herdr_session` and `herdr_bin` (§5).
+    - Missing or `agent_not_ready`: `offline`.
+    - Blocked: `blocked`.
+    - Duplicate: `target_ambiguous`.
+    - Pins (`expect_pane_id`, `expect_cwd`) apply only to the configured inbox.
+  - **A hook session name:** the next-turn handover of §14.4, to the single live hook session of that name, of any type with hooks installed: Claude Code, and Codex on Windows from v0.5.0 (Codex ≥ 0.145.0). Each named session has a handover directory **keyed by name** under `sessions/by-name/<sha256(name)[:32]>/`, so a returning session claims what was held. More than one live session of that name: `target_ambiguous`.
+  - **Both sources have that name:** `target_ambiguous`. There is never a fallback.
+- **Rules that apply to every target:**
+  - §10 trust policy (`trust_mode`, `trusted_senders`; a person sender is matched by email in `trusted_senders`);
+  - §11.1 framing and anti-forgery;
+  - hold reasons;
+  - acknowledgement and event rules.
+  
+  A message to a main work session is untrusted data framed as a request, as in inbox mode.
+- **Machine mode** (§15.4): the runtime starts a connector with **no inbox mapping**. Machine endpoints to such a machine stay stored (as before), and named agents are delivered.
+
+### 16.8 Escalation to the owner (amends §10)
+- `"escalation": {"to": "owner"}` sends `connector escalate` as a `kind: escalation` message from the machine (with `from_agent`) to the machine owner's person endpoint.
+- Existing Herdr escalation configs are unchanged.
+
+### 16.9 Markdown and the website
+- **Markdown:**
+  - Message bodies are rendered on the server with `markdown-it-py` (hash-pinned) in CommonMark mode with **`html=False`**.
+  - Link schemes are allowlisted (`http`, `https`, `mailto`), every link gets `rel="noopener noreferrer nofollow"`, and remote images are not rendered (alt text only).
+  - The CSP is unchanged.
+  - The CLI shows the source text.
+- **Website:**
+  - The website **sends as the person** (`sender_user_id`); the "send as one of your agents" choice is removed.
+  - It shows each agent's reachability, and the "Signed-in apps" list.
+  - It offers an **app-mode** layout (§16.10).
+- **Design tokens:** neutral CSS custom properties in `static/tokens.css` (`--rc-*`), shared by the website and the app's local pages. The product name and logo each come from one setting.
+
+### 16.10 The Windows app window and handoff
+- **Handoff:**
+  - `POST /api/v1/app/handoff` (person session) returns a single-use code valid for **60 s**, bound to that person session.
+  - `GET /app/handoff?code=` consumes the code and sets a web session flagged **app-mode** (cookie rules as in §6; the web session expires with the person session). It redirects to `/app/inbox`.
+  - A code that is reused, expired or tied to a revoked session gets the same generic error page.
+- **App-mode layout:**
+  - left: the rail (Inbox, Agents, This computer, Settings) and the conversation list;
+  - right: the thread;
+  - bottom: the compose box;
+  - no marketing header or footer.
+  
+  `/app/local/<page>` is a sentinel. In a browser it shows "open the RainCLI app"; the app intercepts it and loads its bundled local page.
+- **The app (`RainCLI-app.exe`):** a single pywebview (WebView2) window plus the pystray icon in one process, with the runtime child as in §15.8 H4.
+  - **Local bundled pages:** sign-in, This computer, Settings, and the offline state with Retry.
+  - **`js_api`:** every call checks that the window's current URL is the bundled local origin, and the API never returns credentials.
+  - **Window behaviour:** closing the window hides it; Quit exits.
+  - **Removed:** the tkinter status window and dialogs.
+- **Notifications:**
+  - The runtime long-polls `/api/v1/person/inbox` and appends `{id, kind, at}` to a private notification queue under the app state.
+  - The app raises a Windows toast. Activating it opens the thread.
+  - On Linux, `raincli me inbox --watch`.
+
+### 16.11 CLI (headless parity)
+```
+raincli login [--person]                     # --person: add a person session to this machine (no rotation)
+raincli me inbox [--watch] [--json]          raincli me read <id>
+raincli me send <endpoint> --body-file F|-   [--attach F ...]
+raincli me reply <id> --body-file F|-        raincli me fetch <id> --attachment N [--to DIR]
+raincli me sign-out
+raincli send <endpoint> ... [--from-agent NAME]   # machine credential, any endpoint kind
+raincli routing [--all|--inbox-only]
+```
+- Bodies are read from a file or stdin, never from argv.
+- Attachments use the existing safe download (§12.4).
+- The CLI stays stdlib.
+- **GUI test boundary (§15.8 M11):**
+  - The CDP remote-debugging switch comes **only** from the test environment: the job sets the standard `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`.
+  - Shipped code never sets or reads `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, `--remote-debugging-port`, `--remote-debugging-pipe` or `--remote-allow-origins`. It passes no debugging option to pywebview or WebView2 (`debug=False`).
+  - The bundle check refuses a build whose frozen code or data contains any of those strings, and a test asserts the same over the source.
+
+### 16.12 Amendments after contract review 0 (binding; they override §16.1–16.11 where they conflict)
+
+**C1. Old clients never deliver a named-agent message.**
+- A v0.5.0+ connector stores a message that has a `recipient_agent_name` only under the local states `agent_received`, `agent_held`, `agent_submitting` and `agent_handed_over`, which v0.4 clients never deliver. Records for the machine endpoint keep the §5 states.
+- Once a runtime has polled with `routing=1`, it records `routing_capable: true` in its state directory. From then on it refuses targets and rollbacks below v0.5.0, as the §15.8 H8 floor does.
+- `set-client-version` warns when the team has routing-capable machines and the target is below v0.5.0.
+
+**C2. App-mode web sessions are limited to the person-session scopes.**
+- `GET /app/handoff?code=` creates an **app-mode web session**. It references the person session (`person_session_id`), carries only `person:read` and `person:send`, ends no later than that person session, and is revoked with it.
+- App-mode sessions may use only: inbox, conversations, compose and reply, attachments, the agent directory and picker, and `/app/local/*`.
+- Account, password, team administration, machine management and the Signed-in apps list refuse them with `403` and a link to the website.
+
+**C3. The handoff is resistant to login CSRF.**
+- `GET /app/handoff` is accepted only when the request has `Sec-Fetch-Site: none` and `Sec-Fetch-Mode: navigate`. Otherwise it shows the generic error page and consumes nothing.
+- It never replaces an existing web session of another user.
+- It sets a separate cookie, `raincli_app` (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/app/`), which only app-mode routes accept. The `raincli_session` cookie is untouched.
+- Server and proxy logs record `/app/handoff` without its query string.
+- Markdown links to `/app/handoff` and `/app/local/` are rendered as text.
+
+**C4. `js_api` and navigation.**
+- On every `loaded` event the app generates a new random nonce. Only when the loaded URL's origin **exactly** equals the bundled local origin (scheme, host and port), it passes the nonce to the page with `evaluate_js`.
+- Every `js_api` call must carry the current nonce. Calls with a stale or missing nonce are refused and logged. The API never returns credentials.
+- **Navigation:** the window may show only the configured service origin and the bundled local origin. Any other URL opens in the default browser, never in the window.
+
+**C5. Trust in machine mode** (the lead's default; main may change it before the delivery work starts).
+- **Configuration:** a machine-mode `runtime.json` may carry `trust_mode` (`list` or `team`) and `trusted_senders` (machines, and emails matched case-insensitively).
+- **Default:** `list`, with an implicit trusted set of the owner as a person and the owner's other machines. Every other sender is held `approval_required`.
+- **Changing it:** `raincli trust --mode team|list` and `raincli trust add|remove <machine|@email>`, and also the app's Settings page.
+- **Approving:** `raincli me approve <id> [--always]` or the app. It releases that one message, and `--always` adds the sender to `trusted_senders`.
+- **Connector-mode configs** keep their §10 settings, which now apply to every target.
+
+**C6. Revocation.**
+- A person session is revoked, together with every app-mode web session created from it, by:
+  - `POST /api/v1/app/sign-out`;
+  - `POST /api/v1/person/sign-out`;
+  - revoking the machine;
+  - any rotation of that machine's credential (app re-sign-in, `replace`, website or operator);
+  - a password change;
+  - deactivating the user;
+  - the Signed-in apps list.
+- Removing a member from a team doesn't revoke the session, but every request re-checks membership.
+
+**C7. Sending to its own agents.**
+- A machine may send to an agent endpoint on itself. The check becomes that the sender endpoint, `(machine, from_agent or null)`, and the recipient endpoint differ.
+- Migration `0006` replaces `ck_messages_not_self` with `ck_messages_not_self_endpoint`.
+- Sending to its own machine endpoint stays refused (`400 invalid`).
+
+**C8. Derived holds.**
+- Derived holds are computed at read time and never stored as events.
+- A message in server state `stored`, with a `recipient_agent_name`, is shown with `delivery_state: "held"` and a `hold_reason`:
+  - `client_update_needed` when the recipient machine has never polled with `routing=1`;
+  - otherwise `offline` when no live deliverable entry has that name.
+- Once the recipient acks it, only recipient-reported events apply (§2).
+
+**C9. Several teams.** `team` (slug) is required on person sends and person reads that resolve endpoints whenever the session's user belongs to more than one team. Otherwise the reply is `400 team_required`.
+
+**C10. Replies and `from_agent`.**
+- A reply to an agent goes through the §16.2 order. If that order refuses it, the reply is refused with that reason, and the client offers to send it to the machine endpoint instead. There is no silent fallback.
+- `from_agent` is shown as "via <name> (stated by the machine)". It is never matched against `trusted_senders`.
+
+**C11. Escalations.** `kind: escalation` is accepted only from a machine credential to its own owner's person endpoint. Any other use is `400 invalid`.
+
+**C12. Expiry of offline holds.**
+- Step 4 of §16.2 accepts only names seen within **14 days**.
+- A message held `offline` for an agent endpoint expires after 14 days: the connector reports it `rejected` with `expired_offline`.
+- A next-turn handover shows a held message's age in its frame.
+- Probing names through `unknown_agent` replies is a known limitation.
+
+**C13. Markdown.**
+- Rendering uses `markdown-it-py` with `html=False` and `linkify=False`.
+- `validateLink` admits only `http:`, `https:` and `mailto:`, plus same-origin `/app/conversations/` paths.
+- The rendered body is the only value a template marks safe. Attachments are never rendered.
+- The XSS corpus test includes `javascript:`, `data:` and `vbscript:`, entity-encoded and mixed-case schemes, autolinks, and image syntax.
+
+**C14. Notifications.**
+- A toast shows only "New message from <display name>" or "Escalation from <machine>", never body text.
+- The notification queue keeps entries for 7 days, or the last 500, and is private to the user (ACL as for `agent.json`).
+
+**C15. Issuing.** `/app/login` issues a person session only when the request has `"person_session": true`. v0.5.0+ clients send it.
+
+**C16. The GUI test boundary's scope.**
+- The bundle check covers `raincli_agent` and the entry scripts.
+- Third-party modules are checked instead by asserting that the app calls pywebview with `debug=False` and sets no debugging-related pywebview settings.
+- The Windows e2e asserts that, without the job's variable, the app opens no listening TCP port and no DevTools pipe.
+- A user-level `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` is outside the threat model (same user).

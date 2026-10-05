@@ -148,6 +148,8 @@ class Connector:
         self._log = log or (lambda line: print(line, file=sys.stderr, flush=True))
         self._sleep = sleep
         self._clock = clock
+        # Repeated agent_not_ready (Herdr's pane is not running the agent): back off (review H4).
+        self._not_ready_count, self._not_ready_until = 0, 0.0
         self.started = False
         self.stop_requested = lambda: False  # set by a supervisor (runtime mode)
 
@@ -359,6 +361,10 @@ class Connector:
                     continue
                 if not checked:
                     (ready_reason, ready_detail), checked = self.readiness(), True
+                    if not ready_reason and self._clock() < self._not_ready_until:
+                        ready_reason = "offline"
+                        ready_detail = (f"herdr reported agent_not_ready {self._not_ready_count} times; "
+                                        "retrying after a backoff")
                 if ready_reason:
                     self._hold(record, ready_reason, ready_detail)
                     continue
@@ -375,6 +381,7 @@ class Connector:
         if chosen is None:
             return
         outcome = self._prompt(self.config.herdr_agent, chosen[1])  # no lock held
+        self._note_not_ready(outcome)
         with self.queue.lock():
             record = self.queue.get(chosen[0])
             self._finish(record, outcome, self.config.herdr_agent, q.HELD)
@@ -608,6 +615,12 @@ class Connector:
                     continue
                 if self.stop_requested():
                     break  # never start a submission once asked to stop; it stays pending
+                fits = getattr(self.herdr, "command_line_fits", None)
+                if fits is not None and not fits(target.herdr_agent, self._escalation_text(esc)):
+                    self._hold_escalation(esc, "too_large_for_command_line",
+                                          "the framed escalation would exceed the command-line bound; never truncated")
+                    ready_reason, ready_detail, checked = None, "", False
+                    continue
                 chosen = (esc["id"], self._begin_escalation(esc))
                 ready_reason, ready_detail = "busy", "another escalation was submitted this iteration"
         if chosen is None:
@@ -618,6 +631,21 @@ class Connector:
             self._finish(esc, outcome, target.herdr_agent, q.ESC_PENDING)
             self.queue.save_escalation(esc)
             self.log(f"escalation {esc['id']} is {esc['state']}")
+
+    NOT_READY_FREE = 3  # agent_not_ready answers before backing off
+    NOT_READY_MAX = 600
+
+    def _note_not_ready(self, outcome):
+        """Count consecutive agent_not_ready refusals; from the third, wait 30 s doubling
+        to 10 min before prompting again (the pane is not running the agent)."""
+        if isinstance(outcome, HerdrRejected) and getattr(outcome, "code", "") == "agent_not_ready":
+            self._not_ready_count += 1
+            if self._not_ready_count >= self.NOT_READY_FREE:
+                delay = min(self.NOT_READY_MAX, 30 * 2 ** (self._not_ready_count - self.NOT_READY_FREE))
+                self._not_ready_until = self._clock() + delay
+                self.log(f"herdr agent_not_ready {self._not_ready_count} times; next prompt in {delay} s")
+        elif outcome is None:
+            self._not_ready_count, self._not_ready_until = 0, 0.0
 
     def _hold_escalation(self, esc, reason, detail=""):
         if esc.get("hold_reason") == reason:
@@ -630,12 +658,15 @@ class Connector:
         self.queue.save_escalation(esc)
         self.log(f"escalation {esc['id']} pending: {reason}")
 
+    def _escalation_text(self, esc):
+        return wrap_escalation(esc["id"], self.identity["handle"], esc["message_id"], esc["sender"],
+                               esc["body"], self.prompt_agent_config, self.config.path)
+
     def _begin_escalation(self, esc):
         esc["attempts"] = esc.get("attempts", 0) + 1
         q.Queue.transition(esc, q.SUBMITTING)
         self.queue.save_escalation(esc)
-        return wrap_escalation(esc["id"], self.identity["handle"], esc["message_id"], esc["sender"],
-                               esc["body"], self.prompt_agent_config, self.config.path)
+        return self._escalation_text(esc)
 
     def sync_events(self):
         """Report the latest reportable state of every acked record, once per change."""

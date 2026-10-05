@@ -194,9 +194,14 @@ def run_stage(root, server, wait_for, show, kill_tree):
     try:
         exe = fetch_herdr(work)
     except OSError as exc:
+        shutil.rmtree(work, ignore_errors=True)
         print(f"SKIP: Herdr stage, cannot download the pinned release: {exc}", flush=True)
         return False
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)  # a hash mismatch fails the smoke, leaving nothing behind
+        raise
     if exe is None:
+        shutil.rmtree(work, ignore_errors=True)
         print("SKIP: Herdr stage, no pinned Herdr for this platform and none on PATH", flush=True)
         return False
     env = isolated_env(work / "home")
