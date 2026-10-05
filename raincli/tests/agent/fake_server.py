@@ -128,6 +128,7 @@ class FakeState:
         self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id} (§16.3)
         self.person_inbox = {}  # email -> [message JSON] for the notification feed tests
         self.routing = {}  # agent id -> "all" | "inbox-only" (§16.5)
+        self.me_owner = True  # False: an older server, whose /me has no "owner" (§16.16)
 
     # -- setup -----------------------------------------------------------
 
@@ -251,11 +252,19 @@ class FakeState:
         return {"id": m["id"], "conversation_id": m["conversation_id"], "in_reply_to": m["in_reply_to"],
                 "from": sender, "to": to_handle, "from_endpoint": from_endpoint, "to_endpoint": to_endpoint,
                 "from_agent": m.get("from_agent"), "kind": m.get("kind", "message"), "hold_reason": None,
+                "from_same_owner": self.same_owner(m),
                 "body": m["body"], "created_at": m["created_at"], "seq": m["seq"],
                 "acked_at": m["acked_at"], "delivery_state": m["delivery_state"],
                 "delivery_updated_at": m["delivery_updated_at"],
                 "attachments": [{k: a[k] for k in ("id", "filename", "media_type", "size", "sha256")}
                                 for a in m["attachments"]]}
+
+    def same_owner(self, m):
+        """§16.16 (2), as the server decides it: the sender machine or person has the recipient
+        machine's owner."""
+        owner = self.owners.get(m["recipient"])
+        sender = (m.get("person") or {}).get("email") or self.owners.get(m["sender"])
+        return owner is not None and sender == owner
 
     def visible(self, caller, message_id):
         m = self.messages.get(message_id)
@@ -576,7 +585,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return 200, {"agent": {"handle": caller["handle"], "display_name": caller["display_name"],
                                        "team": {"slug": caller["team"], "name": st.teams[caller["team"]]}},
                              "credential": {"prefix": auth[7:15], "scopes": ["messages:read", "messages:send", "messages:ack"]},
-                             "delivery_history": caller["id"] in st.delivered}
+                             "delivery_history": caller["id"] in st.delivered,
+                             **({"owner": ({"email": st.owners[caller["id"]], "display_name": "Owner"}
+                                           if caller["id"] in st.owners else None)} if st.me_owner else {})}
             if method == "POST" and route == "/app/sign-out":
                 return st.sign_out(caller)
             if method == "PUT" and route == "/presence":

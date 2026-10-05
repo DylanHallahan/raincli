@@ -215,6 +215,8 @@ class Connector:
             return "sender_blocked"  # whatever the trust mode, and even if approved
         if self.config.trust_mode == "team":
             return None  # the server guarantees every sender is in our team
+        if self.config.machine and (record.get("message") or {}).get("from_same_owner") is True:
+            return None  # §16.16 (2): the owner's own machines and the owner, as the server decides
         if sender in trusted or record["approved"]:
             return None
         return "approval_required"
@@ -836,9 +838,13 @@ class Connector:
             self.log(f"escalation {esc['id']} is {esc['state']}")
 
     def _owner_email(self):
-        """The owner's email for ``{"to": "owner"}`` (§16.8): the machine-mode runtime config
-        records it at sign-in; otherwise this machine's person session says who it is."""
+        """The owner's email for ``{"to": "owner"}`` (§16.8): ``GET /me``'s ``owner`` (§16.16);
+        from an older server, the email recorded at sign-in or this machine's person session."""
         if getattr(self, "_owner", None):
+            return self._owner
+        owner = (self.api.me() or {}).get("owner")
+        if isinstance(owner, dict) and isinstance(owner.get("email"), str) and owner["email"]:
+            self._owner = owner["email"].lower()
             return self._owner
         from .. import person
         from ..config import default_config_path

@@ -281,3 +281,51 @@ def test_person_inbox_long_poll_returns_on_arrival(client, alice):
     got = client.get("/api/v1/person/inbox?wait=10", headers=auth(bob)).json()["messages"]
     timer.join()
     assert [m["body"] for m in got] == ["late"] and time.monotonic() - started < 9
+
+
+# §16.16 lead decisions ---------------------------------------------------------------------
+
+def test_me_names_the_machines_owner(client, alice):
+    me = client.get("/api/v1/me", headers=auth(alice["token"])).json()
+    assert me["owner"] == {"email": "alice@example.test", "display_name": "Alice"}
+    bob = client.get("/api/v1/me", headers=auth(alice["world"]["tokens"]["bob"])).json()
+    assert bob["owner"] == {"email": "bob@example.test", "display_name": "Bob"}
+
+
+def test_from_same_owner_is_decided_by_the_server(client, alice):
+    world = alice["world"]
+
+    def send(token, to):
+        r = client.post("/api/v1/messages", headers=auth(token), json={"id": str(uuid.uuid4()), "to": to, "body": "x"})
+        assert r.status_code == 201, r.text
+        return r.json()["message"]
+
+    # alice-laptop (signed in above) and alice-agent are both alice's machines.
+    assert send(alice["token"], "alice-agent")["from_same_owner"] is True
+    assert send(world["tokens"]["bob"], "alice-agent")["from_same_owner"] is False
+    assert send(alice["token"], "bob-agent")["from_same_owner"] is False
+    assert send(world["tokens"]["bob"], {"person": "alice@example.test"})["from_same_owner"] is False  # not a machine
+    assert psend(client, alice["person"], "alice-agent").json()["message"]["from_same_owner"] is True
+    assert psend(client, alice["person"], "bob-agent").json()["message"]["from_same_owner"] is False
+    seen = client.get("/api/v1/inbox?routing=1", headers=auth(world["tokens"]["alice"])).json()["messages"]
+    assert sorted((m["from"], m["from_same_owner"]) for m in seen) == [
+        ("@alice@example.test", True), ("alice-laptop", True), ("bob-agent", False)]
+
+
+def test_person_reply_takes_the_parents_team(client, alice, session):
+    world, person = alice["world"], alice["person"]
+    identity.add_member(session, world["teams"]["globex"], world["users"]["alice"])
+    session.commit()
+    r = client.post("/api/v1/messages", headers=auth(world["tokens"]["bob"]),
+                    json={"id": str(uuid.uuid4()), "to": {"person": "alice@example.test"}, "body": "question"})
+    parent = r.json()["message"]
+    r = psend(client, person, "bob-agent", "answer", in_reply_to=parent["id"])  # no team needed
+    assert r.status_code == 201 and r.json()["message"]["conversation_id"] == parent["conversation_id"]
+    r = psend(client, person, "bob-agent", "again", in_reply_to=parent["id"], team="globex")  # team is ignored
+    assert r.status_code == 201 and r.json()["message"]["conversation_id"] == parent["conversation_id"]
+    r = psend(client, person, "bob-agent", "new")  # a new conversation still needs it
+    assert r.status_code == 400 and r.json()["error"]["code"] == "team_required"
+    r = psend(client, person, "bob-agent", "x", in_reply_to=str(uuid.uuid4()))  # unknown or unseen: 404
+    assert r.status_code == 404
+    r = psend(client, person, "bob-agent", "x", in_reply_to="not-a-uuid")
+    assert r.status_code == 400 and err(r) == "invalid"

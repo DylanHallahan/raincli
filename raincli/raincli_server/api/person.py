@@ -79,6 +79,16 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
             raise ApiError(400, "invalid", "unknown team")
         return team
 
+    def reply_team(session: Session, auth: PersonAuth, in_reply_to: object) -> Team:
+        """The team of the parent message's conversation, when the person may see it and is still
+        a member; otherwise the same 404 a reply to an unseen message gets."""
+        parent = messaging.get_message_for_person(session, auth.user,
+                                                  messaging.parse_uuid(in_reply_to, "in_reply_to"))
+        team = next((t for t in teams_of(session, auth) if t.id == parent.team_id), None)
+        if team is None:
+            raise ApiError(404, "not_found", "in_reply_to message not found")
+        return team
+
     def m(session: Session, msg) -> dict:
         return messaging.message_json(session, msg)
 
@@ -157,7 +167,10 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
             unknown = set(data) - PERSON_SEND_FIELDS
             if unknown:
                 raise ApiError(400, "invalid", f"unknown fields: {', '.join(sorted(unknown))}")
-            team = choose_team(session, auth, data.get("team"))
+            if data.get("in_reply_to") is not None:  # §16.16 (3): the parent's team; "team" is ignored
+                team = reply_team(session, auth, data["in_reply_to"])
+            else:
+                team = choose_team(session, auth, data.get("team"))
             req = messaging.SendRequest.parse({k: v for k, v in data.items() if k != "team"}, "")
             msg, created = messaging.send_as_person(
                 session, auth.user, team.id, id=req.id, to=req.to, body=req.body,

@@ -303,7 +303,7 @@ raincli agents                                                         # each ag
 
 - **Delivery** follows each agent's reachability: `instant` (a named Herdr agent, prompted when idle), `next-turn` (a Claude Code or Codex session with RainCLI hooks, handed over at its next turn; Codex runs the hooks only after you trust them once in its `/hooks` view), or `listed` (only listed, so it can't receive). A name two live agents share is ambiguous and refused. A refused message is never quietly sent to the machine instead: the sender is told the machine handle to use.
 - **A message held** for an agent that is busy, offline or not ready waits on this machine; after 14 days offline it is rejected (`expired_offline`). A handover shows how long it waited.
-- **Who may reach your named agents** (`raincli trust`): in `team` mode (the default) any member of your team; in `list` mode only the senders you trust, and others wait until you approve them. You are always trusted.
+- **Who may reach your named agents** (`raincli trust`): in `team` mode (the default) any member of your team; in `list` mode only the senders you trust, and others wait until you approve them. You and your own other machines are always trusted (the server marks those messages).
 
 ```bash
 raincli trust                                  # show the mode and the lists

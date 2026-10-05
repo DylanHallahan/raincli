@@ -103,7 +103,7 @@ def test_team_required_names_the_teams(machines, world, session):
     refused = cli(machines, "alice", "me", "send", "bob-agent", "--body-file", "-", input="hi", check=False)
     assert refused.returncode != 0 and "--team" in refused.stderr and "acme" in refused.stderr
     cli(machines, "alice", "me", "send", "bob-agent", "--team", "acme", "--body-file", "-", input="hi")
-    # A reply needs no --team: the client finds the parent's team.
+    # A reply needs no --team: the server takes the parent conversation's team (§16.16 (3)).
     mid = str(uuid.uuid4())
     cli(machines, "bob", "send", "@alice@example.test", "--body-file", "-", "--id", mid, input="question")
     rid = str(uuid.uuid4())

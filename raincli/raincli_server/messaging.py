@@ -145,6 +145,7 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
         "to_endpoint": recipient.json(),
         "from_agent": msg.sender_agent_name,
         "kind": msg.kind,
+        "from_same_owner": same_owner(sender, recipient),
         "body": msg.body,
         "created_at": iso(msg.created_at),
         "seq": msg.seq,
@@ -154,6 +155,17 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
         "delivery_updated_at": iso(msg.delivery_updated_at),
         "attachments": attachments,
     }
+
+
+def same_owner(sender: Endpoint, recipient: Endpoint) -> bool:
+    """§16.16 (2): a message to a machine (or one of its agents) from a machine, or a person,
+    with that machine's owner. The client's default trust set trusts it."""
+    if recipient.agent is None:
+        return False
+    owner = recipient.agent.owner_user_id
+    if sender.kind == "person":
+        return sender.user is not None and sender.user.id == owner
+    return sender.agent is not None and sender.agent.owner_user_id == owner
 
 
 def messages_json(session: Session, messages: list[Message]) -> list[dict]:

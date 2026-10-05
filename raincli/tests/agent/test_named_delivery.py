@@ -256,7 +256,7 @@ def test_person_sender_and_its_frame(env, fake_api):
     conn = env.connector(trust_mode="team")
     conn.run_once()
     text = env.herdr.prompts[0][1]
-    assert "\nFrom: Carol C <carol@example.com> | team alpha\n" in text
+    assert '\nFrom: "Carol C" <carol@example.com> | team alpha\n' in text
     assert local(conn, mid)["sender"] == "@carol@example.com"
 
 
@@ -311,13 +311,30 @@ def test_cli_inbox_sees_machine_messages_and_agent_with_flag(env, fake_api, as_a
     as_agent(fake_api.bob)
     env.send(None, "to the machine")
     env.send("reviewer", "to the reviewer")
+    fake_api.state.person_message("bob", "carol@example.com", "Carol", "from a person")
     assert cli.main(["inbox", "--json"]) == 0
     bodies = [json.loads(line)["body"] for line in capsys.readouterr().out.splitlines()]
-    assert bodies == ["to the machine"]
-    assert fake_api.state.inbox_queries[-1] == ("bob", False)
+    assert bodies == ["to the machine", "from a person"]  # review 5 F3: people's messages to the machine too
+    assert fake_api.state.inbox_queries[-1] == ("bob", True)
     assert cli.main(["inbox", "--json", "--agent", "reviewer"]) == 0
     bodies = [json.loads(line)["body"] for line in capsys.readouterr().out.splitlines()]
     assert bodies == ["to the reviewer"]
+
+
+def test_cli_inbox_pages_by_the_unfiltered_page(env, fake_api, as_agent, capsys):
+    """Review 5 F2: more than --limit mixed messages; the filter never ends paging early."""
+    from raincli_agent import cli
+    as_agent(fake_api.bob)
+    for n in range(4):
+        env.send("reviewer", f"agent {n}")
+        env.send(None, f"machine {n}")
+    env.send("reviewer", "agent last")
+    assert cli.main(["inbox", "--json", "--limit", "2"]) == 0
+    bodies = [json.loads(line)["body"] for line in capsys.readouterr().out.splitlines()]
+    assert bodies == [f"machine {n}" for n in range(4)]
+    assert cli.main(["inbox", "--json", "--limit", "3", "--agent", "reviewer"]) == 0
+    bodies = [json.loads(line)["body"] for line in capsys.readouterr().out.splitlines()]
+    assert bodies == [f"agent {n}" for n in range(4)] + ["agent last"]
 
 
 # -- C1 floors ----------------------------------------------------------------------------------------
@@ -337,3 +354,36 @@ def test_routing_capable_raises_every_floor(tmp_path, monkeypatch):
     driver.managed, driver.mode = (lambda: True), (lambda: "automatic")
     driver.consider({"version": "v0.4.9", "allow_downgrade": True, "set_at": "t"})
     assert driver.data["error"] == "target_below_minimum"
+
+
+def test_machine_mode_trusts_the_owners_own_machines_and_person(env, fake_api):
+    """§16.16 (2): the server's from_same_owner is in the machine-mode default trust set, so list
+    mode needs no list of the owner's machines; a blocked sender stays blocked."""
+    env.herdr.add("reviewer", status="idle")
+    st = fake_api.state
+    carol = st.add_agent("carol")
+    for token, owner in ((fake_api.bob, "bob@example.test"), (fake_api.alice, "bob@example.test"),
+                         (carol, "carol@example.test")):
+        st.owners[st.tokens[token]] = owner
+    own_machine = env.send("reviewer", "from my other machine")
+    other = env.send("reviewer", "from carol", sender=carol)
+    own_person = st.person_message("bob", "bob@example.test", "Bob", "from me", agent="reviewer")
+    runtime = env.tmp / "runtime.json"
+    runtime.write_text(json.dumps({"machine_config": env.agent_cfg, "state_dir": "machine-state",
+                                   "trust_mode": "list"}))
+    cfg = load_connector_config(str(runtime))
+    conn = Connector(cfg, ApiClient(env.api.url, env.api.bob), env.herdr, Queue(cfg.state_dir),
+                     log=lambda line: None, sleep=lambda s: None, sessions_state=str(env.state))
+    for _ in range(3):
+        conn.run_once()
+    assert local(conn, own_machine)["state"] == q.SUBMITTED
+    assert local(conn, own_person)["state"] == q.SUBMITTED
+    assert (local(conn, other)["state"], local(conn, other)["hold_reason"]) == (q.AGENT_HELD, "approval_required")
+    runtime.write_text(json.dumps({"machine_config": env.agent_cfg, "state_dir": "machine-state",
+                                   "trust_mode": "list", "blocked_senders": ["alice"]}))
+    cfg = load_connector_config(str(runtime))
+    conn = Connector(cfg, ApiClient(env.api.url, env.api.bob), env.herdr, Queue(cfg.state_dir),
+                     log=lambda line: None, sleep=lambda s: None, sessions_state=str(env.state))
+    blocked = env.send("reviewer", "blocked even if mine")
+    conn.run_once()
+    assert local(conn, blocked)["hold_reason"] == "sender_blocked"

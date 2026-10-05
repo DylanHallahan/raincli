@@ -187,32 +187,19 @@ def cmd_me_reply(args):
 
     def action(state):
         parent = api.message(args.message_id)
-        me = api.me()
-        to = reply_endpoint(parent, "@" + me["user"]["email"])
-        teams = [args.team] if args.team else [None]
+        to = reply_endpoint(parent, "@" + api.me()["user"]["email"])
         state["sent"] = True
-        for index, team in enumerate(teams):
-            try:
-                return _send_reply(api, to, body, mid, parent, files, team)
-            except ApiError as exc:
-                if exc.code == "team_required" and team is None and not args.team:
-                    # The message JSON has no team: try the person's teams in turn. A wrong team is refused
-                    # (400/404) before anything is stored, and every attempt carries the same id.
-                    teams.extend(t["slug"] for t in me.get("teams") or [] if isinstance(t, dict))
-                    continue
-                if team is not None and index < len(teams) - 1 and exc.status in (400, 404):
-                    continue
-                raise
-        raise RainError("none of your teams holds this conversation")
+        # §16.16 (3): the server takes the team from the parent's conversation.
+        return _send_reply(api, to, body, mid, parent, files)
 
     message, created = _send_surfacing_id(args, mid, action)
     report_send(message, created, args.json)
     return EXIT_OK
 
 
-def _send_reply(api, to, body, mid, parent, files, team):
+def _send_reply(api, to, body, mid, parent, files):
     try:
-        return api.send(to, body, message_id=mid, in_reply_to=parent["id"], attachments=files, team=team)
+        return api.send(to, body, message_id=mid, in_reply_to=parent["id"], attachments=files)
     except ApiError as exc:
         if exc.code == "not_deliverable":
             raise not_deliverable(exc, to) from None
@@ -361,7 +348,6 @@ def register(sub, parser_class):
     send.set_defaults(func=cmd_me_send, body=None)
     reply = me_sub.add_parser("reply", help="reply to a message as yourself")
     reply.add_argument("message_id", metavar="MSG_ID")
-    reply.add_argument("--team", metavar="SLUG", help=argparse.SUPPRESS)
     body_file_args(reply)
     reply.set_defaults(func=cmd_me_reply, body=None)
     fetch = me_sub.add_parser("fetch", help="download one attachment of a message (never overwrites)")

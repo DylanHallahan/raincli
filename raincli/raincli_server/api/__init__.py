@@ -31,7 +31,7 @@ from raincli_server import identity, messaging, presence, security
 from raincli_server.db import session_scope
 from raincli_server.identity import AgentAuth
 from raincli_server.messaging import MessagingError
-from raincli_server.models import ROUTING_POLICIES, Agent
+from raincli_server.models import ROUTING_POLICIES, Agent, User
 from raincli_server.web import auth as web_auth
 
 log = logging.getLogger("raincli_server.api")
@@ -247,6 +247,10 @@ def build_api(parent: FastAPI) -> FastAPI:
 
     # Endpoints -------------------------------------------------------------------
 
+    def _owner_json(session, agent):
+        owner = session.get(User, agent.owner_user_id)
+        return {"email": owner.email, "display_name": owner.display_name} if owner is not None else None
+
     @api.get("/me")
     async def me(request: Request):
         def work(session, auth: AgentAuth):
@@ -259,6 +263,8 @@ def build_api(parent: FastAPI) -> FastAPI:
                 # The H2 replace rule's history (inbox role published, or a message recipient):
                 # migration asks for the connector config before choosing machine mode.
                 "delivery_history": identity.has_delivery_history(session, auth.agent),
+                # §16.16 (1): the machine's owner, for {"to": "owner"} escalations.
+                "owner": _owner_json(session, auth.agent),
             }
         return await run(request, None, work)
 

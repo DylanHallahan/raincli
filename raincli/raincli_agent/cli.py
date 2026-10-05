@@ -308,15 +308,15 @@ def cmd_conversations(args):
 
 
 def cmd_inbox(args):
-    """Machine-endpoint messages; with ``--agent NAME`` those to that named agent of
-    this machine instead (§16.14 S1)."""
+    """Machine-endpoint messages, including those people sent; with ``--agent NAME`` those to
+    that named agent of this machine instead (§16.14 S1). It polls with ``routing=1``, which the
+    server honours only for a v0.5 machine, and filters each page (review 5 F3)."""
     api = client(args)
     after, messages = args.after, []
     while True:
-        page, cursor = api.inbox(after=after, limit=args.limit, include_acked=args.all,
-                                 routing=bool(args.agent))
-        page = [m for m in page if _addressed_to(m, args.agent)]
-        messages.extend(page)
+        page, cursor = api.inbox(after=after, limit=args.limit, include_acked=args.all, routing=True)
+        messages.extend(m for m in page if _addressed_to(m, args.agent))
+        # Paging follows the unfiltered page and the cursor (review 5 F2).
         if len(page) < args.limit or int(cursor) <= after:
             break
         after = int(cursor)

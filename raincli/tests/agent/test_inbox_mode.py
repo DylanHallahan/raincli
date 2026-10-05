@@ -439,6 +439,7 @@ def test_escalation_to_owner_without_a_known_owner_is_held(fake_api, connector_e
 
 def test_escalation_to_someone_else_is_refused_by_the_server(fake_api, connector_env, inbox, tmp_path):
     owner_setup(fake_api, tmp_path)
+    fake_api.state.me_owner = False  # an older server: the client falls back to the recorded email
     fake_api.state.add_user("carol@example.test", "pw-carol-123456", teams=("alpha",))
     owner_record(tmp_path, "carol@example.test")  # not bob's owner (C11)
     path = inbox(escalation={"to": "owner"})
@@ -454,3 +455,25 @@ def test_owner_escalation_config_validation(connector_env, inbox):
     for bad in ({"to": "boss"}, {"to": "owner", "herdr_agent": "main-claude"}, {"to": "owner", "notify": True}):
         with pytest.raises(ConfigError):
             load_connector_config(inbox(escalation=bad))
+
+
+def test_escalation_to_owner_takes_the_owner_from_me(fake_api, connector_env, inbox):
+    """§16.16 (1): GET /me names the owner; no runtime.json record is needed."""
+    fake_api.state.add_user("bob@example.test", "pw-bob-123456", teams=("alpha",))
+    fake_api.state.owners[fake_api.state.tokens[fake_api.bob]] = "bob@example.test"
+    path = inbox(escalation={"to": "owner"})
+    msg, conn = _delivered(fake_api, connector_env, path)
+    ops.escalate(conn.queue, conn.config, msg["id"], "help")
+    conn.run_once()
+    [sent] = fake_api.state.person_inbox["bob@example.test"]
+    assert sent["kind"] == "escalation" and esc_records(connector_env)[0]["state"] == "submitted"
+
+
+def test_escalation_to_owner_falls_back_for_an_older_server(fake_api, connector_env, inbox, tmp_path):
+    owner_setup(fake_api, tmp_path)
+    fake_api.state.me_owner = False
+    path = inbox(escalation={"to": "owner"})
+    msg, conn = _delivered(fake_api, connector_env, path)
+    ops.escalate(conn.queue, conn.config, msg["id"], "help")
+    conn.run_once()
+    assert len(fake_api.state.person_inbox["bob@example.test"]) == 1
