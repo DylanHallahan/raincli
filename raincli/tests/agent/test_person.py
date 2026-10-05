@@ -77,7 +77,7 @@ def test_windows_stores_person_session_dpapi(account, home, monkeypatch):
         assert set(data) == {"person_session_dpapi"} and "rps_" not in json.dumps(data)
         assert person.load_session(agent(home)).reveal() in account.state.person_sessions
         install = json.loads(person.install_path(agent(home)).read_text())
-        assert set(install) == {"app_install_token_dpapi"}
+        assert set(install) == {"app_install_token_dpapi", "created_under"}
         assert person.INSTALL_TOKEN_RE.fullmatch(install_token(home))
     finally:
         dpapi.set_backend(None)
@@ -376,3 +376,35 @@ def test_runtime_starts_the_feed_only_in_machine_mode(account, home, monkeypatch
     _, _, configs = service.load_runtime(runtime(home))
     assert service.notification_feed(configs) is not None and started == [agent(home)]
     assert service.notification_feed([("c.json", None)]) is None
+
+
+def test_install_token_rotates_when_the_app_install_changes(account, home, tmp_path, monkeypatch):
+    """§16.15: rotated when install.json's (current, install_stamp) differs from what the token
+    was created under: a full install (new stamp) or any update (new current)."""
+    from raincli_agent.runtime import winapp
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "install.json").write_text(json.dumps({"current": "0.5.0", "previous": None, "probation": None,
+                                                   "install_stamp": "20261005T120000Z-ab12", "stub": 2}))
+    sign_in(account, home)
+    monkeypatch.setattr(winapp, "app_root", lambda *a, **k: root)
+    first = install_token(home)  # created under this install (rotated once from the pre-app token)
+    assert install_token(home) == first  # unchanged install: stable
+    winapp.write_install(root, "0.5.1", "0.5.0")  # a pushed update
+    data = json.loads((root / "install.json").read_text())
+    assert data["install_stamp"] == "20261005T120000Z-ab12" and data["stub"] == 2  # the installer's keys kept
+    second = install_token(home)
+    assert second != first and install_token(home) == second
+    data["install_stamp"] = "20261006T090000Z-cd34"  # a reinstall of the same version
+    (root / "install.json").write_text(json.dumps(data))
+    third = install_token(home)
+    assert third not in (first, second) and install_token(home) == third
+    stored = json.loads(person.install_path(agent(home)).read_text())
+    assert stored["created_under"] == ["0.5.1", "20261006T090000Z-cd34"]
+
+
+def test_install_token_outside_the_app_is_not_rotated_by_reading(account, home):
+    sign_in(account, home)
+    token = install_token(home)
+    assert json.loads(person.install_path(agent(home)).read_text())["created_under"] is None
+    assert install_token(home) == token

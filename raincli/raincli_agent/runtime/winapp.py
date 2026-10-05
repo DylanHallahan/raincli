@@ -116,6 +116,25 @@ def _version_or_none(value):
     return value if isinstance(value, str) and VERSION_RE.fullmatch(value) else None
 
 
+INSTALL_KEPT = ("install_stamp", "stub")  # written by a full install; an update keeps them
+
+
+def _raw_install(root):
+    try:
+        data = json.loads(retry_sharing(lambda: (Path(root) / INSTALL).read_bytes()))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def install_identity(root):
+    """``(current, install_stamp)``: what an app install token is created under (§16.15).
+    Either changes on a full install, and ``current`` on every update."""
+    data = _raw_install(root)
+    stamp = data.get("install_stamp")
+    return _version_or_none(data.get("current")), stamp if isinstance(stamp, str) and len(stamp) <= 200 else None
+
+
 def read_install(root):
     """``install.json`` as ``{"current", "previous", "probation"}`` (each a version or
     None). Invalid content reads as all None. A sharing violation is retried."""
@@ -136,8 +155,10 @@ def write_install(root, current, previous, probation=None):
         raise ConfigError("install.json needs a current version")
     target = Path(root) / INSTALL
     new = target.with_name(INSTALL + ".new")
+    data = {k: v for k, v in _raw_install(root).items() if k in INSTALL_KEPT}  # the installer's keys (§16.15)
+    data.update(current=current, previous=previous, probation=probation)
     with open(new, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump({"current": current, "previous": previous, "probation": probation}, fh, sort_keys=True)
+        json.dump(data, fh, sort_keys=True)
         fh.write("\n")
         fh.flush()
         os.fsync(fh.fileno())

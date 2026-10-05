@@ -65,17 +65,18 @@ def notify_dir(agent_config=None):
 
 # -- one private secret per file -----------------------------------------------------------
 
-def _write_secret(path, key, value):
+def _write_secret(path, key, value, extra=None):
     ensure_private_dir(str(path.parent))
     if config_mod.protects_tokens():
         from .dpapi import protect_token
         data = {key + "_dpapi": protect_token(value)}
     else:
         data = {key: value}
+    data.update(extra or {})
     atomic_write_json(str(path), data, mode=0o600)
 
 
-def _read_secret(path, key, pattern, what):
+def _read_secret(path, key, pattern, what, extra=()):
     """The stored value, or None when the file does not exist. A damaged or foreign
     file is a ``ConfigError`` that never quotes the file."""
     if not os.path.lexists(path):
@@ -85,7 +86,7 @@ def _read_secret(path, key, pattern, what):
         data = json.loads(raw)
     except (ValueError, UnicodeDecodeError):
         raise ConfigError(f"{what} {path} is damaged; sign in again") from None
-    if not isinstance(data, dict) or len(data) != 1 or not ({key, key + "_dpapi"} & set(data)):
+    if not isinstance(data, dict) or len(set(data) - set(extra)) != 1 or not ({key, key + "_dpapi"} & set(data)):
         raise ConfigError(f"{what} {path} is damaged; sign in again")
     if key + "_dpapi" in data:
         from .dpapi import unprotect_token
@@ -166,20 +167,37 @@ def owner_email(agent_config=None):
 
 # -- the app install token (§16.14 S3) ------------------------------------------------------------
 
+def _installed_under():
+    """``[current, install_stamp]`` of the app install running this client, or None outside
+    the app (§16.15: a token is rotated when either differs from what it was created under)."""
+    from .runtime import winapp
+    root = winapp.app_root()
+    return None if root is None else list(winapp.install_identity(root))
+
+
 def rotate_app_install_token(agent_config=None):
-    """Replace the install token with a fresh one. Called on sign-in, sign-out and by the
-    app installer (``raincli app rotate-install-token``). Returns nothing, so no caller can
-    log the token by accident."""
-    _write_secret(install_path(agent_config), "app_install_token", secrets.token_urlsafe(32))
+    """Replace the install token with a fresh one. Called on sign-in and sign-out, and by
+    ``app_install_token`` when the app install changed (§16.15); also available as
+    ``raincli app rotate-install-token``. Returns nothing, so no caller can log the token."""
+    _write_secret(install_path(agent_config), "app_install_token", secrets.token_urlsafe(32),
+                  {"created_under": _installed_under()})
 
 
 def app_install_token(agent_config=None):
-    """This install's token (43 URL-safe characters), created on first use."""
+    """This install's token (``secrets.token_urlsafe(32)``, 43 characters), created on first
+    use and rotated first when the app's ``(current, install_stamp)`` changed (§16.15)."""
     path = install_path(agent_config)
-    value = _read_secret(path, "app_install_token", INSTALL_TOKEN_RE, "app install file")
-    if value is None:
+
+    def read():
+        value = _read_secret(path, "app_install_token", INSTALL_TOKEN_RE, "app install file", ("created_under",))
+        if value is None:
+            return None, None
+        under = json.loads(read_private_file(str(path), "app install file")).get("created_under")
+        return value, under
+    value, under = read()
+    if value is None or under != _installed_under():
         rotate_app_install_token(agent_config)
-        value = _read_secret(path, "app_install_token", INSTALL_TOKEN_RE, "app install file")
+        value, _ = read()
     return value
 
 
