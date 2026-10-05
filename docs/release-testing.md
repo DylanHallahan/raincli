@@ -97,7 +97,7 @@ A **pip-installed v0.2.0** client (installed from its release archive) runs `rai
 - An uninstall with `/SIGNOUT=no` keeps `agent.json`, the connector config, the queue and `migration.log`.
 
 **C. A managed v0.3.2 install**
-A **managed v0.3.2** install is installed through the real updater, and its runtime runs through its launcher with logon start in the HKCU Run value.
+A **managed v0.3.2** install is installed through the real updater, in the documented layout. Its credential, connector config and runtime config are in `~/.config/raincli`, and logon start comes from `runtime startup --config ~/.config/raincli/runtime.json`. That default `runtime.json` is also the app's own default (review 2 R1). The old runtime is started by running exactly its HKCU Run value, as logon does.
 - The app installer records that Run value.
 - The app's migration sends the launcher's stop request; the launcher exits.
 - The Run value then starts the stub, and the same handle keeps delivering.

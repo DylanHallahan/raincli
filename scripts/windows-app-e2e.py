@@ -25,9 +25,11 @@ B. Migration of an old pip-installed client (0.2.0 from its release archive) run
    state_dir: the install waits while the old connector holds its queue, then, once it is closed,
    keeps the handle and credential (no new machine), writes a connector-mode runtime.json, and
    delivery continues. An uninstall without sign-out keeps the credential and connector state.
-C. Migration of a managed v0.3.2 install whose runtime runs through its launcher and starts from
-   the HKCU Run value: the installer records that value, the app sends the launcher's stop request
-   and points the Run value at the stub, and delivery continues on the same handle.
+C. Migration of a managed v0.3.2 install in the documented layout: the credential, connector and
+   runtime config in ~/.config/raincli, logon start through `runtime startup --config` on that
+   default runtime.json (the app's own default too: review 2 R1), and the old runtime started by
+   running exactly its Run value. The installer records that value, the app's stop request stops
+   the launcher, the Run value then starts the stub, and delivery continues on the same handle.
 
 Release traffic goes to the REAL hostnames (api.github.com, github.com,
 objects.githubusercontent.com, release-assets.githubusercontent.com): a hosts-file entry points
@@ -572,6 +574,87 @@ def register(server, name):
     return issued["api_url"], SECRETS.add(issued["token"])
 
 
+TRUST_PROBE = """
+import socket, ssl, sys
+context = ssl.create_default_context()
+with socket.create_connection(("127.0.0.1", 443), timeout=20) as raw:
+    with context.wrap_socket(raw, server_hostname="api.github.com") as tls:
+        print("handshake ok", tls.version())
+"""
+
+
+def trust_probe(work, ca):
+    """A default-context handshake as api.github.com in a fresh Python, as the client makes one."""
+    result = subprocess.run([sys.executable, "-c", TRUST_PROBE], capture_output=True, text=True, timeout=60)
+    if result.returncode == 0:
+        say(f"PASS: the Windows trust store trusts the test root CA ({result.stdout.strip()})")
+        return
+    say("trust probe failed:\n" + (result.stdout + result.stderr)[-2000:])
+    trust_diagnostics(work, ca)
+    raise Failure("Python's default context does not trust the test root CA")
+
+
+def trust_diagnostics(work, ca):
+    """What the runner's stores hold for the test CA, and whether the chain itself verifies."""
+    import base64 as b64
+
+    say("===== TRUST DIAGNOSTICS =====")
+    pem = (work / "ca.pem").read_text()
+    der = b64.b64decode("".join(l for l in pem.splitlines() if l and not l.startswith("-----")))
+    say(f"python {sys.version.split()[0]}, {ssl.OPENSSL_VERSION}; CA CN {ca.cn!r}; CA DER sha256 "
+        f"{hashlib.sha256(der).hexdigest()[:16]}")
+    for store in ("ROOT", "CA", "MY"):
+        try:
+            entries = ssl.enum_certificates(store)
+        except OSError as exc:
+            say(f"enum_certificates({store}) failed: {exc}")
+            continue
+        hits = [(enc, trust) for cert, enc, trust in entries if cert == der]
+        named = [(enc, trust) for cert, enc, trust in entries if ca.cn.encode() in cert and cert != der]
+        say(f"enum_certificates({store}): {len(entries)} entries; exact CA match {hits}; same CN, other DER {named}")
+    context = ssl.create_default_context()
+    loaded = [c for c in context.get_ca_certs() if any(ca.cn in v for rdn in c.get("subject", ()) for _k, v in rdn)]
+    say(f"create_default_context(): {len(context.get_ca_certs())} CA certs loaded; test CA among them: "
+        f"{bool(loaded)}; verify_flags {context.verify_flags!r}")
+    for label, make in (("cafile=ca.pem, strict", lambda: ssl.create_default_context(cafile=str(work / "ca.pem"))),
+                        ("cafile=ca.pem, not strict", lambda: _not_strict(ssl.create_default_context(
+                            cafile=str(work / "ca.pem")))),
+                        ("default store, not strict", lambda: _not_strict(ssl.create_default_context()))):
+        try:
+            with socket.create_connection(("127.0.0.1", 443), timeout=20) as raw:
+                with make().wrap_socket(raw, server_hostname="api.github.com"):
+                    say(f"handshake with {label}: ok")
+        except (OSError, ssl.SSLError) as exc:
+            say(f"handshake with {label}: {type(exc).__name__}: {exc}")
+    tool = openssl()
+    for args in (["version"], ["verify", "-x509_strict", "-CAfile", work / "ca.pem", work / "leaf.pem"],
+                 ["x509", "-noout", "-text", "-in", work / "ca.pem"], ["x509", "-noout", "-text", "-in", work / "leaf.pem"]):
+        out = run([tool, *args], check=False)
+        say(f"openssl {args[0]} {' '.join(str(a) for a in args[1:2])}: exit {out.returncode}\n"
+            + "\n".join(l for l in (out.stdout + out.stderr).splitlines()
+                        if "Modulus" not in l and not l.strip().replace(":", "").isalnum())[:3000])
+    out = run(["certutil", "-store", "Root", ca.cn], check=False)
+    say(f"certutil -store Root: exit {out.returncode}\n{(out.stdout + out.stderr)[-1500:]}")
+    say("===== END TRUST DIAGNOSTICS =====")
+
+
+def _not_strict(context):
+    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    return context
+
+
+def managed_launchers(managed):
+    """Process ids running the managed install's launcher (it is not this script's child)."""
+    marker = str(managed / "launch.py").casefold()
+    out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                          "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | "
+                          "ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }"],
+                         capture_output=True, text=True, timeout=60).stdout
+    flat = [(line, " ".join(line.casefold().replace('"', " ").split())) for line in out.splitlines()]
+    return [int(line.split(" ", 1)[0]) for line, words in flat
+            if marker in line.casefold() and " runtime run " in words]
+
+
 def migrated(config_dir):
     """True once migration converted the token and runtime.json is in connector mode."""
     try:
@@ -591,6 +674,17 @@ def runtime_state_dir(config_dir):
 
 def run_e2e(args, work, stack):
     installers = download_release_installers(work) if args.real else Path(args.installers).resolve()
+    fake = None
+    if not args.real:
+        # First, so a trust problem fails in a minute: the test root CA and the fake endpoint, then a
+        # handshake as api.github.com through Python's default context in a fresh process.
+        ca = TestCA(work)
+        ca.create()
+        stack.callback(ca.remove)
+        fake = FakeGitHub(work, installers, (OLD, NEW))
+        fake.start(str(work / "leaf.pem"), str(work / "leaf.key"))
+        stack.callback(fake.stop)
+        trust_probe(work, ca)
     server = release_e2e.Server(work / "server", args.server_python)
     server.work.mkdir()
     server.prepare()
@@ -616,17 +710,10 @@ def run_e2e(args, work, stack):
     observer = register(server, OBSERVER)[1]
     say(f"PASS: throwaway server on {server.url}; user, team {TEAM} and observer {OBSERVER}")
 
-    fake = None
     if args.real:
         say(f"PASS: published installers of v{OLD} and v{NEW} downloaded and checksum-verified")
     else:
-        ca = TestCA(work)
-        ca.create()
-        stack.callback(ca.remove)
-        fake = FakeGitHub(work, installers, (OLD, NEW))
         fake.add_release(rollback, BROKEN)
-        fake.start(str(work / "leaf.pem"), str(work / "leaf.key"))
-        stack.callback(fake.stop)
         hosts = HostsEntry()
         hosts.add()
         stack.callback(hosts.remove)
@@ -785,33 +872,37 @@ def run_e2e(args, work, stack):
     check(api(server, pip_token, "/api/v1/me")["agent"]["handle"] == OLD_MACHINE, "uninstall signed the machine out")
     say("PASS: B. uninstall with /SIGNOUT=no kept agent.json, the connector config, the queue and migration.log")
 
-    # == C. a managed v0.3 install started from the Run value =====================================
+    # == C. a managed v0.3 install in the documented layout, started by its Run value ===============
+    # SETUP.md step 5 and the Windows guide: the credential, the connector and runtime.json all in
+    # ~/.config/raincli, logon start through `runtime startup --config ~/.config/raincli/runtime.json`.
+    # The app's own default runtime config is the same file, which is review 2's R1 case.
     fresh_slate(app)
     api_url, managed_token = register(server, MANAGED_MACHINE)
     write_private(default_agent_config(), {"api_url": api_url, "token": managed_token})
     connector = config_dir / "connector.json"
     write_private(connector, {"agent_config": str(default_agent_config()), "herdr_agent": "e2e-inbox",
-                              "herdr_bin": "raincli-e2e-no-herdr", "state_dir": str(work / "managed-queue"),
-                              "poll_wait": 1})
+                              "herdr_bin": "raincli-e2e-no-herdr", "poll_wait": 1})  # the default queue directory
     runtime_json = config_dir / "runtime.json"
-    write_private(runtime_json, {"connectors": [str(connector)], "state_dir": str(work / "managed-state")})
+    check(runtime_json == default_agent_config().parent / "runtime.json", "not the default runtime.json")
+    write_private(runtime_json, {"connectors": [str(connector)], "state_dir": str(profile() / ".raincli" / "runtime")})
     launcher = managed / "launch.py"
     run([sys.executable, launcher, "runtime", "startup", "--config", runtime_json], timeout=300)
     old_value = app.run_value()
-    check(old_value and "launch.py" in old_value, f"the managed install's Run value is {old_value!r}")
-    with open(work / "managed-launcher.log", "ab") as out:
-        old_launcher = subprocess.Popen([sys.executable, str(launcher), "runtime", "run", "--config", str(runtime_json)],
-                                        stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
-    stack.callback(end, old_launcher)
+    check(old_value and "launch.py" in old_value and str(runtime_json).casefold() in old_value.casefold(),
+          f"the managed install's Run value does not run the launcher on the default runtime.json: {old_value!r}")
+    # Logon runs exactly the Run value's command line.
+    subprocess.Popen(old_value, close_fds=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    wait_for("the managed launcher started from the Run value", lambda: managed_launchers(managed), timeout=120)
     wait_for(f"the managed {OLD_MANAGED} runtime's presence",
              lambda: shows(server, observer, MANAGED_MACHINE, OLD_MANAGED[1:]), timeout=300)
     before = handles(server, observer)
     app.install(NEW, installers, "managed-migration")
     record = (app.root / "installer-record.log").read_text("utf-8")
     check(old_value in record, "the installer did not record the managed install's Run value")
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        old_launcher.wait(timeout=300)
-    check(old_launcher.poll() is not None, "the managed launcher did not stop on the app's stop request")
+    wait_for("the managed launcher to stop on the app's stop request", lambda: not managed_launchers(managed),
+             timeout=600)
     wait_for("migration to finish (DPAPI token, connector-mode runtime.json)",
              lambda: migrated(config_dir), timeout=300)
     wait_for("the migrated managed machine's presence", lambda: shows(server, observer, MANAGED_MACHINE, NEW),
@@ -823,8 +914,9 @@ def run_e2e(args, work, stack):
           "the managed credential stopped working")
     third = send(server, observer, MANAGED_MACHINE, "after managed migration")
     wait_for("delivery after the managed migration", lambda: delivered(server, observer, third), timeout=240)
-    say(f"PASS: C. managed {OLD_MANAGED}: the installer recorded its Run value, its launcher stopped on the stop "
-        f"request, the Run value now starts the stub, and {MANAGED_MACHINE} keeps delivering; no new machine")
+    say(f"PASS: C. managed {OLD_MANAGED} in the documented layout (default runtime.json, started by its Run value): "
+        "the installer recorded the Run value, the launcher stopped on the app's stop request, the Run value now "
+        f"starts the stub, and {MANAGED_MACHINE} keeps delivering; no new machine")
     app.uninstall(signout=False)
     check(app.run_value() is None, "the final uninstall left the Run value")
 
@@ -834,7 +926,7 @@ def diagnose(work):
     root = app_root()
     for path in [root / "install.json", root / "installer-record.log", *sorted(root.rglob("*.log")),
                  *sorted(work.glob("install-*.log")), work / "uninstall.log", work / "old-connector.log",
-                 work / "managed-launcher.log",
+                 profile() / ".raincli" / "client" / "runtime.log",
                  work / "server" / "server.log", default_agent_config().parent / "runtime.json"]:
         if path.is_file():
             say(f"--- {path} ---\n{tail(path, 6000)}")
