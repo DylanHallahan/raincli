@@ -572,6 +572,75 @@ def register(server, name):
     return issued["api_url"], SECRETS.add(issued["token"])
 
 
+TRUST_PROBE = """
+import socket, ssl, sys
+context = ssl.create_default_context()
+with socket.create_connection(("127.0.0.1", 443), timeout=20) as raw:
+    with context.wrap_socket(raw, server_hostname="api.github.com") as tls:
+        print("handshake ok", tls.version())
+"""
+
+
+def trust_probe(work, ca):
+    """A default-context handshake as api.github.com in a fresh Python, as the client makes one."""
+    result = subprocess.run([sys.executable, "-c", TRUST_PROBE], capture_output=True, text=True, timeout=60)
+    if result.returncode == 0:
+        say(f"PASS: the Windows trust store trusts the test root CA ({result.stdout.strip()})")
+        return
+    say("trust probe failed:\n" + (result.stdout + result.stderr)[-2000:])
+    trust_diagnostics(work, ca)
+    raise Failure("Python's default context does not trust the test root CA")
+
+
+def trust_diagnostics(work, ca):
+    """What the runner's stores hold for the test CA, and whether the chain itself verifies."""
+    import base64 as b64
+
+    say("===== TRUST DIAGNOSTICS =====")
+    pem = (work / "ca.pem").read_text()
+    der = b64.b64decode("".join(l for l in pem.splitlines() if l and not l.startswith("-----")))
+    say(f"python {sys.version.split()[0]}, {ssl.OPENSSL_VERSION}; CA CN {ca.cn!r}; CA DER sha256 "
+        f"{hashlib.sha256(der).hexdigest()[:16]}")
+    for store in ("ROOT", "CA", "MY"):
+        try:
+            entries = ssl.enum_certificates(store)
+        except OSError as exc:
+            say(f"enum_certificates({store}) failed: {exc}")
+            continue
+        hits = [(enc, trust) for cert, enc, trust in entries if cert == der]
+        named = [(enc, trust) for cert, enc, trust in entries if ca.cn.encode() in cert and cert != der]
+        say(f"enum_certificates({store}): {len(entries)} entries; exact CA match {hits}; same CN, other DER {named}")
+    context = ssl.create_default_context()
+    loaded = [c for c in context.get_ca_certs() if any(ca.cn in v for rdn in c.get("subject", ()) for _k, v in rdn)]
+    say(f"create_default_context(): {len(context.get_ca_certs())} CA certs loaded; test CA among them: "
+        f"{bool(loaded)}; verify_flags {context.verify_flags!r}")
+    for label, make in (("cafile=ca.pem, strict", lambda: ssl.create_default_context(cafile=str(work / "ca.pem"))),
+                        ("cafile=ca.pem, not strict", lambda: _not_strict(ssl.create_default_context(
+                            cafile=str(work / "ca.pem")))),
+                        ("default store, not strict", lambda: _not_strict(ssl.create_default_context()))):
+        try:
+            with socket.create_connection(("127.0.0.1", 443), timeout=20) as raw:
+                with make().wrap_socket(raw, server_hostname="api.github.com"):
+                    say(f"handshake with {label}: ok")
+        except (OSError, ssl.SSLError) as exc:
+            say(f"handshake with {label}: {type(exc).__name__}: {exc}")
+    tool = openssl()
+    for args in (["version"], ["verify", "-x509_strict", "-CAfile", work / "ca.pem", work / "leaf.pem"],
+                 ["x509", "-noout", "-text", "-in", work / "ca.pem"], ["x509", "-noout", "-text", "-in", work / "leaf.pem"]):
+        out = run([tool, *args], check=False)
+        say(f"openssl {args[0]} {' '.join(str(a) for a in args[1:2])}: exit {out.returncode}\n"
+            + "\n".join(l for l in (out.stdout + out.stderr).splitlines()
+                        if "Modulus" not in l and not l.strip().replace(":", "").isalnum())[:3000])
+    out = run(["certutil", "-store", "Root", ca.cn], check=False)
+    say(f"certutil -store Root: exit {out.returncode}\n{(out.stdout + out.stderr)[-1500:]}")
+    say("===== END TRUST DIAGNOSTICS =====")
+
+
+def _not_strict(context):
+    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    return context
+
+
 def migrated(config_dir):
     """True once migration converted the token and runtime.json is in connector mode."""
     try:
@@ -591,6 +660,17 @@ def runtime_state_dir(config_dir):
 
 def run_e2e(args, work, stack):
     installers = download_release_installers(work) if args.real else Path(args.installers).resolve()
+    fake = None
+    if not args.real:
+        # First, so a trust problem fails in a minute: the test root CA and the fake endpoint, then a
+        # handshake as api.github.com through Python's default context in a fresh process.
+        ca = TestCA(work)
+        ca.create()
+        stack.callback(ca.remove)
+        fake = FakeGitHub(work, installers, (OLD, NEW))
+        fake.start(str(work / "leaf.pem"), str(work / "leaf.key"))
+        stack.callback(fake.stop)
+        trust_probe(work, ca)
     server = release_e2e.Server(work / "server", args.server_python)
     server.work.mkdir()
     server.prepare()
@@ -616,17 +696,10 @@ def run_e2e(args, work, stack):
     observer = register(server, OBSERVER)[1]
     say(f"PASS: throwaway server on {server.url}; user, team {TEAM} and observer {OBSERVER}")
 
-    fake = None
     if args.real:
         say(f"PASS: published installers of v{OLD} and v{NEW} downloaded and checksum-verified")
     else:
-        ca = TestCA(work)
-        ca.create()
-        stack.callback(ca.remove)
-        fake = FakeGitHub(work, installers, (OLD, NEW))
         fake.add_release(rollback, BROKEN)
-        fake.start(str(work / "leaf.pem"), str(work / "leaf.key"))
-        stack.callback(fake.stop)
         hosts = HostsEntry()
         hosts.add()
         stack.callback(hosts.remove)
