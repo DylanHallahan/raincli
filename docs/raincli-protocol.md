@@ -1157,3 +1157,16 @@ The reviewer checks the framing specifically in every Phase 2 round.
    - **The v0.5 stub** accepts no arguments, or `--open`, to mean: start the app if it isn't running, then show the window (through `app-lock\show`, which the tray watches). `--background` never shows the window.
    - **A full install** writes `"stub": 2` into `install.json`.
    - **Machines updated in place** keep their v0.4 stub, so `install.json` has no `stub` key. On start, the v0.5 app rewrites the RainCLI Start menu shortcut's arguments to `--background` (stdlib PowerShell `WScript.Shell`, no new dependency), and logs it. That start works with a v0.4 stub, and the tray icon opens the window. The next full install restores the no-argument shortcut.
+
+### 16.16 Lead decisions after the client build (binding)
+1. **The owner on `/me`.** `GET /api/v1/me` with a machine credential adds `"owner": {"email", "display_name"}`. `{"to": "owner"}` escalations use it. A machine-mode `runtime.json` no longer needs `owner_email`; the client falls back to it only when the server is older.
+2. **The owner's other machines.**
+   - A message delivered to a machine carries `"from_same_owner": true` when its sender machine, or its sender person, has the same owner as the recipient machine. The server decides this.
+   - The machine-mode default trust set (C5) trusts it, so the client never needs a list of the owner's machines.
+3. **Teams on replies.** `POST /api/v1/person/send` with `in_reply_to` takes the team from the parent message's conversation, and ignores `team`. `team_required` applies only to new conversations.
+4. **Accepted as decided by the builder:**
+   - the held age goes on the To line (`| held <age> before this turn`, from 60 s);
+   - a person sender's From line has no machine part;
+   - `raincli inbox --agent NAME` polls with `routing=1`, which is safe under S1's server check;
+   - `--body` stays on the legacy `send --to` only;
+   - `me read` acks, and `me inbox --watch` never acks.
