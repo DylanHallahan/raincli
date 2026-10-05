@@ -1138,3 +1138,11 @@ The reviewer checks the framing specifically in every Phase 2 round.
 **K2.** Liveness treats an executable named `codex` or `codex-*` as Codex.
 
 **K3.** `!` joins the characters refused in paths placed in a Codex hook command, because of `cmd` delayed expansion.
+
+**S3 addition (main).**
+- **The token is never logged.**
+  - `deploy/raincli/nginx/raincli.com.conf` sets its own `access_log` with a `log_format` whose User-Agent field has the `RainCLIApp/<token>` part replaced by `RainCLIApp/[redacted]` (a `map` on `$http_user_agent`). That covers every location, error lines included where Nginx can control them.
+  - The server's own logging and error paths never record the User-Agent.
+  - Tests cover both: the Nginx config is rendered or parsed with the map applied, and server logs are captured for a request carrying a token.
+  - `docs/raincli-deploy.md` notes that v0.5.0 requires reinstalling the Nginx config.
+- **Lifetime.** `app_install_token` is rotated on sign-out (app or person), on sign-in again, and on every install or reinstall of the app. A rotation makes outstanding handoff codes and app-mode web sessions bound to the old hash fail.
