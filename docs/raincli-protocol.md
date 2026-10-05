@@ -951,3 +951,89 @@ raincli routing [--all|--inbox-only]
   - The CDP remote-debugging switch comes **only** from the test environment: the job sets the standard `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`.
   - Shipped code never sets or reads `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, `--remote-debugging-port`, `--remote-debugging-pipe` or `--remote-allow-origins`. It passes no debugging option to pywebview or WebView2 (`debug=False`).
   - The bundle check refuses a build whose frozen code or data contains any of those strings, and a test asserts the same over the source.
+
+### 16.12 Amendments after contract review 0 (binding; they override §16.1–16.11 where they conflict)
+
+**C1. Old clients never deliver a named-agent message.**
+- A v0.5.0+ connector stores a message that has a `recipient_agent_name` only under the local states `agent_received`, `agent_held`, `agent_submitting` and `agent_handed_over`, which v0.4 clients never deliver. Records for the machine endpoint keep the §5 states.
+- Once a runtime has polled with `routing=1`, it records `routing_capable: true` in its state directory. From then on it refuses targets and rollbacks below v0.5.0, as the §15.8 H8 floor does.
+- `set-client-version` warns when the team has routing-capable machines and the target is below v0.5.0.
+
+**C2. App-mode web sessions are limited to the person-session scopes.**
+- `GET /app/handoff?code=` creates an **app-mode web session**. It references the person session (`person_session_id`), carries only `person:read` and `person:send`, ends no later than that person session, and is revoked with it.
+- App-mode sessions may use only: inbox, conversations, compose and reply, attachments, the agent directory and picker, and `/app/local/*`.
+- Account, password, team administration, machine management and the Signed-in apps list refuse them with `403` and a link to the website.
+
+**C3. The handoff is resistant to login CSRF.**
+- `GET /app/handoff` is accepted only when the request has `Sec-Fetch-Site: none` and `Sec-Fetch-Mode: navigate`. Otherwise it shows the generic error page and consumes nothing.
+- It never replaces an existing web session of another user.
+- It sets a separate cookie, `raincli_app` (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/app/`), which only app-mode routes accept. The `raincli_session` cookie is untouched.
+- Server and proxy logs record `/app/handoff` without its query string.
+- Markdown links to `/app/handoff` and `/app/local/` are rendered as text.
+
+**C4. `js_api` and navigation.**
+- On every `loaded` event the app generates a new random nonce. Only when the loaded URL's origin **exactly** equals the bundled local origin (scheme, host and port), it passes the nonce to the page with `evaluate_js`.
+- Every `js_api` call must carry the current nonce. Calls with a stale or missing nonce are refused and logged. The API never returns credentials.
+- **Navigation:** the window may show only the configured service origin and the bundled local origin. Any other URL opens in the default browser, never in the window.
+
+**C5. Trust in machine mode** (the lead's default; main may change it before the delivery work starts).
+- **Configuration:** a machine-mode `runtime.json` may carry `trust_mode` (`list` or `team`) and `trusted_senders` (machines, and emails matched case-insensitively).
+- **Default:** `list`, with an implicit trusted set of the owner as a person and the owner's other machines. Every other sender is held `approval_required`.
+- **Changing it:** `raincli trust --mode team|list` and `raincli trust add|remove <machine|@email>`, and also the app's Settings page.
+- **Approving:** `raincli me approve <id> [--always]` or the app. It releases that one message, and `--always` adds the sender to `trusted_senders`.
+- **Connector-mode configs** keep their §10 settings, which now apply to every target.
+
+**C6. Revocation.**
+- A person session is revoked, together with every app-mode web session created from it, by:
+  - `POST /api/v1/app/sign-out`;
+  - `POST /api/v1/person/sign-out`;
+  - revoking the machine;
+  - any rotation of that machine's credential (app re-sign-in, `replace`, website or operator);
+  - a password change;
+  - deactivating the user;
+  - the Signed-in apps list.
+- Removing a member from a team doesn't revoke the session, but every request re-checks membership.
+
+**C7. Sending to its own agents.**
+- A machine may send to an agent endpoint on itself. The check becomes that the sender endpoint, `(machine, from_agent or null)`, and the recipient endpoint differ.
+- Migration `0006` replaces `ck_messages_not_self` with `ck_messages_not_self_endpoint`.
+- Sending to its own machine endpoint stays refused (`400 invalid`).
+
+**C8. Derived holds.**
+- Derived holds are computed at read time and never stored as events.
+- A message in server state `stored`, with a `recipient_agent_name`, is shown with `delivery_state: "held"` and a `hold_reason`:
+  - `client_update_needed` when the recipient machine has never polled with `routing=1`;
+  - otherwise `offline` when no live deliverable entry has that name.
+- Once the recipient acks it, only recipient-reported events apply (§2).
+
+**C9. Several teams.** `team` (slug) is required on person sends and person reads that resolve endpoints whenever the session's user belongs to more than one team. Otherwise the reply is `400 team_required`.
+
+**C10. Replies and `from_agent`.**
+- A reply to an agent goes through the §16.2 order. If that order refuses it, the reply is refused with that reason, and the client offers to send it to the machine endpoint instead. There is no silent fallback.
+- `from_agent` is shown as "via <name> (stated by the machine)". It is never matched against `trusted_senders`.
+
+**C11. Escalations.** `kind: escalation` is accepted only from a machine credential to its own owner's person endpoint. Any other use is `400 invalid`.
+
+**C12. Expiry of offline holds.**
+- Step 4 of §16.2 accepts only names seen within **14 days**.
+- A message held `offline` for an agent endpoint expires after 14 days: the connector reports it `rejected` with `expired_offline`.
+- A next-turn handover shows a held message's age in its frame.
+- Probing names through `unknown_agent` replies is a known limitation.
+
+**C13. Markdown.**
+- Rendering uses `markdown-it-py` with `html=False` and `linkify=False`.
+- `validateLink` admits only `http:`, `https:` and `mailto:`, plus same-origin `/app/conversations/` paths.
+- The rendered body is the only value a template marks safe. Attachments are never rendered.
+- The XSS corpus test includes `javascript:`, `data:` and `vbscript:`, entity-encoded and mixed-case schemes, autolinks, and image syntax.
+
+**C14. Notifications.**
+- A toast shows only "New message from <display name>" or "Escalation from <machine>", never body text.
+- The notification queue keeps entries for 7 days, or the last 500, and is private to the user (ACL as for `agent.json`).
+
+**C15. Issuing.** `/app/login` issues a person session only when the request has `"person_session": true`. v0.5.0+ clients send it.
+
+**C16. The GUI test boundary's scope.**
+- The bundle check covers `raincli_agent` and the entry scripts.
+- Third-party modules are checked instead by asserting that the app calls pywebview with `debug=False` and sets no debugging-related pywebview settings.
+- The Windows e2e asserts that, without the job's variable, the app opens no listening TCP port and no DevTools pipe.
+- A user-level `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` is outside the threat model (same user).
