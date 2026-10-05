@@ -81,8 +81,17 @@ class Plan:
 
 class Migration:
     def __init__(self, *, env=None, registry=None, app_root=None, managed_root=None, home=None,
-                 sleep=time.sleep, clock=time.monotonic):
+                 sleep=time.sleep, clock=time.monotonic, connector_configs=(), own_runtime=None,
+                 stop_own=None, restart_own=None, spawn=None, inbox=None):
+        """``own_runtime`` is the app's runtime config, which the tray may already be
+        running; ``stop_own``/``restart_own`` pause and resume it. ``connector_configs``
+        are connector configs the user names explicitly (``--connector-config``)."""
         from .runtime import updates, winapp
+        self.connector_configs = [str(Path(p).absolute()) for p in connector_configs]
+        self.own_runtime = own_runtime
+        self.stop_own, self.restart_own = stop_own, restart_own
+        self.spawn = spawn or self._spawn
+        self.inbox = inbox or self.inbox_role
         self.env = os.environ if env is None else env
         self.registry = winapp.WindowsRegistry() if registry is None else registry
         self.app_root = Path(app_root) if app_root else None
@@ -131,6 +140,9 @@ class Migration:
             if target is not None and (_same(target, agent) or any(_same(target, a) for a in agents)) \
                     and all(not _same(path, c) for c in connectors):
                 connectors.append(str(path.absolute()))
+        for connector in self.connector_configs:
+            if all(not _same(connector, c) for c in connectors):
+                connectors.append(connector)
         for connector in connectors:
             data = self._read_json(connector)
             target = connector_agent_config(connector, data)
@@ -224,23 +236,61 @@ class Migration:
                 except OSError:
                     pass
 
-    # -- 2. stop the old runtime, hold every queue ----------------------------------------------
+    # -- 2. who holds the queues; stop only runtimes we can restart ------------------------------
+
+    @staticmethod
+    def connector_queues(path, data):
+        """A connector's queue directory: its ``state_dir`` resolved from the connector
+        config's own directory, as the connector resolves it (review 1a F2), or every
+        queue at the default location, which is named after a handle."""
+        state = data.get("state_dir") if isinstance(data, dict) else None
+        if isinstance(state, str) and state:
+            return [(Path(path).absolute().parent / Path(state).expanduser()).absolute()]
+        root = Path(default_state_dir("x")).parent
+        return sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
+
+    def runtime_dirs(self, runtime_config):
+        """The runtime state directory and connector queues a runtime config's runtime holds."""
+        try:
+            data = self._read_json(runtime_config)
+        except ConfigError:
+            return []
+        base = Path(runtime_config).absolute().parent
+        dirs = [(base / Path(data.get("state_dir") or "runtime-state").expanduser()).absolute()]
+        for entry in data.get("connectors") or []:
+            if isinstance(entry, str) and entry:
+                connector = base / Path(entry).expanduser()
+                try:
+                    dirs.extend(self.connector_queues(connector, self._read_json(connector)))
+                except ConfigError:
+                    continue
+        return dirs
 
     def queue_dirs(self, plan):
         dirs = [Path(plan.state_dir)]
-        for data in plan.connectors.values():
-            state = data.get("state_dir")
-            if isinstance(state, str) and state:
-                dirs.append(Path(state).expanduser())
-            else:
-                # A queue at the default location is named after its handle: check them all.
-                root = Path(default_state_dir("x")).parent
-                dirs.extend(sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else [])
+        for path, data in plan.connectors.items():
+            dirs.extend(self.connector_queues(path, data))
+        for runtime in plan.old_runtimes:
+            dirs.extend(self.runtime_dirs(runtime))
         unique = []
         for d in dirs:
             if d.is_dir() and all(not _same(d, u) for u in unique):
                 unique.append(d)
         return unique
+
+    @staticmethod
+    def _busy(directory):
+        queue = Queue(str(directory))
+        try:
+            queue.acquire_run_lock()
+        except ConnectorBusy:
+            return True
+        queue.release_run_lock()
+        return False
+
+    def held(self, plan):
+        """The queue directories whose run lock someone holds, probed without keeping any."""
+        return [d for d in self.queue_dirs(plan) if self._busy(d)]
 
     def acquire(self, plan):
         """Every existing queue run lock, or None when one is held (an old runtime or connector)."""
@@ -256,24 +306,139 @@ class Migration:
             held.append(queue)
         return held
 
-    def request_old_stop(self, plan):
-        """A managed (or other) old runtime is stopped through its own stop request (15.8 M7)."""
+    def stoppable(self, plan):
+        """The running runtimes migration may stop, because it can start them again:
+        the app's own runtime (``own_runtime``; the tray restarts it) and an old
+        runtime its Run value starts. ``[(kind, runtime config, dirs)]``."""
+        out = []
+        if self.own_runtime is not None:
+            out.append(("own", str(self.own_runtime), self.runtime_dirs(self.own_runtime)))
+        command = self.old_command(plan)
+        if command is not None:
+            config = command[command.index("--config") + 1]
+            if self.own_runtime is None or not _same(config, self.own_runtime):
+                out.append(("old", config, self.runtime_dirs(config)))
+        return [(kind, config, dirs) for kind, config, dirs in out if dirs and self._busy(dirs[0])]
+
+    @staticmethod
+    def old_command(plan):
+        """The old Run value's argv when it runs ``runtime run --config``, else None."""
+        if not plan.run_value:
+            return None
+        argv = parse_command_line(plan.run_value)
+        if "runtime" in argv and "run" in argv and "--config" in argv[:-1]:
+            return argv
+        return None
+
+    def stop_runtime(self, kind, config, log):
+        """A graceful stop through the runtime's own stop request (15.8 M7)."""
         from .runtime.service import request_stop
-        results = {}
-        for config in plan.old_runtimes:
+        if kind == "own" and self.stop_own is not None:
+            self.stop_own()
+            log.write("app_runtime_paused", runtime_config=config)
+            return
+        try:
+            result = request_stop(config)["status"]
+        except (ConfigError, OSError) as exc:
+            result = "error:" + type(exc).__name__
+        log.write("old_runtime_stop_requested", runtime_config=config, result=result)
+
+    def restart(self, stopped, plan, log):
+        """After a cancel or timeout: start again what migration stopped (review 1a F4)."""
+        for kind, config in stopped:
             try:
-                results[config] = request_stop(config)["status"]
-            except (ConfigError, OSError) as exc:
-                results[config] = "error:" + type(exc).__name__
-        return results
+                if kind == "own":
+                    if self.restart_own is not None:
+                        self.restart_own()
+                else:
+                    self.spawn(self.old_command(plan))
+                log.write("runtime_restarted", runtime_config=config, kind=kind)
+            except OSError as exc:
+                log.write("runtime_restart_failed", runtime_config=config, error=type(exc).__name__)
+
+    @staticmethod
+    def _spawn(argv):
+        import subprocess
+        flags = 0
+        if os.name == "nt":
+            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         close_fds=True, creationflags=flags)
+
+    def free_queues(self, plan, log, notify, cancelled, wait):
+        """Wait until no queue lock is held. A runtime is stopped only when the
+        remaining holders are all runtimes migration can restart; anything else
+        (a connector in an old window) is waited for with a notice. Returns the
+        held locks, or a result dict when cancelled or timed out."""
+        stopped, notified = [], False
+        deadline = self.clock() + wait
+        while True:
+            held = self.held(plan)
+            if not held:
+                locks = self.acquire(plan)
+                if locks is not None:
+                    return locks
+                continue
+            owners = self.stoppable(plan)
+            owned = [d for _, _, dirs in owners for d in dirs]
+            if all(any(_same(h, d) for d in owned) for h in held):
+                for kind, config, _ in owners:
+                    if (kind, config) not in stopped:
+                        self.stop_runtime(kind, config, log)
+                        stopped.append((kind, config))
+            elif not notified:
+                log.write("old_window_holds_queue", queues=[str(h) for h in held])
+                notify(CLOSE_OLD)
+                notified = True
+            if cancelled() or self.clock() >= deadline:
+                self.restart(stopped, plan, log)
+                status = "cancelled" if cancelled() else "waiting"
+                log.write(status)
+                return {"status": status, "message": CLOSE_OLD}
+            self.sleep(1)
 
     # -- 3-5 -----------------------------------------------------------------------------------------
 
+    def pending(self):
+        """Whether a migration has anything left to do: a token to convert, a config
+        to write or normalize, or an old Run value (review 1a F5). False when nothing
+        is installed or the plan does not validate (``run`` then reports why)."""
+        try:
+            plan = self.detect()
+        except ConfigError:
+            return True
+        if plan is None:
+            return False
+        if plan.runtime is not None or plan.run_value:
+            return True
+        for path, data in plan.connectors.items():
+            if self._read_json(path) != data:
+                return True
+        if config_mod.protects_tokens():
+            for agent in plan.agent_configs:
+                if "token_dpapi" not in json.loads(read_private_file(agent, "agent config")):
+                    return True
+        return False
+
+    def inbox_role(self, agent_config):
+        """Whether the server lists an inbox role for this credential's handle (review
+        1a F11): True, False, or None when it cannot be told (offline)."""
+        from .api import ApiClient
+        from .errors import ApiError
+        try:
+            client = ApiClient.from_config(load_config(agent_config), timeout=15, max_attempts=2)
+            handle = client.me()["agent"]["handle"]
+            for machine in client.agents():
+                if machine.get("handle") == handle:
+                    return any(a.get("role") == "inbox" for a in machine.get("agents") or [])
+            return False
+        except (ApiError, ConfigError, KeyError, TypeError):
+            return None
+
     def run(self, start_runtime=None, *, notify=lambda message: None, cancelled=lambda: False, wait=600):
         """Migrate. ``start_runtime(runtime_config)`` starts the new runtime and returns
-        True once it is ready (step 4); without it the old Run value is left alone.
-        ``notify`` receives user-facing messages; ``cancelled`` ends the wait for an
-        old window. Returns a result dict with ``status``."""
+        True once it is ready (step 4). ``notify`` receives user-facing messages;
+        ``cancelled`` ends the wait for an old window. Returns a result dict with ``status``."""
         lock = self._lock()
         if lock is None:
             return {"status": "busy", "message": "another migration is running"}
@@ -285,27 +450,25 @@ class Migration:
             log.write("detected", **plan.summary())
             for path in plan.clamped:
                 log.write("prompt_timeout_clamped", connector=path)
-            held = self.acquire(plan)
-            if held is None:
-                stops = self.request_old_stop(plan)
-                log.write("old_runtime_stop_requested", results=stops)
-                notify(CLOSE_OLD)
-                deadline = self.clock() + wait
-                while held is None:
-                    if cancelled():
-                        log.write("cancelled")
-                        return {"status": "cancelled", "message": CLOSE_OLD}
-                    if self.clock() >= deadline:
-                        log.write("old_runtime_still_running")
-                        return {"status": "waiting", "message": CLOSE_OLD}
-                    self.sleep(1)
-                    held = self.acquire(plan)
+            if plan.runtime is not None and "machine_config" in plan.runtime:
+                # An existing handle about to become machine mode: if it has served as an
+                # inbox, its connector config lives somewhere migration did not look.
+                role = self.inbox(plan.agent_configs[0])
+                log.write("inbox_role_checked", result=role)
+                if role:
+                    message = (f"This machine delivered messages through a connector, but its connector config was "
+                               f"not found. Run: raincli migrate --connector-config PATH")
+                    notify(message)
+                    return {"status": "connector_config_required", "message": message, **plan.summary()}
+            locks = self.free_queues(plan, log, notify, cancelled, wait)
+            if isinstance(locks, dict):
+                return locks
             try:
                 converted = self.write(plan, log)
             finally:
-                for queue in held:
+                for queue in locks:
                     queue.release_run_lock()
-            result = {"status": "migrated", **plan.summary(), "converted": converted}
+            result = {"status": "migrated", **plan.summary(), "converted": converted, "run_value": "unchanged"}
             if config_mod.protects_tokens() and converted:
                 result["notice"] = PIP_NOTICE
                 notify(PIP_NOTICE)
@@ -313,15 +476,19 @@ class Migration:
                 from .runtime import winapp
                 winapp.write_settings(self.app_root, {"agent_config": plan.agent_configs[0],
                                                       "runtime_config": plan.runtime_config})
+                if converted:
+                    # The old Run value cannot read a converted token: the app starts at logon
+                    # from now on, even if step 4 fails (review 1a F1).
+                    result["run_value"] = self.point_run_value_at_app(plan, log)
             if start_runtime is None:
-                result["run_value"] = "unchanged"
                 return result
             if not start_runtime(plan.runtime_config):
                 log.write("new_runtime_not_ready")
-                result.update(status="runtime_not_ready", run_value="unchanged")
+                result["status"] = "runtime_not_ready"
                 return result
             log.write("new_runtime_ready")
-            result["run_value"] = self.disable_old_run_value(plan, log)
+            if not converted:
+                result["run_value"] = self.point_run_value_at_app(plan, log)
             return result
         finally:
             self._unlock(lock)
@@ -347,15 +514,21 @@ class Migration:
             log.write("token_protected", agent_config=agent)
         return converted
 
-    def disable_old_run_value(self, plan, log):
+    def point_run_value_at_app(self, plan, log):
+        """Record the old Run value, then replace it with the stub (app) or remove it."""
         from .runtime import winapp
+        if plan.run_value:
+            log.write("old_run_value_disabled", original=plan.run_value)
+        if self.app_root is not None:
+            if self.registry.get(winapp.RUN_VALUE) != winapp.run_value(self.app_root):
+                self.registry.set(winapp.RUN_VALUE, winapp.run_value(self.app_root))
+                log.write("run_value_set_to_app")
+            plan.run_value = None
+            return "app"
         if not plan.run_value:
             return "none"
-        log.write("old_run_value_disabled", original=plan.run_value)
-        if self.app_root is not None:
-            self.registry.set(winapp.RUN_VALUE, winapp.run_value(self.app_root))
-            return "replaced_by_app"
         self.registry.delete(winapp.RUN_VALUE)
+        plan.run_value = None
         return "removed"
 
     def _lock(self):

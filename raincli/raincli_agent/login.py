@@ -396,6 +396,12 @@ def prepare(config_path=None, force=False, *, identity=existing_identity):
     mode = runtime_mode(runtime_path)
     connectors = connector_references(config_path)
     if not os.path.lexists(config_path):
+        if connectors:
+            # A new handle in a file that connector configs still name would reroute
+            # their delivery (15.8 H3, review 1a F3).
+            raise ConnectorMachine(
+                f"connector configs still name {config_path} ({', '.join(connectors)}); signing in would give "
+                "them a new machine's credential. Remove or repoint those connector configs first")
         if mode not in (None, "machine"):
             raise ConnectorMachine(f"{runtime_path} belongs to another setup and is never replaced by a sign-in")
         return plan
@@ -497,7 +503,8 @@ def logout(config_path=None, *, local_only=False):
     uses = mode == "machine" and _same(Path(runtime_path).parent / Path(
         read_runtime_json(runtime_path)["machine_config"]).expanduser(), config_path)
     uses = uses or bool(connector_references(config_path)) and mode == "connector"
-    result = {"server": server, "removed": [], "runtime": None, "startup": None}
+    result = {"server": server, "removed": [], "runtime": None, "startup": None,
+              "connectors_left": connector_references(config_path)}
     if uses:
         try:
             result["runtime"] = request_stop(runtime_path)["status"]

@@ -30,6 +30,13 @@ class Registry(dict):
         self.pop(name, None)
 
 
+@pytest.fixture(autouse=True)
+def offline_inbox_check(request, monkeypatch):
+    """No test reaches a real server: the F11 inbox check answers "cannot tell" unless a test opts in."""
+    if "fake_api" not in request.fixturenames:
+        monkeypatch.setattr(Migration, "inbox_role", lambda self, config: None)
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -118,19 +125,31 @@ def test_managed_install_keeps_everything_and_disables_run_value_last(home, tmp_
     text = (cfg_dir(home) / "runtime-state" / "migration.log").read_text()
     events = [json.loads(line) for line in text.splitlines()]
     assert [e["original"] for e in events if e["event"] == "old_run_value_disabled"] == [original]
-    assert events[-1]["event"] == "old_run_value_disabled"  # after new_runtime_ready (15.8 H6)
-    assert events[-2]["event"] == "new_runtime_ready"
+    names = [e["event"] for e in events]
+    # A converted token: the Run value moves to the app at the end of step 3 (review 1a F1).
+    assert names.index("token_protected") < names.index("old_run_value_disabled") < names.index("new_runtime_ready")
     assert TOKEN not in text and "token_dpapi" not in text
     assert winapp.read_settings(app) == {"agent_config": str(agent), "runtime_config": str(runtime)}
     assert managed.joinpath("current.json").exists()  # old files are left in place
     assert "pip" in result["notice"]
 
 
-def test_run_value_untouched_when_new_runtime_is_not_ready(home, tmp_path, windows, app):
+def test_conversion_then_not_ready_leaves_the_run_value_on_the_stub(home, tmp_path, windows, app):
+    """Review 1a F1: the old Run value cannot read a converted token, so logon must start the app."""
+    managed, agent, runtime, registry = managed_install(home, tmp_path)
+    result = Migration(registry=registry, app_root=app, managed_root=managed).run(started(ok=False))
+    assert result["status"] == "runtime_not_ready" and result["converted"] == [str(agent)]
+    assert registry == {"RainCLI": winapp.run_value(app)}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="no conversion off Windows")
+def test_nothing_converted_and_not_ready_leaves_the_run_value(home, tmp_path, app):
     managed, agent, runtime, registry = managed_install(home, tmp_path)
     original = dict(registry)
     result = Migration(registry=registry, app_root=app, managed_root=managed).run(started(ok=False))
-    assert result["status"] == "runtime_not_ready" and registry == original
+    assert result["status"] == "runtime_not_ready" and result["converted"] == [] and registry == original
+    result = Migration(registry=registry, app_root=app, managed_root=managed).run(started())
+    assert result["run_value"] == "app" and registry == {"RainCLI": winapp.run_value(app)}
 
 
 def test_running_managed_runtime_is_stopped_through_its_stop_request(home, tmp_path, windows, app):
@@ -151,7 +170,8 @@ def test_running_managed_runtime_is_stopped_through_its_stop_request(home, tmp_p
     result = Migration(registry=registry, app_root=app, managed_root=managed, sleep=sleep).run(
         started(), notify=messages.append)
     assert json.loads((state / "stop.json").read_text()) == {"instance": "old-instance"}
-    assert result["status"] == "migrated" and sleeps and CLOSE_OLD in messages
+    # The only holder is the runtime its Run value restarts: stopped without the "old window" notice.
+    assert result["status"] == "migrated" and sleeps and CLOSE_OLD not in messages
 
 
 # -- shape 2: an old pip/venv client with a connector config ---------------------------------------
@@ -171,7 +191,7 @@ def test_pip_client_with_connector_omitting_agent_config(home, tmp_path, windows
     assert load_runtime(cfg_dir(home) / "runtime.json")[2][0][2].token.reveal() == TOKEN
     log = (Path(runtime["state_dir"]) / "migration.log").read_text()
     assert "prompt_timeout_clamped" in log and TOKEN not in log
-    assert result["run_value"] == "none" and registry == {}
+    assert result["run_value"] == "app" and registry == {"RainCLI": winapp.run_value(app)}
 
 
 def test_pip_client_at_raincli_config_with_several_credentials(home, tmp_path, windows, app):
@@ -269,3 +289,138 @@ def test_linux_keeps_plain_tokens(home, tmp_path):
     result = Migration(registry=Registry(), managed_root=home / "none").run()
     assert result["status"] == "migrated" and result["converted"] == [] and "notice" not in result
     assert json.loads(agent.read_text())["token"] == TOKEN
+
+
+# -- review 1a ---------------------------------------------------------------------------------------
+
+def test_relative_queue_state_dir_resolves_from_the_connector_config(home, tmp_path, windows, app):
+    """F2: an old pip connector with "state_dir": "queue" holding its lock is waited for."""
+    agent = write_agent(cfg_dir(home) / "agent.json")
+    connector = write_connector(cfg_dir(home) / "connector.json", state_dir="queue")
+    queue = cfg_dir(home) / "queue"
+    queue.mkdir()
+    before = snapshot(agent, connector)
+    held = Queue(str(queue))
+    held.acquire_run_lock()
+    messages, ticks = [], []
+    try:
+        migration = Migration(registry=Registry(), app_root=app, managed_root=home / "none",
+                              sleep=lambda s: ticks.append(s))
+        assert any(Path(d) == queue for d in migration.held(migration.detect()))
+        result = migration.run(started(), notify=messages.append, cancelled=lambda: len(ticks) >= 2)
+    finally:
+        held.release_run_lock()
+    assert result["status"] == "cancelled" and messages == [CLOSE_OLD]
+    assert snapshot(agent, connector) == before
+
+
+def test_old_runtime_is_not_stopped_while_a_window_holds_a_queue(home, tmp_path, windows, app):
+    """F4: a foreign holder means nothing is stopped; the wait ends with nothing changed."""
+    managed, agent, runtime, registry = managed_install(home, tmp_path)
+    state = cfg_dir(home) / "runtime-state"
+    state.mkdir()
+    atomic_write_json(state / "status.json", {"status": "running", "instance": "old", "updated_at": 1})
+    window = tmp_path / "window-queue"
+    window.mkdir()
+    write_connector(cfg_dir(home) / "window.json", agent_config="agent.json", herdr_agent="other",
+                    state_dir=str(window))
+    locks = [Queue(str(state)), Queue(str(window))]
+    for lock in locks:
+        lock.acquire_run_lock()
+    clock = {"t": 0}
+
+    def sleep(seconds):
+        clock["t"] += seconds
+    try:
+        result = Migration(registry=registry, app_root=app, managed_root=managed, sleep=sleep,
+                           clock=lambda: clock["t"]).run(started(), wait=5)
+    finally:
+        for lock in locks:
+            lock.release_run_lock()
+    assert result["status"] == "waiting"
+    assert not (state / "stop.json").exists()  # never asked to stop
+    assert "token" in json.loads(agent.read_text())
+
+
+def test_a_stopped_old_runtime_is_restarted_on_timeout(home, tmp_path, windows, app):
+    """F4: stopped (the only holder), then it never released: started again from its Run value."""
+    managed, agent, runtime, registry = managed_install(home, tmp_path)
+    state = cfg_dir(home) / "runtime-state"
+    state.mkdir()
+    atomic_write_json(state / "status.json", {"status": "running", "instance": "old", "updated_at": 1})
+    held = Queue(str(state))
+    held.acquire_run_lock()
+    spawned, clock = [], {"t": 0}
+
+    def sleep(seconds):
+        clock["t"] += seconds
+    try:
+        result = Migration(registry=registry, app_root=app, managed_root=managed, sleep=sleep,
+                           clock=lambda: clock["t"], spawn=spawned.append).run(started(), wait=5)
+    finally:
+        held.release_run_lock()
+    assert result["status"] == "waiting" and (state / "stop.json").exists()
+    assert spawned == [["C:\\Python\\pythonw.exe", f"{managed}/launch.py", "runtime", "run", "--config", str(runtime)]]
+    assert registry["RainCLI"].startswith('"C:')  # untouched
+
+
+def test_the_apps_own_runtime_is_paused_without_a_notice(home, tmp_path, windows, app):
+    """F10, F5: the tray's runtime already runs the config being migrated."""
+    agent = write_agent(cfg_dir(home) / "agent.json")
+    runtime = cfg_dir(home) / "runtime.json"
+    runtime.write_text(json.dumps({"machine_config": "agent.json", "state_dir": "runtime-state"}))
+    state = cfg_dir(home) / "runtime-state"
+    state.mkdir()
+    held = Queue(str(state))
+    held.acquire_run_lock()
+    events, messages = [], []
+
+    def stop_own():
+        events.append("paused")
+        held.release_run_lock()
+    result = Migration(registry=Registry(), app_root=app, managed_root=home / "none", own_runtime=str(runtime),
+                       stop_own=stop_own, restart_own=lambda: events.append("resumed"),
+                       sleep=lambda s: None).run(started(), notify=messages.append)
+    assert result["status"] == "migrated" and events == ["paused"] and CLOSE_OLD not in messages
+
+
+def test_pending_skips_a_finished_migration(home, tmp_path, windows, app):
+    write_agent(cfg_dir(home) / "agent.json")
+    migration = Migration(registry=Registry(), app_root=app, managed_root=home / "none")
+    assert migration.pending()
+    migration.run(started())
+    assert not Migration(registry=Registry(app and {"RainCLI": winapp.run_value(app)}), app_root=app,
+                         managed_root=home / "none").pending()
+    assert not Migration(registry=Registry(), app_root=app, managed_root=tmp_path / "none",
+                         env={"RAINCLI_CONFIG": str(tmp_path / "absent" / "agent.json")}).pending()
+
+
+def test_handle_with_an_inbox_role_asks_for_its_connector_config(home, tmp_path, windows, app):
+    """F11: never silently machine mode for a handle that has delivered through a connector."""
+    agent = write_agent(cfg_dir(home) / "agent.json")
+    before = snapshot(agent)
+    messages = []
+    result = Migration(registry=Registry(), app_root=app, managed_root=home / "none",
+                       inbox=lambda config: True).run(started(), notify=messages.append)
+    assert result["status"] == "connector_config_required" and "--connector-config" in messages[0]
+    assert snapshot(agent) == before and not (cfg_dir(home) / "runtime.json").exists()
+    project = tmp_path / "project"
+    project.mkdir()
+    connector = write_connector(project / "inbox.json", agent_config=str(agent), state_dir="q")
+    result = Migration(registry=Registry(), app_root=app, managed_root=home / "none", inbox=lambda config: True,
+                       connector_configs=[connector]).run(started())
+    assert result["status"] == "migrated" and result["mode"] == "connector"
+    assert json.loads((cfg_dir(home) / "runtime.json").read_text())["connectors"] == [str(connector)]
+
+
+def test_inbox_check_against_the_server(home, tmp_path, fake_api, app):
+    from raincli_agent.config import write_config
+    agent = cfg_dir(home) / "agent.json"
+    write_config(str(agent), fake_api.url, fake_api.alice)
+    migration = Migration(registry=Registry(), app_root=app, managed_root=home / "none")
+    assert migration.inbox_role(str(agent)) is False
+    fake_api.state.directory["alice"] = [{"key": "k" * 16, "name": "inbox", "type": "claude", "status": "idle",
+                                          "role": "inbox", "reachability": "instant", "source": "herdr"}]
+    assert migration.inbox_role(str(agent)) is True
+    write_config(str(agent), "http://127.0.0.1:9", fake_api.alice, force=True)
+    assert migration.inbox_role(str(agent)) is None  # offline: cannot tell

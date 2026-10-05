@@ -78,6 +78,31 @@ def installed_for(config):
     return systemd_quote(resolved) in unit
 
 
+def installed_config():
+    """The runtime config this user's login startup runs (its ``--config``), or None."""
+    if os.name == "nt":
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REGISTRY_KEY) as key:
+                value = winreg.QueryValueEx(key, REGISTRY_VALUE)[0]
+        except (FileNotFoundError, OSError):
+            return None
+        from ..migrate import parse_command_line
+        argv = parse_command_line(value)
+    else:
+        try:
+            unit = (Path.home() / ".config/systemd/user" / NAME).read_text(encoding="utf-8")
+        except OSError:
+            return None
+        line = next((l for l in unit.splitlines() if l.startswith("ExecStart=")), "")
+        import shlex
+        try:
+            argv = [a.replace("%%", "%").replace("$$", "$") for a in shlex.split(line[len("ExecStart="):])]
+        except ValueError:
+            return None
+    return argv[argv.index("--config") + 1] if "--config" in argv[:-1] else None
+
+
 def remove_for(config):
     """Disable login startup only when it runs ``config`` (logout, 15.8 M9)."""
     if not installed_for(config):
