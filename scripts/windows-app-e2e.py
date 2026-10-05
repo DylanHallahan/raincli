@@ -2,9 +2,10 @@
 
 Runs ONLY on a disposable GitHub-hosted Actions Windows runner (it edits the runner's hosts
 file, LocalMachine Root store, HKCU Run value and user PATH, and installs into its profile). It
-takes two installers built from the same source as 0.4.0 and 0.4.1 by
-packaging/windows/build.py, builds a third, 0.4.2, from a staging copy whose tray exits 1, and
-checks (protocol §15, §15.8, §15.9):
+takes two installers built from the same source as 0.5.0 and 0.5.1 by
+packaging/windows/build.py, builds a third, 0.5.2, from a staging copy whose tray exits 1, and
+checks (protocol §15, §15.8, §15.9). The test versions are 0.5.x: a runtime whose connector has polled
+with routing=1 refuses targets below v0.5.0 (§16.12 C1):
 
 A. A fresh app install, signed in from the CLI:
    1. a silent per-user install with no admin: the layout, install.json, the HKCU Run value and
@@ -12,13 +13,13 @@ A. A fresh app install, signed in from the CLI:
    2. `RainCLI.exe --quit` stops the installer-started app (exit 0, nothing left running), then
       sign-in through the installed CLI's `raincli login`, with the password typed into a ConPTY
       prompt, never argv or the environment; DPAPI credential, machine-mode runtime config;
-   3. launching exactly what the Run value names; presence reports 0.4.0, automatic, current;
-   4. a pushed upgrade to 0.4.1 through the installer-asset path (API asset URL, exact download
+   3. launching exactly what the Run value names; presence reports 0.5.0, automatic, current;
+   4. a pushed upgrade to 0.5.1 through the installer-asset path (API asset URL, exact download
       hosts), /UPDATE changing neither the Run value nor the uninstall key, install.json swapped,
-      the tray relaunched from versions\0.4.1;
-   5. a pushed 0.4.2 whose tray exits 1: the stub's probation rolls back, `rolled_back` is
-      reported and 0.4.1 runs again;
-   6. the downgrade to 0.4.0 refused, then allowed with --allow-downgrade;
+      the tray relaunched from versions\0.5.1;
+   5. a pushed 0.5.2 whose tray exits 1: the stub's probation rolls back, `rolled_back` is
+      reported and 0.5.1 runs again;
+   6. the downgrade to 0.5.0 refused, then allowed with --allow-downgrade;
    7. an uninstall that signs out (/SIGNOUT=yes): the machine is revoked and M10's removals hold.
 B. Migration of an old pip-installed client (0.2.0 from its release archive) running as a
    foreground `raincli connector run` with no runtime.json, no agent_config and a relative
@@ -46,7 +47,7 @@ Release traffic goes to the REAL hostnames (api.github.com, github.com,
 objects.githubusercontent.com, release-assets.githubusercontent.com): a hosts-file entry points
 them at 127.0.0.1:443, where a fake release endpoint serves a certificate from a test root CA
 added to the runner's LocalMachine Root store (§15.8 M11). The shipped client has no override, and
-the 0.4.2 rollback build is patched only in this job's staging copy.
+the 0.5.2 rollback build is patched only in this job's staging copy.
 Every credential is generated here and never printed. See docs/release-testing.md.
 
 With ``--real FROM TO`` (for example ``--real v0.4.0 v0.4.1``) it skips the fake endpoint, the
@@ -87,7 +88,7 @@ Failure, SECRETS, say, wait_for, tail = (release_e2e.Failure, release_e2e.SECRET
 TEAM, EMAIL = "app-e2e", "app-e2e@example.invalid"
 MACHINE, OBSERVER, OLD_MACHINE, MANAGED_MACHINE = "e2e-app-machine", "e2e-observer", "e2e-pip-machine", \
     "e2e-managed-machine"
-OLD, NEW, BROKEN = "0.4.0", "0.4.1", "0.4.2"
+OLD, NEW, BROKEN = "0.5.0", "0.5.1", "0.5.2"  # §16.12 C1: never below v0.5.0
 OLD_PIP, OLD_MANAGED = "v0.2.0", "v0.3.2"
 HOSTS = ("api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
 HOSTS_FILE = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "drivers" / "etc" / "hosts"
@@ -806,7 +807,7 @@ def prepare_managed_install(work):
 
 
 def build_rollback_installer(work):
-    """0.4.2 from a STAGING COPY of the client whose tray exits 1 when started in the background, so
+    """0.5.2 from a STAGING COPY of the client whose tray exits 1 when started in the background, so
     the stub's probation must roll it back. The shipped source is untouched (§15.8 M11)."""
     spec = importlib.util.spec_from_file_location("raincli_build", ROOT / "packaging" / "windows" / "build.py")
     build = importlib.util.module_from_spec(spec)
@@ -1217,7 +1218,9 @@ def run_e2e(args, work, stack):
 def diagnose(work):
     say("===== DIAGNOSTICS (secrets redacted) =====")
     root = app_root()
-    for path in [root / "install.json", root / "installer-record.log", *sorted(root.rglob("*.log")),
+    logs = [p for p in sorted(root.rglob("*.log")) if "webview" not in p.relative_to(root).parts]  # not WebView2's
+    for path in [root / "install.json", root / "installer-record.log", *logs,
+                 *sorted((default_agent_config().parent / "runtime-state").rglob("*.log")),
                  *sorted(work.glob("install-*.log")), *sorted(work.glob("uninstall-*.log")),
                  root / "app-lock" / "quit-blockers.txt", work / "old-connector.log",
                  profile() / ".raincli" / "client" / "runtime.log",
