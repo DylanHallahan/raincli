@@ -506,7 +506,8 @@ def main():
                         kill_tree(managed_process)
         finally:
             updates.fetch = original_fetch
-    print("Runtime smoke passed. Fake relay, unavailable Herdr; no production messages, login restart or GitHub release publication tested.")
+    print("Runtime smoke passed. Fake relay; a pinned real Herdr with a self-reporting fake agent (no real Claude Code "
+          "or Codex pane); no production messages, login restart or GitHub release publication tested.")
 
 
 if __name__ == "__main__":
