@@ -689,3 +689,27 @@ def test_v04_shortcut_is_pointed_at_background_once(tmp_path):
     link.unlink()
     (root / "install.json").write_text(json.dumps({"current": "0.5.0"}))
     assert shortcut.fix_v04_shortcut(root, run=never, appdata=str(appdata)) is None and never.calls == []
+
+
+def test_a_window_that_fails_to_start_leaves_the_tray_running(tmp_path, monkeypatch):
+    """The window is optional: if pywebview or WebView2 can't start, delivery carries on headless."""
+    t = tray.Tray.__new__(tray.Tray)
+    t.root_dir, t.icon, t.stopping, t._started = tmp_path, None, __import__("threading").Event(), \
+        __import__("threading").Event()
+    t.exit_code = 0
+
+    class Broken:
+        def create(self):
+            pass
+
+        def start(self, func):
+            raise RuntimeError("no WebView2 environment")
+    t.window = Broken()
+    ran = []
+    t.started = lambda: (ran.append(type(t.window).__name__), t._started.set())
+    t.menu = lambda: None
+    fake_pystray = types.SimpleNamespace(Icon=lambda *a: types.SimpleNamespace(
+        run_detached=lambda: None, stop=lambda: None, _message_handlers={}))
+    monkeypatch.setattr(tray, "icon_image", lambda state: None)
+    assert t._run(fake_pystray) == 0
+    assert ran == ["NoWindow"] and "running in the tray only" in (tmp_path / "app-lock" / "app.log").read_text()

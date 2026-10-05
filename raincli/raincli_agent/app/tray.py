@@ -134,6 +134,7 @@ class Tray:
                                 browser_open=webbrowser.open, confirm=self.confirm)
         self.calls = queue.Queue()
         self.stopping = threading.Event()
+        self._started = threading.Event()
         self.exit_code = 0
         self.migrating = False
         self.icon = None
@@ -378,18 +379,28 @@ class Tray:
         self.icon = pystray.Icon(TITLE, icon_image("offline"), f"{TITLE}: offline", self.menu())
         hook_toast_click(self.icon, self.toast_clicked)
         self.icon.run_detached()
-        if isinstance(self.window, NoWindow):
+        if not isinstance(self.window, NoWindow):
+            try:
+                self.window.create()
+                self.window.start(self.started)  # blocks on this (the main) thread until the window is destroyed
+            except Exception as exc:  # noqa: BLE001 - the window failed: delivery must go on without it
+                if self.root_dir is not None:
+                    winapp.app_log(self.root_dir, f"the window could not start ({type(exc).__name__}); "
+                                                  "running in the tray only")
+                if self._started.is_set():
+                    self.stopping.wait()
+                else:
+                    self.window = NoWindow(self)
+        if isinstance(self.window, NoWindow) and not self._started.is_set():
             self.started()  # no GUI loop: the supervisor runs here until Quit
-        else:
-            self.window.create()
-            self.window.start(self.started)  # blocks on this (the main) thread until the window is destroyed
         self.stopping.set()
         if self.icon is not None:
             self.icon.stop()
         return self.exit_code
 
     def started(self):
-        """pywebview's GUI loop is running (this is its worker thread)."""
+        """pywebview's GUI loop is running (this is its worker thread), or the tray runs without a window."""
+        self._started.set()
         threading.Thread(target=self.pump, daemon=True).start()
         if self.root_dir is not None:  # §16.15: a v0.4 stub can't take the shortcut's empty arguments
             from .shortcut import fix_v04_shortcut
