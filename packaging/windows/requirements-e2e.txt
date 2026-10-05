@@ -1,3 +1,8 @@
-# The Windows app e2e only (scripts/windows-app-e2e.py): a pseudo console for the login prompt.
-# Installed with: pip install --require-hashes --only-binary :all: -r requirements-e2e.txt (CPython 3.14, win_amd64).
+# The Windows app e2e only (scripts/windows-app-e2e.py): a pseudo console for the login prompt, and
+# Playwright, which drives the app window over CDP (connect_over_cdp; no browser download).
+# Installed with requirements-build.txt (which pins typing_extensions, needed by pyee):
+#   pip install --require-hashes --only-binary :all: -r requirements-build.txt -r requirements-e2e.txt (CPython 3.14, win_amd64).
+greenlet==3.5.6 --hash=sha256:f8f0bd690e1a41294ac87905e8121c81a3761ec2583c768f13467428606c8c7a
+playwright==1.63.0 --hash=sha256:2f9a707a6c6c91157ed77bff2b8caeb04b3c8d46e70d585fc134298cbe4b5cc6
+pyee==13.0.1 --hash=sha256:af2f8fede4171ef667dfded53f96e2ed0d6e6bd7ee3bb46437f77e3b57689228
 pywinpty==3.0.5 --hash=sha256:03bb3c16d691d9242267201830bcd0e64a9b663170e9042bc84b210da9de15ac
