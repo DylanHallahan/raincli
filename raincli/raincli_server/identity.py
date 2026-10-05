@@ -16,8 +16,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from raincli_server import security
-from raincli_server.models import (SCOPES, Agent, AgentCredential, Invitation, Membership, Message, Team, User,
-                                   WebSession)
+from raincli_server.models import (PERSON_SCOPES, SCOPES, Agent, AgentCredential, Invitation, Membership, Message,
+                                   PersonSession, Team, User, WebSession)
 
 INVITE_TTL = timedelta(days=7)
 
@@ -104,6 +104,7 @@ def change_password(session: Session, user_id: uuid.UUID, web_session_id: uuid.U
     user.password_hash = security.hash_password(replacement)
     session.execute(update(WebSession).where(WebSession.user_id == user_id,
                                             WebSession.revoked_at.is_(None)).values(revoked_at=now()))
+    revoke_person_sessions(session, user_id=user_id)  # §16.3, §16.12 C6
     session.flush()
     return user
 
@@ -280,6 +281,7 @@ def rotate_agent_credential(session: Session, agent: Agent, actor: User | None =
         .values(revoked_at=now())
     )
     agent.rotated_at, agent.rotated_by = now(), by
+    revoke_person_sessions(session, machine_id=agent.id)  # §16.12 C6: any rotation of the machine's credential
     return _issue_credential(session, agent, tuple(scopes))
 
 
@@ -293,6 +295,7 @@ def revoke_agent(session: Session, agent: Agent, actor: User | None = None) -> N
         update(AgentCredential).where(AgentCredential.agent_id == agent.id, AgentCredential.revoked_at.is_(None))
         .values(revoked_at=ts)
     )
+    revoke_person_sessions(session, machine_id=agent.id)  # §16.3: revoking or signing out the machine
     session.flush()
 
 
@@ -369,6 +372,89 @@ def _is_live_credential_of(session: Session, agent: Agent, token: str) -> bool:
     return auth is not None and auth.agent.id == agent.id
 
 
+# Person sessions (protocol §16.3, §16.12 C6, C15) --------------------------------------
+
+PERSON_IDLE = timedelta(days=30)
+PERSON_ABSOLUTE = timedelta(days=180)
+
+
+@dataclass(frozen=True)
+class PersonAuth:
+    person_session: PersonSession
+    user: User
+
+    def has_scope(self, scope: str) -> bool:
+        return scope in self.person_session.scopes
+
+
+def person_session_expires_at(ps: PersonSession) -> datetime:
+    return min(ps.last_used_at + PERSON_IDLE, ps.created_at + PERSON_ABSOLUTE)
+
+
+def issue_person_session(session: Session, user: User, machine: Agent) -> str:
+    """A new person session for ``user``, bound to the issuing ``machine``. The raw token is returned once."""
+    if machine.owner_user_id != user.id or machine.revoked_at is not None:
+        raise PermissionDenied("a person session is issued only to the owner of an active machine")
+    token = security.new_token(security.PERSON_TOKEN_PREFIX)
+    session.add(PersonSession(user_id=user.id, machine_agent_id=machine.id, token_hash=security.hash_token(token),
+                              prefix=security.token_prefix(token), scopes=list(PERSON_SCOPES)))
+    session.flush()
+    return token
+
+
+def authenticate_person(session: Session, token: str | None, touch: bool = True) -> PersonAuth | None:
+    """Resolve an ``rps_`` bearer token. None for missing, unknown, revoked, expired or disabled."""
+    if not token or not token.startswith(security.PERSON_TOKEN_PREFIX) or len(token) > 200:
+        return None
+    row = session.execute(
+        select(PersonSession, User).join(User, User.id == PersonSession.user_id)
+        .where(PersonSession.token_hash == security.hash_token(token))
+    ).first()
+    if row is None:
+        return None
+    ps, user = row
+    machine = session.get(Agent, ps.machine_agent_id)
+    if ps.revoked_at is not None or not user.is_active or machine is None or machine.revoked_at is not None:
+        return None
+    ts = now()
+    if ts >= person_session_expires_at(ps):
+        return None
+    if touch and ts - ps.last_used_at > timedelta(seconds=30):
+        ps.last_used_at = ts
+    return PersonAuth(person_session=ps, user=user)
+
+
+def revoke_person_sessions(session: Session, *, session_id: uuid.UUID | None = None,
+                           machine_id: uuid.UUID | None = None, user_id: uuid.UUID | None = None) -> int:
+    """Revoke matching person sessions and every app-mode web session made from them (§16.12 C2, C6)."""
+    if session_id is None and machine_id is None and user_id is None:
+        raise ValueError("revoke_person_sessions needs a filter")
+    stmt = update(PersonSession).where(PersonSession.revoked_at.is_(None))
+    if session_id is not None:
+        stmt = stmt.where(PersonSession.id == session_id)
+    if machine_id is not None:
+        stmt = stmt.where(PersonSession.machine_agent_id == machine_id)
+    if user_id is not None:
+        stmt = stmt.where(PersonSession.user_id == user_id)
+    ids = list(session.scalars(stmt.values(revoked_at=now()).returning(PersonSession.id)))
+    if ids:
+        session.execute(update(WebSession).where(WebSession.person_session_id.in_(ids),
+                                                 WebSession.revoked_at.is_(None)).values(revoked_at=now()))
+    session.flush()
+    return len(ids)
+
+
+def person_sessions_for(session: Session, user: User) -> list[tuple[PersonSession, Agent]]:
+    """The user's live person sessions with their issuing machines, newest first (Signed-in apps)."""
+    rows = session.execute(
+        select(PersonSession, Agent).join(Agent, Agent.id == PersonSession.machine_agent_id)
+        .where(PersonSession.user_id == user.id, PersonSession.revoked_at.is_(None))
+        .order_by(PersonSession.created_at.desc())
+    ).all()
+    ts = now()
+    return [(ps, agent) for ps, agent in rows if agent.revoked_at is None and ts < person_session_expires_at(ps)]
+
+
 # Member removal and user disable (protocol §11.5, §12.5) --------------------------
 
 def _revoke_web_sessions(session: Session, user: User) -> None:
@@ -430,6 +516,7 @@ def set_user_active(session: Session, user: User, active: bool, actor: User | No
     user.is_active = bool(active)
     if not active:
         _revoke_web_sessions(session, user)
+        revoke_person_sessions(session, user_id=user.id)  # §16.12 C6
         _revoke_owned_agents(session, user)
         _revoke_open_invitations(session, user)
     session.flush()

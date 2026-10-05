@@ -1,0 +1,31 @@
+{% extends "base_app.html" %}
+{% block title %}Agents · {{ product_name }}{% endblock %}
+{% block body_class %} no-list{% endblock %}
+{% block main %}
+<header class="rc-main-head"><h2>Agents</h2><p>Machines and their agents in your teams. Messages go only to agents that can receive them.</p></header>
+<div class="rc-scroll">
+  <div class="rc-dir">
+    {% for m in machines %}
+    <section class="rc-card" aria-labelledby="machine-{{ m.agent.id }}">
+      <h3 id="machine-{{ m.agent.id }}">{{ m.agent.handle }} <span class="rc-reach">{{ m.owner.display_name }} · {{ m.team.name }}{% if m.agent.routing == 'inbox-only' %} · inbox only{% endif %}</span></h3>
+      <ul class="rc-agents">
+        <li><span class="rc-agent-name">Inbox</span><span class="rc-reach">the machine's inbox agent</span><a class="rc-btn rc-btn-quiet" href="{{ url('/app/compose') }}?to={{ m.agent.handle|urlencode }}">Message</a></li>
+        {% for a in m.agents %}
+        <li><span class="rc-agent-name">{{ a.name }}</span>
+          <span class="rc-reach">{{ a.type }} · {{ a.status }} · {% if a.deliverable %}{{ a.reachability }}{% else %}can't receive messages ({{ a.reason }}){% endif %}</span>
+          {% if a.deliverable and m.agent.routing != 'inbox-only' %}<a class="rc-btn rc-btn-quiet" href="{{ url('/app/compose') }}?to={{ (m.agent.handle ~ '/' ~ a.name)|urlencode }}">Message</a>{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% else %}
+    <p class="rc-empty">No machines in your teams yet.</p>
+    {% endfor %}
+    {% if people %}
+    <section class="rc-card" aria-labelledby="people-title">
+      <h3 id="people-title">People</h3>
+      <ul class="rc-agents">{% for team, person in people %}<li><span class="rc-agent-name">{{ person.display_name }}</span><span class="rc-reach">{{ person.email }} · {{ team.name }}</span><a class="rc-btn rc-btn-quiet" href="{{ url('/app/compose') }}?to={{ ('@' ~ person.email)|urlencode }}">Message</a></li>{% endfor %}</ul>
+    </section>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

@@ -15,10 +15,13 @@ dependencies = [
   "alembic>=1.13",
   "jinja2>=3.1",
   "python-multipart>=0.0.9",
+  "markdown-it-py>=4.2",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27"]
+# Test-only: the app-mode GUI tests (tests/gui) drive headless Chromium. Never a runtime dependency.
+gui-test = ["playwright==1.63.0"]
 
 [project.scripts]
 raincli = "raincli_agent.cli:main"

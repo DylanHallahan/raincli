@@ -202,32 +202,72 @@ def peek_invitation(db: Session, token: str) -> tuple[Invitation, Team] | None:
 # Conversations ----------------------------------------------------------------
 
 @dataclass
+class Side:
+    """One conversation endpoint as the viewer sees it (§16.6)."""
+
+    endpoint: messaging.Endpoint
+    mine: bool  # the viewer is this person, or owns this machine
+
+    @property
+    def label(self) -> str:
+        return self.endpoint.label()
+
+    @property
+    def display(self) -> str:
+        if self.endpoint.kind == "person":
+            return "You" if self.mine else self.endpoint.user.display_name
+        return self.endpoint.label()
+
+    @property
+    def active(self) -> bool:
+        if self.endpoint.kind == "person":
+            return self.endpoint.user.is_active
+        return self.endpoint.agent.revoked_at is None
+
+
+@dataclass
 class ConversationRow:
     conversation: Conversation
     team: Team
-    mine: list[Agent]
-    peer: Agent
+    me: Side
+    peer: Side
     last: Message | None = None
     last_sender: str = ""
     count: int = 0
     unacked: int = 0
 
+
+@dataclass
+class MessageLine:
+    message: Message
+    sender: Side
+    recipient: Side
+    outgoing: bool
+    hold_reason: str | None = None
+
     @property
-    def me(self) -> Agent:
-        return self.mine[0]
+    def shown_state(self) -> str:
+        return "held" if self.message.delivery_state == "stored" and self.hold_reason else self.message.delivery_state
 
 
 @dataclass
 class ConversationView:
     conversation: Conversation
     team: Team
-    mine: list[Agent]
-    peer: Agent
-    agents: dict[uuid.UUID, Agent] = field(default_factory=dict)
-    messages: list[Message] = field(default_factory=list)
+    me: Side
+    peer: Side
+    lines: list[MessageLine] = field(default_factory=list)
     events: dict[uuid.UUID, list[DeliveryEvent]] = field(default_factory=dict)
     attachments: dict[uuid.UUID, list] = field(default_factory=dict)
     truncated: bool = False
+
+    @property
+    def messages(self) -> list[Message]:
+        return [line.message for line in self.lines]
+
+    @property
+    def can_send(self) -> bool:
+        return self.peer.active and not (self.peer.endpoint.kind == "person" and self.peer.mine)
 
 
 def _owned_ids(db: Session, user: User, team_ids: list[uuid.UUID]) -> dict[uuid.UUID, Agent]:
@@ -237,16 +277,44 @@ def _owned_ids(db: Session, user: User, team_ids: list[uuid.UUID]) -> dict[uuid.
     return {a.id: a for a in agents}
 
 
-def list_conversations(
-    db: Session, user: User, team_ids: list[uuid.UUID], only_agent: uuid.UUID | None = None,
-) -> list[ConversationRow]:
-    owned = _owned_ids(db, user, team_ids)
-    ids = [only_agent] if only_agent in owned else list(owned)
-    if not ids:
+def _side(db: Session, conv: Conversation, which: str, user: User, owned: dict) -> Side:
+    ep = messaging.conversation_endpoint(db, conv, which)
+    mine = (ep.kind == "person" and ep.user.id == user.id) or (ep.kind != "person" and ep.agent.id in owned)
+    return Side(ep, mine)
+
+
+def _sides(db: Session, conv: Conversation, user: User, owned: dict) -> tuple[Side, Side]:
+    """(me, peer): the viewer's own person endpoint first, else an owned machine side."""
+    a, b = _side(db, conv, "a", user, owned), _side(db, conv, "b", user, owned)
+    for me, peer in ((a, b), (b, a)):
+        if me.mine and me.endpoint.kind == "person":
+            return me, peer
+    return (a, b) if a.mine else (b, a)
+
+
+def _visible(user: User, owned: dict):
+    ids = list(owned)
+    clauses = [Conversation.a_user_id == user.id, Conversation.b_user_id == user.id]
+    if ids:
+        clauses += [Conversation.agent_a_id.in_(ids), Conversation.agent_b_id.in_(ids)]
+    return or_(*clauses)
+
+
+def _mine_as_recipient(user: User, owned: dict):
+    clauses = [Message.recipient_user_id == user.id]
+    if owned:
+        clauses.append(Message.recipient_agent_id.in_(list(owned)))
+    return or_(*clauses)
+
+
+def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID]) -> list[ConversationRow]:
+    """The person's conversations and those of machines they own, newest first (§16.6)."""
+    if not team_ids:
         return []
+    owned = _owned_ids(db, user, team_ids)
     convs = db.execute(
         select(Conversation, Team).join(Team, Team.id == Conversation.team_id)
-        .where(Conversation.team_id.in_(team_ids), or_(Conversation.agent_a_id.in_(ids), Conversation.agent_b_id.in_(ids)))
+        .where(Conversation.team_id.in_(team_ids), _visible(user, owned))
     ).all()
     if not convs:
         return []
@@ -254,57 +322,56 @@ def list_conversations(
     stats = {
         cid: (last_seq, count, unacked)
         for cid, last_seq, count, unacked in db.execute(
-            select(
-                Message.conversation_id, func.max(Message.seq), func.count(),
-                func.count().filter(and_(Message.acked_at.is_(None), Message.recipient_agent_id.in_(list(owned)))),
-            ).where(Message.conversation_id.in_(conv_ids)).group_by(Message.conversation_id)
+            select(Message.conversation_id, func.max(Message.seq), func.count(),
+                   func.count().filter(and_(Message.acked_at.is_(None), _mine_as_recipient(user, owned))))
+            .where(Message.conversation_id.in_(conv_ids)).group_by(Message.conversation_id)
         )
     }
-    last_seqs = [s[0] for s in stats.values() if s[0] is not None]
-    lasts = {m.conversation_id: m for m in db.scalars(select(Message).where(Message.seq.in_(last_seqs)))} if last_seqs else {}
-    agent_ids = {c.agent_a_id for c, _ in convs} | {c.agent_b_id for c, _ in convs}
-    agents = {a.id: a for a in db.scalars(select(Agent).where(Agent.id.in_(agent_ids)))}
+    last_seqs = [st[0] for st in stats.values() if st[0] is not None]
+    lasts = {m.conversation_id: m for m in db.scalars(select(Message).where(Message.seq.in_(last_seqs)))} \
+        if last_seqs else {}
     rows = []
     for conv, team in convs:
-        a, b = agents[conv.agent_a_id], agents[conv.agent_b_id]
-        mine = [x for x in (a, b) if x.id in owned]
-        peer = b if a.id in owned else a
-        if len(mine) == 2 and only_agent == b.id:
-            mine, peer = [b, a], a
+        me, peer = _sides(db, conv, user, owned)
         last_seq, count, unacked = stats.get(conv.id, (None, 0, 0))
         last = lasts.get(conv.id)
-        rows.append(ConversationRow(
-            conversation=conv, team=team, mine=mine, peer=peer, last=last,
-            last_sender=agents[last.sender_agent_id].handle if last else "", count=count, unacked=unacked,
-        ))
+        sender = Side(messaging.sender_endpoint(db, last), False).display if last else ""
+        if last is not None and last.sender_user_id == user.id:
+            sender = "You"
+        rows.append(ConversationRow(conversation=conv, team=team, me=me, peer=peer, last=last,
+                                    last_sender=sender, count=count, unacked=unacked))
     rows.sort(key=lambda r: (r.last.seq if r.last else 0), reverse=True)
     return rows
 
 
-def get_conversation(
-    db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object,
-) -> ConversationView | None:
+def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object
+                     ) -> ConversationView | None:
     cid = parse_uuid(conversation_id)
     if cid is None or not team_ids:
         return None
+    owned = _owned_ids(db, user, team_ids)
     row = db.execute(
         select(Conversation, Team).join(Team, Team.id == Conversation.team_id)
-        .where(Conversation.id == cid, Conversation.team_id.in_(team_ids))
+        .where(Conversation.id == cid, Conversation.team_id.in_(team_ids), _visible(user, owned))
     ).first()
     if row is None:
         return None
     conv, team = row
-    a, b = db.get(Agent, conv.agent_a_id), db.get(Agent, conv.agent_b_id)
-    mine = [x for x in (a, b) if x.owner_user_id == user.id]
-    if not mine:
-        return None
-    peer = b if a.owner_user_id == user.id else a
+    me, peer = _sides(db, conv, user, owned)
     newest = list(db.scalars(
         select(Message).where(Message.conversation_id == conv.id)
-        .order_by(Message.seq.desc()).limit(CONVERSATION_PAGE + 1)
+        .order_by(Message.seq.desc()).limit(CONVERSATION_PAGE + 1).execution_options(populate_existing=True)
     ))
     truncated = len(newest) > CONVERSATION_PAGE
     messages = list(reversed(newest[:CONVERSATION_PAGE]))
+    lines = []
+    for m in messages:
+        sender = Side(messaging.sender_endpoint(db, m), False)
+        sender.mine = (m.sender_user_id == user.id) or (m.sender_agent_id in owned)
+        recipient = Side(messaging.recipient_endpoint(db, m), False)
+        recipient.mine = (m.recipient_user_id == user.id) or (m.recipient_agent_id in owned)
+        lines.append(MessageLine(m, sender, recipient, outgoing=sender.mine and not recipient.mine,
+                                 hold_reason=messaging.hold_reason(db, m)))
     events: dict[uuid.UUID, list[DeliveryEvent]] = {}
     if messages:
         for ev in db.scalars(
@@ -312,11 +379,19 @@ def get_conversation(
             .order_by(DeliveryEvent.id)
         ):
             events.setdefault(ev.message_id, []).append(ev)
-    return ConversationView(
-        conversation=conv, team=team, mine=mine, peer=peer, agents={a.id: a, b.id: b},
-        messages=messages, events=events, attachments=attachment_meta(db, [m.id for m in messages]),
-        truncated=truncated,
-    )
+    return ConversationView(conversation=conv, team=team, me=me, peer=peer, lines=lines, events=events,
+                            attachments=attachment_meta(db, [m.id for m in messages]), truncated=truncated)
+
+
+def ack_viewed(db: Session, user: User, view: ConversationView) -> int:
+    """Viewing a thread acks the messages addressed to the person (§16.4)."""
+    acked = 0
+    for line in view.lines:
+        m = line.message
+        if m.recipient_user_id == user.id and m.acked_at is None:
+            messaging.person_ack(db, user, m.id)
+            acked += 1
+    return acked
 
 
 @dataclass(frozen=True)
@@ -342,35 +417,94 @@ def attachment_meta(db: Session, message_ids: list[uuid.UUID]) -> dict[uuid.UUID
     return out
 
 
-def attachment_for_user(
-    db: Session, user: User, team_ids: list[uuid.UUID], message_id: object, attachment_id: object,
-) -> Attachment | None:
-    """The attachment if it belongs to that message and the viewer owns one of its participants."""
+def attachment_for_user(db: Session, user: User, team_ids: list[uuid.UUID], message_id: object,
+                        attachment_id: object) -> Attachment | None:
+    """The attachment if the person may see its message (§16.6)."""
     mid = parse_uuid(message_id)
     if mid is None or not team_ids:
         return None
-    msg = db.scalar(select(Message).where(Message.id == mid, Message.team_id.in_(team_ids)))
-    if msg is None:
-        return None
-    agent = db.scalar(select(Agent).where(
-        Agent.id.in_([msg.sender_agent_id, msg.recipient_agent_id]), Agent.owner_user_id == user.id,
-    ).limit(1))
-    if agent is None:
-        return None
     try:
-        return messaging.get_attachment_for_agent(db, agent, mid, attachment_id)
+        return messaging.get_attachment_for_person(db, user, mid, attachment_id)
     except messaging.MessagingError:
         return None
 
 
 def pending_for_user(db: Session, user: User, team_ids: list[uuid.UUID]) -> int:
-    owned = list(_owned_ids(db, user, team_ids))
-    if not owned:
+    """Unacknowledged messages to the person or to machines they own."""
+    if not team_ids:
         return 0
+    owned = _owned_ids(db, user, team_ids)
     return db.scalar(
         select(func.count()).select_from(Message)
-        .where(Message.recipient_agent_id.in_(owned), Message.acked_at.is_(None))
+        .where(Message.team_id.in_(team_ids), _mine_as_recipient(user, owned), Message.acked_at.is_(None))
     ) or 0
+
+
+# The directory and the recipient picker (§16.2, §16.9) ------------------------------------
+
+@dataclass
+class PickerAgent:
+    name: str
+    type: str
+    status: str
+    role: str | None
+    reachability: str | None
+    ambiguous: bool
+    source: str
+
+    @property
+    def deliverable(self) -> bool:
+        return self.reachability in ("instant", "next-turn") and not self.ambiguous
+
+    @property
+    def reason(self) -> str:
+        return "ambiguous" if self.ambiguous else "listed only"
+
+
+@dataclass
+class PickerMachine:
+    agent: Agent
+    team: Team
+    owner: User
+    agents: list[PickerAgent]
+
+
+def team_directory(db: Session, user: User, team_ids: list[uuid.UUID]
+                   ) -> tuple[list[PickerMachine], list[tuple[Team, User]]]:
+    """Active machines with their live agents, and the people of the viewer's teams."""
+    from raincli_server.presence import live_machine_agents
+
+    if not team_ids:
+        return [], []
+    rows = db.execute(
+        select(Agent, Team, User).join(Team, Team.id == Agent.team_id).join(User, User.id == Agent.owner_user_id)
+        .where(Agent.team_id.in_(team_ids), Agent.revoked_at.is_(None)).order_by(Team.name, Agent.handle)
+    ).all()
+    live = live_machine_agents(db, [a.id for a, _, _ in rows])
+    machines = [PickerMachine(agent, team, owner, [
+        PickerAgent(m.name, m.type, m.status, m.role, m.reachability, m.ambiguous, m.source)
+        for m in live.get(agent.id, [])]) for agent, team, owner in rows]
+    people = list(db.execute(
+        select(Team, User).join(Membership, Membership.team_id == Team.id).join(User, User.id == Membership.user_id)
+        .where(Team.id.in_(team_ids), User.is_active.is_(True), User.id != user.id)
+        .order_by(Team.name, User.display_name)
+    ).all())
+    return machines, people
+
+
+def endpoint_from_text(text: str) -> object:
+    """The §16.1 CLI form to the API form: ``handle``, ``handle/agent`` or ``@email``."""
+    text = text.strip()
+    if text.startswith("@"):
+        return {"person": text[1:]}
+    if "/" in text:
+        handle, name = text.split("/", 1)
+        return {"machine": handle, "agent": name}
+    return {"machine": text}
+
+
+def endpoint_text(endpoint: messaging.Endpoint) -> str:
+    return endpoint.label()
 
 
 # Sending --------------------------------------------------------------------
@@ -385,28 +519,34 @@ class SendError(Exception):
 
 
 _FRIENDLY = {
-    "not_found": "The message you are replying to is not visible to this agent.",
-    "forbidden": "This agent is not allowed to send that message.",
+    "not_found": "The message you are replying to is not visible to you.",
+    "forbidden": "You can't send that message.",
     "id_conflict": "That message id was already used for a different message. Reload and try again.",
     "inbox_full": "The recipient's inbox is full: too many messages are waiting to be acknowledged.",
+    "routing_inbox_only": "That machine accepts messages only at its inbox. Send to the machine instead.",
+    "unknown_agent": "That agent isn't known on that machine. Check the name, or send to the machine.",
+    "rate_limited": "You're sending too fast. Wait a moment and try again.",
 }
 
 
-def send_as(
-    db: Session, sender: Agent, *, id: uuid.UUID, to_handle: str, body: str,
+def send_as_person(
+    db: Session, user: User, team: Team, *, id: uuid.UUID, to: object, body: str,  # noqa: A002
     conversation_id: uuid.UUID | None, in_reply_to: uuid.UUID | None, max_pending: int,
     attachments: list[tuple[str, bytes]] | None = None,
 ) -> tuple[Message, bool]:
-    """Send as ``sender`` (already checked to belong to the viewer) through ``messaging.send_message``.
-
-    ``attachments`` is a list of (filename, exact bytes) as in protocol §8. Raises SendError.
-    """
+    """Send as the person (§16.9) through ``messaging.send_as_person``. Raises SendError."""
     try:
-        return messaging.send_message(
-            db, sender, id=id, to_handle=to_handle, body=body, conversation_id=conversation_id,
+        return messaging.send_as_person(
+            db, user, team.id, id=id, to=to, body=body, conversation_id=conversation_id,
             in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments or None,
         )
     except messaging.MessagingError as exc:
+        if exc.code == "not_deliverable":
+            reason = (exc.extra or {}).get("reason", "listed_only")
+            text = ("That agent can't receive messages: its name is used by more than one agent on that machine."
+                    if reason == "ambiguous" else
+                    "That agent can't receive messages: it is listed but has no name RainCLI can deliver to.")
+            raise SendError(exc.code, text) from exc
         # "invalid" messages from the service name the problem (and attachment) without leaking data.
         text = _FRIENDLY.get(exc.code) or (exc.message[:1].upper() + exc.message[1:300] + ".")
         raise SendError(exc.code, text) from exc

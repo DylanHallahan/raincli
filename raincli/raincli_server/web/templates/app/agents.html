@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% from "_state.html" import conn_badge, presence_badge, session_badge, reach_badge, client_badges, time %}
-{% block title %}Machines · RainCLI{% endblock %}
+{% block title %}Machines · {{ product_name }}{% endblock %}
 {% block main %}
 <section class="wrap page-pad">
   <div class="page-head">
@@ -70,7 +70,7 @@
         <td data-label="Agent">{{ s.name }}</td>
         <td data-label="Type">{{ s.type }}</td>
         <td data-label="Status">{{ session_badge(s.status) }}</td>
-        <td data-label="Reachability">{% if s.role == 'inbox' %}{{ reach_badge(s.reachability) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td data-label="Reachability">{{ reach_badge(s.reachability, s.ambiguous) }}</td>
         <td data-label="Machine client">{{ client_badges(row.client) }}</td>
       </tr>
       {% endfor %}

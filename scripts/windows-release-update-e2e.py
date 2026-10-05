@@ -200,13 +200,10 @@ class Server:
             venv = self.work / "venv"
             subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True, timeout=180)
             self._python = str(venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
-            lock = (PKG / "requirements.lock").read_text().splitlines()
-            if os.name == "nt":  # uvloop has no Windows build; uvicorn then uses asyncio
-                lock = [line for line in lock if not line.lower().startswith("uvloop")]
-            requirements = self.work / "requirements.txt"
-            requirements.write_text("\n".join(lock) + "\n")
+            # The lock is hash-pinned; uvloop and tzdata carry platform markers, so it installs as is.
             subprocess.run([self._python, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
-                            "-r", str(requirements)], check=True, timeout=900)
+                            "--require-hashes", "--only-binary=:all:", "-r", str(PKG / "requirements.lock")],
+                           check=True, timeout=900)
         say(f"server python: {self._python}")
 
     def configure(self, database_url):

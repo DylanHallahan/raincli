@@ -35,7 +35,7 @@ if [[ ! -f "$dest/.complete" ]]; then
   python3 -m venv "$dest/venv"
   pip=("$dest/venv/bin/python" -m pip --disable-pip-version-check --no-cache-dir --no-input)
   "${pip[@]}" install --quiet --progress-bar off --upgrade pip
-  "${pip[@]}" install --quiet --progress-bar off --only-binary=:all: -r "$dest/raincli/requirements.lock"
+  "${pip[@]}" install --quiet --progress-bar off --require-hashes --only-binary=:all: -r "$dest/raincli/requirements.lock"
   "${pip[@]}" install --quiet --progress-bar off --no-deps "$dest/raincli"
   rm -rf -- "$dest/raincli/build"
   chown -R root:root "$dest"

@@ -24,9 +24,20 @@ from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 DELIVERY_STATES = ("stored", "received", "held", "submitted", "submission_uncertain", "rejected", "replied")
+MESSAGE_KINDS = ("message", "escalation")
+ROUTING_POLICIES = ("all", "inbox-only")
+PERSON_SCOPES = ("person:read", "person:send")
 EVENT_STATES = ("held", "submitted", "submission_uncertain", "rejected")
 SCOPES = ("messages:read", "messages:send", "messages:ack")
 ROLES = ("owner", "member")
+
+
+# §16.12 C7: the sender endpoint (machine, from_agent or null; or a person) differs from the recipient's.
+NOT_SELF_ENDPOINT = (
+    "NOT (sender_agent_id IS NOT DISTINCT FROM recipient_agent_id"
+    " AND sender_user_id IS NOT DISTINCT FROM recipient_user_id"
+    " AND sender_agent_name IS NOT DISTINCT FROM recipient_agent_name)"
+)
 
 
 class Base(DeclarativeBase):
@@ -93,6 +104,42 @@ class WebSession(Base):
     created_at: Mapped[datetime] = _created()
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # App-mode sessions come from a person-session handoff (§16.10, §16.12 C2/C3): they carry only the
+    # person scopes, end no later than the person session and are revoked with it.
+    app_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    person_session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("person_sessions.id", ondelete="CASCADE"))
+    __table_args__ = (
+        CheckConstraint("app_mode = (person_session_id IS NOT NULL)", name="ck_web_sessions_app_mode"),
+    )
+
+
+class PersonSession(Base):
+    """A person session ``rps_…`` issued to a signed-in machine (protocol §16.3). Stored hashed."""
+
+    __tablename__ = "person_sessions"
+    id: Mapped[uuid.UUID] = _uuid()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    machine_agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    prefix: Mapped[str] = mapped_column(String(12), nullable=False)
+    scopes: Mapped[list[str]] = mapped_column(ARRAY(String(32)), nullable=False)
+    created_at: Mapped[datetime] = _created()
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_person_sessions_user", "user_id"), Index("ix_person_sessions_machine", "machine_agent_id"))
+
+
+class HandoffCode(Base):
+    """A single-use, 60-second code that turns a person session into an app-mode web session (§16.10)."""
+
+    __tablename__ = "handoff_codes"
+    id: Mapped[uuid.UUID] = _uuid()
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    person_session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("person_sessions.id", ondelete="CASCADE"),
+                                                         nullable=False)
+    created_at: Mapped[datetime] = _created()
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Agent(Base):
@@ -111,10 +158,14 @@ class Agent(Base):
     rotated_by: Mapped[str | None] = mapped_column(String(16))
     # When the machine first published an inbox role (§15.8 H2); backfilled conservatively by 0005.
     inbox_role_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Phase 2 (§16.5, §16.2): the machine's routing policy, and when it first polled with routing=1.
+    routing: Mapped[str] = mapped_column(String(16), nullable=False, default="all", server_default="all")
+    routing_capable_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         UniqueConstraint("team_id", "handle", name="uq_agents_team_handle"),
         CheckConstraint("rotated_by IS NULL OR rotated_by IN ('app-login','website','operator')",
                         name="ck_agents_rotated_by"),
+        CheckConstraint("routing IN ('all','inbox-only')", name="ck_agents_routing"),
     )
 
 
@@ -149,15 +200,34 @@ class MachineAgent(Base):
     reachability: Mapped[str | None] = mapped_column(String(16))
     source: Mapped[str] = mapped_column(String(8), nullable=False)
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # §16.2: a name that occurs twice among the machine's deliverable agents is reported listed + ambiguous.
+    ambiguous: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     __table_args__ = (
         CheckConstraint("status IN ('working','idle','blocked','offline','unknown')", name="ck_machine_agents_status"),
         CheckConstraint("type IN ('claude','codex','gemini','cursor','opencode','other')", name="ck_machine_agents_type"),
         CheckConstraint("role IS NULL OR role = 'inbox'", name="ck_machine_agents_role"),
-        CheckConstraint("reachability IS NULL OR (role = 'inbox' AND reachability IN ('instant','next-turn'))",
+        # Every agent may carry reachability (§16.2); the inbox must be deliverable, as before.
+        CheckConstraint("reachability IS NULL OR reachability IN ('instant','next-turn','listed')",
                         name="ck_machine_agents_reachability"),
         CheckConstraint("source IN ('herdr','hook','scan')", name="ck_machine_agents_source"),
-        CheckConstraint("(role IS NULL) = (reachability IS NULL)", name="ck_machine_agents_inbox_reachability"),
+        CheckConstraint("role IS NULL OR (reachability IS NOT NULL AND reachability IN ('instant','next-turn'))",
+                        name="ck_machine_agents_inbox_reachability"),
+        CheckConstraint("NOT ambiguous OR reachability IS NOT DISTINCT FROM 'listed'", name="ck_machine_agents_ambiguous"),
         Index("uq_machine_agents_one_inbox", "agent_id", unique=True, postgresql_where="role = 'inbox'"),
+    )
+
+
+class KnownAgent(Base):
+    """A deliverable agent name a machine reported within the retention window (§16.2, §16.12 C12)."""
+
+    __tablename__ = "known_agents"
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    reachability: Mapped[str] = mapped_column(String(16), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        CheckConstraint("reachability IN ('instant','next-turn')", name="ck_known_agents_reachability"),
     )
 
 
@@ -185,20 +255,34 @@ class AgentCredential(Base):
 
 
 class Conversation(Base):
+    """A thread between exactly two endpoints (§16.6). Each side is a machine, an agent on a machine
+    (machine plus name) or a person. ``a_key``/``b_key`` are canonical endpoint keys (``m:<id>``,
+    ``a:<id>:<name>``, ``p:<id>``) with ``a_key < b_key``, so a pair has one default thread."""
+
     __tablename__ = "conversations"
     id: Mapped[uuid.UUID] = _uuid()
     team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
-    # Direct thread: agent_a_id < agent_b_id (canonical order) so a pair has one default thread.
-    agent_a_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id"), nullable=False)
-    agent_b_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id"), nullable=False)
+    agent_a_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id"))
+    agent_b_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id"))
+    a_agent_name: Mapped[str | None] = mapped_column(String(64))
+    b_agent_name: Mapped[str | None] = mapped_column(String(64))
+    a_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    b_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    a_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    b_key: Mapped[str] = mapped_column(String(160), nullable=False)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = _created()
     __table_args__ = (
-        CheckConstraint("agent_a_id < agent_b_id", name="ck_conversations_order"),
-        Index(
-            "uq_conversations_default_pair", "agent_a_id", "agent_b_id",
-            unique=True, postgresql_where="is_default",
-        ),
+        CheckConstraint("a_key < b_key", name="ck_conversations_order"),
+        CheckConstraint("(agent_a_id IS NULL) <> (a_user_id IS NULL)", name="ck_conversations_a_one"),
+        CheckConstraint("(agent_b_id IS NULL) <> (b_user_id IS NULL)", name="ck_conversations_b_one"),
+        CheckConstraint("a_agent_name IS NULL OR agent_a_id IS NOT NULL", name="ck_conversations_a_name"),
+        CheckConstraint("b_agent_name IS NULL OR agent_b_id IS NOT NULL", name="ck_conversations_b_name"),
+        Index("uq_conversations_default_pair", "a_key", "b_key", unique=True, postgresql_where="is_default"),
+        Index("ix_conversations_agent_a", "agent_a_id"),
+        Index("ix_conversations_agent_b", "agent_b_id"),
+        Index("ix_conversations_user_a", "a_user_id"),
+        Index("ix_conversations_user_b", "b_user_id"),
     )
 
 
@@ -209,8 +293,14 @@ class Message(Base):
     team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
     conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversations.id"), nullable=False)
     in_reply_to: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("messages.id"))
-    sender_agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id"), nullable=False)
-    recipient_agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id"), nullable=False)
+    # Endpoints (§16.1): a machine (agent id), an agent on a machine (agent id plus name) or a person.
+    sender_agent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id"))
+    sender_agent_name: Mapped[str | None] = mapped_column(String(64))  # from_agent, as stated by the machine
+    sender_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    recipient_agent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id"))
+    recipient_agent_name: Mapped[str | None] = mapped_column(String(64))
+    recipient_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="message", server_default="message")
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = _created()
     acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -219,10 +309,18 @@ class Message(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     __table_args__ = (
-        CheckConstraint("sender_agent_id <> recipient_agent_id", name="ck_messages_not_self"),
+        CheckConstraint(NOT_SELF_ENDPOINT, name="ck_messages_not_self_endpoint"),
+        CheckConstraint("(sender_agent_id IS NULL) <> (sender_user_id IS NULL)", name="ck_messages_one_sender"),
+        CheckConstraint("(recipient_agent_id IS NULL) <> (recipient_user_id IS NULL)", name="ck_messages_one_recipient"),
+        CheckConstraint("sender_agent_name IS NULL OR sender_agent_id IS NOT NULL", name="ck_messages_sender_name"),
+        CheckConstraint("recipient_agent_name IS NULL OR recipient_agent_id IS NOT NULL",
+                        name="ck_messages_recipient_name"),
+        CheckConstraint("kind IN ('message','escalation')", name="ck_messages_kind"),
         CheckConstraint("char_length(body) BETWEEN 1 AND 16000", name="ck_messages_body_len"),
         Index("ix_messages_recipient_seq", "recipient_agent_id", "seq"),
         Index("ix_messages_recipient_pending", "recipient_agent_id", postgresql_where="acked_at IS NULL"),
+        Index("ix_messages_recipient_user_seq", "recipient_user_id", "seq"),
+        Index("ix_messages_sender_user", "sender_user_id"),
         Index("ix_messages_conversation_seq", "conversation_id", "seq"),
     )
 

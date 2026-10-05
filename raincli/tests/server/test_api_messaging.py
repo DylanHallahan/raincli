@@ -262,7 +262,7 @@ def test_me_and_agents(client, world):
     agents = client.get("/api/v1/agents", headers=auth(world["tokens"]["alice"])).json()["agents"]
     assert agents == [{"handle": "alice-agent", "display_name": "alice-agent", "active": True,
                        "presence": {"status": "unknown", "seen_at": None, "expires_at": None},
-                       "machine": None, "agents": []},
+                       "machine": None, "routing": "all", "agents": []},
                       {"handle": "bob-agent", "display_name": "bob-agent", "active": True,
                        "presence": {"status": "unknown", "seen_at": None, "expires_at": None},
-                       "machine": None, "agents": []}]
+                       "machine": None, "routing": "all", "agents": []}]

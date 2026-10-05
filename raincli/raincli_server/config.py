@@ -19,6 +19,9 @@ class Settings:
     cookie_secure: bool = True
     max_pending: int = 1000
     rate_limit_per_min: int = 120
+    # Branding (protocol §16.9): one product name and one logo (a file in web/static).
+    product_name: str = "RainCLI"
+    product_logo: str = "favicon.svg"
 
     def __repr__(self) -> str:  # never show secrets or DB passwords
         return f"Settings(public_url={self.public_url!r}, root_path={self.root_path!r})"
@@ -45,4 +48,21 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         cookie_secure=env.get("RAINCLI_COOKIE_SECURE", "1") not in ("0", "false", "no"),
         max_pending=int(env.get("RAINCLI_MAX_PENDING", "1000")),
         rate_limit_per_min=int(env.get("RAINCLI_RATE_LIMIT_PER_MIN", "120")),
+        product_name=_product_name(env.get("RAINCLI_PRODUCT_NAME", "RainCLI")),
+        product_logo=_product_logo(env.get("RAINCLI_PRODUCT_LOGO", "favicon.svg")),
     )
+
+
+def _product_name(value: str) -> str:
+    value = value.strip()
+    if not 1 <= len(value) <= 40 or any(ord(ch) < 0x20 for ch in value):
+        raise ConfigError("RAINCLI_PRODUCT_NAME must be 1-40 printable characters")
+    return value
+
+
+def _product_logo(value: str) -> str:
+    import re
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(svg|png)", value):
+        raise ConfigError("RAINCLI_PRODUCT_LOGO must be a .svg or .png file name in web/static")
+    return value

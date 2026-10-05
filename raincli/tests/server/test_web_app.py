@@ -431,7 +431,6 @@ def test_cross_team_ids_are_404(client, world, session):
     csrf = app_csrf(client)
     assert client.get(f"/app/conversations/{msg.conversation_id}").status_code == 404
     assert client.get("/app/teams/acme").status_code == 404
-    assert client.get(f"/app?agent={world['agents']['alice'].id}").status_code == 404
     for aid in (world["agents"]["alice"].id, world["agents"]["bob"].id):
         assert client.post(f"/app/agents/{aid}/rotate", data={"csrf_token": csrf}).status_code == 404
         assert client.post(f"/app/agents/{aid}/revoke", data={"csrf_token": csrf}).status_code == 404
@@ -477,56 +476,62 @@ def test_inbox_and_conversation_show_delivery_state(client, world, session):
     assert "Acme · 1 message" in conv.text and "Team Acme" not in conv.text
 
 
-def test_compose_as_own_agent_and_reply(client, world, session):
+def test_compose_as_the_person_and_reply(client, world, session):
+    """§16.9: the website sends as the person; there is no "send as one of your agents" choice."""
     login(client)
     page = client.get("/app/compose")
+    assert 'name="from_agent"' not in page.text and "Sent as <strong>you (Alice)</strong>" in page.text
     mid = str(uuid.uuid4())
-    data = {"csrf_token": csrf_of(page.text), "message_id": mid,
-            "from_agent": str(world["agents"]["alice"].id), "to": "bob-agent", "body": "Hi Bob\r\nline two"}
+    data = {"csrf_token": csrf_of(page.text), "message_id": mid, "to": "bob-agent", "body": "Hi Bob\r\nline two"}
     r = client.post("/app/conversations/new/send", data=data, follow_redirects=False)
     assert r.status_code == 303 and "notice=sent" in r.headers["location"]
     stored = session.get(Message, uuid.UUID(mid))
-    assert stored.sender_agent_id == world["agents"]["alice"].id and stored.body == "Hi Bob\nline two"
+    assert stored.sender_user_id == world["users"]["alice"].id and stored.sender_agent_id is None
+    assert stored.recipient_agent_id == world["agents"]["bob"].id and stored.body == "Hi Bob\nline two"
     assert stored.delivery_state == "stored"
-    # Resubmitting the same form is idempotent.
-    again = client.post("/app/conversations/new/send", data=data, follow_redirects=False)
+    # Resubmitting the same form is idempotent; a stray from_agent field is ignored.
+    again = client.post("/app/conversations/new/send", data={**data, "from_agent": str(world["agents"]["bob"].id)},
+                        follow_redirects=False)
     assert "notice=duplicate" in again.headers["location"]
     assert session.scalar(select(func.count()).select_from(Message)) == 1
 
-    # Bob replies from the conversation page; the parent becomes "replied".
+    # Bob sees it as a message to his machine and replies as himself; the reply goes to Alice.
     from fastapi.testclient import TestClient
 
     with TestClient(client.app) as bob:
         login(bob, email="bob@example.test")
         conv = bob.get(f"/app/conversations/{stored.conversation_id}?reply_to={mid}")
-        assert "Reply to alice-agent" in conv.text
+        assert "Reply to @alice@example.test" in conv.text
         r = bob.post(f"/app/conversations/{stored.conversation_id}/send", data={
-            "csrf_token": csrf_of(conv.text), "message_id": str(uuid.uuid4()),
-            "from_agent": str(world["agents"]["bob"].id), "to": "alice-agent", "body": "On it",
-            "in_reply_to": mid,
-        }, follow_redirects=False)
+            "csrf_token": csrf_of(conv.text), "message_id": str(uuid.uuid4()), "body": "On it",
+            "in_reply_to": mid}, follow_redirects=False)
         assert r.status_code == 303
     session.expire_all()
     assert session.get(Message, uuid.UUID(mid)).delivery_state == "replied"
-    assert "Replied" in client.get(f"/app/conversations/{stored.conversation_id}").text
+    reply = session.scalar(select(Message).where(Message.in_reply_to == uuid.UUID(mid)))
+    assert reply.sender_user_id == world["users"]["bob"].id and reply.recipient_user_id == world["users"]["alice"].id
+    # Alice reads the reply; viewing it acks it.
+    page = client.get(f"/app/conversations/{reply.conversation_id}").text
+    assert "On it" in page
+    session.expire_all()
+    assert session.get(Message, reply.id).acked_at is not None
 
 
-def test_compose_as_another_users_agent_is_rejected(client, world, session):
+def test_compose_endpoints_and_cross_team_recipients(client, world, session):
     login(client)
     csrf = csrf_of(client.get("/app/compose").text)
-    for foreign in (world["agents"]["bob"], world["agents"]["eve"]):  # same team, other team
+    sent = {}
+    for to in ("bob-agent", "@bob@example.test"):
         r = client.post("/app/conversations/new/send", data={
-            "csrf_token": csrf, "message_id": str(uuid.uuid4()), "from_agent": str(foreign.id),
-            "to": "alice-agent", "body": "spoofed",
-        })
-        assert r.status_code == 404
-    # Cross-team recipients are rejected without revealing whether they exist.
-    r = client.post("/app/conversations/new/send", data={
-        "csrf_token": csrf, "message_id": str(uuid.uuid4()), "from_agent": str(world["agents"]["alice"].id),
-        "to": "eve-agent", "body": "hi",
-    })
-    assert r.status_code == 400
-    assert session.scalar(select(func.count()).select_from(Message)) == 0
+            "csrf_token": csrf, "message_id": str(uuid.uuid4()), "to": to, "body": "hi"}, follow_redirects=False)
+        assert r.status_code == 303, to
+        sent[to] = r
+    # Cross-team and unknown recipients are rejected without revealing whether they exist.
+    for to in ("eve-agent", "@eve@example.test", "nobody", "@nobody@example.test", "bob-agent/ghost"):
+        r = client.post("/app/conversations/new/send", data={
+            "csrf_token": csrf, "message_id": str(uuid.uuid4()), "to": to, "body": "hi"})
+        assert r.status_code == 400, to
+    assert session.scalar(select(func.count()).select_from(Message)) == 2
 
 
 def test_compose_capacity_and_invalid_body(client, world, session, settings):
@@ -985,7 +990,8 @@ def test_every_web_html_redirect_and_error_response_is_no_store(client, world, s
 def test_hashed_static_urls_return_immutable(client):
     html = client.get("/").text
     urls = re.findall(r'(?:href|src)="(/static/[^"?]+\?v=[0-9a-f]{12})"', html)
-    assert {u.split("?")[0] for u in urls} == {"/static/app.css", "/static/app.js", "/static/favicon.svg"}
+    assert {u.split("?")[0] for u in urls} == {"/static/app.css", "/static/app.js", "/static/favicon.svg",
+                                               "/static/tokens.css"}
     for url in urls:
         r = client.get(url)
         assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=31536000, immutable"
@@ -1052,7 +1058,9 @@ def test_machines_page_lists_agents_with_inbox_first_and_no_keys(client, world, 
     assert len(rows) == 3
     # The inbox badge comes first, on the inbox row only, with its reachability.
     assert 'class="badge role-inbox"' in rows[0] and "team-inbox" in rows[0] and ">Next turn<" in rows[0]
-    assert "role-inbox" not in rows[1] + rows[2] and "reach-" not in rows[1] + rows[2]
+    assert "role-inbox" not in rows[1] + rows[2]
+    # §16.2: every agent shows its reachability; v0.4 reports leave non-inbox agents listed.
+    assert ">Listed<" in rows[1] and ">Listed<" in rows[2] and "reach-instant" not in rows[1] + rows[2]
     assert ">aider<" in rows[1] and ">Unknown<" in rows[1] and ">notes<" in rows[2] and ">Working<" in rows[2]
     # The machine's version and update state appear on each agent.
     assert all("v0.3.1" in r and ">Rolled back<" in r for r in rows)

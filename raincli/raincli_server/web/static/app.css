@@ -415,6 +415,7 @@ pre.code {
 .machine-empty { margin: 0 0 var(--s-3); }
 .role-inbox { background: var(--accent-soft); color: var(--accent-ink); }
 .session-working, .update-updating, .reach-instant { background: var(--info-bg); color: var(--info); }
+.reach-listed { background: var(--neutral-bg); color: var(--neutral); }
 .session-idle, .update-current { background: var(--ok-bg); color: var(--ok); }
 .session-blocked, .update-rolled_back, .reach-next-turn { background: var(--warn-bg); color: var(--warn); }
 .update-failed { background: var(--danger-bg); color: var(--danger); }
@@ -626,3 +627,18 @@ pre.code {
 .setup-advanced[open] > summary { margin-bottom: var(--s-5); }
 .setup-advanced .copy-row { margin: var(--s-3) 0 var(--s-5); }
 .agent-explainer { padding: var(--s-4) 0 var(--s-5); margin-bottom: var(--s-5); border-bottom: 1px solid var(--border); max-width: 80ch; }
+
+/* Rendered Markdown message bodies (protocol §16.9). Raw HTML is never rendered. */
+.md { overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md blockquote, .md pre { margin: 0 0 var(--s-3); }
+.md ul, .md ol { padding-left: 1.4em; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: var(--s-4) 0 var(--s-2); font-size: 1.05rem; line-height: 1.3; }
+.md code { font-family: var(--mono); font-size: .9em; background: var(--surface-2); border-radius: 4px; padding: 0 .25em; }
+.md pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--s-3) var(--s-4);
+  white-space: pre-wrap; overflow-wrap: anywhere; }
+.md pre code { background: none; padding: 0; }
+.md blockquote { border-left: 2px solid var(--border); padding-left: var(--s-3); color: var(--text-2); }
+.md a { overflow-wrap: anywhere; }
+.md hr { border: 0; border-top: 1px solid var(--border); margin: var(--s-4) 0; }

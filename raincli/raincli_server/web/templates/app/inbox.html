@@ -1,36 +1,21 @@
 {% extends "base.html" %}
 {% from "_state.html" import state_badge, time %}
-{% block title %}Inbox · RainCLI{% endblock %}
+{% block title %}Inbox · {{ product_name }}{% endblock %}
 {% block main %}
 <section class="wrap page-pad">
   <div class="page-head">
     <div>
       <h1>Inbox</h1>
-      <p class="muted">Conversations of the agents you own.{% if pending %} <strong>{{ pending }}</strong> message{{ '' if pending == 1 else 's' }} not yet acknowledged by your agents.{% endif %}</p>
+      <p class="muted">Your conversations, and those of the machines you own.{% if pending %} <strong>{{ pending }}</strong> message{{ '' if pending == 1 else 's' }} not yet read or acknowledged.{% endif %}</p>
     </div>
-    {% if agents|selectattr('active')|list %}<a class="btn" href="{{ url('/app/compose') }}">New message</a>{% endif %}
+    <a class="btn" href="{{ url('/app/compose') }}">New message</a>
   </div>
 
-  {% if agents|length > 1 %}
-  <nav class="filters" aria-label="Filter by agent">
-    <a href="{{ url('/app') }}" {% if not selected %}aria-current="true"{% endif %}>All agents</a>
-    {% for row in agents %}
-    <a href="{{ url('/app') }}?agent={{ row.agent.id }}" {% if selected == row.agent.id %}aria-current="true"{% endif %}>{{ row.agent.handle }}</a>
-    {% endfor %}
-  </nav>
-  {% endif %}
-
-  {% if not agents %}
-  <div class="card empty">
-    <h2>No agents yet</h2>
-    <p class="muted">Add a machine to get its credential, then install the RainCLI runtime on it. Its conversations will appear here.</p>
-    <p class="actions"><a class="btn" href="{{ url('/app/agents') }}#add-machine">Add a machine</a></p>
-  </div>
-  {% elif not conversations %}
+  {% if not conversations %}
   <div class="card empty">
     <h2>No conversations yet</h2>
-    <p class="muted">When one of your agents sends or receives a message, the conversation shows up here with its delivery state.</p>
-    {% if agents|selectattr('active')|list %}<p class="actions"><a class="btn" href="{{ url('/app/compose') }}">Send a message</a></p>{% endif %}
+    <p class="muted">Message a teammate, one of their agents or a machine. Messages to you and your machines show up here with their delivery state.</p>
+    <p class="actions"><a class="btn" href="{{ url('/app/compose') }}">Send a message</a>{% if not machines_owned %} <a class="btn btn-quiet" href="{{ url('/app/agents') }}#set-up">Set up a machine</a>{% endif %}</p>
   </div>
   {% else %}
   <ul class="conv-list">
@@ -38,9 +23,9 @@
     <li>
       <a class="conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}">
         <div class="conv-top">
-          <span class="conv-peers"><span class="handle">{{ row.me.handle }}</span> <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> <span class="handle">{{ row.peer.handle }}</span></span>
+          <span class="conv-peers"><span class="handle">{{ row.me.display }}</span> <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> <span class="handle">{{ row.peer.display }}</span></span>
           <span class="conv-team">{{ row.team.slug }}</span>
-          {% if row.unacked %}<span class="badge badge-count" title="Messages to your agent not yet acknowledged">{{ row.unacked }} new</span>{% endif %}
+          {% if row.unacked %}<span class="badge badge-count" title="Messages to you or your machines not yet read or acknowledged">{{ row.unacked }} new</span>{% endif %}
           <span class="conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span>
         </div>
         {% if row.last %}

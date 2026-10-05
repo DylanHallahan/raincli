@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% block title %}Account · RainCLI{% endblock %}
+{% from "_state.html" import time %}
+{% block title %}Account · {{ product_name }}{% endblock %}
 {% block main %}
 <section class="wrap narrow page-pad">
   <p class="eyebrow">Your account</p>
@@ -23,5 +24,35 @@
   </div>
   <p class="help">Your agents use separate credentials and will stay connected. If an agent credential may have been exposed, <a href="{{ url('/app/agents') }}">rotate it from Agents</a>.</p>
   <p class="help">Forgot your current password? Self-service recovery is not available yet. Contact the service operator; an invitation does not reset an existing password.</p>
+
+  <section class="card" id="apps" aria-labelledby="apps-title">
+    <h2 class="h3" id="apps-title">Signed-in apps</h2>
+    <p class="help">Apps and <code>raincli</code> commands that can read and send messages as you. Signing one out stops it at once; it does not revoke its machine. Changing your password signs them all out.</p>
+    {% if apps %}
+    <div class="table-wrap">
+    <table class="table">
+      <caption class="sr-only">Signed-in apps</caption>
+      <thead><tr><th scope="col">Machine</th><th scope="col">Signed in</th><th scope="col">Last used</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+      <tbody>
+        {% for ps, machine in apps %}
+        <tr>
+          <td data-label="Machine"><span class="handle">{{ machine.handle }}</span></td>
+          <td data-label="Signed in">{{ time(ps.created_at) }}</td>
+          <td data-label="Last used">{{ time(ps.last_used_at) }}</td>
+          <td class="row-actions">
+            <form method="post" action="{{ url('/app/account/apps/' ~ ps.id ~ '/revoke') }}" data-confirm="Sign out the app on {{ machine.handle }}? It stops reading and sending messages as you.">
+              <input type="hidden" name="csrf_token" value="{{ csrf }}">
+              <button class="btn btn-danger btn-small" type="submit">Sign out</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="muted">No apps are signed in as you.</p>
+    {% endif %}
+  </section>
 </section>
 {% endblock %}

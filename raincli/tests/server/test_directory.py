@@ -45,8 +45,8 @@ def test_report_is_stored_team_scoped_and_read_without_keys(client, world):
     # The inbox comes first, then by name; keys are never returned.
     assert [a["name"] for a in seen["agents"]] == ["raincli-inbox", "gemini", "notes"]
     assert seen["agents"][0] == {"name": "raincli-inbox", "type": "claude", "status": "idle", "role": "inbox",
-                                 "reachability": "instant", "source": "herdr"}
-    assert all(set(a) == {"name", "type", "status", "role", "reachability", "source"} for a in seen["agents"])
+                                 "reachability": "instant", "source": "herdr", "ambiguous": False}
+    assert all(set(a) == {"name", "type", "status", "role", "reachability", "source", "ambiguous"} for a in seen["agents"])
     assert "a" * 32 not in client.get("/api/v1/agents", headers=auth(world["tokens"]["bob"])).text
     # Bob has never reported: no machine block and no agents.
     bob = entry(client, world["tokens"]["alice"], "bob-agent")
@@ -98,7 +98,9 @@ def test_rejected_report_changes_nothing(client, world, session):
     [agent(role="main")],
     [agent(role="inbox")],                                         # the inbox needs a reachability
     [agent(role="inbox", reachability="soon")],
-    [agent(reachability="instant")],                               # reachability only on the inbox
+    [agent(reachability="soon")],                                  # §16.2: instant, next-turn or listed
+    [agent(reachability="instant", ambiguous=True)],               # ambiguous names are listed
+    [agent(reachability="listed", ambiguous="yes")],
     [INBOX, agent(key="b" * 32, role="inbox", reachability="next-turn")],  # a single inbox
     [agent(source="scan", status="idle")],                         # scan implies unknown
     [agent(cwd="/home/alice")], [agent(pid=1234)], [agent(title="t")],  # unknown keys, including paths

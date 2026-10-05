@@ -1,0 +1,12 @@
+{% extends "base_app.html" %}
+{% block title %}Inbox · {{ product_name }}{% endblock %}
+{% block list %}{% with current_id=None %}{% include "app_mode/_conv_list.html" %}{% endwith %}{% endblock %}
+{% block main %}
+<div class="rc-scroll">
+  <div class="rc-center">
+    <h2>{% if conversations %}Select a conversation{% else %}No conversations yet{% endif %}</h2>
+    <p class="rc-help">Message a teammate, one of their agents or a machine. Messages to you appear here.</p>
+    <p><a class="rc-btn" href="{{ url('/app/compose') }}">New message</a></p>
+  </div>
+</div>
+{% endblock %}

@@ -9,6 +9,8 @@ import secrets
 
 AGENT_TOKEN_PREFIX = "rca_"
 INVITE_TOKEN_PREFIX = "rci_"
+PERSON_TOKEN_PREFIX = "rps_"
+HANDOFF_CODE_PREFIX = "rch_"
 HANDLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,39}$")
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,189}\.[^@\s]{2,}$")

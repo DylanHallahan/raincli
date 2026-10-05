@@ -33,11 +33,15 @@
 {%- set label = labels.get(status, labels['unknown']) -%}
 <span class="badge session-{{ status if status in labels else 'unknown' }}" title="{{ label[1] }}">{{ label[0] }}</span>
 {%- endmacro %}
-{% macro reach_badge(reachability) -%}
-{%- if reachability == 'instant' -%}
+{% macro reach_badge(reachability, ambiguous=false) -%}
+{%- if ambiguous -%}
+<span class="badge reach-listed" title="Two agents on this machine share this name, so neither can be messaged by name.">Listed (name used twice)</span>
+{%- elif reachability == 'instant' -%}
 <span class="badge reach-instant" title="Messages are handed to this Herdr session as soon as it is idle.">Instant</span>
 {%- elif reachability == 'next-turn' -%}
-<span class="badge reach-next-turn" title="Messages wait until this Claude Code session is next used.">Next turn</span>
+<span class="badge reach-next-turn" title="Messages wait until this session is next used.">Next turn</span>
+{%- else -%}
+<span class="badge reach-listed" title="Listed for visibility; it has no name RainCLI can deliver to.">Listed</span>
 {%- endif -%}
 {%- endmacro %}
 {% macro client_badges(client) -%}

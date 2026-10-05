@@ -56,8 +56,8 @@ class WebSecurityMiddleware:
         # One-time purge of any pre-cutover browser cache (see CACHE_VERSION_COOKIE).
         purge = scope.get("method") == "GET" and not _has_cookie(request_headers, CACHE_VERSION_COOKIE, b"1")
         static = path.startswith("/static/")
-        # Invitation URLs carry a secret: never send them as a referrer and never cache them.
-        invite = path.startswith("/invite/")
+        # Invitation and app handoff URLs carry a secret: never send them as a referrer and never cache them.
+        invite = path.startswith("/invite/") or path == "/app/handoff"
         limit = UPLOAD_BODY_LIMIT if UPLOAD_PATH_RE.match(path) else WEB_BODY_LIMIT
 
         if scope.get("method") in ("POST", "PUT", "PATCH", "DELETE"):
