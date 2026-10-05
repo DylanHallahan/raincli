@@ -24,6 +24,7 @@ KEYS = {"agent_config", "herdr_agent", "expect_pane_id", "expect_cwd", "state_di
 INBOX_KEYS = {"hook", "name"}
 INBOX_HOOK_TYPES = ("claude", "codex")
 ESCALATION_KEYS = {"herdr_agent", "expect_pane_id", "expect_cwd", "notify"}
+OWNER_ESCALATION_KEYS = {"to"}
 MODES = ("direct", "inbox")
 TRUST_MODES = ("list", "team")
 
@@ -34,6 +35,7 @@ class EscalationTarget:
     expect_pane_id: str = ""
     expect_cwd: str = ""
     notify: bool = True
+    to_owner: bool = False  # {"to": "owner"} (§16.8): a kind=escalation message to the owner's person endpoint
 
 
 @dataclass(frozen=True)
@@ -224,6 +226,14 @@ def _escalation(data, inbox):
         return None
     if not isinstance(esc, dict):
         raise ConfigError("connector config: escalation must be an object")
+    if "to" in esc:
+        if esc["to"] != "owner":
+            raise ConfigError('connector config: escalation.to must be "owner"')
+        unknown = sorted(set(esc) - OWNER_ESCALATION_KEYS)
+        if unknown:
+            raise ConfigError(f"connector config: an escalation to the owner takes no other keys "
+                              f"({', '.join(unknown)})")
+        return EscalationTarget(herdr_agent="", notify=False, to_owner=True)
     unknown = sorted(set(esc) - ESCALATION_KEYS)
     if unknown:
         raise ConfigError(f"connector config: unknown escalation keys {', '.join(unknown)}")

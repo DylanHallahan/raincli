@@ -147,7 +147,9 @@ class ApiClient:
                 code = payload["error"].get("code")
                 message = payload["error"].get("message") or message
                 code = self._redact(code) if isinstance(code, str) else None
-            raise error_for(status, code, self._redact(message), retry_after=retry_after)
+            error = error_for(status, code, self._redact(message), retry_after=retry_after)
+            error.payload = payload if isinstance(payload, dict) else {}  # team_required teams, C10 reason
+            raise error
         if raw:
             return status, body, resp_headers
         if not isinstance(payload, dict):

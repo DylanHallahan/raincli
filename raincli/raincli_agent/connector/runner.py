@@ -11,6 +11,7 @@ import random
 import re
 import sys
 import time
+import uuid
 
 from .. import attachments as att
 from ..config import standard_config_path
@@ -31,6 +32,13 @@ INBOX_GUIDANCE = (
     "Escalate what you can't handle: raincli connector escalate --config {config} {id} --body-file -]\n")
 
 NOTIFY_TITLE = "RainCLI escalation"
+
+
+def owner_escalation_body(esc):
+    """The text of an escalation sent to the owner (§16.8): which message it is about,
+    then the inbox agent's summary. Never longer than a message body may be."""
+    head = f"Escalation from your inbox agent about message {esc['message_id']} from {esc['sender']}:\n\n"
+    return (head + (esc.get("body") or ""))[:16000]
 
 
 def inbox_guidance(message_id, handle, shareable_context, config_path):
@@ -181,7 +189,11 @@ class Connector:
                     self.queue.save(record)
                     self.log(f"message {record['id']} is submission_uncertain (restart during submission)")
             for esc in self.queue.escalations():
-                if esc["state"] == q.SUBMITTING:
+                if esc["state"] == q.SUBMITTING and esc.get("owner_message_id"):
+                    # A send to the owner is idempotent (its message id is fixed): send it again.
+                    q.Queue.transition(esc, q.ESC_PENDING, detail="connector restarted while sending to the owner")
+                    self.queue.save_escalation(esc)
+                elif esc["state"] == q.SUBMITTING:
                     q.Queue.transition(esc, q.UNCERTAIN,
                                        detail="connector restarted during submission; not resubmitted")
                     self.queue.save_escalation(esc)
@@ -775,6 +787,8 @@ class Connector:
         section 5, at most one submission per iteration, never resubmitted
         automatically."""
         target = self.config.escalation
+        if target is not None and target.to_owner:
+            return self.process_owner_escalations()
         chosen = None
         with self.queue.lock():
             pending = [e for e in self.queue.escalations() if e["state"] == q.ESC_PENDING]
@@ -820,6 +834,67 @@ class Connector:
             self._finish(esc, outcome, target.herdr_agent, q.ESC_PENDING)
             self.queue.save_escalation(esc)
             self.log(f"escalation {esc['id']} is {esc['state']}")
+
+    def _owner_email(self):
+        """The owner's email for ``{"to": "owner"}`` (§16.8): the machine-mode runtime config
+        records it at sign-in; otherwise this machine's person session says who it is."""
+        if getattr(self, "_owner", None):
+            return self._owner
+        from .. import person
+        from ..config import default_config_path
+        self._owner = self.config.owner_email.lstrip("@") or person.owner_email(
+            self.config.agent_config or default_config_path())
+        return self._owner
+
+    def process_owner_escalations(self):
+        """``"escalation": {"to": "owner"}`` (§16.8): each pending escalation becomes one
+        ``kind: escalation`` message from this machine (``from_agent``: the inbox agent) to
+        the owner's person endpoint. Its message id is fixed before the first attempt, so a
+        retry never duplicates it; a refusal holds it with the server's code."""
+        with self.queue.lock():
+            pending = [e for e in self.queue.escalations() if e["state"] == q.ESC_PENDING]
+        if not pending or self.stop_requested():
+            return
+        try:
+            owner = self._owner_email()
+        except Exception as exc:  # noqa: BLE001 - no record and no person session
+            owner, detail = None, str(exc)[:200]
+        else:
+            detail = "sign in again, or add a person session (raincli login --person), to record the owner"
+        for esc in pending:
+            if self.stop_requested():
+                return
+            with self.queue.lock():
+                esc = self.queue.load_escalation(esc["id"])
+                if esc is None or esc["state"] != q.ESC_PENDING:
+                    continue
+                if not owner:
+                    self._hold_escalation(esc, "owner_unknown", detail)
+                    continue
+                esc.setdefault("owner_message_id", str(uuid.uuid4()))
+                q.Queue.transition(esc, q.SUBMITTING)
+                esc["attempts"] = esc.get("attempts", 0) + 1
+                self.queue.save_escalation(esc)
+            body = owner_escalation_body(esc)
+            inbox_agent = self.config.herdr_agent or (self.config.inbox_hook or ("", ""))[1] or None
+            try:
+                self.api.send({"person": owner}, body, message_id=esc["owner_message_id"], kind="escalation",
+                              from_agent=inbox_agent)
+                outcome = None
+            except ApiError as exc:
+                outcome = exc
+            with self.queue.lock():
+                esc = self.queue.load_escalation(esc["id"])
+                if outcome is None:
+                    q.Queue.transition(esc, q.SUBMITTED, detail="sent to the owner")
+                elif getattr(outcome, "status", None) in (400, 403, 404, 409):
+                    self._hold_escalation(esc, "owner_refused", f"{outcome.code}: {outcome}"[:300])
+                    continue
+                else:  # transport, rate limit or server error: retried with the same id
+                    q.Queue.transition(esc, q.ESC_PENDING, reason="owner_unreachable")
+                    esc["hold_detail"] = str(outcome)[:300]
+                self.queue.save_escalation(esc)
+                self.log(f"escalation {esc['id']} to the owner is {esc['state']}")
 
     NOT_READY_FREE = 3  # agent_not_ready answers before backing off
     NOT_READY_MAX = 600

@@ -533,6 +533,18 @@ def stop_requested(state, instance):
     return isinstance(request, dict) and request.get("instance") == instance
 
 
+def notification_feed(configs):
+    """Machine mode with a person session: long-poll the person inbox into the app's
+    notification queue (§16.10). The feed idles while there is no session."""
+    cfg = configs[0][1] if configs else None
+    if cfg is None or not getattr(cfg, "machine", False) or not cfg.agent_config:
+        return None
+    from .. import person
+    feed = person.NotificationFeed(cfg.agent_config, log=lambda text: print(text, file=sys.stderr, flush=True))
+    feed.start()
+    return feed
+
+
 def run(path, once=False, pushed=None):
     from .pushed import PushedUpdates
     from . import updates
@@ -553,7 +565,7 @@ def run(path, once=False, pushed=None):
             print(notice, file=sys.stderr, flush=True)  # the runtime log or journal keeps it
     stop = threading.Event()
     previous = {}
-    supervisor = None
+    supervisor = feed = None
     instance = uuid.uuid4().hex
 
     def record(status, connectors):
@@ -574,6 +586,7 @@ def run(path, once=False, pushed=None):
         # made during startup targets it rather than a previous run.
         record("starting", [])
         supervisor = Supervisor(path, state, configs, runtime_sha, salt)
+        feed = None if once else notification_feed(configs)
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
             while not stop.is_set():
                 supervisor.refresh(pool)
@@ -605,6 +618,8 @@ def run(path, once=False, pushed=None):
                     if supervisor.changed():
                         break
     finally:
+        if feed is not None:
+            feed.stop.set()
         if stop.is_set() and not once and pushed.managed():
             # Asked to stop (a signal or `runtime stop`): tell the launcher this
             # exit is not a failed first start (review 2, O10).

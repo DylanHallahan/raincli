@@ -377,3 +377,80 @@ def test_herdr_cli_notify_argv(tmp_path):
     HerdrCli(str(script)).notify("RainCLI escalation", "alice: $(id) `x`")
     assert json.loads((tmp_path / "argv.json").read_text()) == [
         "notification", "show", "RainCLI escalation", "--body", "alice: $(id) `x`"]
+
+
+# -- escalation to the owner (§16.8) -------------------------------------------------------------
+
+def owner_record(tmp_path, email="bob@example.test"):
+    """What sign-in records beside the agent config: the owner's email (§16.8)."""
+    (tmp_path / "runtime.json").write_text(json.dumps({"machine_config": "bob-agent.json",
+                                                       "owner_email": email}))
+
+
+def owner_setup(fake_api, tmp_path, email="bob@example.test"):
+    fake_api.state.add_user(email, "pw-bob-123456", teams=("alpha",))
+    bob = fake_api.state.tokens[fake_api.bob]
+    fake_api.state.owners[bob] = email
+    owner_record(tmp_path, email)
+
+
+def test_escalation_to_owner_is_one_idempotent_person_message(fake_api, connector_env, inbox, tmp_path):
+    owner_setup(fake_api, tmp_path)
+    path = inbox(escalation={"to": "owner"})
+    msg, conn = _delivered(fake_api, connector_env, path)
+    esc, _ = ops.escalate(conn.queue, conn.config, msg["id"], "Alice needs a decision on the deploy.")
+    conn.run_once()
+    conn.run_once()
+    [sent] = fake_api.state.person_inbox["bob@example.test"]
+    assert sent["kind"] == "escalation" and sent["from_agent"] == "bob-claude"
+    assert sent["body"] == (f"Escalation from your inbox agent about message {msg['id']} from alice:\n\n"
+                            "Alice needs a decision on the deploy.")
+    record = esc_records(connector_env)[0]
+    assert record["state"] == "submitted" and record["owner_message_id"] == sent["id"]
+    assert main_prompts(connector_env) == [] and connector_env.herdr.notifications == []
+
+
+def test_escalation_to_owner_retries_with_the_same_id(fake_api, connector_env, inbox, tmp_path):
+    owner_setup(fake_api, tmp_path)
+    path = inbox(escalation={"to": "owner"})
+    msg, conn = _delivered(fake_api, connector_env, path)
+    ops.escalate(conn.queue, conn.config, msg["id"], "help")
+    fake_api.state.fail("POST", r"^/api/v1/messages$", (503, "unavailable", {}), times=10)
+    conn.run_once()
+    record = esc_records(connector_env)[0]
+    assert record["state"] == "pending" and record["hold_reason"] == "owner_unreachable"
+    first_id = record["owner_message_id"]
+    fake_api.state.faults.clear()
+    conn = connector_env.connector(path=path)  # a restart keeps the id
+    conn.run_once()
+    [sent] = fake_api.state.person_inbox["bob@example.test"]
+    assert sent["id"] == first_id and esc_records(connector_env)[0]["state"] == "submitted"
+
+
+def test_escalation_to_owner_without_a_known_owner_is_held(fake_api, connector_env, inbox):
+    path = inbox(escalation={"to": "owner"})
+    msg, conn = _delivered(fake_api, connector_env, path)
+    ops.escalate(conn.queue, conn.config, msg["id"], "help")
+    conn.run_once()
+    record = esc_records(connector_env)[0]
+    assert record["state"] == "pending" and record["hold_reason"] == "owner_unknown"
+    assert "login --person" in record["hold_detail"]
+
+
+def test_escalation_to_someone_else_is_refused_by_the_server(fake_api, connector_env, inbox, tmp_path):
+    owner_setup(fake_api, tmp_path)
+    fake_api.state.add_user("carol@example.test", "pw-carol-123456", teams=("alpha",))
+    owner_record(tmp_path, "carol@example.test")  # not bob's owner (C11)
+    path = inbox(escalation={"to": "owner"})
+    msg, conn = _delivered(fake_api, connector_env, path)
+    ops.escalate(conn.queue, conn.config, msg["id"], "help")
+    conn.run_once()
+    record = esc_records(connector_env)[0]
+    assert record["state"] == "pending" and record["hold_reason"] == "owner_refused"
+
+
+def test_owner_escalation_config_validation(connector_env, inbox):
+    assert load_connector_config(inbox(escalation={"to": "owner"})).escalation.to_owner
+    for bad in ({"to": "boss"}, {"to": "owner", "herdr_agent": "main-claude"}, {"to": "owner", "notify": True}):
+        with pytest.raises(ConfigError):
+            load_connector_config(inbox(escalation=bad))
