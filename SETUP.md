@@ -137,6 +137,12 @@ Once the runtime is running (step 5), messages from teammates are:
 
 The connector never uses the focused pane. If a target is missing or its pins don't match, messages wait. `raincli connector status --config ~/.config/raincli/connector.json` explains why. Fix the mapping yourself rather than letting the agent retarget it.
 
+Optional Herdr keys:
+- `"herdr_session": "<name>"` sends every Herdr call to that named session (`herdr --session <name> …`). Use it when the inbox runs in a session other than Herdr's default, or when the runtime starts at logon without your shell's `HERDR_SESSION`.
+- `"herdr_bin"`: the Herdr executable. An absolute path wins. On Windows the default prefers `%LOCALAPPDATA%\Programs\Herdr\bin\herdr.exe`, the stable alias Herdr's installer keeps current across `herdr update`; otherwise `PATH` is used. It is resolved again each time the connector starts.
+- **On Windows, pin the pane with `expect_pane_id`.** Herdr's live working directory doesn't follow `cd` on native Windows, so an `expect_cwd` pin can hold messages as `target_mismatch`.
+- A message whose prompt would exceed the command-line bound (about 30,000 characters after quoting) is held as `too_large_for_command_line` and never truncated. Ask the sender for a shorter message or an attachment.
+
 **Direct delivery** without an inbox agent is an explicit alternative. Set `"mode": "direct"` and point `herdr_agent` at the session. See `docs/raincli-inbox-agent.md`.
 
 ### 4c. Claude Code inbox (agent, no Herdr)

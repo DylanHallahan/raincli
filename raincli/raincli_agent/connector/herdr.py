@@ -8,11 +8,50 @@ way to address the focused or current pane: every call names its target.
 
 import json
 import os
+from pathlib import Path
+import re
+import shutil
 import subprocess
 import threading
 from dataclasses import dataclass, field, replace
 
 READY_STATUSES = ("idle", "done")
+# A Herdr session name: passed as `--session NAME` on every call. It never starts
+# with "-", so it can't be read as an option.
+SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# Windows limits a command line to 32,767 UTF-16 units. A prompt whose whole
+# command line (as subprocess.list2cmdline quotes it) would exceed this is held,
+# never truncated. The same bound applies on every platform, so behaviour is
+# predictable.
+CMDLINE_CAP = 30_000
+# Herdr's install.ps1 keeps this directory a junction to the active release
+# (`$defaultVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Herdr\bin"`,
+# Set-ManagedJunction; the release holds herdr.exe), so the path survives
+# `herdr update` while the versioned release directory on PATH does not.
+WINDOWS_ALIAS = ("Programs", "Herdr", "bin", "herdr.exe")
+
+
+def resolve_herdr_bin(configured="herdr", env=None, which=shutil.which, windows=None):
+    """The Herdr executable to run. An explicit absolute path wins. On Windows the
+    default name prefers the stable alias %LOCALAPPDATA%\\Programs\\Herdr\\bin\\herdr.exe
+    when it exists; otherwise PATH. Called at each connector start."""
+    env = os.environ if env is None else env
+    windows = os.name == "nt" if windows is None else windows
+    configured = configured or "herdr"
+    expanded = os.path.expanduser(configured)
+    if os.path.isabs(expanded):
+        return expanded
+    if windows and configured.lower() in ("herdr", "herdr.exe") and env.get("LOCALAPPDATA"):
+        alias = Path(env["LOCALAPPDATA"]).joinpath(*WINDOWS_ALIAS)
+        if alias.is_file():
+            return str(alias)
+    return which(configured, path=env.get("PATH")) or configured
+
+
+def command_line_length(argv):
+    """UTF-16 length of ``argv`` as Windows receives it (subprocess.list2cmdline)."""
+    line = subprocess.list2cmdline([str(a) for a in argv])
+    return len(line) + sum(1 for ch in line if ord(ch) > 0xFFFF)
 
 
 @dataclass(frozen=True)
@@ -36,7 +75,7 @@ class HerdrRejected(HerdrError):
 
     def __init__(self, reason, message=""):
         super().__init__(message or reason)
-        self.reason = reason  # hold reason: "blocked" or "offline"
+        self.reason = reason  # hold reason: "blocked", "offline" or "too_large_for_command_line"
 
 
 class HerdrBoundary:
@@ -55,6 +94,10 @@ class HerdrBoundary:
     def list_agents(self):
         """Every live agent as ``{name, kind, status, terminal_id, cwd}``. Raise HerdrError."""
         raise NotImplementedError
+
+    def command_line_fits(self, name, text):
+        """Whether a prompt of ``text`` to ``name`` fits the command-line bound."""
+        return True
 
 
 def _find_agent_dict(obj):
@@ -91,22 +134,40 @@ def _is_not_found(code, message):
 
 
 class HerdrCli(HerdrBoundary):
-    """Real boundary: ``herdr agent get`` and ``herdr agent prompt``."""
+    """Real boundary: ``herdr agent get`` and ``herdr agent prompt``.
 
-    def __init__(self, binary="herdr", timeout=10.0, own_session=False):
-        self.binary = binary
+    Output is decoded as UTF-8 (undecodable bytes replaced), never the ANSI code
+    page. On Windows each call runs without a console window and in its own
+    process group, so a console Ctrl-C never reaches a prompt in flight."""
+
+    def __init__(self, binary="herdr", timeout=10.0, own_session=False, session=None, resolve=True):
+        self.binary = resolve_herdr_bin(binary) if resolve else binary
         self.timeout = timeout
+        if session is not None and not SESSION_RE.fullmatch(session):
+            raise ValueError("invalid herdr session name")
+        self.session = session or None
         # POSIX only: keep a terminal Ctrl-C from reaching a prompt in flight; the
-        # supervised connector finishes it and then stops. Windows is unchanged.
+        # supervised connector finishes it and then stops. Windows uses a new process group.
         self.own_session = own_session and os.name != "nt"
 
+    def argv(self, args):
+        return [self.binary, *(["--session", self.session] if self.session else []), *args]
+
+    def command_line_fits(self, name, text):
+        return command_line_length(self.argv(["agent", "prompt", name, text])) <= CMDLINE_CAP
+
     def _run(self, argv, timeout):
+        flags = 0
+        if os.name == "nt":
+            flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         try:
-            return subprocess.run([self.binary, *argv], capture_output=True, text=True,
-                                  timeout=timeout, shell=False, stdin=subprocess.DEVNULL,
-                                  start_new_session=self.own_session)
+            return subprocess.run(self.argv(argv), capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=timeout, shell=False, stdin=subprocess.DEVNULL,
+                                  start_new_session=self.own_session, creationflags=flags)
         except subprocess.TimeoutExpired:
             raise HerdrTimeout(f"herdr {argv[0]} {argv[1]} timed out after {timeout}s") from None
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise HerdrError(f"herdr {argv[0]} {argv[1]} output could not be read: {type(exc).__name__}") from None
         except OSError as exc:
             raise HerdrError(f"cannot run herdr: {exc.strerror}") from None
 
@@ -149,6 +210,9 @@ class HerdrCli(HerdrBoundary):
         return out
 
     def prompt(self, name, text, timeout):
+        if not self.command_line_fits(name, text):
+            raise HerdrRejected("too_large_for_command_line",
+                                f"the prompt's command line would exceed {CMDLINE_CAP} characters")
         proc = self._run(["agent", "prompt", name, text], timeout)
         if proc.returncode == 0:
             return
@@ -159,6 +223,10 @@ class HerdrCli(HerdrBoundary):
             raise HerdrRejected("blocked", "herdr rejected the prompt: agent_blocked")
         if proc.returncode == 1 and code == NOT_FOUND_CODE:
             raise HerdrRejected("offline", "herdr rejected the prompt: agent_not_found")
+        if proc.returncode == 1 and code == "agent_not_ready":
+            # Herdr 0.9.3 src/app/api/agents.rs: returned before any input is sent, when
+            # the pane's foreground process is not (or no longer) the named agent.
+            raise HerdrRejected("offline", "herdr rejected the prompt: agent_not_ready")
         if proc.returncode == 2 and not proc.stdout:
             # Clap usage error: the command was never executed.
             raise HerdrRejected("offline", "herdr rejected the prompt arguments")
@@ -195,6 +263,10 @@ class FakeHerdr(HerdrBoundary):
     prompts: list = field(default_factory=list)
     notifications: list = field(default_factory=list)
     get_calls: list = field(default_factory=list)
+    max_prompt_chars: int = None  # simulate the command-line bound
+
+    def command_line_fits(self, name, text):
+        return self.max_prompt_chars is None or len(text) <= self.max_prompt_chars
 
     def __post_init__(self):
         self._lock = threading.Lock()

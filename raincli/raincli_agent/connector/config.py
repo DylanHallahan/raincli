@@ -16,7 +16,7 @@ HERDR_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 KEYS = {"agent_config", "herdr_agent", "expect_pane_id", "expect_cwd", "state_dir",
         "trusted_senders", "poll_wait", "recheck_interval", "prompt_timeout",
-        "herdr_bin", "herdr_timeout",
+        "herdr_bin", "herdr_timeout", "herdr_session",
         # protocol section 10 (inbox-agent mode)
         "mode", "trust_mode", "blocked_senders", "shareable_context", "escalation",
         # protocol section 14.4 (next-turn inbox through a Claude Code hook session)
@@ -49,6 +49,7 @@ class ConnectorConfig:
     prompt_timeout: float = 30.0
     herdr_bin: str = "herdr"
     herdr_timeout: float = 10.0
+    herdr_session: str = ""  # "" = Herdr's own choice; else passed as --session on every call
     mode: str = "direct"
     trust_mode: str = "list"
     blocked_senders: tuple = field(default_factory=tuple)
@@ -64,6 +65,17 @@ class ConnectorConfig:
 
 def default_state_dir(handle):
     return os.path.join(os.path.expanduser("~"), ".local", "state", "raincli", "connector", handle)
+
+
+def _herdr_session(data, what="connector config"):
+    from .herdr import SESSION_RE
+    value = data.get("herdr_session", "")
+    if value == "":
+        return ""
+    if not isinstance(value, str) or not SESSION_RE.fullmatch(value):
+        raise ConfigError(f"{what}: herdr_session must be a Herdr session name "
+                          "(letters, digits, '.', '_' or '-', at most 64, not starting with '-')")
+    return value
 
 
 def _number(data, key, default, lo, hi):
@@ -237,5 +249,6 @@ def load_connector_config(path):
         prompt_timeout=float(_number(data, "prompt_timeout", 30, 1, 600)),
         herdr_bin=_string(data, "herdr_bin") or "herdr",
         herdr_timeout=float(_number(data, "herdr_timeout", 10, 1, 120)),
+        herdr_session=_herdr_session(data),
         path=os.path.abspath(path),
     )

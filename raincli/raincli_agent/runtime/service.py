@@ -76,8 +76,12 @@ def _read_runtime(path):
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ConfigError(f"cannot read runtime config: {exc}") from None
-    if not isinstance(data, dict) or set(data) - {"connectors", "machine_config", "state_dir"}:
-        raise ConfigError("runtime config supports only connectors, machine_config and state_dir")
+    if not isinstance(data, dict) or set(data) - {"connectors", "machine_config", "state_dir", "herdr_bin",
+                                                  "herdr_session"}:
+        raise ConfigError("runtime config supports only connectors, machine_config, state_dir, "
+                          "herdr_bin and herdr_session")
+    if ({"herdr_bin", "herdr_session"} & set(data)) and "machine_config" not in data:
+        raise ConfigError("runtime herdr_bin and herdr_session apply to machine mode; connectors set their own")
     def absolute(p):
         return (path.parent / Path(p).expanduser()).resolve()
     entries, machine = data.get("connectors"), data.get("machine_config")
@@ -93,6 +97,20 @@ def _read_runtime(path):
     if not isinstance(state, str) or not state:
         raise ConfigError("runtime state_dir must be a path")
     return path, entries, absolute, machine, absolute(state)
+
+
+def machine_options(runtime_path):
+    """Machine mode's Herdr options from runtime.json: ``{"herdr_bin", "herdr_session"}``."""
+    from ..connector.config import _herdr_session
+    try:
+        data = json.loads(Path(runtime_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"cannot read runtime config: {exc}") from None
+    data = data if isinstance(data, dict) else {}
+    herdr_bin = data.get("herdr_bin", "herdr")
+    if not isinstance(herdr_bin, str) or not herdr_bin:
+        raise ConfigError("runtime herdr_bin must be a path or command name")
+    return {"herdr_bin": herdr_bin, "herdr_session": _herdr_session(data, "runtime config")}
 
 
 def load_machine(machine_path):
@@ -112,6 +130,7 @@ def load_runtime(path):
     machine mode."""
     path, entries, absolute, machine, state = _read_runtime(path)
     if machine is not None:
+        machine_options(path)  # validated with the rest of the runtime config
         return path, state, [load_machine(machine)]
     paths = [str(absolute(p)) for p in entries]
     if len(set(map(os.path.normcase, paths))) != len(paths):
@@ -201,7 +220,7 @@ class Worker:
     def __init__(self, path, cfg, identity, state, binding):
         self.path, self.cfg, self.binding = path, cfg, binding
         self.api = ApiClient.from_config(identity, timeout=5, max_attempts=1)
-        self.herdr = HerdrCli(cfg.herdr_bin, timeout=5)
+        self.herdr = HerdrCli(cfg.herdr_bin, timeout=5, session=cfg.herdr_session or None)
         self.process = None
         self.next_start = 0
         self.failures = 0
@@ -271,6 +290,10 @@ class Worker:
         except OSError:
             pass
         self._new_handshake()
+        # Re-resolve the Herdr executable at each connector start (an update moves it).
+        if isinstance(self.herdr, HerdrCli):
+            from ..connector.herdr import resolve_herdr_bin
+            self.herdr.binary = resolve_herdr_bin(self.cfg.herdr_bin)
         try:
             log = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         except OSError:
@@ -368,10 +391,12 @@ class MachineWorker:
     client block and the directory under the machine credential, and carries the
     reply's update target. Messages to the machine stay stored on the server."""
 
-    def __init__(self, path, identity, state, binding):
+    def __init__(self, path, identity, state, binding, options=None):
         self.path, self.cfg, self.binding, self.state = path, None, binding, state
+        self.options = options or {"herdr_bin": "herdr", "herdr_session": ""}
         self.api = ApiClient.from_config(identity, timeout=5, max_attempts=1)
-        self.herdr = HerdrCli("herdr", timeout=5)
+        self.herdr = HerdrCli(self.options["herdr_bin"], timeout=5,
+                              session=self.options["herdr_session"] or None)
         self.handle = None
         self.retired = False
         self.reply = None
@@ -416,16 +441,18 @@ class MachineWorker:
                 pass
 
 
-def make_worker(path, cfg, identity, state, binding):
+def make_worker(path, cfg, identity, state, binding, options=None):
     if cfg is None:
-        return MachineWorker(path, identity, state, binding)
+        return MachineWorker(path, identity, state, binding, options)
     return Worker(path, cfg, identity, state, binding)
 
 
 class Supervisor:
     def __init__(self, path, state, configs, runtime_sha, salt=None):
         self.path, self.state, self.salt = path, state, salt
-        self.workers = [make_worker(p, cfg, identity, state, binding) for p, cfg, identity, binding in configs]
+        options = machine_options(path) if machine_mode(configs) else None
+        self.workers = [make_worker(p, cfg, identity, state, binding, options)
+                        for p, cfg, identity, binding in configs]
         self.seen = (runtime_sha, tuple(w.binding for w in self.workers))
         self.error = self.reason = None
 
@@ -455,12 +482,13 @@ class Supervisor:
             return
         current = {w.path: w for w in self.workers if not w.retired}
         workers = []
+        options = machine_options(self.path) if machine_mode(configs) else None
         for p, cfg, identity, binding in configs:
             worker = current.pop(p, None)
-            if worker is None or worker.binding != binding:
+            if worker is None or worker.binding != binding or getattr(worker, "options", None) != options:
                 if worker is not None:
                     worker.retire()
-                worker = make_worker(p, cfg, identity, state, binding)
+                worker = make_worker(p, cfg, identity, state, binding, options)
             workers.append(worker)
         list(pool.map(lambda w: w.retire(), current.values()))  # removed from the runtime config
         self.workers, self.error, self.reason = workers, None, None

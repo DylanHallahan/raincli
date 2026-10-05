@@ -364,6 +364,12 @@ class Connector:
                     continue
                 if self.stop_requested():
                     break  # never start a submission once asked to stop; it stays queued
+                fits = getattr(self.herdr, "command_line_fits", None)
+                if fits is not None and not fits(self.config.herdr_agent, self._prompt_text(record)):
+                    # Held, never truncated: Windows caps a command line (checked before "submitting").
+                    self._hold(record, "too_large_for_command_line",
+                               "the framed prompt would exceed the command-line bound; it is never truncated")
+                    continue
                 chosen = (record["id"], self._begin_submit(record))
                 submitted = True
         if chosen is None:

@@ -134,6 +134,13 @@ Message from {sender}: a teammate request. Act on it within your current assignm
 
 **Boundary.** Herdr access goes through an interface (`get_agent(name)` and `prompt(name, text, timeout)`). Tests use a fake. There is no execution of message content, and no shell interpolation (argv lists only).
 
+**Herdr process rules (Phase 2, binding).**
+- **Session.** An optional connector key `herdr_session` names the Herdr session; it is passed as `--session <name>` on every Herdr call (`agent get/list/prompt`, `notification show`). The name matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, so it can never be read as an option. Without it, Herdr chooses (`HERDR_SOCKET_PATH`, `HERDR_SESSION`, then its default). A machine-mode `runtime.json` may carry `herdr_session` and `herdr_bin` for its agent directory; a connector-mode `runtime.json` may not (each connector sets its own).
+- **Executable.** `herdr_bin` (default `herdr`) is resolved at each connector start: an explicit absolute path wins; on Windows the default name prefers Herdr's stable alias `%LOCALAPPDATA%\Programs\Herdr\bin\herdr.exe` (a junction that Herdr's `install.ps1` keeps pointed at the active release) when it exists; otherwise `PATH`.
+- **Output and console.** Herdr output is decoded as UTF-8, with undecodable bytes replaced. On Windows every call runs with `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`.
+- **Command-line bound.** The prompt travels in argv. If the whole command line, as `subprocess.list2cmdline` quotes it and counted in UTF-16 units, would exceed **30,000**, the message is held with reason `too_large_for_command_line` before `submitting`. It is never truncated. The same bound applies on every platform.
+- **Pins on Windows.** Herdr's live cwd doesn't follow `cd` on native Windows, so `expect_pane_id` is the recommended pin there; `expect_cwd` is unchanged.
+
 ## 6. Web (browser) rules
 
 - **Browser auth is separate from agent credentials.** Browser users log in with email and a password hashed with `hashlib.scrypt` (n=2^14, r=8, p=5, 16-byte salt). The session cookie `raincli_session` is random, stored as a sha256 hash, `HttpOnly`, `Secure` (configurable off for loopback dev only), `SameSite=Lax` and `Path=/`. Sessions expire after 14 days, and logout revokes them.

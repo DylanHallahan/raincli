@@ -168,7 +168,20 @@ def headless_login_and_machine_mode(root, server):
     return agent, runtime
 
 
+def herdr_stage(server):
+    """Real Herdr delivery (Phase 2): see scripts/herdr_smoke.py."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import herdr_smoke
+    return herdr_smoke.run_stage(ROOT, server, wait_for, show, kill_tree)
+
+
 def main():
+    if "--herdr-only" in sys.argv[1:]:
+        with FakeApi() as server:
+            herdr_stage(server)
+        return
+    with FakeApi() as server:
+        herdr_stage(server)
     with tempfile.TemporaryDirectory(prefix="raincli-runtime-") as tmp, FakeApi() as server:
         root = Path(tmp)
         identity = root / "agent.json"

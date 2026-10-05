@@ -459,7 +459,8 @@ def cmd_connector_run(args, herdr=None):
     cfg, api, identity, queue = _connector_parts(args, loaded=loaded)
     queue.acquire_run_lock()
     try:
-        herdr = herdr or HerdrCli(cfg.herdr_bin, cfg.herdr_timeout, own_session=bool(ready))
+        herdr = herdr or HerdrCli(cfg.herdr_bin, cfg.herdr_timeout, own_session=bool(ready),
+                                  session=cfg.herdr_session or None)
         # Supervised: the readiness file lives in the runtime state directory,
         # which also holds the hook sessions a next-turn inbox is delivered to.
         connector = Connector(cfg, api, herdr, queue, identity=identity,
