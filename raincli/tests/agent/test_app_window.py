@@ -15,7 +15,7 @@ import pytest
 
 import raincli_agent
 from raincli_agent import login
-from raincli_agent.app import policy, tray, window
+from raincli_agent.app import policy, shortcut, tray, window
 from raincli_agent.app.window import Api, AppWindow
 from raincli_agent.config import Secret
 from raincli_agent.runtime import winapp
@@ -515,9 +515,9 @@ def test_toast_click_hook_wraps_pystray_notify(monkeypatch):
 
 
 def test_open_requests_are_taken_once(tmp_path):
-    assert not winapp.take_open_request(tmp_path)
-    winapp.request_open(tmp_path)
-    assert winapp.take_open_request(tmp_path) and not winapp.take_open_request(tmp_path)
+    assert not winapp.take_show_request(tmp_path)
+    winapp.request_show(tmp_path)
+    assert winapp.take_show_request(tmp_path) and not winapp.take_show_request(tmp_path)
 
 
 def test_stub_without_arguments_asks_for_the_window(tmp_path, monkeypatch):
@@ -525,18 +525,21 @@ def test_stub_without_arguments_asks_for_the_window(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "executable", str(tmp_path / "RainCLI.exe"))
     calls = []
     monkeypatch.setattr(winapp, "stub_main", lambda root, open_window=False: calls.append(open_window) or 0)
-    assert stub.main([]) == 0 and calls == [True] and (tmp_path / "app-lock" / winapp.OPEN).exists()
-    assert stub.main(["--background"]) == 0 and calls == [True, False]
+    assert stub.main([]) == 0 and calls == [True] and (tmp_path / "app-lock" / winapp.SHOW).exists()
+    assert winapp.take_show_request(tmp_path)
+    assert stub.main(["--open"]) == 0 and calls == [True, True] and winapp.take_show_request(tmp_path)
+    assert stub.main(["--background"]) == 0 and calls == [True, True, False]
+    assert not (tmp_path / "app-lock" / winapp.SHOW).exists()
 
 
 def test_a_background_start_discards_a_stale_open_request(tmp_path, monkeypatch):
-    winapp.request_open(tmp_path)
+    winapp.request_show(tmp_path)
     monkeypatch.setattr(winapp.Stub, "run", lambda self: 0)
     assert winapp.stub_main(tmp_path) == 0
-    assert not (tmp_path / "app-lock" / winapp.OPEN).exists()
-    winapp.request_open(tmp_path)
+    assert not (tmp_path / "app-lock" / winapp.SHOW).exists()
+    winapp.request_show(tmp_path)
     assert winapp.stub_main(tmp_path, open_window=True) == 0
-    assert (tmp_path / "app-lock" / winapp.OPEN).exists()  # the app it started takes it
+    assert (tmp_path / "app-lock" / winapp.SHOW).exists()  # the app it started takes it
 
 
 def test_supervisor_answers_quit_and_open_requests(tmp_path, monkeypatch):
@@ -548,7 +551,7 @@ def test_supervisor_answers_quit_and_open_requests(tmp_path, monkeypatch):
     t.post = lambda fn, *a: posted.append(fn)
     t.window = types.SimpleNamespace(show=lambda: None)
     t.quit = quits.append
-    winapp.request_open(tmp_path)
+    winapp.request_show(tmp_path)
     monkeypatch.setattr(tray, "STEP_EVERY", 99)
     t.supervise()
     assert posted == [t.window.show] and quits == []
@@ -587,26 +590,41 @@ def test_without_webview2_the_app_never_opens_a_window_and_links_the_runtime(tmp
 # -- §16.14 S3: the install token rides only in the User-Agent, only to the service ------------------------
 
 def test_user_agent_carries_the_install_token_to_the_service_only(tmp_path):
+    """Review 4 A2: the global User-Agent stays at its base; our own filter; the current token only on
+    requests to the exact service origin."""
     app, win, _ = make(tmp_path)
-    init, requested = Events(), Events()
-    control = types.SimpleNamespace(NavigationStarting=Events(), NavigationCompleted=Events(),
+    init, requested, starting = Events(), Events(), Events()
+    control = types.SimpleNamespace(NavigationStarting=starting, NavigationCompleted=Events(),
                                     CoreWebView2InitializationCompleted=init)
     win.native = types.SimpleNamespace(browser=types.SimpleNamespace(webview=control))
     app.attach_native()
+    filters = []
     core = types.SimpleNamespace(Settings=types.SimpleNamespace(UserAgent="Mozilla/5.0 Edg/131.0"),
-                                 WebResourceRequested=requested)
-    init.handlers[0](types.SimpleNamespace(CoreWebView2=core), None)
-    assert core.Settings.UserAgent == "Mozilla/5.0 Edg/131.0 RainCLIApp/install-token-1"
+                                 WebResourceRequested=requested,
+                                 AddWebResourceRequestedFilter=lambda uri, ctx: filters.append((uri, ctx)))
+    app._core_ready(core, context_all="All")
+    assert core.Settings.UserAgent == "Mozilla/5.0 Edg/131.0"  # never the token
+    assert filters == [(SERVICE + "/*", "All")]
 
     def request(url):
         headers = {}
         req = types.SimpleNamespace(Uri=url, Headers=types.SimpleNamespace(SetHeader=headers.__setitem__))
         requested.handlers[0](None, types.SimpleNamespace(Request=req))
         return headers
+    assert request(SERVICE + "/app/inbox") == {"User-Agent": "Mozilla/5.0 Edg/131.0 RainCLIApp/install-token-1"}
+    for other in (LOCAL + "settings.html", "https://example.org/", "http://raincli.example/app/inbox",
+                  "https://raincli.example:8443/app/inbox", "https://raincli.example.evil.example/"):
+        assert "RainCLIApp/" not in str(request(other)), other
     app.services.install_token = "install-token-2"  # sign-in or sign-out rotated it
     app.refresh_install_token()
-    assert request(SERVICE + "/app/inbox") == {"User-Agent": "Mozilla/5.0 Edg/131.0 RainCLIApp/install-token-2"}
-    assert request(LOCAL + "settings.html") == {} and request("https://example.org/") == {}
+    assert request(SERVICE + "/x") == {"User-Agent": "Mozilla/5.0 Edg/131.0 RainCLIApp/install-token-2"}
+    # A new service origin (signed in to another server) gets its filter before its first navigation.
+    app.services.service_url = lambda: "https://other.example"
+    app.refresh_navigation()
+    starting.handlers[0](None, types.SimpleNamespace(Uri="https://other.example/app/inbox", Cancel=False))
+    assert filters[-1] == ("https://other.example/*", "All") and len(filters) == 2
+    starting.handlers[0](None, types.SimpleNamespace(Uri="https://other.example/app/x", Cancel=False))
+    assert len(filters) == 2
 
 
 def test_handoff_refreshes_the_token_and_sign_in_starts_a_new_app_session(tmp_path):
@@ -619,3 +637,55 @@ def test_handoff_refreshes_the_token_and_sign_in_starts_a_new_app_session(tmp_pa
     app.on_loaded()
     app.api.sign_in(nonce_of(win), {"email": "a@example.test", "machine_name": "alice-laptop", "again": True}, "pw")
     assert app.install_token == "install-token-2" and services.handoffs == 2
+
+
+# -- §16.15: install.json keeps the full installer's keys; the v0.4 shortcut is fixed ---------------------
+
+def test_install_json_keeps_stub_and_install_stamp(tmp_path):
+    import json
+    (tmp_path / "install.json").write_text(json.dumps({"current": "0.5.0", "previous": None, "probation": None,
+                                                       "stub": 2, "install_stamp": "20261005T121400-ab12cd34ef56"}))
+    winapp.write_install(tmp_path, "0.5.1", "0.5.0", probation="0.5.1")  # a pushed update
+    data = json.loads((tmp_path / "install.json").read_text())
+    assert data == {"current": "0.5.1", "previous": "0.5.0", "probation": "0.5.1", "stub": 2,
+                    "install_stamp": "20261005T121400-ab12cd34ef56"}
+    assert winapp.read_install(tmp_path) == {"current": "0.5.1", "previous": "0.5.0", "probation": "0.5.1"}
+    for bad in ({"stub": True}, {"stub": "2"}, {"install_stamp": "a b"}, {"install_stamp": 7}):
+        (tmp_path / "install.json").write_text(json.dumps({"current": "0.5.0", **bad}))
+        assert set(winapp.read_install_meta(tmp_path).values()) == {None}, bad
+
+
+class Run:
+    def __init__(self, out="rewritten", code=0):
+        self.calls, self.out, self.code = [], out, code
+
+    def __call__(self, argv, **kw):
+        self.calls.append((argv, kw))
+        return types.SimpleNamespace(returncode=self.code, stdout=self.out + "\n", stderr="")
+
+
+def test_v04_shortcut_is_pointed_at_background_once(tmp_path):
+    import json
+    appdata = tmp_path / "AppData"
+    link = appdata / shortcut.SHORTCUT
+    link.parent.mkdir(parents=True)
+    link.write_bytes(b"lnk")
+    root = tmp_path / "RainCLI"
+    root.mkdir()
+    winapp.write_install(root, "0.5.0", "0.4.0")  # updated in place: no "stub" key
+    logged, run = [], Run()
+    assert shortcut.fix_v04_shortcut(root, run=run, appdata=str(appdata), log=lambda r, t: logged.append(t)) == "rewritten"
+    argv, kw = run.calls[0]
+    assert argv[0] == "powershell.exe" and "-NoProfile" in argv and str(link) not in " ".join(argv)
+    assert kw["env"]["RAINCLI_LNK"] == str(link) and kw["env"]["RAINCLI_STUB"] == str(root / "RainCLI.exe")
+    assert logged == ["Start menu shortcut for the v0.4 stub: rewritten (RainCLI.lnk --background)"]
+    quiet = []
+    assert shortcut.fix_v04_shortcut(root, run=Run("unchanged"), appdata=str(appdata),
+                                   log=lambda r, t: quiet.append(t)) == "unchanged" and quiet == []
+    assert shortcut.fix_v04_shortcut(root, run=Run("x", code=1), appdata=str(appdata), log=lambda r, t: None) == "failed"
+    (root / "install.json").write_text(json.dumps({"current": "0.5.0", "stub": 2}))  # a full v0.5 install
+    never = Run()
+    assert shortcut.fix_v04_shortcut(root, run=never, appdata=str(appdata)) is None and never.calls == []
+    link.unlink()
+    (root / "install.json").write_text(json.dumps({"current": "0.5.0"}))
+    assert shortcut.fix_v04_shortcut(root, run=never, appdata=str(appdata)) is None and never.calls == []

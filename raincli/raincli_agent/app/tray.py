@@ -173,7 +173,7 @@ class Tray:
             tick += 1
             if self.root_dir is not None and winapp.quit_requested(self.root_dir):
                 return self.quit(0)  # RainCLI.exe --quit (the uninstaller)
-            if self.root_dir is not None and winapp.take_open_request(self.root_dir):
+            if self.root_dir is not None and winapp.take_show_request(self.root_dir):
                 self.post(self.window.show)  # a second launch: focus this window
             if tick % STEP_EVERY:
                 continue
@@ -391,8 +391,11 @@ class Tray:
     def started(self):
         """pywebview's GUI loop is running (this is its worker thread)."""
         threading.Thread(target=self.pump, daemon=True).start()
+        if self.root_dir is not None:  # §16.15: a v0.4 stub can't take the shortcut's empty arguments
+            from .shortcut import fix_v04_shortcut
+            threading.Thread(target=fix_v04_shortcut, args=(self.root_dir,), daemon=True).start()
         self.window.home()
-        opened = self.root_dir is not None and winapp.take_open_request(self.root_dir)
+        opened = self.root_dir is not None and winapp.take_show_request(self.root_dir)
         if opened or not self.start_hidden or not self.signed_in() or not self.services.has_person_session():
             self.post(self.window.show)
         self.post(self.first_run)

@@ -9,7 +9,7 @@
 ;   - stops a running app with `RainCLI.exe --quit` and continues only if that exits 0 (§15.9);
 ;   - installs versions\X.Y.Z, and the stable stub RainCLI.exe and the PATH shim bin\raincli.exe,
 ;     both onedir with their own _internal (§15.9);
-;   - writes install.json {current, previous, probation} atomically (M6);
+;   - writes install.json {current, previous, probation, stub: 2, install_stamp} atomically (M6, §16.15);
 ;   - puts <root>\bin first on the user PATH, adds the Start menu entries and starts the tray,
 ;     whose first run signs in or migrates an older install (§15.6, H6);
 ;   - checks for the WebView2 Runtime the window needs, and offers Microsoft's download page (§16.10).
@@ -63,6 +63,7 @@ Source: "{#DistDir}\stub\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdi
 Source: "{#DistDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: not IsUpdate
 
 [Icons]
+; No arguments: the v0.5 stub starts the app if needed and shows its window (§16.15).
 Name: "{userprograms}\RainCLI\RainCLI"; Filename: "{app}\RainCLI.exe"; Check: not IsUpdate
 Name: "{userprograms}\RainCLI\Uninstall RainCLI"; Filename: "{uninstallexe}"; Check: not IsUpdate
 
@@ -321,9 +322,16 @@ end;
 
 { -- M6: install.json ------------------------------------------------------------------- }
 
+function InstallStamp: String;
+begin
+  { §16.15: new on every full install; the client rotates its app install token when it changes. }
+  Result := GetDateTimeString('yyyymmdd"T"hhnnss', #0, #0) + '-' + IntToHex(Random($7FFFFFFF), 8)
+            + IntToHex(Random($7FFFFFFF), 8);
+end;
+
 procedure WriteInstallJson;
 var
-  Old, Current, Previous, Json, Path: String;
+  Old, Current, Previous, Json, Path, Extra: String;
 begin
   Old := ReadRootFile('install.json');
   Current := JsonVersion(Old, 'current');
@@ -332,14 +340,17 @@ begin
     Previous := Current;
   if Previous = '{#AppVersion}' then
     Previous := '';
+  { §16.15: "stub": 2 marks the v0.5 stub, which opens the window when run without arguments. }
+  Extra := ', "stub": 2, "install_stamp": "' + InstallStamp + '"}';
   if Previous = '' then
-    Json := '{"current": "{#AppVersion}", "previous": null, "probation": null}'
+    Json := '{"current": "{#AppVersion}", "previous": null, "probation": null' + Extra
   else
-    Json := '{"current": "{#AppVersion}", "previous": "' + Previous + '", "probation": null}';
+    Json := '{"current": "{#AppVersion}", "previous": "' + Previous + '", "probation": null' + Extra;
   Path := RootDir + '\install.json';
   if not SaveStringToFile(Path + '.new', Json + #13#10, False) or
      not MoveFileEx(Path + '.new', Path, MOVEFILE_REPLACE_EXISTING or MOVEFILE_WRITE_THROUGH) then
     RaiseException('could not write ' + Path);
+  Log('install.json: ' + Json);
 end;
 
 { -- L2 and H6: the shim first on the user PATH ----------------------------------------- }

@@ -168,6 +168,7 @@ class AppWindow:
         self.quitting = False
         self.install_token = None  # §16.14 S3: sent as "RainCLIApp/<token>" to the service origin only
         self._ua_base = None
+        self._core = None
         self.api = Api(self)
 
     # -- set-up ---------------------------------------------------------------------------------------
@@ -231,20 +232,35 @@ class AppWindow:
         control.CoreWebView2InitializationCompleted += lambda sender, args: self._core_ready(sender.CoreWebView2)
         return True
 
-    def _core_ready(self, core):
-        """WebView2 is up (UI thread): add the install token to its User-Agent, and keep every request to
-        the service origin on the current token, which sign-in and sign-out rotate."""
+    def _core_ready(self, core, context_all=None):
+        """WebView2 is up (UI thread). The token never goes into the global User-Agent (§16.14 S3, review
+        4 A2): our own request filter for the service origin, and a hook that adds the CURRENT token to
+        requests for exactly that origin, so sign-in and sign-out rotations apply at once."""
+        if context_all is None:
+            from Microsoft.Web.WebView2.Core import CoreWebView2WebResourceContext
+            context_all = CoreWebView2WebResourceContext.All
+        self._core, self._context_all, self._filtered = core, context_all, set()
         self._ua_base = str(core.Settings.UserAgent)
-        core.Settings.UserAgent = self.user_agent(self._ua_base)
+        self._ensure_filter()
         core.WebResourceRequested += lambda sender, args: self._native_request(args.Request)
 
+    def _ensure_filter(self):
+        """UI thread only (core ready, or NavigationStarting): filter the current service origin."""
+        if getattr(self, "_core", None) is None:
+            return
+        base = self.service_base()
+        if policy.origin(base) is not None and base not in self._filtered:
+            self._core.AddWebResourceRequestedFilter(base + "/*", self._context_all)
+            self._filtered.add(base)
+
     def _native_request(self, request):
-        if self._ua_base is None or self.navigation is None:
+        if self._ua_base is None or not self.install_token:
             return
         if policy.same_origin(str(request.Uri), self.service_url()):
             request.Headers.SetHeader("User-Agent", self.user_agent(self._ua_base))
 
     def _native_starting(self, args):
+        self._ensure_filter()  # the service origin can change at sign-in
         if self.before_navigate(str(args.Uri)):
             args.Cancel = True
 
