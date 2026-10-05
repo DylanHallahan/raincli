@@ -63,9 +63,9 @@ From v0.4.0, a release also carries the Windows app installer: `RainCLI-Setup-<X
 ## Building and attaching the assets (main agent)
 1. Set `__version__` in `raincli/raincli_agent/__init__.py` (and `version` in `raincli/pyproject.toml`) to `X.Y.Z`, merge, and tag the release commit `vX.Y.Z`.
 2. In GitHub, run **Actions → Manual Windows app build → Run workflow** on the tag `vX.Y.Z`. It:
-   - installs the hash-pinned build tools (`packaging/windows/requirements-build.txt`);
-   - freezes the tray, the CLI, the stub and the PATH shim with PyInstaller and compiles the Inno Setup installer (`packaging/windows/build.py`);
-   - **fails if the bundle contains any test hook** (`packaging/windows/verify_bundle.py`: no `_build_test` module or file, no `TEST_RELEASE_BASE`/`TEST_CERT_SHA256` name, no server or build-tool module, the real tray and stub) and checks the checksum line;
+   - installs the hash-pinned build tools (`packaging/windows/requirements-build.txt`), then pywebview for the app window (`requirements-webview.txt`, with `--no-deps --no-build-isolation`, because `proxy_tools` is published only as a source archive);
+   - freezes the app (window and tray), the CLI, the stub and the PATH shim with PyInstaller and compiles the Inno Setup installer (`packaging/windows/build.py`);
+   - **fails if the bundle contains any test hook** (`packaging/windows/verify_bundle.py`: no `_build_test` module or file, no `TEST_RELEASE_BASE`/`TEST_CERT_SHA256` name, no server or build-tool module, the real tray and stub, the window without tkinter, and no WebView2 debugging switch in RainCLI's own code or pages) and checks the checksum line;
    - uploads the artifact `RainCLI-Setup-X.Y.Z`, holding the two files.
 3. Download and check the artifact, then attach both files to the release:
    ```bash
