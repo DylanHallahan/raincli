@@ -83,7 +83,7 @@ class BodySizeLimit:
 
     def limit_for(self, scope: Scope) -> int:
         method, path = scope.get("method"), scope.get("path", "").rstrip("/")
-        if method == "POST" and path.endswith("/messages"):
+        if method == "POST" and (path.endswith("/messages") or path.endswith("/person/send")):
             return self.send_limit
         if method == "PUT" and path.endswith("/presence"):
             return self.presence_limit
@@ -400,6 +400,12 @@ def build_api(parent: FastAPI) -> FastAPI:
             sign_in, sessionmaker(), api.state.login_limiter, data, ip, settings.public_url)
         return JSONResponse(body, status_code=status)
 
+    from raincli_server.api import person as person_api
+
+    person_api.register(api, sessionmaker=sessionmaker, limiter=limiter, settings=settings, ApiError=ApiError,
+                        MAX_WAIT_SECONDS=MAX_WAIT_SECONDS, POLL_INTERVAL=POLL_INTERVAL,
+                        attachment_headers=attachment_headers)
+
     @api.post("/app/sign-out")
     async def app_sign_out(request: Request):
         def work(session, auth: AgentAuth):
@@ -411,7 +417,8 @@ def build_api(parent: FastAPI) -> FastAPI:
     return api
 
 
-_LOGIN_FIELDS = {"email", "password", "machine_name", "team", "previous_token", "replace"}
+_LOGIN_FIELDS = {"email", "password", "machine_name", "team", "previous_token", "replace", "person_session",
+                 "person_only"}
 
 
 def sign_in(factory, limiter: web_auth.LoginLimiter, data: object, ip: str, api_url: str) -> tuple[int, dict]:
@@ -420,18 +427,24 @@ def sign_in(factory, limiter: web_auth.LoginLimiter, data: object, ip: str, api_
     Only a wrong password counts against the limiter. ``blocked`` is checked before scrypt runs, and
     once the password is right every outcome calls ``success()`` (§15.8 M2).
     """
-    if not isinstance(data, dict) or set(data) - _LOGIN_FIELDS or not {"email", "password", "machine_name"} <= set(data):
+    person_only = data.get("person_only", False) if isinstance(data, dict) else False
+    required = {"email", "password"} | (set() if person_only is True else {"machine_name"})
+    if not isinstance(data, dict) or set(data) - _LOGIN_FIELDS or not required <= set(data):
         raise ApiError(400, "invalid", 'body must be {"email", "password", "machine_name", "team"?, '
-                                       '"previous_token"?, "replace"?}')
+                                       '"previous_token"?, "replace"?, "person_session"?, "person_only"?}')
     email, password, machine_name, team_slug, previous_token = (
         data.get(k) for k in ("email", "password", "machine_name", "team", "previous_token"))
-    replace = data.get("replace", False)
-    if (not all(isinstance(v, str) for v in (email, password, machine_name))
-            or not all(v is None or isinstance(v, str) for v in (team_slug, previous_token))
-            or not isinstance(replace, bool)):
+    replace, want_person = data.get("replace", False), data.get("person_session", False)
+    if (not all(isinstance(v, str) for v in (email, password))
+            or not all(v is None or isinstance(v, str) for v in (machine_name, team_slug, previous_token))
+            or not all(isinstance(v, bool) for v in (replace, want_person, person_only))):
         raise ApiError(400, "invalid", "email, password, machine_name, team and previous_token must be strings, "
-                                       "and replace a boolean")
-    if not security.valid_handle(machine_name):
+                                       "and replace, person_session and person_only booleans")
+    if not person_only and machine_name is None:
+        raise ApiError(400, "invalid", "machine_name is required")
+    if person_only and (previous_token is None or replace):
+        raise ApiError(400, "invalid", "person_only needs previous_token, and no replace")
+    if machine_name is not None and not security.valid_handle(machine_name):
         raise ApiError(400, "invalid", "machine_name must match ^[a-z][a-z0-9-]{1,31}$")
     if team_slug is not None and not security.valid_slug(team_slug):
         raise ApiError(400, "invalid", "unknown team")
@@ -443,17 +456,31 @@ def sign_in(factory, limiter: web_auth.LoginLimiter, data: object, ip: str, api_
         if user is None:
             limiter.failure(ip, email)
             outcome = ApiError(401, "invalid_credentials", "that email and password combination is not correct")
+        elif person_only:
+            limiter.success(ip, email)
+            outcome = _person_only(session, user, previous_token)
         else:
             limiter.success(ip, email)
             outcome = _sign_in_machine(session, user, machine_name, team_slug, api_url,
-                                       previous_token=previous_token, replace=replace)
+                                       previous_token=previous_token, replace=replace, person_session=want_person)
     if isinstance(outcome, ApiError):
         raise outcome
     return outcome
 
 
+def _person_only(session: Session, user, previous_token: str) -> tuple[int, dict] | ApiError:
+    """§16.3: a person session for an already signed-in machine's owner. No rotation, no machine change."""
+    auth = identity.authenticate_agent(session, previous_token, touch=False)
+    if auth is None or auth.agent.owner_user_id != user.id:
+        return ApiError(400, "invalid", "person_only needs the current credential of a machine you own")
+    token = identity.issue_person_session(session, user, auth.agent)
+    log.info("app sign-in: person session added for machine %s in team %s", auth.agent.handle, auth.team.slug)
+    return 200, {"person_session": token}
+
+
 def _sign_in_machine(session: Session, user, machine_name: str, team_slug: str | None, api_url: str, *,
-                     previous_token: str | None, replace: bool) -> tuple[int, dict] | ApiError:
+                     previous_token: str | None, replace: bool,
+                     person_session: bool = False) -> tuple[int, dict] | ApiError:
     """Choose the team, then create or rotate the machine. Errors are returned, so the caller still
     commits the password-hash upgrade that a successful password check may have made."""
     teams = [team for team, _role in identity.teams_for_user(session, user)]
@@ -479,10 +506,11 @@ def _sign_in_machine(session: Session, user, machine_name: str, team_slug: str |
     except identity.NameInUse:
         return ApiError(409, "name_in_use", "you already have a machine with that name")
     log.info("app sign-in: machine %s in team %s %s", agent.handle, team.slug, "rotated" if rotated else "created")
-    return (200 if rotated else 201), {
-        "api_url": api_url, "token": token, "handle": agent.handle,
-        "team": {"slug": team.slug, "name": team.name}, "rotated": rotated,
-    }
+    body = {"api_url": api_url, "token": token, "handle": agent.handle,
+            "team": {"slug": team.slug, "name": team.name}, "rotated": rotated}
+    if person_session:  # §16.12 C15: only when asked
+        body["person_session"] = identity.issue_person_session(session, user, agent)
+    return (200 if rotated else 201), body
 
 
 def attachment_headers(filename: str, sha256: str, size: int) -> dict[str, str]:
