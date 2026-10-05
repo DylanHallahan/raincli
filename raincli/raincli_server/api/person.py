@@ -194,12 +194,21 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
 
     @api.post("/app/handoff")
     async def app_handoff(request: Request):
-        """§16.10: a single-use code, valid for 60 s and bound to this person session."""
+        """§16.10, §16.14 S3/S4: a single-use code, valid for 60 s, bound to this person session and to the
+        app install (``{"app_install_hash": sha256(app_install_token)}``)."""
+        body = await json_body(request, "person:read")
+        if not isinstance(body, dict) or set(body) - {"app_install_hash"}:
+            raise ApiError(400, "invalid", "request body must be {\"app_install_hash\": ...}")
+        install_hash = body.get("app_install_hash")
+        if not isinstance(install_hash, str) or not security.INSTALL_HASH_RE.match(install_hash):
+            raise ApiError(400, "invalid", "app_install_hash must be 64 lowercase hex characters")
+
         def work(session, auth: PersonAuth):
             code = security.new_token(security.HANDOFF_CODE_PREFIX)
             expires = identity.now() + HANDOFF_TTL
             session.add(HandoffCode(id=uuid.uuid4(), code_hash=security.hash_token(code),
-                                    person_session_id=auth.person_session.id, expires_at=expires))
+                                    person_session_id=auth.person_session.id, expires_at=expires,
+                                    install_hash=install_hash))
             return {"code": code, "expires_at": messaging.iso(expires),
-                    "url": f"{settings.public_url}/app/handoff?code={code}"}
+                    "url": f"{settings.public_url}{settings.root_path or ''}/app/handoff?code={code}"}
         return await run(request, "person:read", work)

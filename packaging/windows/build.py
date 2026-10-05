@@ -13,7 +13,7 @@
    into the work directory) and write the checksum file: one line of 64 lowercase hex characters,
    two spaces, then the installer's file name.
 
-Usage (Windows, Python 3.14 with requirements-build.txt installed):
+Usage (Windows, Python 3.14 with requirements-build.txt, then requirements-webview.txt, installed):
     python packaging/windows/build.py [--version 0.4.1] [--out DIR] [--iscc PATH]
 
 ``--no-installer`` stops after step 4 (any OS: a dry run of the freeze and the checks).

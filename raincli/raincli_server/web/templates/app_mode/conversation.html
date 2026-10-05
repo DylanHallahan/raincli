@@ -1,29 +1,39 @@
 {% extends "base_app.html" %}
 {% from "_state.html" import time %}
+{% macro initials(name) -%}
+{%- set parts = (name or '?').replace('-', ' ').replace('_', ' ').replace('@', ' ').replace('/', ' ').split() -%}
+{{- ((parts[0][:1] if parts else '?') ~ (parts[1][:1] if parts|length > 1 else ''))|upper -}}
+{%- endmacro %}
 {% block title %}{{ view.peer.display }} · {{ product_name }}{% endblock %}
 {% block list %}{% with current_id=view.conversation.id %}{% include "app_mode/_conv_list.html" %}{% endwith %}{% endblock %}
 {% block main %}
+{% set kind = view.peer.endpoint.kind %}
 <header class="rc-main-head">
-  <h2>{{ view.peer.display }}</h2>
-  <p>{{ view.peer.label }} · {{ view.team.name }}{% if not view.peer.active %} · no longer active{% endif %}</p>
+  <div>
+    <h2>{{ view.peer.display }}</h2>
+    <p>{{ view.peer.label }} · {{ view.team.name }}{% if not view.peer.active %} · no longer active{% endif %}</p>
+  </div>
+  <span class="rc-pill">{{ 'Teammate' if kind == 'person' else 'Agent' if kind == 'agent' else 'Machine inbox' }}</span>
 </header>
 <div class="rc-scroll">
   {% if view.truncated %}<p class="rc-flash">Showing the most recent {{ view.lines|length }} messages.</p>{% endif %}
   <ol class="rc-thread">
-    {% for line in view.lines %}{% set m = line.message %}
+    {% for line in view.lines %}{% set m = line.message %}{% set st = line.shown_state %}
     <li class="rc-msg{{ ' rc-out' if line.outgoing else '' }}" id="m-{{ m.id }}">
-      <div class="rc-msg-meta">
-        <strong>{{ line.sender.display }}</strong>
-        {% if m.sender_agent_name %}<span>via {{ m.sender_agent_name }} (stated by the machine)</span>{% endif %}
-        <span>to {{ line.recipient.display }}</span>
-        <span>{{ time(m.created_at) }}</span>
-        {% if m.kind == 'escalation' %}<span class="rc-badge rc-escalation">Escalation</span>{% endif %}
-        <span class="rc-badge{{ ' rc-held' if line.shown_state == 'held' else ' rc-ok' if line.shown_state in ('received', 'submitted', 'replied') else '' }}">{{ line.shown_state }}{% if line.hold_reason %}: {{ line.hold_reason|replace('_', ' ') }}{% endif %}</span>
-        {% if view.can_send %}<a href="{{ url('/app/conversations/' ~ view.conversation.id) }}?reply_to={{ m.id }}#body">Reply</a>{% endif %}
+      <span class="rc-avatar" aria-hidden="true">{{ initials(line.sender.display) }}</span>
+      <div class="rc-msg-body">
+        <div class="rc-who">
+          <span><strong>{{ line.sender.display }}</strong> · {{ time(m.created_at) }}</span>
+          {% if m.sender_agent_name %}<span>via {{ m.sender_agent_name }} (stated by the machine)</span>{% endif %}
+          <span>to {{ line.recipient.display }}</span>
+          {% if view.can_send %}<a href="{{ url('/app/conversations/' ~ view.conversation.id) }}?reply_to={{ m.id }}#body">Reply</a>{% endif %}
+        </div>
+        {% if m.kind == 'escalation' %}<p class="rc-needs"><strong>Escalation</strong> · this needs you.</p>{% endif %}
+        <div class="rc-msg-content"><div class="md">{{ m.body|markdown }}</div></div>
+        {% set atts = view.attachments.get(m.id, []) %}
+        {% if atts %}<ul class="rc-attachments" aria-label="Attachments">{% for a in atts %}<li><a class="rc-file" href="{{ url('/app/messages/' ~ m.id ~ '/attachments/' ~ a.id) }}" download="{{ a.filename }}"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>{{ a.filename }} <span>{{ a.size|filesize }} · {{ a.sha256[:8] }}</span></a></li>{% endfor %}</ul>{% endif %}
+        <p class="rc-state{{ ' rc-held' if st == 'held' else ' rc-rejected' if st == 'rejected' else ' rc-ok' if st in ('received', 'submitted', 'replied') else '' }}">{{ st }}{% if line.hold_reason %}: {{ line.hold_reason|replace('_', ' ') }}{% endif %}</p>
       </div>
-      <div class="md">{{ m.body|markdown }}</div>
-      {% set atts = view.attachments.get(m.id, []) %}
-      {% if atts %}<ul class="rc-attachments" aria-label="Attachments">{% for a in atts %}<li><a href="{{ url('/app/messages/' ~ m.id ~ '/attachments/' ~ a.id) }}" download="{{ a.filename }}">{{ a.filename }}</a> · {{ a.size|filesize }}</li>{% endfor %}</ul>{% endif %}
     </li>
     {% endfor %}
   </ol>

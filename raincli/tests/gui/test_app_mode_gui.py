@@ -8,6 +8,7 @@ Screenshots (light and dark) go to ``RAINCLI_GUI_ARTIFACTS`` or the test's tempo
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -93,11 +94,24 @@ def sign_in(base, email, machine):
                                             "person_session": True})
 
 
+# §16.14 S3: the app's webview appends its install token to the browser's own User-Agent.
+APP_TOKEN = "gui-test-install-token-" + "x" * 24
+INSTALL_HASH = hashlib.sha256(APP_TOKEN.encode()).hexdigest()
+
+
+def app_user_agent(browser):
+    probe = browser.new_page()
+    try:
+        return probe.evaluate("navigator.userAgent") + " RainCLIApp/" + APP_TOKEN
+    finally:
+        probe.close()
+
+
 def open_app(browser, base, person, scheme="light"):
     """A fresh 'webview' profile, signed in through the handoff exactly as the app does."""
-    context = browser.new_context(color_scheme=scheme, accept_downloads=True)
+    context = browser.new_context(color_scheme=scheme, accept_downloads=True, user_agent=app_user_agent(browser))
     page = context.new_page()
-    page.goto(api(base, "/api/v1/app/handoff", {}, person)["url"])
+    page.goto(api(base, "/api/v1/app/handoff", {"app_install_hash": INSTALL_HASH}, person)["url"])
     assert page.url.endswith("/app/inbox"), page.url
     return context, page
 
@@ -135,12 +149,13 @@ def test_layout_rail_list_thread_compose_in_light_and_dark(people, browser, arti
 
 # Send, reply and attachments --------------------------------------------------------------------
 
-def test_send_reply_and_attachments(people, browser, tmp_path):
+def test_send_reply_and_attachments(people, browser, tmp_path, artifacts):
     base = people["base"]
     report = tmp_path / "report.md"
     report.write_text("# Report\n\nAll green.\n", "utf-8")
     alice_ctx, alice = open_app(browser, base, people["alice"]["person_session"])
     alice.click("text=New")
+    alice.screenshot(path=str(artifacts / "app-mode-compose-light.png"))
     alice.fill("#to", "@bob@example.test")
     alice.fill("#body", "Here is the *report*")
     alice.set_input_files("input[name=files]", str(report))
@@ -162,6 +177,7 @@ def test_send_reply_and_attachments(people, browser, tmp_path):
     alice.reload()
     assert "Thanks, looks good" in alice.locator(".rc-thread").inner_text()
     assert "replied" in alice.locator(".rc-msg").first.inner_text()
+    alice.screenshot(path=str(artifacts / "app-mode-attachment-reply-light.png"))
     alice_ctx.close()
     bob_ctx.close()
 
@@ -188,7 +204,7 @@ def test_markdown_xss_corpus_does_not_execute(people, browser):
 
 # The agents picker refuses listed and ambiguous agents --------------------------------------------
 
-def test_agents_picker_and_listed_agents(people, browser):
+def test_agents_picker_and_listed_agents(people, browser, artifacts):
     base = people["base"]
     bob_token = people["bob"]["token"]
     request = urllib.request.Request(base + "/api/v1/presence", method="PUT", data=json.dumps({"status": "ready", "agents": [
@@ -202,6 +218,7 @@ def test_agents_picker_and_listed_agents(people, browser):
     urllib.request.urlopen(request, timeout=15).read()
     context, page = open_app(browser, base, people["alice"]["person_session"])
     page.click("nav.rc-nav a:has-text('Agents')")
+    page.screenshot(path=str(artifacts / "app-mode-agents-light.png"))
     card = page.locator("section.rc-card", has_text="bob-laptop")
     reviewer = card.locator("li", has_text="reviewer")
     assert reviewer.locator("a:has-text('Message')").count() == 1 and "instant" in reviewer.inner_text()
@@ -218,6 +235,22 @@ def test_agents_picker_and_listed_agents(people, browser):
 
 
 # The sentinel and app-mode refusals ------------------------------------------------------------
+
+def test_a_stolen_app_cookie_does_nothing_in_a_normal_browser(people, browser):
+    """§16.14 S3: the raincli_app cookie only works with the app install's User-Agent token."""
+    base = people["base"]
+    context, page = open_app(browser, base, people["alice"]["person_session"])
+    assert "Signed in as" in page.inner_text(".rc-whoami") and "(alice@example.test)" in page.inner_text(".rc-whoami")
+    stolen = [c for c in context.cookies() if c["name"] == "raincli_app"]
+    assert stolen
+    thief = browser.new_context()
+    thief.add_cookies(stolen)
+    page2 = thief.new_page()
+    page2.goto(base + "/app/inbox")
+    assert page2.locator(".rc-nav").count() == 0 and "/login" in page2.url
+    thief.close()
+    context.close()
+
 
 def test_local_sentinel_and_refused_pages(people, browser):
     base = people["base"]

@@ -24,11 +24,16 @@
     </div>
     {% endif %}
     {% endif %}
-    <label class="sr-only" for="body">Message</label>
-    <textarea id="body" name="body" maxlength="16000" required placeholder="Write a message (Markdown)">{{ draft or '' }}</textarea>
-    <div class="rc-compose-row">
-      <label>Attach Markdown files <input type="file" name="files" accept=".md,text/markdown" multiple></label>
-      <span>{% if to_label %}To {{ to_label }} · {% endif %}<button class="rc-btn" type="submit">Send</button></span>
+    <p class="rc-hint" id="body-hint">Markdown is supported. Attach Markdown files with the clip.</p>
+    <div class="rc-box">
+      {% if to_label %}<div class="rc-box-row"><span class="rc-to">To: <strong>{{ to_label }}</strong></span></div>{% endif %}
+      <label class="sr-only" for="body">Message</label>
+      <textarea id="body" name="body" maxlength="16000" required placeholder="Write a message" aria-describedby="body-hint">{{ draft or '' }}</textarea>
+      <div class="rc-box-row">
+        <label class="rc-icon-btn" title="Attach Markdown files"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L15.5 7"/></svg><span class="sr-only">Attach Markdown files</span><input type="file" name="files" accept=".md,text/markdown" multiple></label>
+        <span class="rc-files"></span>
+        <button class="rc-icon-btn rc-send" type="submit" title="Send"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span class="sr-only">Send</span></button>
+      </div>
     </div>
   </form>
 </div>
