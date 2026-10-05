@@ -15,6 +15,8 @@ from fastapi import APIRouter, Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+from raincli_server.markdown import render as render_markdown
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
@@ -120,6 +122,7 @@ def _static_versions(root: Path) -> dict[str, str]:
 
 STATIC_VERSIONS = _static_versions(HERE / "static")
 
+templates.env.filters["markdown"] = render_markdown  # the only value templates mark safe (§16.12 C13)
 templates.env.filters["ts"] = fmt_ts
 templates.env.filters["iso"] = iso_ts
 templates.env.filters["filesize"] = lambda n: f"{n} B" if n < 1024 else f"{n / 1024:.1f} KiB"

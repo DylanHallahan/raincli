@@ -21,7 +21,7 @@
         {% if m.in_reply_to %}<span class="nowrap">· <a href="#m-{{ m.in_reply_to }}">reply</a></span>{% endif %}
         <span class="nowrap">· {{ time(m.created_at) }}</span>
       </div>
-      <div class="msg-body pre">{{ m.body }}</div>
+      <div class="msg-body md">{{ m.body|markdown }}</div>
       {% set atts = view.attachments.get(m.id, []) %}
       {% if atts %}
       <ul class="attachments" aria-label="Attachments (external data)">

@@ -8,7 +8,7 @@ The updater has no source override. It fetches only stable releases of the canon
 1. **Database.** It uses a disposable PostgreSQL on loopback:
    - a fresh `initdb` cluster on a random port, with a random password (the Windows runner's preinstalled PostgreSQL through `PGBIN`, or any `initdb`/`pg_ctl` found on `PATH` or under `/usr/lib/postgresql/*/bin`);
    - or, if `RAINCLI_TEST_DATABASE_URL` is set, a throwaway database on that local test server (`scripts/test-postgres.sh`), dropped at the end.
-2. **Server.** It starts the server from this checkout in a new venv built from `raincli/requirements.lock` (without `uvloop` on Windows), migrates, and runs uvicorn on `127.0.0.1` with a random `RAINCLI_SECRET_KEY`.
+2. **Server.** It starts the server from this checkout in a new venv built from the hash-pinned `raincli/requirements.lock` (`uvloop` is skipped on Windows by its platform marker), migrates, and runs uvicorn on `127.0.0.1` with a random `RAINCLI_SECRET_KEY`.
 3. **Enrolment.** It enrols a disposable user, the team `release-e2e` and the machine `e2e-machine` with `raincli-admin`. The machine config is written to the temporary directory.
 4. **Managed install.** It installs `from_version` **managed** through the real updater (`updates.resolve` and `updates.install` for that exact tag), then checks the launcher reports that version and the mode is `automatic`.
 5. **Runtime.** It starts the runtime through the managed launcher with one connector (Herdr deliberately absent, so no real session is touched), a private `HOME`, and no inherited `HERDR_*` or `PYTHONPATH`.
