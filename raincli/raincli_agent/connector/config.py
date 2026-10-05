@@ -59,6 +59,11 @@ class ConnectorConfig:
     path: str = ""
 
     @property
+    def has_inbox(self):
+        """False for a machine-mode connector (§16.7): named agents only."""
+        return bool(self.herdr_agent or self.inbox_hook)
+
+    @property
     def target_label(self):
         return self.herdr_agent or "%s hook session %s" % self.inbox_hook
 

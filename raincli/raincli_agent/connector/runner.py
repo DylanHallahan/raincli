@@ -8,6 +8,7 @@ mode the loop also delivers pending escalations to the main session.
 import json
 import os
 import random
+import re
 import sys
 import time
 
@@ -59,6 +60,23 @@ def frame_record(record, identity, guidance="", agent_config=None, held_seconds=
                         from_agent=message.get("from_agent"), held_seconds=held_seconds)
 
 
+EMAIL_SENDER_RE = re.compile(r"^@[^@\s/\\]{1,64}@[^@\s/\\]{1,190}$")
+EXPIRE_OFFLINE = 14 * 86400  # §16.12 C12: an agent message held offline this long is rejected
+
+
+def message_target(message):
+    """The named agent a message is addressed to (§16.1), None for the machine
+    endpoint, or False when the name is not a valid agent name."""
+    to = message.get("to_endpoint")
+    if not isinstance(to, dict) or to.get("agent") is None:
+        return None
+    name = to["agent"]
+    if (not isinstance(name, str) or not 1 <= len(name) <= 64
+            or sessions.normalize_name(name, "") != name):
+        return False
+    return name
+
+
 def message_problem(message):
     """Why a server message can't be queued, or None. Checked before any path use."""
     if not isinstance(message, dict):
@@ -67,8 +85,17 @@ def message_problem(message):
         q.normalize_id(message.get("id"))
     except q.QueueError:
         return "bad id"
-    if not isinstance(message.get("from"), str) or not HANDLE_RE.match(message["from"]):
+    sender = message.get("from")
+    origin = message.get("from_endpoint")
+    if isinstance(origin, dict) and "person" in origin:
+        # §16.1: a person sender is "@email" (an email is never a handle or an option).
+        if not (isinstance(sender, str) and EMAIL_SENDER_RE.fullmatch(sender)
+                and sender[1:].lower() == str(origin.get("person", "")).lower()):
+            return "bad sender"
+    elif not isinstance(sender, str) or not HANDLE_RE.match(sender):
         return "bad sender"  # section 12.3: the handle grammar, never e.g. "-evil"
+    if message_target(message) is False:
+        return "bad target"
     if not isinstance(message.get("body"), str):
         return "bad body"
     seq = message.get("seq")
@@ -86,8 +113,10 @@ def reportable(record):
         return (q.HELD, record["hold_reason"])
     if state in (q.SUBMITTED, q.UNCERTAIN, q.REJECTED):
         return (state, record.get("detail") or "")
-    if state == q.HANDED_OVER:
+    if state == q.HANDED_OVER or state == q.AGENT_HANDED_OVER:
         return (q.HELD, "next_turn")  # waiting for the hook session's next turn (14.4)
+    if state == q.AGENT_HELD:
+        return (q.HELD, record["hold_reason"])
     return None  # received, submitting and dismissed have no server event
 
 
@@ -133,7 +162,14 @@ class Connector:
             for record in self.queue.all():
                 if record.get("handover_key") and not self.sessions_state:
                     continue  # settled once a runtime that owns the sessions runs this queue
-                if record["state"] == q.SUBMITTING and record.get("handover_key"):
+                if record["state"] == q.AGENT_SUBMITTING and record.get("handover_key"):
+                    self._recover_handover(record)
+                elif record["state"] == q.AGENT_SUBMITTING:
+                    q.Queue.transition(record, q.UNCERTAIN,
+                                       detail="connector restarted during submission; not resubmitted")
+                    self.queue.save(record)
+                    self.log(f"message {record['id']} is submission_uncertain (restart during submission)")
+                elif record["state"] == q.SUBMITTING and record.get("handover_key"):
                     self._recover_handover(record)
                 elif record["state"] == q.HANDED_OVER:
                     target = self._inbox_target()[0] if self.config.inbox_hook else None
@@ -172,6 +208,7 @@ class Connector:
         self.retry_acks()
         self.poll(wait)
         self.process()
+        self.process_named()
         self.process_escalations()
         self.sync_events()
 
@@ -200,6 +237,11 @@ class Connector:
         message_id = q.normalize_id(message["id"])
         with self.queue.lock():
             record = self.queue.load(message_id)
+            target = message_target(message)
+            if record is None and target is None and not self.config.has_inbox:
+                # A machine with no inbox mapping (machine mode, §16.7): messages to the
+                # machine endpoint stay stored on the server, unacknowledged.
+                return
             if record is None:
                 record = {"version": 1, "id": message_id, "seq": message.get("seq"),
                           "sender": message.get("from", ""), "message": message,
@@ -208,7 +250,13 @@ class Connector:
                 record["attachments_local"] = []
                 record["attachment_attempts"] = 0
                 record["attachment_retry_at"] = 0
-                q.Queue.transition(record, q.ATTACHMENT_PENDING if message.get("attachments") else q.RECEIVED)
+                if target:
+                    # §16.12 C1: only agent_* states until it settles; attachments are a flag.
+                    record["target"] = target
+                    record["attachments_pending"] = bool(message.get("attachments"))
+                    q.Queue.transition(record, q.AGENT_RECEIVED)
+                else:
+                    q.Queue.transition(record, q.ATTACHMENT_PENDING if message.get("attachments") else q.RECEIVED)
                 self.queue.save(record)  # fsynced before the ack below
                 self.log(f"stored message {message_id} from {record['sender']}")
             if not record["acked"] and self._ensure_local(record):
@@ -218,7 +266,10 @@ class Connector:
         """True once the message and all its attachments are durable locally."""
         if record["state"] == q.DISMISSED:
             return False
-        if record["state"] != q.ATTACHMENT_PENDING:
+        if record.get("target"):
+            if not record.get("attachments_pending"):
+                return True
+        elif record["state"] != q.ATTACHMENT_PENDING:
             return True
         if self._clock() < record.get("attachment_retry_at", 0):
             return False
@@ -232,7 +283,11 @@ class Connector:
             self.queue.save(record)
             self.log(f"message {record['id']} stays unacked ({record['detail']})")
             return False
-        q.Queue.transition(record, q.RECEIVED, detail="attachments stored")
+        if record.get("target"):
+            record["attachments_pending"] = False
+            record["detail"] = "attachments stored"
+        else:
+            q.Queue.transition(record, q.RECEIVED, detail="attachments stored")
         self.queue.save(record)
         return True
 
@@ -305,6 +360,8 @@ class Connector:
         The queue lock is released while ``herdr.prompt`` runs (R2-L7), so
         operator commands and ``connector escalate`` never wait on a prompt. The
         durable ``submitting`` record and run.lock guard the state meanwhile."""
+        if not self.config.has_inbox:
+            return  # machine mode: only named agents are delivered (§16.7)
         if self.config.inbox_hook:
             return self.process_next_turn()
         chosen = None
@@ -373,10 +430,12 @@ class Connector:
         key, mid = record["handover_key"], record["id"]
         if sessions.handover_state(self.sessions_state, key, mid) == "missing":
             # No file was ever written, so nothing can have reached the session.
-            q.Queue.transition(record, q.RECEIVED, detail="restart before handover; nothing was handed over")
+            q.Queue.transition(record, q.received_state(record),
+                               detail="restart before handover; nothing was handed over")
             record.pop("handover_key", None)
         else:
-            q.Queue.transition(record, q.HANDED_OVER, detail="handed over (recovered after restart)")
+            q.Queue.transition(record, q.AGENT_HANDED_OVER if record.get("target") else q.HANDED_OVER,
+                               detail="handed over (recovered after restart)")
         self.queue.save(record)
         self.log(f"message {mid} is {record['state']} (restart during handover)")
 
@@ -389,7 +448,8 @@ class Connector:
         key, mid = record["handover_key"], record["id"]
         state = sessions.handover_state(self.sessions_state, key, mid)
         if state == "submitted":
-            q.Queue.transition(record, q.SUBMITTED, detail=f"emitted to {self.config.target_label} (next turn)")
+            label = record.get("target") or self.config.target_label
+            q.Queue.transition(record, q.SUBMITTED, detail=f"emitted to {label} (next turn)")
         elif state == "missing":
             q.Queue.transition(record, q.UNCERTAIN, detail="the handover file is missing; not re-emitted")
         elif state == "claimed":
@@ -412,11 +472,12 @@ class Connector:
             # arbitrates).
             if not sessions.reclaim(self.sessions_state, key, mid):
                 return False
-            q.Queue.transition(record, q.HELD, reason=reason)
+            q.Queue.transition(record, q.held_state(record), reason=reason)
             record["hold_detail"] = detail or "the session ended before its next turn; reclaimed"
+            self._held_since(record, reason)
         sessions.settle(self.sessions_state, key, mid)
         record.pop("claim_seen_at", None)
-        if record["state"] == q.HELD:
+        if record["state"] in q.HOLD_STATES:
             record.pop("handover_key", None)
         self.queue.save(record)
         self.log(f"message {mid} is {record['state']}")
@@ -426,11 +487,10 @@ class Connector:
         """The handover file could not be written (for example an unsafe inbox
         directory). Hold the message unless the file could already be emitted."""
         mid = record["id"]
-        claimed = any(os.path.lexists(os.path.join(self.sessions_state, sessions.SESSIONS, key + ".inbox", mid + x))
-                      for x in (".md.claimed", ".md.receipt"))
+        claimed = any(os.path.lexists(sessions._inbox_file(self.sessions_state, key, mid, x))
+                      for x in (".claimed", ".receipt"))
         if not claimed and (sessions.reclaim(self.sessions_state, key, mid)
-                            or not os.path.lexists(os.path.join(self.sessions_state, sessions.SESSIONS,
-                                                                key + ".inbox", mid + ".md"))):
+                            or not os.path.lexists(sessions._inbox_file(self.sessions_state, key, mid))):
             record.pop("handover_key", None)
             record["handover_retry_at"] = self._clock() + 30
             self._hold(record, "offline", f"cannot hand over to the session: {type(exc).__name__}")
@@ -489,32 +549,180 @@ class Connector:
                 self.queue.save(record)
                 self.log(f"message {record['id']} is handed_over")
 
+    # -- named agents (protocol §16.7, §16.12 C1, C12) -------------------------
+
+    def _named_candidates(self, name, herdr_agents, hook_records):
+        """(Herdr agents, live hook sessions) carrying exactly this name."""
+        herdr = [a for a in herdr_agents if a.get("name") == name]
+        hooks = sessions.live_sessions(self.sessions_state, None, name, now=self._clock(),
+                                       records=hook_records) if self.sessions_state else []
+        return herdr, hooks
+
+    def _reconcile_named(self, record, hook_records):
+        """A named-session handover: settled from the files; reclaimed and held when no
+        single live session of that name is left (it is handed over again, with its
+        held age, once one is)."""
+        live = sessions.live_sessions(self.sessions_state, None, record["target"], now=self._clock(),
+                                      records=hook_records)
+        if len(live) == 1:
+            return self._reconcile_handover(record, record["handover_key"])
+        reason = "target_ambiguous" if live else "offline"
+        return self._reconcile_handover(record, None, reason=reason,
+                                        detail=f"no single live session named {record['target']}")
+
+    def process_named(self):
+        """Deliver messages addressed to a named agent on this machine (§16.7).
+
+        The target is the Herdr agent or the live hook session with exactly that
+        name; none is ``offline``, several (or one of each) ``target_ambiguous``.
+        There is never a fallback and no inbox pin applies. At most one Herdr
+        prompt per iteration; a next-turn handover goes to the name's box."""
+        chosen = None
+        with self.queue.lock():
+            records = [r for r in self.queue.all() if r.get("target")]
+            if not records:
+                return
+            hook_records = (sessions.read_sessions(self.sessions_state, now=self._clock(), drop=False)
+                            if self.sessions_state else [])
+            for record in records:
+                if record["state"] == q.AGENT_HANDED_OVER:
+                    self._reconcile_named(record, hook_records)
+            trusted = self.trusted()
+            herdr_agents, herdr_ok, herdr_error = None, True, ""
+            prompted = False
+            for record in records:
+                if not record["acked"] or record["state"] not in q.AGENT_PENDING:
+                    continue
+                if record.get("attachments_pending"):
+                    continue
+                if (record.get("hold_reason") == "offline" and record.get("offline_since") is not None
+                        and self._clock() - record["offline_since"] >= EXPIRE_OFFLINE):
+                    q.Queue.transition(record, q.REJECTED, detail="expired_offline")
+                    self.queue.save(record)
+                    self.log(f"message {record['id']} to {record['target']} expired after 14 days offline")
+                    continue
+                if self._policy_held(record, trusted):
+                    continue
+                if herdr_agents is None:
+                    try:
+                        herdr_agents = self.herdr.list_agents()
+                    except HerdrError as exc:
+                        herdr_agents, herdr_ok, herdr_error = [], False, str(exc)[:200]
+                name = record["target"]
+                herdr, hooks = self._named_candidates(name, herdr_agents, hook_records)
+                if len(herdr) + len(hooks) > 1:
+                    self._hold(record, "target_ambiguous",
+                               f"{len(herdr)} Herdr agent(s) and {len(hooks)} hook session(s) are named {name}")
+                    continue
+                if not herdr and not hooks:
+                    detail = f"no live agent named {name}" + ("" if herdr_ok else f" (herdr: {herdr_error})")
+                    self._hold(record, "offline", detail)
+                    continue
+                if self.stop_requested():
+                    break
+                if hooks:
+                    self._hand_over_named(record, hooks[0])
+                    continue
+                status = herdr[0].get("status") or "unknown"
+                if status == "blocked":
+                    self._hold(record, "blocked", f"herdr reports {name} status blocked")
+                    continue
+                if status not in READY_STATUSES:
+                    self._hold(record, "busy", f"herdr reports {name} status {status}")
+                    continue
+                if prompted:
+                    self._hold(record, "busy", "another message was submitted this iteration")
+                    continue
+                fits = getattr(self.herdr, "command_line_fits", None)
+                if fits is not None and not fits(name, self._prompt_text(record)):
+                    self._hold(record, "too_large_for_command_line",
+                               "the framed prompt would exceed the command-line bound; it is never truncated")
+                    continue
+                chosen = (record["id"], name, self._begin_submit(record))
+                prompted = True
+        if chosen is None:
+            return
+        outcome = self._prompt(chosen[1], chosen[2])  # no lock held
+        with self.queue.lock():
+            record = self.queue.get(chosen[0])
+            self._finish(record, outcome, chosen[1], q.AGENT_HELD)
+            if record["state"] == q.AGENT_HELD:
+                self._held_since(record, record["hold_reason"])
+            else:
+                for field in ("held_since", "offline_since"):
+                    record.pop(field, None)
+            self.queue.save(record)
+            self.log(f"message {record['id']} to {chosen[1]} is {record['state']}")
+
+    def _hand_over_named(self, record, session):
+        """Write the framed message to the name's box for the session's next turn."""
+        box = sessions.name_box(record["target"])
+        if self._clock() < record.get("handover_retry_at", 0):
+            return
+        try:
+            sessions.inbox_dir(self.sessions_state, box, create=True)
+        except (OSError, ConfigError) as exc:
+            self._hold(record, "offline", f"cannot hand over to the session: {type(exc).__name__}")
+            return
+        held = self._clock() - record["held_since"] if record.get("held_since") is not None else None
+        text = self._prompt_text(record, held_seconds=held)
+        if not sessions.fits_one_turn(text, session["type"]):
+            cap = sessions.char_cap(session["type"])
+            bound = f"{cap} characters" if cap else f"{sessions.CLAIM_CAP_BYTES} bytes"
+            self._hold(record, "too_large_for_hook", f"framed message exceeds the per-turn bound ({bound})")
+            return
+        record["attempts"] = record.get("attempts", 0) + 1
+        record["handover_key"] = box
+        q.Queue.transition(record, q.AGENT_SUBMITTING)
+        self.queue.save(record)
+        try:
+            sessions.hand_over(self.sessions_state, box, record["id"], text)
+        except (OSError, ConfigError) as exc:
+            self._undo_handover(record, box, exc)
+            return
+        q.Queue.transition(record, q.AGENT_HANDED_OVER,
+                           detail=f"handed to the {session['type']} session {record['target']}; at its next turn")
+        for field in ("held_since", "offline_since"):
+            record.pop(field, None)
+        self.queue.save(record)
+        self.log(f"message {record['id']} is handed_over to {record['target']}")
+
     def _hold(self, record, reason, detail=""):
-        if record["state"] == q.HELD and record["hold_reason"] == reason:
+        state = q.held_state(record)
+        if record["state"] == state and record["hold_reason"] == reason:
             if record.get("hold_detail") != detail:  # local detail only; no new event
                 record["hold_detail"] = detail
                 self.queue.save(record)
             return
-        q.Queue.transition(record, q.HELD, reason=reason)
+        q.Queue.transition(record, state, reason=reason)
         record["hold_detail"] = detail
+        self._held_since(record, reason)
         self.queue.save(record)
         self.log(f"holding message {record['id']}: {reason} ({detail})")
+
+    def _held_since(self, record, reason):
+        """Clock times for the held age shown on a handover (C12) and offline expiry."""
+        record.setdefault("held_since", self._clock())
+        if reason == "offline":
+            record.setdefault("offline_since", self._clock())
+        else:
+            record.pop("offline_since", None)
 
     def _begin_submit(self, record):
         """Durably mark ``submitting`` (before any input can reach the session)
         and return the prompt text."""
         record["attempts"] = record.get("attempts", 0) + 1
-        q.Queue.transition(record, q.SUBMITTING)
+        q.Queue.transition(record, q.submitting_state(record))
         self.queue.save(record)
         return self._prompt_text(record)
 
-    def _prompt_text(self, record):
+    def _prompt_text(self, record, held_seconds=None):
         """The section 11.1 prompt; identical for Herdr and next-turn delivery."""
         guidance = ""
-        if self.config.mode == "inbox":
+        if self.config.mode == "inbox" and not record.get("target"):
             guidance = inbox_guidance(record["id"], self.identity["handle"],
                                       self.config.shareable_context, self.config.path)
-        return frame_record(record, self.identity, guidance, self.prompt_agent_config)
+        return frame_record(record, self.identity, guidance, self.prompt_agent_config, held_seconds)
 
     def _prompt(self, target_name, text):
         """Run the prompt; return None on success or the Exception. A

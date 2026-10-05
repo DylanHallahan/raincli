@@ -166,13 +166,37 @@ def sessions_dir(state_dir, create=False):
     return private_dir(os.path.join(state_dir, SESSIONS), create)
 
 
+# A handover "box" is a session key (the configured inbox, ``<key>.inbox``) or a
+# name box ``n:<sha256(name)[:32]>`` (protocol §16.7: a named session's handovers
+# live in ``sessions/by-name/<sha>/``, so whichever live session has that name
+# claims them, also one that returns under a new session id).
+BY_NAME = "by-name"
+NAME_BOX_RE = re.compile(r"^n:[0-9a-f]{32}$")
+
+
+def name_box(name):
+    return "n:" + hashlib.sha256(name.encode("utf-8", "surrogatepass")).hexdigest()[:32]
+
+
+def _box_parts(box):
+    if NAME_BOX_RE.fullmatch(box or ""):
+        return (BY_NAME, box[2:])
+    if KEY_RE.fullmatch(box or ""):
+        return (box + ".inbox",)
+    raise ConfigError("invalid session key")
+
+
 def inbox_dir(state_dir, key, create=False):
-    if not KEY_RE.fullmatch(key):
-        raise ConfigError("invalid session key")
+    parts = _box_parts(key)
     base = sessions_dir(state_dir, create)
     if base is None:
         return None
-    return private_dir(os.path.join(base, key + ".inbox"), create)
+    if len(parts) == 2:
+        by_name = private_dir(os.path.join(base, BY_NAME), create)
+        if by_name is None:
+            return None
+        return private_dir(os.path.join(by_name, parts[1]), create)
+    return private_dir(os.path.join(base, parts[0]), create)
 
 
 # -- session records -------------------------------------------------------------
@@ -250,17 +274,22 @@ def read_sessions(state_dir, now=None, drop=True):
     return out
 
 
-def live_sessions(state_dir, agent_type, name, now=None):
-    """The live hook sessions of this type and name: process alive, or (with no
-    determinable process) an event within the last 10 minutes."""
-    return [r for r in read_sessions(state_dir, now, drop=False)
-            if r["type"] == agent_type and r["name"] == name and r["status"] != "offline"]
+def live_sessions(state_dir, agent_type, name, now=None, records=None):
+    """The live hook sessions of this type (None: any type) and name: process alive,
+    or (with no determinable process) an event within the last 10 minutes."""
+    records = read_sessions(state_dir, now, drop=False) if records is None else records
+    return [r for r in records
+            if (agent_type is None or r["type"] == agent_type) and r["name"] == name and r["status"] != "offline"]
 
 
 # -- next-turn inbox: connector side ----------------------------------------------
 
+def _box_dir(state_dir, key):
+    return os.path.join(state_dir, SESSIONS, *_box_parts(key))
+
+
 def _inbox_file(state_dir, key, message_id, suffix=""):
-    return os.path.join(state_dir, SESSIONS, key + ".inbox", message_id + ".md" + suffix)
+    return os.path.join(_box_dir(state_dir, key), message_id + ".md" + suffix)
 
 
 def _unlink(path):
@@ -307,7 +336,7 @@ def settle(state_dir, key, message_id):
     for suffix in ("", ".claimed", ".receipt", ".reclaimed"):
         _unlink(_inbox_file(state_dir, key, message_id, suffix))
     try:
-        os.rmdir(os.path.join(state_dir, SESSIONS, key + ".inbox"))
+        os.rmdir(_box_dir(state_dir, key))
     except OSError:
         pass  # not empty, or already gone
 
@@ -333,11 +362,13 @@ def _read_regular(path, limit):
         os.close(fd)
 
 
-def claim(state_dir, key, kind="claude"):
+def claim(state_dir, key, kind="claude", used=None):
     """Claim pending framed messages, oldest first, within ``kind``'s per-turn bound.
 
     Returns ``(texts, ids)``. The caller emits the texts and then calls
-    ``write_receipts``. Only regular ``<uuid>.md`` files are considered."""
+    ``write_receipts``. Only regular ``<uuid>.md`` files are considered. ``used``
+    is a ``[bytes, chars, count]`` budget shared by several boxes in one turn."""
+    used = [0, 0, 0] if used is None else used
     directory = inbox_dir(state_dir, key)
     if directory is None:
         return [], []
@@ -350,7 +381,8 @@ def claim(state_dir, key, kind="claude"):
                 continue
             entries.append((st.st_mtime_ns, entry.name, st.st_size))
     entries.sort()
-    texts, ids, total_bytes, total_chars = [], [], 0, 0
+    texts, ids = [], []
+    total_bytes, total_chars = used[0], used[1]
     cap_chars = char_cap(kind)
     for _mtime, name, size in entries:
         if size > CLAIM_CAP_BYTES:
@@ -371,7 +403,7 @@ def claim(state_dir, key, kind="claude"):
             text = data.decode("utf-8") if data is not None else None
         except UnicodeDecodeError:
             text = None
-        extra = context_chars(text) + (context_chars(SEPARATOR) if texts else 0) if text is not None else 0
+        extra = context_chars(text) + (context_chars(SEPARATOR) if texts or used[2] else 0) if text is not None else 0
         if text is None or (cap_chars is not None and total_chars + extra > cap_chars):
             try:
                 os.rename(claimed, pending)  # not this turn; nothing was emitted
@@ -384,6 +416,7 @@ def claim(state_dir, key, kind="claude"):
         ids.append(name[:-3])
         total_bytes += size
         total_chars += extra
+    used[0], used[1], used[2] = total_bytes, total_chars, used[2] + len(texts)
     return texts, ids
 
 

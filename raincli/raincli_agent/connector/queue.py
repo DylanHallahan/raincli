@@ -23,8 +23,34 @@ UNCERTAIN = "submission_uncertain"
 HANDED_OVER = "handed_over"
 REJECTED = "rejected"
 DISMISSED = "dismissed"
-STATES = (ATTACHMENT_PENDING, RECEIVED, HELD, SUBMITTING, HANDED_OVER, SUBMITTED, UNCERTAIN, REJECTED, DISMISSED)
+# Messages to a named agent (protocol §16.7, §16.12 C1) live only in these states
+# until they settle, so a v0.4 client, which delivers only received/held, never
+# delivers one (to its inbox) after a rollback. Pending attachments are a flag.
+AGENT_RECEIVED = "agent_received"
+AGENT_HELD = "agent_held"
+AGENT_SUBMITTING = "agent_submitting"
+AGENT_HANDED_OVER = "agent_handed_over"
+STATES = (ATTACHMENT_PENDING, RECEIVED, HELD, SUBMITTING, HANDED_OVER, SUBMITTED, UNCERTAIN, REJECTED, DISMISSED,
+          AGENT_RECEIVED, AGENT_HELD, AGENT_SUBMITTING, AGENT_HANDED_OVER)
 PENDING = (RECEIVED, HELD)
+AGENT_PENDING = (AGENT_RECEIVED, AGENT_HELD)
+HOLD_STATES = (HELD, AGENT_HELD)
+
+
+def received_state(record):
+    return AGENT_RECEIVED if record.get("target") else RECEIVED
+
+
+def held_state(record):
+    return AGENT_HELD if record.get("target") else HELD
+
+
+def submitting_state(record):
+    return AGENT_SUBMITTING if record.get("target") else SUBMITTING
+
+
+def pending_states(record):
+    return AGENT_PENDING if record.get("target") else PENDING
 
 # Escalation states (protocol section 10). Escalations are local only: the
 # server never sees them.
@@ -158,8 +184,8 @@ class Queue:
         if state not in STATES and state not in ESC_STATES:
             raise ValueError(state)
         record["state"] = state
-        record["hold_reason"] = reason if state in (HELD, ESC_PENDING) else None
-        if state not in (HELD, ESC_PENDING):
+        record["hold_reason"] = reason if state in (HELD, AGENT_HELD, ESC_PENDING) else None
+        if state not in (HELD, AGENT_HELD, ESC_PENDING):
             record["hold_detail"] = ""
         record["detail"] = detail
         record.setdefault("history", []).append(

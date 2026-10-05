@@ -22,12 +22,12 @@ def _require(record, allowed, action):
 def approve(queue, message_id):
     with queue.lock():
         record = queue.get(message_id)
-        _require(record, q.PENDING, "approve")
+        _require(record, q.pending_states(record), "approve")
         if record.get("hold_reason") == "sender_blocked":
             raise StateConflict(f"cannot approve message {record['id']}: the sender is in blocked_senders")
         record["approved"] = True
-        if record["state"] == q.HELD and record["hold_reason"] == "approval_required":
-            q.Queue.transition(record, q.RECEIVED, detail="approved by operator")
+        if record["state"] in q.HOLD_STATES and record["hold_reason"] == "approval_required":
+            q.Queue.transition(record, q.received_state(record), detail="approved by operator")
         queue.save(record)
         return record
 
@@ -35,7 +35,7 @@ def approve(queue, message_id):
 def reject(queue, message_id):
     with queue.lock():
         record = queue.get(message_id)
-        _require(record, q.PENDING, "reject")
+        _require(record, q.pending_states(record), "reject")
         q.Queue.transition(record, q.REJECTED, detail="declined by recipient operator")
         queue.save(record)
         return record
@@ -70,7 +70,7 @@ def resubmit(queue, message_id):
         _require(record, (q.UNCERTAIN,), "resubmit")
         record["approved"] = True  # the operator chose to deliver it
         record["resubmits"] = record.get("resubmits", 0) + 1
-        q.Queue.transition(record, q.RECEIVED, detail="resubmit requested by operator")
+        q.Queue.transition(record, q.received_state(record), detail="resubmit requested by operator")
         queue.save(record)
         return record
 

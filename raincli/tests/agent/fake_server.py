@@ -50,7 +50,7 @@ def presence_problem(body):
         return "agents"
     keys, inboxes = set(), 0
     for a in agents:
-        if not isinstance(a, dict) or set(a) != AGENT_KEYS:
+        if not isinstance(a, dict) or not AGENT_KEYS <= set(a) or set(a) - AGENT_KEYS - {"ambiguous"}:
             return "agent keys"
         if not isinstance(a["key"], str) or not re.fullmatch(r"[a-z0-9]{8,64}", a["key"]) or a["key"] in keys:
             return "agent key"
@@ -66,8 +66,12 @@ def presence_problem(body):
             return "agent status"
         if a["source"] not in {"herdr", "hook", "scan"} or (a["source"] == "scan" and a["status"] != "unknown"):
             return "agent source"
-        if a["role"] not in (None, "inbox") or (a["role"] is None) != (a["reachability"] is None):
+        # §16.2 / migration 0006: reachability on any agent; an inbox must be deliverable;
+        # "ambiguous" only as true, with "listed".
+        if a["role"] not in (None, "inbox") or a["reachability"] not in (None, "instant", "next-turn", "listed"):
             return "agent role"
+        if "ambiguous" in a and (a["ambiguous"] is not True or a["reachability"] != "listed"):
+            return "ambiguous"
         if a["role"] == "inbox":
             inboxes += 1
             if a["reachability"] not in ("instant", "next-turn"):
