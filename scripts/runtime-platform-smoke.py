@@ -145,7 +145,7 @@ def headless_login_and_machine_mode(root, server):
         from raincli_agent import login
         from raincli_agent.config import Secret
         login.login("smoke@example.test", Secret(PASSWORD), api_url=server.url, config_path=str(agent),
-                    machine_name="smoke-machine")
+                    machine_name="smoke-machine", person_session=True)  # as `raincli login` and the app ask
     assert json.loads(runtime.read_text()) == {"machine_config": str(agent), "state_dir": "runtime-state",
                                                "owner_email": "smoke@example.test"}
     person_session_checks(machine, agent, server)
