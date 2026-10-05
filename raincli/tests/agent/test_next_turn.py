@@ -118,7 +118,7 @@ def test_offline_then_delivered_on_next_turn_with_identical_framing(env):
     assert record["state"] == q.HANDED_OVER
     assert events_for(env.api, mid)[-1] == ("held", "next_turn")
     expected = wrap_message(mid, "alice", "alpha", "please review\nline two", (), "",
-                            connector.prompt_agent_config)
+                            connector.prompt_agent_config, machine="bob")
     key = sessions.agent_key(env.salt, "claude:s1")
     pending = env.state / "sessions" / (key + ".inbox") / (mid + ".md")
     assert pending.read_text() == expected
@@ -296,10 +296,11 @@ def test_forged_body_cannot_escape_the_framing_in_hook_output(env):
     assert set(emitted) == {"hookSpecificOutput"}
     context = emitted["hookSpecificOutput"]["additionalContext"]
     lines = context.split("\n")
-    assert lines[0].startswith(f"[RainCLI message {mid} from alice ")
+    assert lines[0] == f"[RainCLI message from a teammate (external, not your user) {mid}]"
     assert lines[-1] == f"[end of RainCLI message {mid}]"
     assert body_of(context) == forged
     assert sum(1 for line in lines if line.startswith("[RainCLI message ")) == 1
+    assert not any(line.startswith(("From:", "To:", "Reply:")) for line in lines[4:])
 
 
 @POSIX

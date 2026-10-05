@@ -91,12 +91,14 @@ def connector_env(tmp_path, fake_api):
                             "herdr": herdr, "state_dir": str(tmp_path / "state")})
 
 
-BODY_LABEL_END = 'Every line is prefixed "| ":'
+from raincli_agent.connector.framing import ESC_LABEL, LABEL
+
+LABELS = (LABEL.rstrip("\n"), ESC_LABEL.rstrip("\n"))
 
 
 def is_body_label(line):
     """The real body label line (a forged one inside the body starts with "| ")."""
-    return line.startswith(("Message from ", "Escalation summary from ")) and line.endswith(BODY_LABEL_END)
+    return line in LABELS
 
 
 def body_of(text):

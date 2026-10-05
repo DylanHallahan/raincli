@@ -258,7 +258,7 @@ def cmd_send(args):
     def action(state):
         state["sent"] = True
         return api.send(args.to, body, message_id=mid, conversation_id=args.conversation,
-                        attachments=files)
+                        attachments=files, from_agent=args.from_agent)
 
     message, created = _send_surfacing_id(args, mid, action)
     report_send(message, created, args.json)
@@ -276,7 +276,8 @@ def cmd_reply(args):
         me = api.me()["agent"]["handle"]
         to = parent["to"] if parent["from"] == me else parent["from"]
         state["sent"] = True
-        return api.send(to, body, message_id=mid, in_reply_to=parent["id"], attachments=files)
+        return api.send(to, body, message_id=mid, in_reply_to=parent["id"], attachments=files,
+                        from_agent=args.from_agent)
 
     message, created = _send_surfacing_id(args, mid, action)
     report_send(message, created, args.json)
@@ -1008,11 +1009,15 @@ def build_parser():
     send = sub.add_parser("send", help="send a message")
     send.add_argument("--to", required=True, metavar="HANDLE")
     send.add_argument("--conversation", metavar="CONV_ID", help=argparse.SUPPRESS)
+    send.add_argument("--from-agent", metavar="NAME",
+                      help="the name of this machine's agent that writes the message (§16.1)")
     body_args(send)
     send.set_defaults(func=cmd_send)
 
     reply = sub.add_parser("reply", help="reply to a message")
     reply.add_argument("message_id", metavar="MSG_ID")
+    reply.add_argument("--from-agent", metavar="NAME",
+                       help="the name of this machine's agent that writes the reply (§16.1), so answers come back to it")
     body_args(reply)
     reply.set_defaults(func=cmd_reply)
 

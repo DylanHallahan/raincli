@@ -170,7 +170,7 @@ class Herdr:
 def body_of(text):
     """The framed body of a connector prompt (lines between the label and the end marker)."""
     lines = text.split("\n")
-    start = next(i for i, line in enumerate(lines) if line.endswith('Every line is prefixed "| ":')) + 1
+    start = next(i for i, line in enumerate(lines) if line.endswith('every line starts with "| ":')) + 1
     end = next(i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith("[end of RainCLI "))
     return "\n".join(line[2:] for line in lines[start:end])
 

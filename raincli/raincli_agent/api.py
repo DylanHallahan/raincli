@@ -194,7 +194,7 @@ class ApiClient:
         return self.request("GET", "/agents")[1]["agents"]
 
     def send(self, to, body, *, message_id=None, conversation_id=None, in_reply_to=None,
-             attachments=None):
+             attachments=None, from_agent=None, kind=None):
         """Send a message. Returns ``(message, created)``.
 
         The id is fixed before the first attempt, so every retry is the same
@@ -207,6 +207,10 @@ class ApiClient:
             payload["in_reply_to"] = in_reply_to
         if attachments:
             payload["attachments"] = attachments  # from attachments.load_for_send
+        if from_agent:
+            payload["from_agent"] = from_agent  # §16.1: which of this machine's agents wrote it
+        if kind:
+            payload["kind"] = kind
         _, data = self.request("POST", "/messages", body=payload)
         return data["message"], bool(data.get("created"))
 
