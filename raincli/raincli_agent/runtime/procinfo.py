@@ -12,10 +12,12 @@ import sys
 TYPES_BY_NAME = {
     "claude": "claude", "codex": "codex", "gemini": "gemini", "cursor-agent": "cursor", "opencode": "opencode",
 }
-# Processes a hook may run under between the agent and itself: shells, and the
-# Python of the managed launcher or the raincli entry point.
+# Processes a hook may run under between the agent and itself: shells, the Python of
+# the managed launcher or the raincli entry point, and raincli's own executables (the
+# Windows app's bin\raincli.exe shim, the pip entry-point launcher). Codex on Windows
+# runs a hook as codex.exe -> cmd.exe /C -> raincli.exe -> raincli.exe.
 PASS_THROUGH = {"sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "tcsh", "csh", "busybox", "env", "nu",
-                "pwsh", "powershell", "cmd", "conhost"}
+                "pwsh", "powershell", "cmd", "conhost", "raincli"}
 
 
 def plain(name):

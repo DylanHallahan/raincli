@@ -22,7 +22,7 @@ KEYS = {"agent_config", "herdr_agent", "expect_pane_id", "expect_cwd", "state_di
         # protocol section 14.4 (next-turn inbox through a Claude Code hook session)
         "inbox"}
 INBOX_KEYS = {"hook", "name"}
-INBOX_HOOK_TYPES = ("claude",)
+INBOX_HOOK_TYPES = ("claude", "codex")
 ESCALATION_KEYS = {"herdr_agent", "expect_pane_id", "expect_cwd", "notify"}
 MODES = ("direct", "inbox")
 TRUST_MODES = ("list", "team")
@@ -175,9 +175,9 @@ def _inbox_hook(data):
     if inbox is None:
         return None
     if not isinstance(inbox, dict) or set(inbox) != INBOX_KEYS:
-        raise ConfigError('connector config: inbox must be {"hook": "claude", "name": "<session name>"}')
+        raise ConfigError('connector config: inbox must be {"hook": "claude"|"codex", "name": "<session name>"}')
     if inbox["hook"] not in INBOX_HOOK_TYPES:
-        raise ConfigError('connector config: inbox.hook must be "claude"')
+        raise ConfigError('connector config: inbox.hook must be "claude" or "codex"')
     name = inbox["name"]
     from ..runtime.sessions import normalize_name
     if not isinstance(name, str) or not 1 <= len(name) <= 64 or normalize_name(name, "") != name:

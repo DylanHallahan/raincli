@@ -1,8 +1,9 @@
 """``raincli hook <claude|codex> <event>``: a fast, network-free agent hook.
 
-It records the session's status for the runtime's directory and, for Claude
-Code's SessionStart/UserPromptSubmit, emits pending next-turn inbox messages as
-additional context. Whatever happens it exits 0 within about 2 s and writes
+It records the session's status for the runtime's directory and, on
+SessionStart/UserPromptSubmit (Claude Code, and Codex from 0.145.0), emits pending
+next-turn inbox messages as ``hookSpecificOutput.additionalContext``, the output
+both agents read (Codex: codex-rs/hooks/schema/generated/*.command.output.schema.json). Whatever happens it exits 0 within about 2 s and writes
 nothing to stderr; its own errors go to a private log as short codes only (never
 prompt, cwd or transcript fields).
 """
@@ -19,6 +20,9 @@ DEADLINE = 2.0
 LOG_LIMIT = 256 * 1024
 EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "Notification", "PermissionRequest", "SessionEnd")
 CLAIM_EVENTS = ("SessionStart", "UserPromptSubmit")
+# SessionStart "source": Claude Code (startup, resume, clear, compact) and Codex
+# (codex-rs/hooks/src/events/session_start.rs: startup, resume, clear, compact, fork).
+SESSION_SOURCES = ("startup", "resume", "clear", "compact", "fork")
 # Notification types that mean the session waits for its user (Claude Code 2.1.x).
 NEEDS_INPUT = ("permission_prompt", "elicitation_dialog")
 
@@ -91,6 +95,9 @@ def handle(agent_type, event, name, state_dir, stdin, stdout, now=None):
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not 1 <= len(session_id) <= 256:
         return "no_session_id"
+    source = payload.get("source")
+    if event == "SessionStart" and source is not None and source not in SESSION_SOURCES:
+        log_code(state_dir, "unknown_session_source")  # recorded anyway; only the code is logged
     key = sessions.agent_key(salt, f"{agent_type}:{session_id}")
     if sessions.sessions_dir(state_dir, create=True) is None:
         return "no_sessions_dir"
@@ -119,9 +126,9 @@ def handle(agent_type, event, name, state_dir, stdin, stdout, now=None):
             if namespace:
                 record["pid_ns"] = namespace
     sessions.write_record(state_dir, record)
-    if agent_type != "claude" or event not in CLAIM_EVENTS:
+    if event not in CLAIM_EVENTS:
         return "recorded"
-    texts, ids = sessions.claim(state_dir, key)
+    texts, ids = sessions.claim(state_dir, key, agent_type)
     if not ids:
         return "recorded"
     output = {"hookSpecificOutput": {"hookEventName": event,
