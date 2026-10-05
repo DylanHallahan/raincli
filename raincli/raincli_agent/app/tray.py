@@ -1,29 +1,33 @@
-"""``RainCLI-app.exe --background``: the tray (15.5, 15.8 H4). A thin front end.
+"""``RainCLI-app.exe``: the app (protocol §15.5, §16.10). One process holds:
 
-- the icon (ready, offline, updating, error) and a status window, read from the
-  runtime's local status record (``app.status``);
-- the menu: Status, Open log, Pause/Resume, Sign out, Quit;
-- a first-run sign-in dialog calling ``login.login``; migration (``migrate``)
-  runs first and a machine with a credential never signs in again;
-- the runtime runs as this process's child (``winapp.AppHost``); when another
-  version becomes current the tray exits with ``SWITCH_EXIT`` for the stub.
+- the window (``window.AppWindow``, pywebview/WebView2) on the main thread: the local pages
+  (sign-in, This computer, Settings, offline) and the hosted inbox. Closing it hides it;
+- the tray icon (pystray, detached): Open, Pause/Resume, Open log, Sign in again, Quit;
+- the runtime as this process's child (``winapp.AppHost``); when another version becomes current
+  the app exits with ``SWITCH_EXIT`` for the stub;
+- a supervisor thread: the runtime's step, ``--quit`` and open requests (a second launch focuses
+  the window), the icon state, and toasts from the notification queue (§16.12 C14).
 
-``pystray`` and ``Pillow`` are imported here only. Tk runs on the main thread;
-the icon menu and network work post callbacks to it through a queue.
+``--background`` starts with the window hidden unless there is no credential yet. ``pywebview``,
+``pystray`` and ``Pillow`` are imported lazily, and only here and in ``window``.
 """
 import os
 from pathlib import Path
 import queue
 import sys
 import threading
+import webbrowser
 
 from .. import __version__
-from ..config import Secret, default_config_path
 from ..runtime import winapp
+from . import policy
 from . import status as model
 
 COLOURS = {"ready": "#2e9d5b", "offline": "#8a8f98", "updating": "#d29a1e", "error": "#c23b3b"}
 TITLE = "RainCLI"
+NIN_BALLOONUSERCLICK = 0x0405
+TICK = 1.0  # seconds: open and quit requests are answered within this
+STEP_EVERY = 2  # ticks between runtime steps, icon refreshes and notification reads
 
 
 def icon_image(state):
@@ -35,30 +39,111 @@ def icon_image(state):
     return image
 
 
+class LockedHost:
+    """``AppHost`` shared by the supervisor, the tray menu and the window's js_api threads."""
+
+    def __init__(self, host):
+        self._host = host
+        self._lock = threading.RLock()
+
+    def __getattr__(self, name):
+        value = getattr(self._host, name)
+        if not callable(value):
+            return value
+        def call(*args, **kwargs):
+            with self._lock:
+                return value(*args, **kwargs)
+        return call
+
+    @property
+    def paused(self):
+        return self._host.paused
+
+    @property
+    def config(self):
+        return self._host.config
+
+    @config.setter
+    def config(self, value):
+        with self._lock:
+            self._host.config = value
+
+
+def hook_toast_click(icon, callback):
+    """pystray shows a toast with ``notify``; on Windows, also call ``callback`` when it is clicked
+    (``NIN_BALLOONUSERCLICK``). False where that is not available."""
+    try:
+        from pystray._util import win32
+        handlers = icon._message_handlers
+        original = handlers[win32.WM_NOTIFY]
+    except (ImportError, AttributeError, KeyError):
+        return False
+
+    def on_notify(wparam, lparam):
+        if lparam == NIN_BALLOONUSERCLICK:
+            callback()
+            return 0
+        return original(wparam, lparam)
+    handlers[win32.WM_NOTIFY] = on_notify
+    return True
+
+
+class NoWindow:
+    """The WebView2 Runtime is missing: the app never falls back to MSHTML. The tray and the runtime keep
+    running; opening the window explains why and opens Microsoft's download page."""
+
+    def __init__(self, tray):
+        self.tray = tray
+
+    def show(self):
+        from .window import WEBVIEW2_DOWNLOAD
+        if self.tray.icon is not None:
+            self.tray.icon.notify("Install the Microsoft Edge WebView2 Runtime to open the window. "
+                                  "Messages are still delivered.", TITLE)
+        webbrowser.open(WEBVIEW2_DOWNLOAD)
+
+    def open_hosted(self, path=None, thread_id=None):
+        self.show()
+
+    def load(self, url):
+        self.show()
+
+    def local_url(self, page, query=""):
+        return page
+
+    def home(self):
+        pass
+
+    def destroy(self):
+        self.tray.stopping.set()
+
+
 class Tray:
-    def __init__(self, root_dir):
-        import tkinter as tk
-        self.tk = tk
+    def __init__(self, root_dir, *, background=True, webview=None):
+        from .services import Services
+        from .window import AppWindow
         self.root_dir = root_dir
         self.agent_config, self.runtime_config = winapp.paths(root_dir)
         self.state_dir = Path(root_dir or Path(self.agent_config).parent) / "state"
-        self.host = winapp.AppHost(root_dir, __version__, self.runtime_config,
-                                   log_path=self.state_dir / "runtime.log")
+        self.host = LockedHost(winapp.AppHost(root_dir, __version__, self.runtime_config,
+                                              log_path=self.state_dir / "runtime.log"))
+        self.start_hidden = background
+        self.services = Services(root_dir, self.host, paths=lambda: (self.agent_config, self.runtime_config))
+        self.webview = webview
+        self.window = AppWindow(self.services, profile_dir=self.state_dir / "webview", webview=webview,
+                                browser_open=webbrowser.open, confirm=self.confirm)
         self.calls = queue.Queue()
+        self.stopping = threading.Event()
         self.exit_code = 0
-        self.handle = None
-        self.agents = None
-        self.window = self.dialog = None
         self.migrating = False
-        self.ui = tk.Tk()
-        self.ui.withdraw()
-        self.ui.title(TITLE)
         self.icon = None
         self.icon_state = None
+        self.toast_thread = None  # what clicking the last toast opens
 
     # -- plumbing ---------------------------------------------------------------------------
 
     def post(self, fn, *args):
+        """Run ``fn`` on the UI-action worker, one at a time (pywebview's window calls are thread-safe)."""
         self.calls.put((fn, args))
 
     def background(self, fn, *args, done=None):
@@ -72,23 +157,35 @@ class Tray:
         threading.Thread(target=work, daemon=True).start()
 
     def pump(self):
-        while True:
+        while not self.stopping.is_set():
             try:
-                fn, args = self.calls.get_nowait()
+                fn, args = self.calls.get(timeout=0.5)
             except queue.Empty:
-                break
-            fn(*args)
-        self.ui.after(200, self.pump)
+                continue
+            try:
+                fn(*args)
+            except Exception as exc:  # noqa: BLE001 - one failed action never stops the app
+                print(f"RainCLI app: {fn.__name__} failed: {type(exc).__name__}", file=sys.stderr)
 
     def supervise(self):
-        if self.root_dir is not None and winapp.quit_requested(self.root_dir):
-            return self.quit(0)  # RainCLI.exe --quit (the uninstaller)
-        if not self.migrating:
-            code = self.host.step() if self.signed_in() else None
-            if code is not None:
-                return self.quit(code)
-        self.refresh_icon()
-        self.ui.after(2000, self.supervise)
+        tick = 0
+        while not self.stopping.wait(TICK):
+            tick += 1
+            if self.root_dir is not None and winapp.quit_requested(self.root_dir):
+                return self.quit(0)  # RainCLI.exe --quit (the uninstaller)
+            if self.root_dir is not None and winapp.take_open_request(self.root_dir):
+                self.post(self.window.show)  # a second launch: focus this window
+            if tick % STEP_EVERY:
+                continue
+            if not self.migrating:
+                self.agent_config, self.runtime_config = winapp.paths(self.root_dir)
+                if self.host.config != str(self.runtime_config):
+                    self.host.config = str(self.runtime_config)
+                code = self.host.step() if self.signed_in() else None
+                if code is not None:
+                    return self.quit(code)
+            self.refresh_icon()
+            self.toasts()
 
     def signed_in(self):
         return os.path.exists(self.agent_config) and os.path.exists(self.runtime_config)
@@ -106,13 +203,43 @@ class Tray:
             self.icon_state = state
             self.icon.icon = icon_image(state)
             self.icon.title = f"{TITLE}: {state}"
-        if self.window is not None:
-            self.window_text.set("\n".join(self.describe()))
 
-    def describe(self):
-        return model.describe(self.status(), handle=self.handle, version=__version__,
-                              update_mode=winapp.update_mode(self.root_dir) if self.root_dir else None,
-                              agents=self.agents, paused=self.host.paused)
+    # -- toasts (§16.10, §16.12 C14) ------------------------------------------------------------
+
+    def toasts(self):
+        """One toast per new notification: the sender's name only, never body text."""
+        if not self.signed_in():
+            return
+        try:
+            entries = self.services.notifications()
+        except Exception:  # noqa: BLE001 - no person session or queue yet
+            return
+        for entry in entries or ():
+            text, thread = self.toast_for(entry)
+            self.toast_thread = thread
+            if self.icon is not None:
+                self.icon.notify(text, TITLE)
+
+    def toast_for(self, entry):
+        """``(text, conversation id or None)`` for a queue entry ``{id, kind, at}``."""
+        kind, sender, thread = entry.get("kind"), None, None
+        try:
+            summary = self.services.message_summary(entry["id"])
+            kind, sender, thread = summary["kind"] or kind, summary["sender"], summary.get("conversation_id")
+        except Exception:  # noqa: BLE001 - offline: a toast without the name
+            pass
+        return policy.toast_text(kind, sender), thread
+
+    def toast_clicked(self):
+        thread = self.toast_thread
+        self.post(self.open_thread, thread)
+
+    def open_thread(self, thread):
+        self.window.show()
+        if thread:
+            self.window.open_hosted(thread_id=thread)
+        else:
+            self.window.open_hosted("/app/inbox")
 
     # -- menu -----------------------------------------------------------------------------------
 
@@ -120,100 +247,39 @@ class Tray:
         import pystray
         item = pystray.MenuItem
         return pystray.Menu(
-            item("Status", lambda: self.post(self.show_status), default=True),
-            item("Open log", lambda: self.post(self.open_log)),
-            item(lambda _: "Resume" if self.host.paused else "Pause", lambda: self.post(self.toggle_pause)),
+            item(f"Open {TITLE}", lambda: self.post(self.window.show), default=True),
+            item(lambda _: "Resume" if self.host.paused else "Pause", lambda: self.post(self.services.toggle_pause)),
+            item("Open log", lambda: self.post(self.services.open_log)),
             item("Sign in again", lambda: self.post(self.sign_in, True)),
-            item("Sign out", lambda: self.post(self.sign_out)),
             item("Quit", lambda: self.post(self.quit, 0)))
 
-    def show_status(self):
-        tk = self.tk
-        if self.window is None:
-            self.window = tk.Toplevel(self.ui)
-            self.window.title(f"{TITLE} status")
-            self.window_text = tk.StringVar(value="\n".join(self.describe()))
-            tk.Label(self.window, textvariable=self.window_text, justify="left", anchor="w",
-                     padx=16, pady=12, font=("Segoe UI", 10)).pack(fill="both")
-            self.window.protocol("WM_DELETE_WINDOW", self.close_status)
-            self.fetch_directory()
-        self.window.deiconify()
-        self.window.lift()
+    def sign_in(self, again=False):
+        """The local sign-in page. ``again`` replaces this machine's own credential (review 1a F9)."""
+        self.window.show()
+        self.window.load(self.window.local_url("sign-in", "again=1" if again else ""))
 
-    def close_status(self):
-        self.window.destroy()
-        self.window = None
-
-    def fetch_directory(self):
-        def fetch():
-            from ..api import ApiClient
-            from ..config import load_config
-            client = ApiClient.from_config(load_config(self.agent_config), timeout=10, max_attempts=1)
-            handle = client.me()["agent"]["handle"]
-            mine = [m for m in client.agents() if m.get("handle") == handle]
-            return handle, (mine[0].get("agents") or []) if mine else []
-
-        def done(result, error):
-            if result:
-                self.handle, self.agents = result
-            self.refresh_icon()
-        if self.signed_in():
-            self.background(fetch, done=done)
-
-    def open_log(self):
-        log = self.state_dir / "runtime.log"
-        if hasattr(os, "startfile") and log.exists():
-            os.startfile(str(log))  # noqa: S606 - the user's own private log
-
-    def toggle_pause(self):
-        if self.host.paused:
-            self.host.resume()
-        else:
-            self.background(self.host.pause)
-
-    def sign_out(self):
-        from tkinter import messagebox
-        from .. import login
-        try:
-            _, handle = login.describe(self.agent_config)
-        except Exception:  # noqa: BLE001
-            return
-        name = handle or "this machine"
-        if not messagebox.askyesno(TITLE, f"Sign out {name}?\n\nIt is revoked on the server and its credential "
-                                          "is deleted from this computer. Queues are kept."):
-            return
-
-        def done(result, error):
-            if error is not None:
-                if messagebox.askyesno(TITLE, f"Signing out failed: {error}\n\nThe credential was kept. Delete it "
-                                              "from this computer only? (Then revoke the machine on the website.)"):
-                    self.migrating = True
-                    self.background(lambda: (self.host.stop(), login.logout(self.agent_config, local_only=True)),
-                                    done=after)
-                return
-            after(result, None)
-
-        def after(result, error):
-            self.migrating = False
-            self.handle = self.agents = None
-            self.sign_in()
-        self.migrating = True
-        self.background(lambda: (self.host.stop(), login.logout(self.agent_config))[1], done=done)
+    def confirm(self, title, message):
+        if isinstance(self.window, NoWindow):  # no dialogs without the window: say it, take the safe answer
+            if self.icon is not None:
+                self.icon.notify(message[:240], title)
+            return False
+        return bool(self.window.window.create_confirmation_dialog(title, message))
 
     def quit(self, code=0):
         self.exit_code = code
         if code != winapp.SWITCH_EXIT:
             self.host.stop()
+        self.stopping.set()
         if self.icon is not None:
             self.icon.stop()
-        self.ui.quit()
+        self.window.destroy()
 
     # -- first run: migration, then sign-in -----------------------------------------------------
 
     def first_run(self, connector_configs=()):
         """Migration only when something is left to do and no new version is on
         probation; with a credential the runtime starts first (review 1a F5). The
-        sign-in dialog appears only when there is no credential."""
+        sign-in page appears only when there is no credential."""
         from ..migrate import Migration
         stop = threading.Event()
 
@@ -242,7 +308,7 @@ class Tray:
             self.host.start()
         if not pending:
             if not self.signed_in():
-                self.sign_in()
+                self.post(self.sign_in)
             return
         self.migrating = True
 
@@ -258,7 +324,7 @@ class Tray:
             elif result["status"] == "connector_config_required":
                 self.ask_connector_config(result["message"])
             elif result["status"] in ("busy", "waiting"):
-                self.ui.after(10000, self.first_run)  # an old window still runs: try again
+                threading.Timer(10, self.post, (self.first_run,)).start()  # an old window still runs: try again
             elif not self.signed_in():
                 self.sign_in()
             elif not self.host.paused and not self.host.running():
@@ -267,36 +333,40 @@ class Tray:
 
     def ask_connector_config(self, message):
         """Review 1a F11: the handle has served as an inbox, so ask where its connector config is."""
-        from tkinter import filedialog, messagebox
-        if not messagebox.askokcancel(TITLE, message.split(" Run:")[0] + "\n\nChoose the connector config file?"):
+        self.window.show()
+        if not self.confirm(TITLE, message.split(" Run:")[0] + "\n\nChoose the connector config file?"):
             return
-        path = filedialog.askopenfilename(title="Connector config", filetypes=[("JSON", "*.json")])
-        if path:
-            self.first_run(connector_configs=(path,))
+        dialog = getattr(getattr(self.webview, "FileDialog", None), "OPEN", 10)
+        paths = self.window.window.create_file_dialog(dialog, file_types=("JSON (*.json)",))
+        if paths:
+            self.first_run(connector_configs=(paths[0],))
 
     def notice(self, message, cancel_event):
-        from tkinter import messagebox
+        if isinstance(self.window, NoWindow):
+            if self.icon is not None:
+                self.icon.notify(message[:240], TITLE)
+            return  # migration keeps waiting; Quit stops it
+        self.window.show()
         if cancel_event is None:
-            messagebox.showinfo(TITLE, message)
-        elif not messagebox.askokcancel(TITLE, message + "\n\nOK keeps waiting; Cancel stops."):
+            self.window.window.create_confirmation_dialog(TITLE, message)
+        elif not self.confirm(TITLE, message + "\n\nOK keeps waiting; Cancel stops."):
             cancel_event.set()
-
-    def sign_in(self, again=False):
-        """``again``: replace this machine's own machine-mode credential (for one that
-        cannot be read here, review 1a F9); a connector machine's is never replaced."""
-        if self.dialog is None:
-            self.dialog = SignInDialog(self)
-        self.dialog.force = bool(again)
-        self.dialog.show()
 
     # -- run -----------------------------------------------------------------------------------------
 
     def run(self):
         lock = winapp.tray_lock(self.root_dir) if self.root_dir is not None else None
         if self.root_dir is not None and lock is None:
-            # Another tray runs this install: never exit 0, which the stub reads as a quit (review 3 N1).
+            # Another app runs this install: never exit 0, which the stub reads as a quit (review 3 N1).
+            # The stub's open request (a second launch) reaches that app.
             return winapp.ALREADY_RUNNING_EXIT
         import pystray
+        from .window import webview2_version
+        if self.webview is None and os.name == "nt" and webview2_version() is None:
+            self.window = NoWindow(self)
+        elif self.webview is None:
+            import webview
+            self.webview = self.window._webview = webview
         try:
             return self._run(pystray)
         finally:
@@ -305,122 +375,48 @@ class Tray:
 
     def _run(self, pystray):
         self.icon_state = "offline"
-        self.icon = pystray.Icon("RainCLI", icon_image("offline"), f"{TITLE}: offline", self.menu())
+        self.icon = pystray.Icon(TITLE, icon_image("offline"), f"{TITLE}: offline", self.menu())
+        hook_toast_click(self.icon, self.toast_clicked)
         self.icon.run_detached()
-        self.ui.after(0, self.pump)
-        self.ui.after(0, self.first_run)
-        self.ui.after(2000, self.supervise)
-        self.ui.mainloop()
+        if isinstance(self.window, NoWindow):
+            self.started()  # no GUI loop: the supervisor runs here until Quit
+        else:
+            self.window.create()
+            self.window.start(self.started)  # blocks on this (the main) thread until the window is destroyed
+        self.stopping.set()
+        if self.icon is not None:
+            self.icon.stop()
         return self.exit_code
 
-
-class SignInDialog:
-    """Email, machine name and password; calls ``login.login``. After any refusal
-    the password field is cleared: the tray never retries with a remembered
-    password (15.8 M2), and nothing about the request is logged (M3)."""
-
-    def __init__(self, tray):
-        from .. import login
-        tk = tray.tk
-        self.tray, self.login, self.team, self.replace, self.force = tray, login, None, False, False
-        self.top = tk.Toplevel(tray.ui)
-        self.top.title("Sign in to RainCLI")
-        self.top.protocol("WM_DELETE_WINDOW", self.top.withdraw)
-        frame = tk.Frame(self.top, padx=16, pady=12)
-        frame.pack(fill="both")
-        self.email, self.name, self.password = tk.StringVar(), tk.StringVar(value=login.default_machine_name()), \
-            tk.StringVar()
-        self.message = tk.StringVar(value="Sign in with your RainCLI account to add this computer to your team.")
-        tk.Label(frame, textvariable=self.message, wraplength=360, justify="left").grid(row=0, columnspan=2, sticky="w")
-        for row, (label, var, show) in enumerate((("Email", self.email, None), ("Machine name", self.name, None),
-                                                  ("Password", self.password, "•")), 1):
-            tk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=4)
-            tk.Entry(frame, textvariable=var, show=show or "", width=36).grid(row=row, column=1, pady=4)
-        self.teams = tk.StringVar()
-        self.team_menu = None
-        self.frame = frame
-        self.button = tk.Button(frame, text="Sign in", command=self.submit)
-        self.button.grid(row=5, column=1, sticky="e", pady=8)
-
-    def show(self):
-        self.top.deiconify()
-        self.top.lift()
-
-    def submit(self):
-        password = Secret(self.password.get())
-        self.password.set("")
-        if not password.reveal():
-            self.message.set("Enter your password.")
-            return
-        email, name = self.email.get().strip(), self.name.get().strip()
-        team = self.teams.get() or self.team
-        replace = self.replace
-        self.button.config(state="disabled")
-        self.message.set("Signing in…")
-        root = self.tray.root_dir
-        config_path = winapp.read_settings(root).get("agent_config") if root else None
-
-        force = self.force
-
-        def work():
-            if force:
-                self.tray.host.pause()  # the runtime would otherwise publish with a credential being replaced
-            plan = self.login.prepare(config_path or default_config_path(), force=force)
-            return self.login.login(email, password, plan=plan, machine_name=name, team=team or None,
-                                    replace=replace)
-        self.tray.background(work, done=self.done)
-
-    def done(self, result, error):
-        from tkinter import messagebox
-        login = self.login
-        self.button.config(state="normal")
-        self.replace = False
-        if error is not None and self.force and self.tray.signed_in():
-            self.tray.host.resume()  # nothing was replaced: the current credential keeps running
-        if error is None:
-            self.force = False
-            self.top.withdraw()
-            self.tray.agent_config, self.tray.runtime_config = winapp.paths(self.tray.root_dir)
-            self.tray.host.config = str(self.tray.runtime_config)
-            self.tray.handle = result["handle"]
-            self.tray.host.resume()
-            return
-        if isinstance(error, login.TeamChoiceRequired) and error.teams:
-            slugs = [t["slug"] for t in error.teams]
-            self.teams.set(slugs[0])
-            if self.team_menu is not None:
-                self.team_menu.destroy()
-            self.tray.tk.Label(self.frame, text="Team").grid(row=4, column=0, sticky="w")
-            self.team_menu = self.tray.tk.OptionMenu(self.frame, self.teams, *slugs)
-            self.team_menu.grid(row=4, column=1, sticky="w")
-            self.message.set("Choose a team, enter your password again and sign in.")
-        elif isinstance(error, login.NameInUse):
-            name = self.name.get().strip()
-            if messagebox.askyesno("Replace machine", f"Replace machine {name}?\n\nIts current credential is "
-                                                      "revoked. Choose No to pick another name."):
-                self.replace = True
-                self.message.set(f"Enter your password again to replace machine {name}.")
-            else:
-                self.message.set("Choose another machine name.")
-        elif isinstance(error, login.LoginError):
-            self.message.set(str(error))
-        else:
-            self.message.set(f"Sign-in failed: {error}")
+    def started(self):
+        """pywebview's GUI loop is running (this is its worker thread)."""
+        threading.Thread(target=self.pump, daemon=True).start()
+        self.window.home()
+        opened = self.root_dir is not None and winapp.take_open_request(self.root_dir)
+        if opened or not self.start_hidden or not self.signed_in() or not self.services.has_person_session():
+            self.post(self.window.show)
+        self.post(self.first_run)
+        self.supervise()
 
 
 def self_check():
-    """``RainCLI-app.exe --self-check`` (15.9): import the tray and its GUI modules, with
-    no desktop, so a build proves the frozen app can start. 0 on success."""
+    """``RainCLI-app.exe --self-check`` (15.9): import the app and its GUI modules, with no desktop,
+    so a build proves the frozen app can start. 0 on success."""
     import importlib
-    modules = ("pystray", "PIL.Image", "PIL.ImageDraw", "tkinter", "tkinter.filedialog", "tkinter.messagebox",
-               "raincli_agent.app.status", "raincli_agent.login", "raincli_agent.migrate",
-               "raincli_agent.runtime.service", "raincli_agent.runtime.winapp")
+    modules = ("pystray", "PIL.Image", "PIL.ImageDraw", "webview", "raincli_agent.app.window",
+               "raincli_agent.app.services", "raincli_agent.app.status", "raincli_agent.login",
+               "raincli_agent.migrate", "raincli_agent.runtime.service", "raincli_agent.runtime.winapp")
     for name in modules:
         try:
             importlib.import_module(name)
         except Exception as exc:  # noqa: BLE001 - reported, never raised
             print(f"RainCLI-app self-check: cannot import {name}: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 1
+    from .window import LOCAL_DIR
+    missing = [p for p in policy.LOCAL_PAGES if not (LOCAL_DIR / f"{p}.html").is_file()]
+    if missing:
+        print(f"RainCLI-app self-check: missing local pages: {', '.join(missing)}", file=sys.stderr)
+        return 1
     print(f"RainCLI-app self-check: ok ({__version__})")
     return 0
 
@@ -429,10 +425,10 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv == ["--self-check"]:
         return self_check()
-    if argv != ["--background"]:
-        print("usage: RainCLI-app.exe --background | --self-check", file=sys.stderr)
+    if argv not in (["--background"], []):
+        print("usage: RainCLI-app.exe [--background] | --self-check", file=sys.stderr)
         return 2
-    return Tray(winapp.app_root()).run()
+    return Tray(winapp.app_root(), background=bool(argv)).run()
 
 
 if __name__ == "__main__":

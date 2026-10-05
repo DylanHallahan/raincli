@@ -1146,3 +1146,14 @@ The reviewer checks the framing specifically in every Phase 2 round.
   - Tests cover both: the Nginx config is rendered or parsed with the map applied, and server logs are captured for a request carrying a token.
   - `docs/raincli-deploy.md` notes that v0.5.0 requires reinstalling the Nginx config.
 - **Lifetime.** `app_install_token` is rotated on sign-out (app or person), on sign-in again, and on every install or reinstall of the app. A rotation makes outstanding handoff codes and app-mode web sessions bound to the old hash fail.
+
+### 16.15 Lead decisions after the app-window build (binding)
+1. **Token form.** `app_install_token` is `secrets.token_urlsafe(32)`, 43 characters. The server accepts `RainCLIApp/[A-Za-z0-9_-]{32,128}` and binds `sha256` (lowercase hex) of the token text as sent. The client exposes `person.app_install_token(agent_config) -> str`.
+2. **Rotation on install.**
+   - The client rotates the token itself. The installer never touches the user's config directory.
+   - A full install writes `install_stamp` (a timestamp plus random hex) into `install.json`. The client records the `(current, install_stamp)` its token was created under, and rotates when either differs.
+   - So the token also rotates on every pushed update, which is harmless: the next page goes through a fresh handoff.
+3. **Opening the app from the Start menu** (fixes a v0.4.0 defect: the shortcut runs `RainCLI.exe` with no arguments, which the v0.4 stub rejects).
+   - **The v0.5 stub** accepts no arguments, or `--open`, to mean: start the app if it isn't running, then show the window (through `app-lock\show`, which the tray watches). `--background` never shows the window.
+   - **A full install** writes `"stub": 2` into `install.json`.
+   - **Machines updated in place** keep their v0.4 stub, so `install.json` has no `stub` key. On start, the v0.5 app rewrites the RainCLI Start menu shortcut's arguments to `--background` (stdlib PowerShell `WScript.Shell`, no new dependency), and logs it. That start works with a v0.4 stub, and the tray icon opens the window. The next full install restores the no-argument shortcut.

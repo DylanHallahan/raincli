@@ -122,11 +122,14 @@ def upgrade():
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("used_at", sa.DateTime(timezone=True)),
+        sa.Column("install_hash", sa.String(64), nullable=False),
     )
     op.add_column("web_sessions", sa.Column("app_mode", sa.Boolean(), nullable=False, server_default=sa.false()))
     op.add_column("web_sessions", sa.Column("person_session_id", sa.UUID(),
                                             sa.ForeignKey("person_sessions.id", ondelete="CASCADE")))
     op.create_check_constraint("ck_web_sessions_app_mode", "web_sessions", "app_mode = (person_session_id IS NOT NULL)")
+    op.add_column("web_sessions", sa.Column("app_install_hash", sa.String(64)))
+    op.create_check_constraint("ck_web_sessions_app_install", "web_sessions", "app_mode = (app_install_hash IS NOT NULL)")
 
 
 def downgrade():
@@ -140,6 +143,10 @@ def downgrade():
             RAISE EXCEPTION 'cannot downgrade below 0006: person or agent endpoints exist';
           END IF;
         END $$""")
+    # §16.14 S5: an app-mode session must never survive as a full web session once its columns are gone.
+    op.execute("DELETE FROM web_sessions WHERE app_mode")
+    op.drop_constraint("ck_web_sessions_app_install", "web_sessions")
+    op.drop_column("web_sessions", "app_install_hash")
     op.drop_constraint("ck_web_sessions_app_mode", "web_sessions")
     op.drop_column("web_sessions", "person_session_id")
     op.drop_column("web_sessions", "app_mode")

@@ -11,7 +11,8 @@
 ;     both onedir with their own _internal (§15.9);
 ;   - writes install.json {current, previous, probation} atomically (M6);
 ;   - puts <root>\bin first on the user PATH, adds the Start menu entries and starts the tray,
-;     whose first run signs in or migrates an older install (§15.6, H6).
+;     whose first run signs in or migrates an older install (§15.6, H6);
+;   - checks for the WebView2 Runtime the window needs, and offers Microsoft's download page (§16.10).
 ; /UPDATE /DIR=<root>\versions\X.Y.Z (the app's updater) installs only that version folder: no
 ; uninstaller or uninstall key, no stub, shim, Run value, PATH, shortcuts, install.json or launch (H5).
 ; The uninstaller stops the app (it refuses while the app keeps running), removes the raincli-marked
@@ -455,6 +456,58 @@ begin
     WriteInstallJson;
     PutBinFirstOnPath;
     WriteRunValue;
+  end;
+end;
+
+{ -- the WebView2 Runtime (protocol §16.10) ------------------------------------------------------- }
+{ The app window needs the Microsoft Edge WebView2 Runtime. Windows 11 ships it; some Windows 10
+  machines lack it. Without it the app still delivers messages and its tray says how to get it. }
+
+const
+  WebView2Client = 'Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  WebView2Download = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703';
+
+function WebView2At(RootKey: Integer; Key: String): String;
+begin
+  if not RegQueryStringValue(RootKey, Key, 'pv', Result) then
+    Result := '';
+  if Result = '0.0.0.0' then
+    Result := '';
+end;
+
+function WebView2Version: String;
+begin
+  Result := WebView2At(HKLM32, 'SOFTWARE\' + WebView2Client);
+  if Result = '' then
+    Result := WebView2At(HKLM64, 'SOFTWARE\' + WebView2Client);
+  if Result = '' then
+    Result := WebView2At(HKCU, 'Software\' + WebView2Client);
+end;
+
+function InitializeSetup: Boolean;
+var
+  Version: String;
+  Code: Integer;
+begin
+  Result := True;
+  if IsUpdate then
+    Exit;
+  Version := WebView2Version;
+  if Version <> '' then
+  begin
+    Log('WebView2 Runtime: ' + Version);
+    Exit;
+  end;
+  Log('WebView2 Runtime: missing');
+  if WizardSilent then
+    Exit;
+  if MsgBox('The RainCLI window needs the Microsoft Edge WebView2 Runtime, which is not installed on this computer.'
+            + #13#10#13#10 + 'Yes: open Microsoft''s download page. Install the runtime, then run this setup again.'
+            + #13#10 + 'No: install RainCLI now. Messages are delivered, and the window opens once the runtime is installed.',
+            mbConfirmation, MB_YESNO) = IDYES then
+  begin
+    ShellExec('open', WebView2Download, '', '', SW_SHOWNORMAL, ewNoWait, Code);
+    Result := False;
   end;
 end;
 

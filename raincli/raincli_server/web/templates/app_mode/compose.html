@@ -2,7 +2,7 @@
 {% block title %}New message · {{ product_name }}{% endblock %}
 {% block list %}{% with current_id=None %}{% include "app_mode/_conv_list.html" %}{% endwith %}{% endblock %}
 {% block main %}
-<header class="rc-main-head"><h2>New message</h2><p>Sent as you, {{ viewer.user.display_name }}.</p></header>
+<header class="rc-main-head"><div><h2>New message</h2><p>Sent as you, {{ viewer.user.display_name }}.</p></div></header>
 <div class="rc-scroll"></div>
 {% include "app_mode/_composer.html" %}
 {% endblock %}

@@ -555,9 +555,11 @@ def test_tray_imports_gui_libraries_lazily():
     top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     names = {a.name.split(".")[0] for n in top for a in n.names} | {
         (n.module or "").split(".")[0] for n in top if isinstance(n, ast.ImportFrom)}
-    assert not names & {"pystray", "PIL", "tkinter"}
+    assert not names & {"pystray", "PIL", "tkinter", "webview"}
+    assert "tkinter" not in source  # §16.10: the tkinter window and dialogs are gone
     result = subprocess.run([sys.executable, "-c", "import sys, raincli_agent.app.tray, raincli_agent.cli; "
-                             "assert not {'pystray', 'PIL', 'tkinter'} & set(sys.modules), sys.modules.keys()"],
+                             "assert not {'pystray', 'PIL', 'tkinter', 'webview'} & set(sys.modules), "
+                             "sys.modules.keys()"],
                             capture_output=True, text=True, cwd=Path(raincli_agent.__file__).parents[1])
     assert result.returncode == 0, result.stderr
 
@@ -645,7 +647,7 @@ def test_running_stub_ends_a_tray_that_ignores_quit(app, monkeypatch):
     assert stub.run() == 0 and killed == [tray] and clock.now - 1000 < winapp.GRACEFUL_STOP + 5
 
 
-def test_stub_main_accepts_only_background_and_quit(app, monkeypatch):
+def test_stub_main_accepts_only_background_quit_or_nothing(app, monkeypatch):
     from raincli_agent.app import stub
     monkeypatch.setattr(sys, "executable", str(app / "RainCLI.exe"))
     assert stub.main(["--quit"]) == 0
@@ -662,12 +664,12 @@ def test_app_self_check(monkeypatch, capsys):
     """15.9: --self-check imports the GUI modules and the tray, no desktop needed."""
     import types
     from raincli_agent.app import tray
-    for name in ("pystray", "PIL", "PIL.Image", "PIL.ImageDraw", "tkinter", "tkinter.filedialog", "tkinter.messagebox"):
+    for name in ("pystray", "PIL", "PIL.Image", "PIL.ImageDraw", "webview"):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     assert tray.main(["--self-check"]) == 0 and "self-check: ok" in capsys.readouterr().out
     monkeypatch.setitem(sys.modules, "pystray", None)  # an import that fails
     assert tray.main(["--self-check"]) == 1 and "cannot import pystray" in capsys.readouterr().err
-    assert tray.main([]) == 2
+    assert tray.main(["--bogus"]) == 2
 
 
 def test_tray_quits_on_request_and_entry_point_exists():

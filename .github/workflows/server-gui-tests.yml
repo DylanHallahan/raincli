@@ -1,0 +1,64 @@
+name: Manual server and GUI tests
+# The full test suite on Linux (protocol §16.14 S6): the server against a throwaway PostgreSQL service,
+# the client, and the Playwright GUI tests (app mode and the app's local pages) in headless Chromium.
+# It fails if any GUI test was skipped, so a missing browser can never pass silently. Screenshots are
+# uploaded as an artifact. Manual only; read-only token; no secrets (the database password below is a
+# throwaway for the job's own service container).
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 # 17-alpine
+        env:
+          POSTGRES_USER: raincli
+          POSTGRES_PASSWORD: raincli-ci-only
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U raincli" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      RAINCLI_TEST_DATABASE_URL: postgresql://raincli:raincli-ci-only@127.0.0.1:5432/postgres
+      RAINCLI_GUI_ARTIFACTS: ${{ github.workspace }}/gui-artifacts
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14.7'
+      - name: Install the server and test pins (hash-checked)
+        working-directory: raincli
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r requirements.lock -r requirements-test.lock
+          python -m pip install --disable-pip-version-check --no-deps --no-build-isolation -e .
+      - name: Install headless Chromium for Playwright
+        run: python -m playwright install --with-deps chromium
+      - name: Run the full suite
+        run: python -m pytest raincli/tests -q -rs --junitxml=test-results.xml
+      - name: Fail if any GUI test was skipped or none ran
+        if: always()
+        shell: python
+        run: |
+          import sys
+          import xml.etree.ElementTree as ET
+          cases = [c for c in ET.parse("test-results.xml").getroot().iter("testcase")
+                   if ".gui." in "." + c.get("classname", "") + "."]
+          skipped = [c.get("classname") + "::" + c.get("name") for c in cases if c.find("skipped") is not None]
+          print(f"GUI tests: {len(cases)}, skipped: {len(skipped)}")
+          for name in skipped:
+              print("SKIPPED", name)
+          sys.exit(1 if skipped or not cases else 0)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: gui-screenshots
+          path: gui-artifacts
+          if-no-files-found: warn
+          retention-days: 14

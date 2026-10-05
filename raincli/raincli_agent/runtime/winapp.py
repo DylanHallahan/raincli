@@ -710,6 +710,24 @@ def quit_requested(root):
     return (Path(root) / "app-lock" / QUIT).exists()
 
 
+OPEN = "open"  # <root>\\app-lock\\open: a second launch asks the running app to show its window
+
+
+def request_open(root):
+    directory = Path(root) / "app-lock"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / OPEN).write_bytes(b"")
+
+
+def take_open_request(root):
+    """True once per request: the running app shows and focuses its window."""
+    try:
+        (Path(root) / "app-lock" / OPEN).unlink()
+    except OSError:
+        return False
+    return True
+
+
 def clear_quit(root):
     try:
         (Path(root) / "app-lock" / QUIT).unlink()
@@ -976,12 +994,14 @@ def app_running(root, running_from=processes_under):
     return bool(blockers(root, running_from))
 
 
-def stub_main(root):
+def stub_main(root, open_window=False):
     lock = single_instance(root)
     if lock is None:
-        return 0  # already running
+        return 0  # already running (an open request reaches its app)
     try:
         clear_quit(root)  # a request left by a previous session
+        if not open_window:
+            take_open_request(root)  # likewise: a sign-in start stays in the tray
         return Stub(root).run()
     finally:
         clear_quit(root)

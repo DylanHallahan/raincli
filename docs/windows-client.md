@@ -19,11 +19,12 @@ The installer:
 - starts RainCLI at logon (a `RainCLI` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, pointing at `RainCLI.exe --background`);
 - adds **RainCLI** and **Uninstall RainCLI** to the Start menu;
 - puts the `raincli` command first on your user `PATH` (open a new terminal to use it);
-- starts the tray app, which signs you in on its first run, or moves an existing install over (below);
+- checks for the Microsoft Edge WebView2 Runtime, which the RainCLI window needs (Windows 11 includes it). If it is missing, the installer offers Microsoft's download page; without it the app still delivers messages, and the window opens once the runtime is installed;
+- starts the app, whose window signs you in on its first run, or moves an existing install over (below);
 - writes `installer-record.log` in the install folder, recording any startup entry for RainCLI that already existed, before it changes anything. It never overwrites a startup entry it hasn't recorded.
 
 ### Sign in
-On its first run the tray asks for your RainCLI **email and password** and a **machine name**. The name defaults to the computer's name in handle form (lowercase letters, digits and dashes, for example `desktop-ab12cd`), and you can change it. If you belong to several teams, it asks which one. Signing in creates this machine on your team's **Machines** page, labelled "Signed in from <name>", with its own credential. Your password is sent once to `https://raincli.com` over HTTPS and is never stored or logged; the app never retries with it.
+On its first run the RainCLI window asks for your RainCLI **email and password** and a **machine name**. The name defaults to the computer's name in handle form (lowercase letters, digits and dashes, for example `desktop-ab12cd`), and you can change it. If you belong to several teams, it asks which one. Signing in creates this machine on your team's **Machines** page, labelled "Signed in from <name>", with its own credential. Your password is sent once to `https://raincli.com` over HTTPS and is never stored or logged; the app never retries with it.
 
 - **"That name is taken"**: a teammate uses it, or a revoked machine had it. Choose another name.
 - **"You already have a machine with that name"**: signing in again on the same computer replaces its credential automatically. From another computer, the app asks you to confirm **replace machine <name>**, and that works only for a machine that has never received a message or had an inbox. Otherwise revoke the old machine on the website, then choose a new name.
@@ -35,7 +36,11 @@ Sign-in stores the machine credential in `%USERPROFILE%\.config\raincli\agent.js
 `raincli login` does the same from a terminal. It reads the password from a no-echo prompt only (never an argument, the environment or a file) and refuses without one.
 
 ### What the app does in this release
-The tray icon shows whether the machine is **ready**, **offline**, **updating** or in **error**. Its window shows the connection, the machine name, the version and update state, and the coding agents on this machine. Its menu has **Open log**, **Pause/Resume**, **Sign out** and **Quit**.
+The RainCLI window shows your **Inbox** and conversations and the **Agents** in your teams, signed in as you, plus two pages of its own: **This computer** (the connection, the machine name, the version and update state, the routing policy and the coding agents on this machine, with Pause, Open log and Sign out) and **Settings** (who may message this computer's agents, trust, and updates). If RainCLI can't be reached, the window says so and offers **Retry**. Links to other sites open in your default browser.
+
+Closing the window keeps RainCLI running in the tray. Opening **RainCLI** from the Start menu again brings the window back. The tray icon shows whether the machine is **ready**, **offline**, **updating** or in **error**, and its menu has **Open RainCLI**, **Pause/Resume**, **Open log**, **Sign in again** and **Quit**. A new message raises a Windows notification that names only the sender ("New message from …" or "Escalation from …"), never the text; clicking it opens the conversation.
+
+Signing out (This computer) revokes the machine, deletes its credential and clears the window's private browser profile.
 
 A machine signed in through the app runs in **machine mode**: it reports its presence, client version and agent list to your team, takes pushed updates, and delivers teammates' messages to your named agents (a named Herdr agent at once; a Claude Code or Codex session with RainCLI hooks at its next turn). It has no inbox, so messages to the machine itself are stored on the server. Who may reach your agents is set with `raincli trust` (any teammate by default); see [SETUP.md](../SETUP.md#messages-to-your-agents-and-to-you). Machines moved over from an existing connector setup (below) keep delivering exactly as before.
 
@@ -81,7 +86,7 @@ A reinstall over a running app first stops it the same way (`RainCLI.exe --quit`
 %LOCALAPPDATA%\Programs\RainCLI\
   RainCLI.exe, _internal\   the stub: starts the current version and owns rollback; replaced only by a full install
   bin\raincli.exe, bin\_internal\   the CLI on PATH; runs the current version's raincli.exe
-  versions\<X.Y.Z>\          each version: RainCLI-app.exe (tray) and raincli.exe (CLI)
+  versions\<X.Y.Z>\          each version: RainCLI-app.exe (window and tray) and raincli.exe (CLI)
   install.json               {"current", "previous", "probation"}
   app.json                   the agent and runtime config the app runs
   installer-record.log       startup entries found before the first change

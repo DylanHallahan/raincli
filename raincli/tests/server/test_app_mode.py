@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import html as htmllib
+import logging
 import uuid
 from datetime import timedelta
 
@@ -16,6 +18,11 @@ from raincli_server.models import HandoffCode, Message, PersonSession, WebSessio
 from test_web_app import PASSWORD, app_csrf, csrf_of, login
 
 NAV = {"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate"}
+# §16.14 S3: the app install token the webview sends in its User-Agent; the server sees only its hash.
+APP_TOKEN = "t" * 20 + "Abc_-123" + "z" * 15
+INSTALL_HASH = hashlib.sha256(APP_TOKEN.encode()).hexdigest()
+WEBVIEW_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Edg/131.0 RainCLIApp/" + APP_TOKEN
+WEBVIEW = {"User-Agent": WEBVIEW_UA}
 
 
 def person_session(client, email="alice@example.test", machine="alice-laptop"):
@@ -25,8 +32,8 @@ def person_session(client, email="alice@example.test", machine="alice-laptop"):
     return r.json()
 
 
-def handoff_code(client, person):
-    r = client.post("/api/v1/app/handoff", headers=auth(person))
+def handoff_code(client, person, install_hash=INSTALL_HASH):
+    r = client.post("/api/v1/app/handoff", headers=auth(person), json={"app_install_hash": install_hash})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["code"].startswith("rch_") and body["url"].endswith("/app/handoff?code=" + body["code"])
@@ -35,7 +42,7 @@ def handoff_code(client, person):
 
 def open_app(app, person, client):
     """A fresh 'webview' that consumes a handoff code."""
-    webview = TestClient(app)
+    webview = TestClient(app, headers=WEBVIEW)
     code = handoff_code(client, person)
     r = webview.get(f"/app/handoff?code={code}", headers=NAV, follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"].endswith("/app/inbox"), r.text
@@ -70,7 +77,7 @@ def test_handoff_sets_a_separate_strict_cookie(alice_app, session):
 def test_handoff_needs_a_user_started_navigation_and_consumes_nothing_otherwise(app, client, world, session, headers):
     person = person_session(client)["person_session"]
     code = handoff_code(client, person)
-    with TestClient(app) as webview:
+    with TestClient(app, headers=WEBVIEW) as webview:
         r = webview.get(f"/app/handoff?code={code}", headers=headers, follow_redirects=False)
         assert r.status_code == 400 and "raincli_app" not in r.headers.get("set-cookie", "")
         assert "can't be used" in htmllib.unescape(r.text)
@@ -82,19 +89,19 @@ def test_handoff_needs_a_user_started_navigation_and_consumes_nothing_otherwise(
 def test_handoff_codes_are_single_use_and_short_lived(app, client, world, session):
     person = person_session(client)["person_session"]
     code = handoff_code(client, person)
-    with TestClient(app) as webview:
+    with TestClient(app, headers=WEBVIEW) as webview:
         assert webview.get(f"/app/handoff?code={code}", headers=NAV, follow_redirects=False).status_code == 303
-    with TestClient(app) as again:
+    with TestClient(app, headers=WEBVIEW) as again:
         r = again.get(f"/app/handoff?code={code}", headers=NAV, follow_redirects=False)
         assert r.status_code == 400 and "can't be used" in htmllib.unescape(r.text)
     code = handoff_code(client, person)
     session.execute(update(HandoffCode).where(HandoffCode.used_at.is_(None))
                     .values(expires_at=identity.now() - timedelta(seconds=1)))
     session.commit()
-    with TestClient(app) as late:
+    with TestClient(app, headers=WEBVIEW) as late:
         assert late.get(f"/app/handoff?code={code}", headers=NAV, follow_redirects=False).status_code == 400
     for bogus in ("", "rch_nope", "x" * 300, "rca_" + "a" * 40):
-        with TestClient(app) as other:
+        with TestClient(app, headers=WEBVIEW) as other:
             assert other.get(f"/app/handoff?code={bogus}", headers=NAV, follow_redirects=False).status_code == 400
 
 
@@ -102,7 +109,7 @@ def test_handoff_bound_to_a_revoked_session_fails(app, client, world):
     person = person_session(client)["person_session"]
     code = handoff_code(client, person)
     assert client.post("/api/v1/person/sign-out", headers=auth(person)).status_code == 200
-    with TestClient(app) as webview:
+    with TestClient(app, headers=WEBVIEW) as webview:
         assert webview.get(f"/app/handoff?code={code}", headers=NAV, follow_redirects=False).status_code == 400
 
 
@@ -262,3 +269,85 @@ def test_tokens_css_has_light_and_dark_rc_tokens(client):
     import re
     # app-mode.css uses only tokens: no raw colours outside tokens.css.
     assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", app_mode)
+
+
+# §16.14 S3: the handoff and app-mode sessions are bound to the app install ---------------------------
+
+@pytest.mark.parametrize("user_agent", [
+    None, "Mozilla/5.0 Chrome/131.0 Edg/131.0",  # no token: an ordinary browser
+    WEBVIEW_UA.replace(APP_TOKEN, "w" * 43),  # another install's token
+    WEBVIEW_UA + " RainCLIApp/" + APP_TOKEN,  # two tokens
+    WEBVIEW_UA.replace("RainCLIApp/", "RainCLIApp/ "),  # malformed
+    WEBVIEW_UA.replace("RainCLIApp/", "XRainCLIApp/"),
+])
+def test_handoff_needs_the_bound_install_token_and_consumes_nothing_otherwise(app, client, world, session,
+                                                                             user_agent):
+    person = person_session(client)["person_session"]
+    code = handoff_code(client, person)
+    with TestClient(app) as browser:
+        headers = dict(NAV, **({"User-Agent": user_agent} if user_agent else {"User-Agent": ""}))
+        r = browser.get(f"/app/handoff?code={code}", headers=headers, follow_redirects=False)
+        assert r.status_code == 400 and "raincli_app" not in r.headers.get("set-cookie", "")
+        assert "can't be used" in htmllib.unescape(r.text)
+    session.expire_all()
+    assert session.scalar(select(HandoffCode.used_at)) is None
+    with TestClient(app, headers=WEBVIEW) as webview:  # the right install still can
+        assert webview.get(f"/app/handoff?code={code}", headers=NAV, follow_redirects=False).status_code == 303
+
+
+def test_handoff_request_must_carry_a_well_formed_install_hash(client, world):
+    person = person_session(client)["person_session"]
+    for body in (None, {}, {"app_install_hash": "A" * 64}, {"app_install_hash": "a" * 63}, {"app_install_hash": 1},
+                 {"app_install_hash": INSTALL_HASH, "extra": 1}):
+        r = client.post("/api/v1/app/handoff", headers=auth(person), **({"json": body} if body is not None else {}))
+        assert r.status_code == 400 and r.json()["error"]["code"] == "invalid", body
+
+
+def test_a_stolen_app_cookie_is_useless_in_another_browser(alice_app, app):
+    cookie = alice_app["webview"].cookies.get("raincli_app")
+    assert cookie and alice_app["webview"].get("/app/inbox").status_code == 200
+    for user_agent in ("Mozilla/5.0 Chrome/131.0", WEBVIEW_UA.replace(APP_TOKEN, "w" * 43)):
+        with TestClient(app, headers={"User-Agent": user_agent}) as thief:
+            thief.cookies.set("raincli_app", cookie, path="/app/")
+            r = thief.get("/app/inbox", follow_redirects=False)
+            assert r.status_code in (303, 401) and "rc-nav" not in r.text, user_agent
+            assert thief.get("/app/conversations/new", follow_redirects=False).status_code != 200
+
+
+def test_the_app_rail_says_who_is_signed_in(alice_app):
+    webview = alice_app["webview"]
+    for path in ("/app/inbox", "/app/agents"):
+        page = htmllib.unescape(webview.get(path).text)
+        assert 'class="rc-whoami"' in page and "Signed in as" in page and "(alice@example.test)" in page, path
+
+
+def test_the_install_token_is_never_logged(alice_app, caplog):
+    webview = alice_app["webview"]
+    with caplog.at_level(logging.DEBUG):
+        webview.get("/app/inbox")
+        webview.get("/app/handoff?code=rch_bogus", headers=NAV)
+        webview.get("/app/does-not-exist")
+        webview.get("/api/v1/person/me", headers={"Authorization": "Bearer rps_bogus"})
+    text = "\n".join(r.getMessage() + " " + str(r.__dict__) for r in caplog.records)
+    assert APP_TOKEN not in text and "RainCLIApp" not in text
+
+
+# §16.14 S4: the handoff URL keeps the root path -------------------------------------------------------
+
+def test_handoff_url_includes_the_root_path(settings, engine, world):
+    from dataclasses import replace
+
+    from raincli_server.app import create_app
+
+    app = create_app(replace(settings, root_path="/raincli"))
+    try:
+        with TestClient(app, root_path="/raincli") as c:
+            r = c.post("/raincli/api/v1/app/login", json={"email": "alice@example.test", "password": PASSWORD,
+                                                          "machine_name": "alice-laptop", "person_session": True})
+            person = r.json()["person_session"]
+            r = c.post("/raincli/api/v1/app/handoff", headers=auth(person), json={"app_install_hash": INSTALL_HASH})
+            assert r.status_code == 200, r.text
+            url = r.json()["url"]
+            assert url == f"{settings.public_url}/raincli/app/handoff?code={r.json()['code']}"
+    finally:
+        app.state.engine.dispose()

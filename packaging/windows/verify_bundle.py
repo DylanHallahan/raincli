@@ -7,9 +7,12 @@ executable's archive and checks:
 - no ``_build_test`` module or file, and no test package;
 - no code object naming ``TEST_RELEASE_BASE``, ``TEST_CERT_SHA256`` or ``_build_test``;
 - no server, test-runner or build-tool module;
-- the tray executable freezes ``raincli_agent.app.tray`` and its GUI modules (``pystray``,
-  ``PIL``, ``tkinter``), the CLI freezes ``raincli_agent.cli``, the stub freezes
-  ``raincli_agent.app.stub``, and the PATH shim freezes no client code at all.
+- the app executable freezes ``raincli_agent.app.tray``, the window and its GUI modules (``pystray``,
+  ``PIL``, ``webview``) and never ``tkinter``; the CLI freezes ``raincli_agent.cli``, the stub freezes
+  ``raincli_agent.app.stub``, and the PATH shim freezes no client code at all;
+- the GUI test boundary (§16.11, §16.12 C16): no ``raincli_agent`` module, entry script or bundled
+  ``raincli_agent`` file (the local pages) contains a WebView2 debugging switch or its variable.
+  Third-party modules are covered by the test asserting ``debug=False`` and no debugging settings.
 
 Usage: python verify_bundle.py <dist-dir> --version X.Y.Z
 Exit status 0 when clean; 1 with one line per problem otherwise.
@@ -21,6 +24,10 @@ import types
 
 FORBIDDEN_NAMES = ("TEST_RELEASE_BASE", "TEST_CERT_SHA256", "_build_test")
 FORBIDDEN_MODULES = ("raincli_server", "pytest", "PyInstaller", "fastapi", "sqlalchemy", "uvicorn")
+# Built from parts, so this checker never matches itself if it is ever bundled.
+FORBIDDEN_DEBUG = tuple("".join(parts) for parts in (
+    ("WEBVIEW2_", "ADDITIONAL_BROWSER_ARGUMENTS"), ("--remote-", "debugging-port"), ("--remote-", "debugging-pipe"),
+    ("--remote-", "allow-origins"), ("REMOTE_", "DEBUGGING_PORT")))
 
 
 def frozen_modules(exe):
@@ -78,13 +85,18 @@ def check_modules(label, modules, required):
             problems.append(f"{label}: {short} must never be bundled")
         if short.startswith("raincli_agent") or name.startswith("<script>"):
             strings = set(code_strings(code))
-            for bad in FORBIDDEN_NAMES:
+            for bad in FORBIDDEN_NAMES + FORBIDDEN_DEBUG:
                 if any(bad in s for s in strings):
                     problems.append(f"{label}: {short} refers to {bad}")
     for name in required:
         if name not in modules:
             problems.append(f"{label}: {name} is not frozen in")
     return problems
+
+
+def check_absent(label, modules, absent):
+    return [f"{label}: {name} must not be frozen in" for name in absent
+            if any(m == name or m.startswith(name + ".") for m in modules)]
 
 
 def check_files(dist):
@@ -97,6 +109,11 @@ def check_files(dist):
             for bad in FORBIDDEN_NAMES:
                 if bad.encode() in data:
                     problems.append(f"file {path.relative_to(dist)} refers to {bad}")
+        if path.is_file() and "raincli_agent" in path.parts:  # our own data files, such as the local pages
+            data = path.read_bytes()
+            for bad in FORBIDDEN_DEBUG:
+                if bad.encode() in data:
+                    problems.append(f"file {path.relative_to(dist)} refers to {bad}")
     return problems
 
 
@@ -105,7 +122,8 @@ def verify(dist, version):
     folder = dist / f"RainCLI-{version}"
     problems = check_files(dist)
     targets = [
-        (folder / "RainCLI-app.exe", ["raincli_agent.app.tray", "pystray", "PIL", "tkinter"]),
+        (folder / "RainCLI-app.exe", ["raincli_agent.app.tray", "raincli_agent.app.window", "pystray", "PIL",
+                                      "webview"]),
         (folder / "raincli.exe", ["raincli_agent.cli"]),
         (dist / "stub" / "RainCLI.exe", ["raincli_agent.app.stub"]),
         (dist / "bin" / "raincli.exe", []),
@@ -116,6 +134,8 @@ def verify(dist, version):
             continue
         modules = frozen_modules(exe)
         problems += check_modules(str(exe.relative_to(dist)), modules, required)
+        problems += check_absent(str(exe.relative_to(dist)), modules,
+                                 ["tkinter"] if exe.name == "RainCLI-app.exe" else ["webview", "pystray", "tkinter"])
         if exe.parent.name == "bin" and any(m.startswith("raincli_agent") for m in modules):
             problems.append("bin/raincli.exe must not bundle the client; it only forwards to the current version")
     return problems
@@ -130,7 +150,7 @@ def main(argv=None):
     for problem in problems:
         print("BUNDLE CHECK FAILED: " + problem)
     if not problems:
-        print(f"bundle check passed: RainCLI {args.version} carries no test hooks")
+        print(f"bundle check passed: RainCLI {args.version} carries no test hooks and no debugging switches")
     return 1 if problems else 0
 
 

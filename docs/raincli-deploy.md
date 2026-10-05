@@ -131,6 +131,14 @@ After the upgrade, check with a test machine's credential:
 
 Existing handles keep working unchanged, and each becomes a machine once its runtime (v0.3.0 or later) reports. Because this release runs a new migration, rolling it back follows checklist item 2 below.
 
+### Upgrading to v0.5.0 (messaging and routing, migration `0006`)
+
+**v0.5.0 requires reinstalling both Nginx files.** Reinstall `raincli-http.conf` and `raincli.com.conf` as in step 5 of the first deployment, keeping the host's `ssl_certificate` lines, then run `sudo nginx -t && sudo systemctl reload nginx`. The new files:
+- add the person-session routes (`/api/v1/person/inbox` long-polls, `/api/v1/person/send` takes 2 MiB) and the app handoff, `/app/handoff`, which is logged without its query string;
+- replace the default `combined` access log with `raincli_main`. The Windows app's window sends `RainCLIApp/<install token>` in its User-Agent, and both RainCLI log formats record that as `RainCLIApp/[redacted]` (a `map` on `$http_user_agent`). With the old file, Nginx would write the token to `raincli.access.log`.
+
+The server itself never logs the User-Agent (uvicorn access logging stays off). After the reload, confirm that `grep -c 'RainCLIApp/[^[]' /var/log/nginx/raincli.access.log` stays at 0 once an app has opened its window.
+
 ### Client versions (admin CLI)
 
 The operator chooses which client version each team's managed installs run. The server stores and replies with **a version only**; clients install it only from stable releases of the canonical GitHub repository, so the server can't choose where code comes from. Releases are unsigned (see [SETUP.md](../SETUP.md#updates)).
@@ -295,7 +303,7 @@ Within a minute, the handle's **Machines** page entry shows its client version a
 ## Operations
 
 - **Health:** `GET https://raincli.com/api/v1/health` returns `{"ok":true,"db":"ok"}`, or 503 when the DB is unreachable. It carries no private data.
-- **Logs:** `journalctl -u raincli` (application errors only, because uvicorn access logging is off) and `/var/log/nginx/raincli.access.log` (no `Authorization` header; invitation URLs are not logged).
+- **Logs:** `journalctl -u raincli` (application errors only, because uvicorn access logging is off) and `/var/log/nginx/raincli.access.log` (no `Authorization` header; invitation URLs and handoff codes are not logged; the app install token is redacted from the User-Agent).
 - **Backups:**
   - Check the schedule with `systemctl list-timers raincli-backup.timer`, and take one on demand with `sudo systemctl start raincli-backup`.
   - Backups hold message bodies and attachments in plaintext. Keep `/var/backups/raincli` private. Off-host or encrypted copies are the operator's choice and are not automated here.
