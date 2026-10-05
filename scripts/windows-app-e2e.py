@@ -561,14 +561,23 @@ def click_dialog_ok(title, timeout=60):
     user32.SendMessageW(ok, 0x00F5, 0, 0)  # BM_CLICK
 
 
-def window_page(browser, fragment, timeout=120):
+def window_page(browser, fragment, port, timeout=120):
     def page():
         for context in browser.contexts:
             for candidate in context.pages:
                 if fragment in candidate.url:
                     return candidate
         return None
-    return wait_for(f"the app window showing {fragment}", page, timeout=timeout, interval=1)
+    try:
+        return wait_for(f"the app window showing {fragment}", page, timeout=timeout, interval=1)
+    except Failure:
+        seen = [c.url for context in browser.contexts for c in context.pages]
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
+                targets = [(t.get("type"), t.get("url")) for t in json.loads(response.read())]
+        except (OSError, ValueError) as exc:
+            targets = f"unavailable: {exc}"
+        raise Failure(f"no window page showing {fragment}; Playwright pages {seen}; CDP targets {targets}") from None
 
 
 def shot(page, name):
@@ -647,7 +656,7 @@ def part_d(app, server, installers, password, observer, menu, work):
     check(devtools_answer(f"127.0.0.1:{port}"), "the positive control failed: no DevTools answer on the CDP port")
     with sync_playwright() as pw:
         browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
-        page = window_page(browser, "sign-in.html")
+        page = window_page(browser, "sign-in.html", port)
         page.wait_for_function("document.getElementById('machine').value.length > 0", timeout=60000)
         check(page.evaluate("document.visibilityState") == "visible", "--open did not show the window")
         shot(page, "d4-sign-in")
