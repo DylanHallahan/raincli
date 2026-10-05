@@ -151,26 +151,92 @@ def test_explicit_absolute_path_wins(tmp_path):
     assert resolve_herdr_bin(explicit, env={"LOCALAPPDATA": str(local)}, windows=True) == explicit
 
 
+def touch(path, executable=True):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    if executable:
+        path.chmod(0o755)
+    return path
+
+
 def test_windows_prefers_the_stable_alias_then_path(tmp_path):
     local = tmp_path / "Local"
-    alias = local.joinpath(*herdr_mod.WINDOWS_ALIAS)
-    on_path = str(tmp_path / ".herdr" / "packages" / "standalone" / "releases" / "0.9.3" / "herdr.exe")
-    which = lambda name, path=None: on_path  # noqa: E731
-    env = {"LOCALAPPDATA": str(local), "PATH": "x"}
-    assert resolve_herdr_bin("herdr", env=env, which=which, windows=True) == on_path  # no alias yet
-    alias.parent.mkdir(parents=True)
-    alias.write_text("")
+    release = touch(tmp_path / "releases" / "0.9.3" / "herdr.exe")
+    env = {"LOCALAPPDATA": str(local), "PATH": str(release.parent)}
+    assert resolve_herdr_bin("herdr", env=env, windows=True) == str(release)  # no alias yet
+    alias = touch(local.joinpath(*herdr_mod.WINDOWS_ALIAS))
     for name in ("herdr", "herdr.exe", "", None):
-        assert resolve_herdr_bin(name, env=env, which=which, windows=True) == str(alias)
+        assert resolve_herdr_bin(name, env=env, windows=True) == str(alias)
     assert str(alias).endswith(os.path.join("Programs", "Herdr", "bin", "herdr.exe"))
-    # Another command name is looked up on PATH, never swapped for the alias.
-    assert resolve_herdr_bin("herdr-dev", env=env, which=lambda n, path=None: "/p/herdr-dev",
-                             windows=True) == "/p/herdr-dev"
-    assert resolve_herdr_bin("herdr", env=env, which=which, windows=False) == on_path  # POSIX: PATH
+    dev = touch(tmp_path / "dev" / "herdr-dev.exe")
+    env["PATH"] = str(dev.parent)
+    assert resolve_herdr_bin("herdr-dev", env=env, windows=True) == str(dev)  # another name: PATH only
 
 
-def test_unresolved_name_is_left_for_the_os(tmp_path):
-    assert resolve_herdr_bin("herdr", env={"PATH": str(tmp_path)}, windows=False) == "herdr"
+def test_windows_never_resolves_a_batch_file(tmp_path):
+    """H1: herdr.cmd earlier on PATH than herdr.exe: the .exe, never the batch file."""
+    early = touch(tmp_path / "early" / "herdr.cmd")
+    touch(tmp_path / "early" / "herdr.bat")
+    late = touch(tmp_path / "late" / "herdr.exe")
+    env = {"PATH": os.pathsep.join([str(early.parent), str(late.parent)]), "PATHEXT": ".COM;.EXE;.BAT;.CMD"}
+    assert resolve_herdr_bin("herdr", env=env, windows=True) == str(late)
+    env["PATH"] = str(early.parent)
+    with pytest.raises(HerdrError, match="not found"):
+        resolve_herdr_bin("herdr", env=env, windows=True)
+    for explicit in (str(early), "herdr.cmd", "C:/tools/herdr.BAT", str(tmp_path / "herdr")):
+        with pytest.raises(HerdrError):
+            resolve_herdr_bin(explicit, env=env, windows=True)
+
+
+@pytest.mark.parametrize("name", ["herdr.cmd", "C:\\tools\\herdr.bat", "/opt/x/HERDR.CMD"])
+def test_explicit_batch_herdr_bin_is_a_config_error(tmp_path, name):
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({"herdr_agent": "inbox", "herdr_bin": name}))
+    with pytest.raises(ConfigError, match="not a .bat or .cmd"):
+        load_connector_config(str(path))
+
+
+def test_path_walk_skips_relative_entries_and_the_current_directory(tmp_path, monkeypatch):
+    """H2: a herdr in the current directory (a cloned repository) is never run."""
+    planted = touch(tmp_path / "repo" / "herdr")
+    touch(tmp_path / "repo" / "herdr.exe")
+    monkeypatch.chdir(tmp_path / "repo")
+    for windows in (False, True):
+        env = {"PATH": os.pathsep.join(["", ".", "repo", "./bin"])}
+        with pytest.raises(HerdrError, match="not found"):
+            resolve_herdr_bin("herdr", env=env, windows=windows)
+    good = touch(tmp_path / "bin" / "herdr")
+    resolved = resolve_herdr_bin("herdr", env={"PATH": os.pathsep.join([".", "", str(good.parent)])}, windows=False)
+    assert resolved == str(good) and os.path.isabs(resolved) and resolved != str(planted)
+    with pytest.raises(HerdrError):
+        resolve_herdr_bin("bin/herdr", env={"PATH": str(good.parent)}, windows=False)  # relative path
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_posix_requires_an_executable_file(tmp_path):
+    touch(tmp_path / "a" / "herdr", executable=False)
+    good = touch(tmp_path / "b" / "herdr")
+    env = {"PATH": os.pathsep.join([str(tmp_path / "a"), str(tmp_path / "b")])}
+    assert resolve_herdr_bin("herdr", env=env, windows=False) == str(good)
+
+
+def test_missing_herdr_holds_offline_and_is_found_later(tmp_path, fake_api, connector_env, monkeypatch):
+    """No bare-name fallback: until Herdr is found, the message is held offline."""
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    cli = HerdrCli("herdr")
+    assert cli.binary is None
+    with pytest.raises(HerdrError, match="not found"):
+        cli.get_agent("x")
+    msg = send(fake_api, fake_api.alice, "bob")
+    conn = connector_env.connector()
+    conn.herdr = cli
+    conn.run_once()
+    record = conn.queue.get(msg["id"])
+    assert (record["state"], record["hold_reason"]) == ("held", "offline")
+    binary = touch(tmp_path / "found" / "herdr")
+    binary.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(0)\n")
+    monkeypatch.setenv("PATH", str(binary.parent))
+    assert cli.resolve() is None and cli.binary == str(binary)
 
 
 def test_binary_is_re_resolved_at_each_connector_start(tmp_path, fake_api, monkeypatch):
@@ -242,10 +308,76 @@ def test_docs_recommend_pane_id_on_windows_and_document_the_session():
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX script")
-def test_agent_not_ready_is_a_pre_submission_refusal(tmp_path):
-    """Herdr refuses before sending input when the pane is not running the named agent."""
-    body = ('sys.stderr.write(json.dumps({"error": {"code": "agent_not_ready", '
+@pytest.mark.parametrize("version,offline", [("0.9.3", True), ("0.10.0", True), ("0.9.2", False), ("", False)])
+def test_agent_not_ready_is_offline_only_from_herdr_093(tmp_path, version, offline):
+    """H4: a pre-send refusal in Herdr 0.9.3; older or unknown versions stay uncertain."""
+    body = (f'if sys.argv[1:] == ["--version"]:\n    print("herdr {version}")\n    sys.exit(0)\n'
+            'sys.stderr.write(json.dumps({"error": {"code": "agent_not_ready", '
             '"message": "agent x is not an active named agent"}}))\nsys.exit(1)')
-    with pytest.raises(HerdrRejected) as info:
-        HerdrCli(str(script(tmp_path, body))).prompt("x", "hello", 5)
-    assert info.value.reason == "offline"
+    cli = HerdrCli(str(script(tmp_path, body)))
+    if offline:
+        with pytest.raises(HerdrRejected) as info:
+            cli.prompt("x", "hello", 5)
+        assert (info.value.reason, info.value.code) == ("offline", "agent_not_ready")
+    else:
+        with pytest.raises(HerdrError) as info:
+            cli.prompt("x", "hello", 5)
+        assert not isinstance(info.value, HerdrRejected)  # -> submission_uncertain
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX script")
+def test_version_is_read_once_per_connector_start(tmp_path):
+    count = tmp_path / "count"
+    body = (f'open({str(count)!r}, "a").write("v")\nprint("herdr 0.9.3")')
+    cli = HerdrCli(str(script(tmp_path, body)))
+    assert cli.version() == (0, 9, 3) and cli.version() == (0, 9, 3)
+    assert count.read_text() == "v"
+    cli.resolve()  # a new connector start reads it again
+    cli.version()
+    assert count.read_text() == "vv"
+
+
+def test_repeated_agent_not_ready_backs_off(fake_api, connector_env):
+    msg = send(fake_api, fake_api.alice, "bob")
+    conn = connector_env.connector()
+    now = [1000.0]
+    conn._clock = lambda: now[0]
+    calls = []
+
+    def prompt(name, text, timeout):
+        calls.append(now[0])
+        raise HerdrRejected("offline", "agent_not_ready", code="agent_not_ready")
+    connector_env.herdr.prompt = prompt
+    for _ in range(3):
+        conn.run_once()
+    assert len(calls) == 3  # three tries, then a backoff
+    conn.run_once()
+    assert len(calls) == 3
+    record = conn.queue.get(msg["id"])
+    assert (record["state"], record["hold_reason"]) == ("held", "offline") and "backoff" in record["hold_detail"]
+    now[0] += 31
+    conn.run_once()
+    assert len(calls) == 4
+    connector_env.herdr.prompt = lambda name, text, timeout: calls.append(now[0])
+    now[0] += 61
+    conn.run_once()
+    assert conn._not_ready_count == 0 and conn.queue.get(msg["id"])["state"] == "submitted"
+
+
+def test_oversize_escalation_is_held_before_submitting(fake_api, connector_env):
+    """H3: the same command-line check before an escalation is submitted."""
+    msg = send(fake_api, fake_api.alice, "bob")
+    path = connector_env.make(mode="inbox", escalation={"herdr_agent": "main-session", "notify": False})
+    connector_env.herdr.add("main-session")
+    conn = connector_env.connector(path=path)
+    conn.run_once()
+    from raincli_agent.connector import ops
+    assert conn.queue.get(msg["id"])["state"] == "submitted"
+    esc_id = ops.escalate(conn.queue, conn.config, msg["id"], "please look")[0]["id"]
+    connector_env.herdr.max_prompt_chars = 10
+    before = len(connector_env.herdr.prompts)
+    conn.run_once()
+    conn.run_once()
+    esc = conn.queue.load_escalation(esc_id)
+    assert esc["hold_reason"] == "too_large_for_command_line" and esc.get("attempts", 0) == 0
+    assert len(connector_env.herdr.prompts) == before

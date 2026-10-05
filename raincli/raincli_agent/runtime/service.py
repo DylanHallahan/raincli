@@ -107,10 +107,8 @@ def machine_options(runtime_path):
     except (OSError, ValueError) as exc:
         raise ConfigError(f"cannot read runtime config: {exc}") from None
     data = data if isinstance(data, dict) else {}
-    herdr_bin = data.get("herdr_bin", "herdr")
-    if not isinstance(herdr_bin, str) or not herdr_bin:
-        raise ConfigError("runtime herdr_bin must be a path or command name")
-    return {"herdr_bin": herdr_bin, "herdr_session": _herdr_session(data, "runtime config")}
+    from ..connector.config import _herdr_bin
+    return {"herdr_bin": _herdr_bin(data, "runtime config"), "herdr_session": _herdr_session(data, "runtime config")}
 
 
 def load_machine(machine_path):
@@ -292,8 +290,7 @@ class Worker:
         self._new_handshake()
         # Re-resolve the Herdr executable at each connector start (an update moves it).
         if isinstance(self.herdr, HerdrCli):
-            from ..connector.herdr import resolve_herdr_bin
-            self.herdr.binary = resolve_herdr_bin(self.cfg.herdr_bin)
+            self.herdr.resolve()  # a miss holds offline until Herdr is found
         try:
             log = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         except OSError:

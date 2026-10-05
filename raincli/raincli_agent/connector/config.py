@@ -67,6 +67,18 @@ def default_state_dir(handle):
     return os.path.join(os.path.expanduser("~"), ".local", "state", "raincli", "connector", handle)
 
 
+def _herdr_bin(data, what="connector config"):
+    """``herdr_bin``: never a batch file, which Windows runs through cmd.exe (review H1)."""
+    value = data.get("herdr_bin", "herdr")
+    if not isinstance(value, str):
+        raise ConfigError(f"{what}: herdr_bin must be a string")
+    value = value or "herdr"
+    if value.lower().endswith((".bat", ".cmd")):
+        raise ConfigError(f"{what}: herdr_bin must be the Herdr executable (herdr.exe on Windows), "
+                          "not a .bat or .cmd file: those run through cmd.exe, which can't safely carry a message")
+    return value
+
+
 def _herdr_session(data, what="connector config"):
     from .herdr import SESSION_RE
     value = data.get("herdr_session", "")
@@ -247,7 +259,7 @@ def load_connector_config(path):
         poll_wait=int(_number(data, "poll_wait", 25, 0, 25)),
         recheck_interval=float(_number(data, "recheck_interval", 5, 0.05, 300)),
         prompt_timeout=float(_number(data, "prompt_timeout", 30, 1, 600)),
-        herdr_bin=_string(data, "herdr_bin") or "herdr",
+        herdr_bin=_herdr_bin(data),
         herdr_timeout=float(_number(data, "herdr_timeout", 10, 1, 120)),
         herdr_session=_herdr_session(data),
         path=os.path.abspath(path),
