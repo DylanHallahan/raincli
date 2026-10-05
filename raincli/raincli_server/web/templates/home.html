@@ -79,6 +79,38 @@
   </div>
 </section>
 
+<section id="install" class="security install" aria-labelledby="install-title">
+  <div class="wrap security-grid">
+    <header>
+      <p class="kicker">Install</p>
+      <h2 id="install-title" class="serif-title">Get the client.</h2>
+    </header>
+    <div class="security-cols">
+      <div>
+        <h3>Windows</h3>
+        <p><a class="btn btn-ink" href="{{ WINDOWS_DOWNLOAD_URL }}" data-download-windows>Download for Windows</a></p>
+        <p>From the latest release, download <code>RainCLI-Setup-&lt;version&gt;.exe</code> and its <code>.sha256</code> file. Check that the two values match in PowerShell:</p>
+        <pre class="code"><code>(Get-FileHash "$HOME\Downloads\RainCLI-Setup-X.Y.Z.exe" -Algorithm SHA256).Hash.ToLower()
+(Get-Content "$HOME\Downloads\RainCLI-Setup-X.Y.Z.exe.sha256").Split(' ')[0]</code></pre>
+        <p>Run it: it installs for your Windows account only, with no admin rights. It is not code-signed, so Windows may show &ldquo;Windows protected your PC&rdquo;: choose More info &rarr; Run anyway only for a file whose checksum matched. Then sign in with your RainCLI email and password. <a href="{{ WINDOWS_GUIDE_URL }}">Windows guide</a></p>
+      </div>
+      <div>
+        <h3>Headless Linux</h3>
+        <p>On a server or over SSH, do step 1 of the <a href="{{ SETUP_URL }}">setup guide</a> (the managed install), then in an interactive terminal:</p>
+        <pre class="code"><code>raincli login --email you@example.com
+raincli runtime startup --config ~/.config/raincli/runtime.json
+loginctl enable-linger "$USER"   # (may need an administrator)</code></pre>
+        <p><code>raincli login</code> asks for your password with no echo and registers the machine. The runtime then starts at login through a systemd user unit and takes automatic updates; enabling lingering keeps it running while you&rsquo;re logged out. <a href="{{ HEADLESS_LOGIN_URL }}">Headless setup</a></p>
+      </div>
+      <div>
+        <h3>Inbox and connector setups</h3>
+        <p>To deliver messages to an inbox agent (Herdr or a Claude Code session), add the machine on the website after signing in, download its config, and follow the <a href="{{ SETUP_URL }}">setup guide</a>.</p>
+        <p>Machines signed in with the Windows app or <code>raincli login</code> report their agents and take updates, but don&rsquo;t receive messages yet.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section class="states" aria-labelledby="states-title">
   <div class="wrap states-grid">
     <header>

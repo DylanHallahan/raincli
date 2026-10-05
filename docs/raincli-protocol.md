@@ -1106,3 +1106,35 @@ The reviewer checks the framing specifically in every Phase 2 round.
 3. **The `person_only` reply** is exactly `200 {"person_session": "rps_…"}`.
 4. **A C10 fallback reply** to the machine endpoint goes into the default conversation of that endpoint pair, not the parent's conversation.
 5. **Sign-in by a user with no team** stays `400 invalid`, as in §15.
+
+### 16.14 Amendments after review rounds 2 and 3 (binding)
+**S1. The capability gate is set only by the delivering connector.**
+- Only the connector that delivers for the machine polls with `routing=1`.
+- Other clients on the machine credential (`raincli inbox`, `show` and so on) never send it, so they see only machine-endpoint messages. `raincli inbox --agent NAME` filters to one named agent of this machine, for its owner's tooling.
+- The server sets `routing_capable_at` only when the polling machine's last presence reported a client of v0.5.0 or later.
+
+**S2. Markdown link exclusions survive encoding.**
+- `validate_link` percent-decodes and resolves dot segments before the prefix check, and refuses `..` in any encoding.
+- Absolute `http(s)` links to the service host get the same `/app/handoff` and `/app/local/` exclusion.
+
+**S3. The handoff is bound to the app install** (strengthens C3).
+- **The binding:** every app install holds a random 32-byte `app_install_token`, stored private beside `person.json`, never sent in a URL and never logged. Its webview sends the User-Agent suffix `RainCLIApp/<token>`.
+- **Requesting a code:** `POST /api/v1/app/handoff` carries `sha256(token)`, which the code is bound to.
+- **Using a code:** `GET /app/handoff` is accepted only when, in addition to C3's `Sec-Fetch` checks, the request's User-Agent carries a token whose hash matches the code's binding. Otherwise it shows the generic error page and consumes nothing.
+- **Every request:** app-mode web sessions require that same User-Agent token on every request, so the `raincli_app` cookie is useless in any other browser.
+- **Identity:** the app-mode rail shows "Signed in as <display name> (<email>)".
+- **Residual risk (accepted):** a same-user process can read the token, which is the same boundary as `person.json`.
+
+**S4.** The handoff URL is `public_url + root_path + "/app/handoff?code=…"`.
+
+**S5.** The downgrade of `0006` deletes app-mode web sessions before it drops the columns.
+
+**S6. CI for the PostgreSQL and GUI suites.**
+- A manual-only Linux workflow, `server-gui-tests.yml` (`contents: read`, no secrets), runs the full suite with a PostgreSQL service and `playwright install chromium`. It fails if any GUI test is skipped.
+- The workflow file is added to `main` by the main agent before it is first dispatched.
+
+**K1.** The Codex probe runs the first `codex` found in the absolute PATH entries, by absolute path. The current directory is never searched. `codex.cmd` is allowed, because its arguments are constant.
+
+**K2.** Liveness treats an executable named `codex` or `codex-*` as Codex.
+
+**K3.** `!` joins the characters refused in paths placed in a Codex hook command, because of `cmd` delayed expansion.
