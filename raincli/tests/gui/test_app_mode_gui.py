@@ -135,12 +135,13 @@ def test_layout_rail_list_thread_compose_in_light_and_dark(people, browser, arti
 
 # Send, reply and attachments --------------------------------------------------------------------
 
-def test_send_reply_and_attachments(people, browser, tmp_path):
+def test_send_reply_and_attachments(people, browser, tmp_path, artifacts):
     base = people["base"]
     report = tmp_path / "report.md"
     report.write_text("# Report\n\nAll green.\n", "utf-8")
     alice_ctx, alice = open_app(browser, base, people["alice"]["person_session"])
     alice.click("text=New")
+    alice.screenshot(path=str(artifacts / "app-mode-compose-light.png"))
     alice.fill("#to", "@bob@example.test")
     alice.fill("#body", "Here is the *report*")
     alice.set_input_files("input[name=files]", str(report))
@@ -162,6 +163,7 @@ def test_send_reply_and_attachments(people, browser, tmp_path):
     alice.reload()
     assert "Thanks, looks good" in alice.locator(".rc-thread").inner_text()
     assert "replied" in alice.locator(".rc-msg").first.inner_text()
+    alice.screenshot(path=str(artifacts / "app-mode-attachment-reply-light.png"))
     alice_ctx.close()
     bob_ctx.close()
 
@@ -188,7 +190,7 @@ def test_markdown_xss_corpus_does_not_execute(people, browser):
 
 # The agents picker refuses listed and ambiguous agents --------------------------------------------
 
-def test_agents_picker_and_listed_agents(people, browser):
+def test_agents_picker_and_listed_agents(people, browser, artifacts):
     base = people["base"]
     bob_token = people["bob"]["token"]
     request = urllib.request.Request(base + "/api/v1/presence", method="PUT", data=json.dumps({"status": "ready", "agents": [
@@ -202,6 +204,7 @@ def test_agents_picker_and_listed_agents(people, browser):
     urllib.request.urlopen(request, timeout=15).read()
     context, page = open_app(browser, base, people["alice"]["person_session"])
     page.click("nav.rc-nav a:has-text('Agents')")
+    page.screenshot(path=str(artifacts / "app-mode-agents-light.png"))
     card = page.locator("section.rc-card", has_text="bob-laptop")
     reviewer = card.locator("li", has_text="reviewer")
     assert reviewer.locator("a:has-text('Message')").count() == 1 and "instant" in reviewer.inner_text()

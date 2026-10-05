@@ -2,7 +2,7 @@
 <section class="rc-list" aria-labelledby="conv-list-title">
   <div class="rc-list-head">
     <h1 id="conv-list-title">Inbox</h1>
-    <a class="rc-btn" href="{{ url('/app/compose') }}">New</a>
+    <a class="rc-new" href="{{ url('/app/compose') }}"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New message</a>
   </div>
   {% if conversations %}
   <ul>

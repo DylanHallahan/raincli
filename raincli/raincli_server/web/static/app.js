@@ -47,4 +47,11 @@
   document.querySelectorAll("input[readonly].mono").forEach(function (input) {
     input.addEventListener("focus", function () { input.select(); });
   });
+  // App mode: name the chosen attachments next to the clip.
+  document.addEventListener("change", function (event) {
+    var input = event.target;
+    if (!input.matches || !input.matches('.rc-box input[type="file"]')) return;
+    var out = input.form && input.form.querySelector(".rc-files");
+    if (out) out.textContent = Array.prototype.map.call(input.files, function (f) { return f.name; }).join(", ");
+  });
 })();
