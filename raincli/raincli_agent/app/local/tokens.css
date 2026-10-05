@@ -1,0 +1,96 @@
+/* Neutral design tokens (protocol §16.9), visual direction A.
+   Rebranding = this file + the product-name setting + the logo file. */
+
+:root {
+  /* Surfaces */
+  --rc-bg: #ffffff;            /* thread, page */
+  --rc-surface: #f7f7f8;       /* nav, cards, composer */
+  --rc-surface-2: #ececee;     /* hover, selected row */
+  --rc-surface-3: #e3e3e6;     /* pressed, inputs on surface */
+  --rc-out-bg: #f1f5fe;        /* your own outgoing messages */
+
+  /* Text and lines */
+  --rc-text: #0d0d0d;
+  --rc-text-2: #3a3a40;
+  --rc-muted: #5d5d66;
+  --rc-border: #e5e5e8;
+  --rc-border-strong: #8e8e96;
+
+  /* Accent (the only brand colour) */
+  --rc-accent: #1f5fd1;
+  --rc-accent-hover: #1a4fb0;
+  --rc-accent-soft: #e8effc;
+  --rc-on-accent: #ffffff;
+  --rc-focus: #1f5fd1;
+
+  /* Status (text colour / tint) */
+  --rc-ok: #1e7a3c;     --rc-ok-bg: #e6f4ea;
+  --rc-warn: #8f5400;   --rc-warn-bg: #fdf3dc;
+  --rc-danger: #b42318; --rc-danger-bg: #fdecea;
+  --rc-info: #1f5fd1;   --rc-info-bg: #e8effc;
+
+  /* Type: system fonts only (Segoe UI Variable on Windows, SF on macOS) */
+  --rc-font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "SF Pro Text", Roboto, "Noto Sans", Arial, sans-serif;
+  --rc-font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, "SF Pro Display", Roboto, "Noto Sans", Arial, sans-serif;
+  --rc-mono: ui-monospace, "Cascadia Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --rc-fs-xs: .75rem; --rc-fs-sm: .8125rem; --rc-fs-base: .9375rem; --rc-fs-md: 1rem;
+  --rc-fs-lg: 1.125rem; --rc-fs-xl: 1.375rem;
+  /* website only */
+  --rc-fs-2xl: 1.75rem; --rc-fs-3xl: 2.5rem; --rc-fs-display: clamp(2rem, 1.2rem + 3vw, 3.25rem);
+  --rc-lh: 1.5; --rc-lh-tight: 1.15;
+  --rc-fw-heading: 650;
+
+  /* Spacing (4 px base) */
+  --rc-s-1: 4px; --rc-s-2: 8px; --rc-s-3: 12px; --rc-s-4: 16px; --rc-s-5: 24px; --rc-s-6: 32px; --rc-s-7: 48px; --rc-s-8: 64px;
+
+  /* Corners */
+  --rc-radius-sm: 6px;    /* chips, inputs, code */
+  --rc-radius: 10px;      /* buttons, cards, list rows */
+  --rc-radius-lg: 16px;   /* composer, dialogs, app window */
+  --rc-radius-pill: 999px;/* avatars, send button, counts */
+
+  /* Elevation: borders first, shadow only for floating things */
+  --rc-shadow-sm: 0 1px 2px rgba(0, 0, 0, .05);
+  --rc-shadow: 0 1px 2px rgba(0, 0, 0, .05), 0 8px 24px rgba(0, 0, 0, .07);
+
+  /* Motion */
+  --rc-ease: cubic-bezier(.2, 0, 0, 1);
+  --rc-dur: 150ms;
+
+  /* Layout */
+  --rc-nav-width: 64px;
+  --rc-rail-width: 280px;
+  --rc-thread-max: 760px;
+
+  color-scheme: light;
+}
+
+/* Dark follows the system setting. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rc-bg: #212121;
+    --rc-surface: #2a2a2a;
+    --rc-surface-2: #333336;
+    --rc-surface-3: #3d3d41;
+    --rc-out-bg: #23293a;
+    --rc-text: #ececec;
+    --rc-text-2: #d0d0d4;
+    --rc-muted: #ababb3;
+    --rc-border: #3a3a3a;
+    --rc-border-strong: #78787f;
+    --rc-accent: #7aa7ff;
+    --rc-accent-hover: #9dbdff;
+    --rc-accent-soft: #1e2a44;
+    --rc-on-accent: #0b1630;
+    --rc-focus: #7aa7ff;
+    --rc-ok: #6fcf8e;     --rc-ok-bg: #15291c;
+    --rc-warn: #f2b65a;   --rc-warn-bg: #2c2310;
+    --rc-danger: #ff8a7a; --rc-danger-bg: #331816;
+    --rc-info: #9dbdff;   --rc-info-bg: #1e2a44;
+    --rc-shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+    --rc-shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .35);
+    color-scheme: dark;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) { :root { --rc-dur: 0ms; } }

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'">
+  <title>Sign in · RainCLI</title>
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="local.css">
+  <script src="local.js" defer></script>
+  <script src="sign-in.js" defer></script>
+</head>
+<body class="bare">
+  <main>
+    <div class="center">
+      <h1>Sign in to RainCLI</h1>
+      <p class="muted" id="intro">Sign in with your RainCLI account to add this computer to your team.</p>
+      <p class="message" id="message" role="alert"></p>
+      <form id="sign-in" class="card" novalidate>
+        <div class="field"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" required></div>
+        <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required></div>
+        <div class="field"><label for="machine">Machine name</label><input id="machine" name="machine" type="text" autocomplete="off" spellcheck="false" required maxlength="32" pattern="[a-z][a-z0-9-]{1,31}" aria-describedby="machine-help"><p class="muted small" id="machine-help">How teammates address this computer: lowercase letters, digits and dashes.</p></div>
+        <div class="field hidden" id="team-field"><label for="team">Team</label><select id="team" name="team"></select></div>
+        <div class="choice hidden" id="replace-field"><input id="replace" name="replace" type="checkbox"><label for="replace" id="replace-label">Replace machine</label></div>
+        <div class="row"><button class="btn btn-wide" type="submit" id="submit">Sign in</button></div>
+      </form>
+    </div>
+  </main>
+</body>
+</html>
