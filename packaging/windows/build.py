@@ -152,13 +152,12 @@ def ensure_iscc(given, work):
                         f"/DIR={home}", f"/LOG={work / 'inno-install.log'}"], check=True, timeout=600)
         if not iscc.is_file():
             raise SystemExit(f"Inno Setup {INNO_VERSION} did not install ISCC.exe")
-    if os.name == "nt":
-        found = subprocess.run(["powershell", "-NoProfile", "-Command",
-                                f"(Get-Item -LiteralPath '{iscc}').VersionInfo.ProductVersion"],
-                               capture_output=True, text=True, timeout=60).stdout.strip()
-        if not found.startswith(INNO_VERSION):
-            raise SystemExit(f"ISCC.exe reports version {found!r}, expected {INNO_VERSION}")
-        say(f"Inno Setup {found} (pinned {INNO_VERSION}, SHA-256 checked)")
+    log = work / "inno-install.log"
+    found = re.search(r"Setup version: Inno Setup version (\S+)", log.read_text("utf-8", errors="replace")) \
+        if log.is_file() else None
+    if not found or found.group(1) != INNO_VERSION:
+        raise SystemExit(f"Inno Setup's install log does not show version {INNO_VERSION}")
+    say(f"Inno Setup {found.group(1)} (pinned {INNO_VERSION}, SHA-256 checked)")
     return str(iscc)
 
 
