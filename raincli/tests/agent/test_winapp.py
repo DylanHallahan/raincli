@@ -436,7 +436,7 @@ def test_stub_relaunches_after_a_switch_and_rolls_back_a_crash_on_probation(app)
         if len(started) == 1:  # the running 0.4.0 installs 0.4.1 and exits with the switch code
             return Process(code=winapp.SWITCH_EXIT, on_wait=lambda: winapp.write_install(app, "0.4.1", "0.4.0", "0.4.1"))
         if version == "0.4.1":
-            return Process(code=3)  # crashes before its first heartbeat
+            return Process(code=5)  # crashes before its first heartbeat (3 means "already running")
         return Process(code=0)
     assert winapp.Stub(app, popen=popen, sleep=clock.sleep, clock=clock, wall=lambda: 0).run() == 0
     assert started == ["0.4.0", "0.4.1", "0.4.0"]
@@ -599,7 +599,8 @@ def test_stub_quit_exits_1_when_the_app_is_still_running(app):
     lock = winapp.single_instance(app)
     clock = Clock()
     try:
-        assert winapp.stub_quit(app, timeout=120, sleep=clock.sleep, clock=clock) == 1
+        assert winapp.stub_quit(app, timeout=120, sleep=clock.sleep, clock=clock, out=lambda t: None,
+                                running_from=lambda r: []) == 1
         assert 120 <= clock.now - 1000.0 <= 122
     finally:
         os.close(lock)
@@ -687,7 +688,8 @@ def test_quit_waits_for_a_tray_whose_stub_died(app):
     lock = winapp.tray_lock(app)
     clock = Clock()
     try:
-        assert winapp.stub_quit(app, timeout=10, sleep=clock.sleep, clock=clock, running_from=lambda r: []) == 1
+        assert winapp.stub_quit(app, timeout=10, sleep=clock.sleep, clock=clock, running_from=lambda r: [],
+                                out=lambda t: None) == 1
         assert winapp.quit_requested(app)  # the tray answers the same request
     finally:
         os.close(lock)
@@ -696,8 +698,9 @@ def test_quit_waits_for_a_tray_whose_stub_died(app):
 
 def test_quit_exits_1_while_a_process_runs_from_the_root(app):
     clock = Clock()
-    pids = [4242]
-    assert winapp.stub_quit(app, timeout=5, sleep=clock.sleep, clock=clock, running_from=lambda r: pids) == 1
+    pids = [(4242, str(app / "versions" / "0.4.0" / "raincli.exe"))]
+    assert winapp.stub_quit(app, timeout=5, sleep=clock.sleep, clock=clock, running_from=lambda r: pids,
+                            out=lambda t: None) == 1
     pids.clear()
     assert winapp.stub_quit(app, running_from=lambda r: pids) == 0
 
@@ -721,8 +724,132 @@ def test_processes_under_finds_a_process_from_the_root(tmp_path):
     shutil.copy(shutil.which("sleep"), exe)
     process = subprocess.Popen([str(exe), "30"])
     try:
-        assert process.pid in winapp.processes_under(root)
+        assert (process.pid, str(exe)) in winapp.processes_under(root)
         assert winapp.processes_under(tmp_path / "elsewhere") == []
     finally:
         process.kill()
         process.wait()
+
+
+# -- review 3 ----------------------------------------------------------------------------------------
+
+def test_tray_already_running_exits_3_not_0(app):
+    """N1: a second tray must not look like a quit to its stub."""
+    from raincli_agent.app import tray as tray_mod
+    lock = winapp.tray_lock(app)
+    try:
+        fake = type("T", (), {"root_dir": app})()
+        assert tray_mod.Tray.run(fake) == winapp.ALREADY_RUNNING_EXIT == 3
+    finally:
+        os.close(lock)
+
+
+def test_stub_waits_and_retries_a_tray_that_is_already_running(app):
+    """N1: exit 3 means wait 10 s and retry (logged, a fixed wait), never quit."""
+    clock, codes, sleeps = Clock(), [3, 3, 0], []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock.sleep(seconds)
+    stub = winapp.Stub(app, popen=lambda argv, **kw: Process(code=codes.pop(0)), sleep=sleep, clock=clock,
+                       wall=lambda: 0)
+    assert stub.run() == 0 and codes == []
+    assert sleeps == [1] * 20  # two fixed 10 s waits, no growing backoff
+    log = (app / "app-lock" / "stub.log").read_text()
+    assert log.count("already running") == 2
+
+
+def test_stub_answers_a_quit_while_waiting_for_a_running_tray(app):
+    clock = Clock()
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        (app / "app-lock" / "quit").write_bytes(b"")
+    stub = winapp.Stub(app, popen=lambda argv, **kw: Process(code=3), sleep=sleep, clock=clock, wall=lambda: 0)
+    assert stub.run() == 0
+
+
+def test_quit_refusal_names_its_blockers(app):
+    """N2: printed, and written one per line to app-lock\\quit-blockers.txt for the installer."""
+    clock, printed = Clock(), []
+    cli = str(app / "versions" / "0.4.0" / "raincli.exe")
+    lock = winapp.tray_lock(app)
+    try:
+        code = winapp.stub_quit(app, timeout=3, sleep=clock.sleep, clock=clock,
+                                running_from=lambda r: [(4242, cli)], out=printed.append)
+    finally:
+        os.close(lock)
+    assert code == 1
+    lines = (app / "app-lock" / "quit-blockers.txt").read_text(encoding="utf-8").splitlines()
+    assert lines == ["RainCLI-app.exe (the tray)", f"{cli} (pid 4242)"]
+    assert printed[0].startswith("RainCLI is still running") and printed[1:] == ["  " + line for line in lines]
+    assert winapp.stub_quit(app, running_from=lambda r: []) == 0
+    assert not (app / "app-lock" / "quit-blockers.txt").exists()  # a stale report is removed
+
+
+def test_already_running_during_probation_is_not_a_failed_start(app):
+    add_version(app, "0.4.1")
+    winapp.write_install(app, "0.4.1", "0.4.0", probation="0.4.1")
+    clock, codes = Clock(), [3, 0]
+
+    def popen(argv, **kw):
+        code = codes.pop(0)
+        if code == 0:
+            winapp.beat(app, "0.4.1")  # the retried tray starts and reports
+        return Process(code=code)
+    stub = winapp.Stub(app, popen=popen, sleep=clock.sleep, clock=clock, wall=lambda: 0)
+    assert stub.run() == 0
+    assert winapp.read_install(app) == {"current": "0.4.1", "previous": "0.4.0", "probation": None}
+
+
+# -- e2e run 37250440832, A7: the uninstaller is not a blocker ----------------------------------------
+
+def test_quit_ignores_its_own_ancestors_and_the_uninstaller(app):
+    """unins000.exe (phase one, from <root>) -> its %TEMP% copy -> RainCLI.exe --quit:
+    none of them is a blocker; a tray and a CLI running from <root> are."""
+    root = str(app)
+    temp = "/tmp/is-XYZ.tmp"
+    table = {
+        1: (0, "/sbin/init", 1),
+        100: (1, root + "/unins000.exe", 100),  # first phase, waits for the second
+        200: (100, temp + "/unins000.tmp", 200),  # the [Code] that calls --quit
+        300: (200, root + "/RainCLI.exe", 300),  # this --quit invocation
+        400: (1, root + "/versions/0.4.0/RainCLI-app.exe", 50),  # a real tray
+        500: (1, root + "/bin/raincli.exe", 60),  # a foreground CLI through the shim
+        600: (1, root + "/versions/0.4.0/unins000.exe", 70),  # not the root uninstaller
+    }
+    found = winapp.processes_under(app, table=table, self_pid=300)
+    assert found == [(400, root + "/versions/0.4.0/RainCLI-app.exe"), (500, root + "/bin/raincli.exe"),
+                     (600, root + "/versions/0.4.0/unins000.exe")]
+    assert winapp.processes_under(app, table={k: v for k, v in table.items() if k not in (400, 500, 600)},
+                                  self_pid=300) == []
+
+
+def test_ancestors_stop_at_pid_reuse_and_cycles():
+    # 30's recorded parent 20 started after 30: pid 20 was reused, so the chain ends at 30.
+    table = {10: (0, "/a", 1), 20: (10, "/b", 500), 30: (20, "/c", 100)}
+    assert winapp.ancestors(30, table) == set()
+    table = {10: (0, "/a", 1), 20: (10, "/b", 50), 30: (20, "/c", 100)}
+    assert winapp.ancestors(30, table) == {10, 20}
+    cycle = {1: (2, "/a", None), 2: (3, "/b", None), 3: (1, "/c", None)}
+    assert winapp.ancestors(1, cycle) == {2, 3}  # terminates
+    assert winapp.ancestors(99, table) == set()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc")
+def test_quit_excludes_a_real_parent_running_from_the_root(tmp_path):
+    """A real tree: a process run from the root starts the --quit check as its child."""
+    import shutil
+    root = tmp_path / "RainCLI"
+    root.mkdir()
+    shell = root / "unins000.exe"
+    shutil.copy(os.path.realpath(shutil.which("bash")), shell)
+    probe = ("import sys, json; sys.path.insert(0, %r); from raincli_agent.runtime import winapp; "
+             "print(json.dumps(winapp.processes_under(%r)))") % (str(Path(raincli_agent.__file__).parents[1]), str(root))
+    plain = root / "helper"
+    shutil.copy(os.path.realpath(shutil.which("bash")), plain)
+    for parent in (shell, plain):
+        result = subprocess.run([str(parent), "-c", f'"{sys.executable}" -c "{probe}"'], capture_output=True,
+                                text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == [], (parent, result.stdout)  # the parent is an ancestor

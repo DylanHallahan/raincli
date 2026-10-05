@@ -68,6 +68,8 @@ SETTINGS = "app.json"
 HEARTBEAT = "heartbeat.json"
 INSTALL_TIMEOUT = 600
 SWITCH_EXIT = 75  # the tray asks the stub to start install.json's current version
+ALREADY_RUNNING_EXIT = 3  # another tray holds tray.lock: the stub waits and retries (review 3 N1)
+ALREADY_RUNNING_WAIT = 10
 PROBATION = 120  # seconds for a new version's first heartbeat (15.8 H4)
 GRACEFUL_STOP = 120
 
@@ -746,9 +748,22 @@ class Stub:
                     write_install(self.root, version, state["previous"], probation=None)
                 return True
             if process.poll() is not None or quit_requested(self.root):
-                return quit_requested(self.root)  # a quit is not a failed start
+                # A quit, or another tray already running (retried), is not a failed start.
+                return quit_requested(self.root) or process.poll() == ALREADY_RUNNING_EXIT
             self.sleep(1)
         return heartbeat_since(self.root, version, since)
+
+    def log(self, text):
+        """``<root>\\app-lock\\stub.log``: short lines, kept under 64 KiB with one ``.1``."""
+        path = self.root / "app-lock" / "stub.log"
+        try:
+            path.parent.mkdir(exist_ok=True)
+            if path.exists() and path.stat().st_size > 64 * 1024:
+                os.replace(path, str(path) + ".1")
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(time.strftime("%Y-%m-%dT%H:%M:%S ") + text + "\n")
+        except OSError:
+            pass
 
     def wait_or_quit(self, process):
         """The tray's exit status, or None after a quit request: the tray sees the same
@@ -796,6 +811,15 @@ class Stub:
             if code == SWITCH_EXIT:
                 failures = 0
                 continue
+            if code == ALREADY_RUNNING_EXIT:
+                # A tray that outlived its stub still runs: wait for it, a fixed 10 s at a
+                # time, answering a quit request; never treat this as a quit.
+                self.log(f"tray {version} already running; retrying in {ALREADY_RUNNING_WAIT} s")
+                for _ in range(ALREADY_RUNNING_WAIT):
+                    if quit_requested(self.root):
+                        return 0
+                    self.sleep(1)
+                continue
             if code == 0:
                 return 0
             failures = 0 if self.clock() - started > 600 else failures + 1
@@ -826,54 +850,104 @@ def tray_lock(root):
     return single_instance(root, "tray.lock")
 
 
-def processes_under(root):
-    """Pids of processes (other than this one) whose executable is under ``root``.
-    Windows: a Toolhelp snapshot plus each process's full image path. Elsewhere
-    /proc/<pid>/exe. Processes that cannot be queried are skipped."""
-    prefix = os.path.normcase(str(Path(root).absolute())) + os.sep
-    found = []
+def process_table():
+    """``{pid: (parent pid, executable path or None, start time or None)}`` for every
+    process. Windows: one Toolhelp snapshot, ``QueryFullProcessImageNameW`` and
+    ``GetProcessTimes``. Elsewhere: /proc. Fields that cannot be read are None."""
+    from . import procinfo
+    table = {}
     if os.name == "nt":
-        from .procinfo import _windows, windows_snapshot
-        c, w, k, _ = _windows()
+        c, w, k, _ = procinfo._windows()
         query = k.QueryFullProcessImageNameW
         query.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD)]
-        for pid in windows_snapshot():
-            if pid in (0, os.getpid()):
-                continue
+        for pid, (_, parent) in procinfo.windows_snapshot().items():
+            path = None
             handle = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-            if not handle:
-                continue
-            try:
-                buf, size = c.create_unicode_buffer(32768), w.DWORD(32768)
-                if query(handle, 0, buf, c.byref(size)) and os.path.normcase(buf.value).startswith(prefix):
-                    found.append(pid)
-            finally:
-                k.CloseHandle(handle)
-        return found
+            if handle:
+                try:
+                    buf, size = c.create_unicode_buffer(32768), w.DWORD(32768)
+                    if query(handle, 0, buf, c.byref(size)):
+                        path = buf.value
+                finally:
+                    k.CloseHandle(handle)
+            table[pid] = (parent, path, procinfo.windows_start(pid))
+        return table
     for entry in Path("/proc").iterdir() if Path("/proc").is_dir() else []:
-        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            _, parent, _ = procinfo.linux_info(pid)
+        except (OSError, ValueError, IndexError):
             continue
         try:
-            exe = os.readlink(entry / "exe")
+            path = os.readlink(entry / "exe")
         except OSError:
+            path = None
+        table[pid] = (parent, path, procinfo.linux_start(pid))
+    return table
+
+
+def ancestors(pid, table):
+    """``pid``'s parent chain. It stops at an unknown parent, a cycle, or a parent that
+    started after its child: that pid was reused by an unrelated process."""
+    out, seen, child = set(), {pid}, pid
+    while child in table:
+        parent = table[child][0]
+        if not parent or parent in seen or parent not in table:
+            break
+        child_start, parent_start = table[child][2], table[parent][2]
+        if child_start is not None and parent_start is not None and parent_start > child_start:
+            break
+        out.add(parent)
+        seen.add(parent)
+        child = parent
+    return out
+
+
+UNINSTALLER_RE = re.compile(r"unins[0-9]*\.exe", re.IGNORECASE)
+
+
+def processes_under(root, table=None, self_pid=None):
+    """``[(pid, executable path)]`` of processes whose executable is under ``root``,
+    leaving out this process and its ancestors (the installer or uninstaller that
+    called ``--quit``) and ``<root>\\unins*.exe``, the uninstaller's first phase."""
+    root = Path(root).absolute()
+    prefix = os.path.normcase(str(root)) + os.sep
+    table = process_table() if table is None else table
+    self_pid = os.getpid() if self_pid is None else self_pid
+    skip = {0, self_pid} | ancestors(self_pid, table)
+    found = []
+    for pid, (_, path, _) in sorted(table.items()):
+        if pid in skip or not path or not os.path.normcase(path).startswith(prefix):
             continue
-        if os.path.normcase(exe).startswith(prefix):
-            found.append(int(entry.name))
+        name = os.path.basename(path)
+        if UNINSTALLER_RE.fullmatch(name) and os.path.normcase(os.path.dirname(path)) == os.path.normcase(str(root)):
+            continue
+        found.append((pid, path))
     return found
+
+
+def blockers(root, running_from=processes_under):
+    """What keeps the app running: held app locks and executables running from the root."""
+    out = []
+    for name, what in (("stub.lock", "RainCLI.exe (the app's stub)"), ("tray.lock", "RainCLI-app.exe (the tray)")):
+        lock = single_instance(root, name)
+        if lock is None:
+            out.append(what)
+        else:
+            os.close(lock)
+    try:
+        out.extend(f"{path} (pid {pid})" for pid, path in running_from(root))
+    except OSError:
+        pass
+    return out
 
 
 def app_running(root, running_from=processes_under):
     """Whether any part of the app runs: the stub's or the tray's lock is held, or a
     process runs from the install root."""
-    for name in ("stub.lock", "tray.lock"):
-        lock = single_instance(root, name)
-        if lock is None:
-            return True
-        os.close(lock)
-    try:
-        return bool(running_from(root))
-    except OSError:
-        return False
+    return bool(blockers(root, running_from))
 
 
 def stub_main(root):
@@ -888,23 +962,43 @@ def stub_main(root):
         os.close(lock)
 
 
-def stub_quit(root, timeout=GRACEFUL_STOP, sleep=time.sleep, clock=time.monotonic, running_from=processes_under):
+BLOCKERS = "quit-blockers.txt"
+
+
+def stub_quit(root, timeout=GRACEFUL_STOP, sleep=time.sleep, clock=time.monotonic, running_from=processes_under,
+              out=None):
     """``RainCLI.exe --quit`` (15.9): create ``<root>\\app-lock\\quit``, which the running
     stub answers by stopping the tray (runtime first) and exiting. Waits up to
     ``timeout`` seconds until the stub's and the tray's locks are free and no process
     runs from ``<root>`` (review 2 R3): 0 then (or when nothing was running), 1 when
-    the app is still running. It never kills anything."""
+    the app is still running. On 1 it prints what it waited on and writes it, one per
+    line, to ``<root>\\app-lock\\quit-blockers.txt`` for the installer (review 3 N2).
+    It never kills anything."""
     root = Path(root)
+    out = out or (lambda text: print(text, file=sys.stderr, flush=True))
     (root / "app-lock").mkdir(parents=True, exist_ok=True)
+    report = root / "app-lock" / BLOCKERS
+    try:
+        report.unlink()
+    except OSError:
+        pass
     if not app_running(root, running_from):
         clear_quit(root)
         return 0
     (root / "app-lock" / QUIT).write_bytes(b"")
     deadline = clock() + timeout
     while True:
-        if not app_running(root, running_from):
+        waiting = blockers(root, running_from)
+        if not waiting:
             clear_quit(root)
             return 0
         if clock() >= deadline:
+            out("RainCLI is still running; close these and try again:")
+            for line in waiting:
+                out("  " + line)
+            try:
+                report.write_text("".join(line + "\n" for line in waiting), encoding="utf-8")
+            except OSError:
+                pass
             return 1
         sleep(1)

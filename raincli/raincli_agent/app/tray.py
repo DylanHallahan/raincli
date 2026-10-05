@@ -292,10 +292,11 @@ class Tray:
     # -- run -----------------------------------------------------------------------------------------
 
     def run(self):
-        import pystray
         lock = winapp.tray_lock(self.root_dir) if self.root_dir is not None else None
         if self.root_dir is not None and lock is None:
-            return 0  # another tray already runs this install
+            # Another tray runs this install: never exit 0, which the stub reads as a quit (review 3 N1).
+            return winapp.ALREADY_RUNNING_EXIT
+        import pystray
         try:
             return self._run(pystray)
         finally:
