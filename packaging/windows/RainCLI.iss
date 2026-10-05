@@ -325,8 +325,9 @@ end;
 function InstallStamp: String;
 begin
   { §16.15: new on every full install; the client rotates its app install token when it changes. }
-  Result := GetDateTimeString('yyyymmdd"T"hhnnss', #0, #0) + '-' + IntToHex(Random($7FFFFFFF), 8)
-            + IntToHex(Random($7FFFFFFF), 8);
+  Result := GetDateTimeString('yyyymmdd"T"hhnnss', #0, #0) + '-'
+            + Copy(GetSHA256OfString(GetDateTimeString('yyyymmddhhnnsszzz', #0, #0) + '|'
+                   + IntToStr(GetTickCount) + '|' + ExpandConstant('{app}')), 1, 16);
 end;
 
 procedure WriteInstallJson;
