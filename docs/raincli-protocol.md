@@ -1222,3 +1222,40 @@ It never raises for these cases, and never logs the token.
 - **Real-PostgreSQL tests:** both new `409` codes, and the wrong-password `401`.
 - **Client tests:** each `check_credential` outcome, `set_aside` (contents, rollback on failure, lock), migration's `invalid` path, the window's offer, and `--new-machine`.
 - **Windows e2e, part E:** an old pip-style config with a revoked credential owned by **another account**, plus a connector config naming it. The installer runs, and migration sets it aside. Then the window shows sign-in and the user signs in as the team owner, which gives a new machine and a person session; the backup holds the old files. A second case is a live credential owned by another user: the window offers a new machine, and accepting it works.
+
+### 16.18 Amendments after the v0.5.1 contract review (binding; they override §16.17 where they conflict)
+**V1. The old runtime state moves with the old setup.**
+- `set_aside` also moves, into the backup, the runtime `state_dir` of every runtime config it moves: the machine queue, `sessions/` including the by-name handover boxes, `machine-salt`, `routing-capable.json` and `status.json`.
+- Only connector queues that have their own `state_dir` stay in place.
+- A fresh sign-in never reuses an old state directory.
+- A test proves that an old `agent_held` record and a by-name handover file are never delivered after the fresh sign-in.
+
+**V2. Setups with several credentials.**
+- A runtime config that also names connectors of other credentials is rewritten without this credential's connectors, atomically, with the original kept in the backup. It is not moved.
+- Migration ends `fresh_sign_in_needed` only when no valid credential remains. Otherwise it ends `migrated_with_stale_set_aside`.
+
+**V3. Finding every connector.**
+- The connector configs moved are the ones `migrate.detect` would find for this `agent.json`: the scan directories, connector-mode runtime configs, the old Run value's `--config`, `app.json`'s runtime config and any `--connector-config` given. Startup-folder and Scheduled Task entries (H7) are listed in the result.
+- If any queue run lock is held by a process other than the app's own runtime, `set_aside` refuses with nothing changed and says "close the old RainCLI window".
+
+**V4. An unreadable credential.** `check_credential` has a fifth outcome, `unreadable`, for a foreign or damaged DPAPI blob, a damaged file, or a file holding both token forms. It is treated like `invalid` in §16.17 items 3 and 4. The sentence: "This computer's saved RainCLI setup can't be read by this Windows account."
+
+**V5. An old Run value.** If the Run value names a runtime config that `set_aside` moved, it is recorded in the migration log, then pointed at the app's stub on app installs, or removed by the CLI (as §15.9).
+
+**V6. Order and naming.**
+- `set_aside` first stops the app's own runtime: `host.pause()` in the window, or `request_stop` in the CLI, waiting for its lock. It resumes nothing; the fresh sign-in starts the new runtime.
+- The backup directory is created exclusively, with a numeric suffix on a clash.
+
+**V7. The password and the `not_owner` message.**
+- Accepting the offer asks for the password again: the window clears the field and requires it again, and the CLI uses a new `getpass`.
+- The `not_owner` message adds: "The other machine stays active for its owner until they revoke it."
+- The backup stays private.
+
+**V8. More e2e and test coverage.**
+- **Windows e2e, part E, adds:**
+  - (a) an old machine-mode setup with held named-agent records and a by-name handover file, none of which may be delivered (V1);
+  - (b) a connector config outside the scan directories that names the default path (V3);
+  - (c) a connector runtime with several credentials, one of them revoked (V2).
+- **Real-PostgreSQL or client tests:**
+  - (d) a foreign DPAPI blob (V4);
+  - (e) an install while the server is unreachable: the credential is adopted as `unknown`, then the sign-in check catches the stale credential.
