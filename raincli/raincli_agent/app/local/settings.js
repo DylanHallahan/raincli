@@ -3,7 +3,7 @@
   "use strict";
   function check(name, value) { var el = document.getElementById(name + "-" + value); if (el) el.checked = true; }
   function load() {
-    return rc.call("settings").then(function (s) {
+    return rc.read("settings").then(function (s) {
       check("routing", s.routing); check("trust", s.trust_mode); check("update", s.update_mode);
       var list = document.getElementById("trusted");
       list.textContent = "";

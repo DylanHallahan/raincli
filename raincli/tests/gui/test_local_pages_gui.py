@@ -270,3 +270,25 @@ def test_this_computer_connects_coding_agents_only_on_click(browser, local_origi
     assert page.inner_text("#hooks li[data-agent=codex] button") == "Disconnect"
     context.close()
     assert not errors
+
+
+def test_a_read_whose_reply_is_dropped_is_asked_again(browser, local_origin):
+    """pywebview re-injects its bridge when the app's cancelled sentinel navigation completes, dropping the
+    reply to a call in flight (seen in the Windows e2e). One-shot reads (rc.read) ask again after 8 s."""
+    context = browser.new_context(viewport={"width": 1180, "height": 780})
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.add_init_script(FAKE_API % (json.dumps({"status": STATUS}), "true"))
+    page.add_init_script("""(() => {
+        let first = true;
+        window.__replies.hooks = () => {
+            if (first) { first = false; return new Promise(() => {}); }  // the dropped reply
+            return [{kind: "codex", name: "Codex", state: "not_connected"}];
+        };
+    })();""")
+    page.goto(f"{local_origin}this-computer.html")
+    page.wait_for_selector("#hooks li[data-agent=codex] [data-state=not_connected]", timeout=20000)
+    assert len([c for c in calls(page) if c[0] == "hooks"]) == 2
+    context.close()
+    assert not errors

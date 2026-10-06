@@ -14,7 +14,7 @@
     rc.message("Enter your password again to set up this computer as a new machine.");
     document.getElementById("password").focus();
   });
-  rc.call("sign_in_defaults").then(function (d) {
+  rc.read("sign_in_defaults").then(function (d) {
     document.getElementById("machine").value = d.machine_name || "";
     if (d.email) document.getElementById("email").value = d.email;
     if (again) rc.text("intro", "Sign in again to replace this computer's credential. Its name and agents stay the same.");

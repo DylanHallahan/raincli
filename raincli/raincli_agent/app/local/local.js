@@ -25,6 +25,30 @@
         });
       });
     },
+    // A one-shot read (no side effects): each attempt waits 8 s, then asks again, up to 4 times. pywebview
+    // re-injects its bridge when a navigation the app cancelled completes (the /app/local sentinel), which
+    // drops the reply to a call already in flight; a read must not hang on that.
+    read: function (name) {
+      var args = Array.prototype.slice.call(arguments, 1);
+      return new Promise(function (resolve, reject) {
+        var done = false, attempts = 0;
+        function attempt() {
+          attempts += 1;
+          var timer = setTimeout(function () {
+            if (done) return;
+            if (attempts < 4) { attempt(); } else { done = true; reject(new Error("no answer")); }
+          }, 8000);
+          window.rc.call.apply(null, [name].concat(args)).then(function (value) {
+            clearTimeout(timer);
+            if (!done) { done = true; resolve(value); }
+          }, function (error) {
+            clearTimeout(timer);
+            if (!done) { done = true; reject(error); }
+          });
+        }
+        attempt();
+      });
+    },
     text: function (id, value) { var el = document.getElementById(id); if (el) el.textContent = value == null ? "" : String(value); },
     show: function (id, visible) { var el = document.getElementById(id); if (el) el.classList.toggle("hidden", !visible); },
     message: function (text, isError) {

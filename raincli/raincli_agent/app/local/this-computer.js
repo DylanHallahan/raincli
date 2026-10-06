@@ -54,7 +54,7 @@
     });
   }
   function load(keepMessage) {
-    return rc.call("hooks").then(render, function () {
+    return rc.read("hooks").then(render, function () {
       if (!keepMessage) say("Couldn't check the coding agents.", true);
     });
   }
