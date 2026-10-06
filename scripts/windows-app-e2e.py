@@ -1103,7 +1103,10 @@ def part_e(app, server, installers, password, observer, work, codex=None):
             page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it
             page = window.page("this-computer.html", timeout=60)
             row = "#hooks li[data-agent=codex]"
-            wait_for("Codex's state", lambda: page.is_visible(f"{row} button"), timeout=120, interval=1)
+            wait_for("Codex's state", lambda: page.locator(f"{row} [data-state]").count() == 1, timeout=120, interval=1)
+            state = page.get_attribute(f"{row} [data-state]", "data-state")
+            check(state == "not_connected", f"Codex shows {state!r}: {page.inner_text(row)!r}; "
+                                            f"codex at {codex} (on the app's PATH)")
             check(page.inner_text(f"{row} button") == "Connect", f"Codex shows {page.inner_text(row)!r}")
             check((codex_hooks.read_text("utf-8") if codex_hooks.is_file() else None) == before,
                   "hooks were installed before the click")
