@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from raincli_agent import migrate as migrate_mod
+
 from raincli_agent import config as config_mod, dpapi
 from raincli_agent.config import load_config
 from raincli_agent.connector.queue import Queue
@@ -35,6 +37,7 @@ def offline_inbox_check(request, monkeypatch):
     """No test reaches a real server: the F11 inbox check answers "cannot tell" unless a test opts in."""
     if "fake_api" not in request.fixturenames:
         monkeypatch.setattr(Migration, "inbox_role", lambda self, config: None)
+        monkeypatch.setattr(migrate_mod, "_check_credential", lambda agent: "unknown")  # §16.17 3: offline
 
 
 @pytest.fixture

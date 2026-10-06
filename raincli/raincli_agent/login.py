@@ -82,6 +82,17 @@ class AlreadySignedIn(LoginError):
     code = "already_signed_in"
 
 
+class StaleMachineCredential(LoginError):
+    """§16.17: ``person_only`` refused this computer's machine credential (revoked, rotated or
+    unknown). The fix is a new machine (``raincli login --new-machine``)."""
+    code = "machine_credential_invalid"
+
+
+class NotMachineOwner(LoginError):
+    """§16.17: this computer's machine belongs to another account."""
+    code = "not_machine_owner"
+
+
 class ConnectorMachine(LoginError):
     """The credential feeds connector delivery (a migrated install): a new
     sign-in would replace it with a machine that has no delivery (15.6)."""
@@ -111,6 +122,30 @@ def computer_name():
 
 def default_machine_name():
     return slugify_machine_name(computer_name())
+
+
+def suggest_new_machine_name(old_handle=None):
+    """A machine name for "Set up this computer as a new machine" (§16.17 4): the computer name
+    in handle form, never the old handle. When the old handle is unknown (its credential no
+    longer answers), the computer name gets a ``-2`` suffix, as the old machine most likely
+    carried it."""
+    base = default_machine_name()
+    if old_handle is not None and base != old_handle:
+        return base
+    for n in range(2, 100):
+        candidate = f"{base[:32 - len(str(n)) - 1].rstrip('-')}-{n}"
+        if candidate != old_handle:
+            return candidate
+    return "machine-new"
+
+
+def known_handle(agent_config):
+    """The old machine's handle when its credential still answers ``/me`` (``not_owner``), else None."""
+    return existing_identity(agent_config)[1] if os.path.lexists(agent_config) else None
+
+
+from .setaside import (OFFER, SetAsideRefused, check_credential, set_aside,  # noqa: E402,F401 - §16.17 API
+                       stale_message)
 
 
 def check_machine_name(name):
@@ -403,6 +438,11 @@ def request_person_only(api_url, email, password, machine_token):
     try:
         status, reply = _post(api_url, "/app/login", body, secrets=[password.reveal(), machine_token.reveal()])
     except ApiError as exc:
+        from .setaside import stale_message
+        if exc.code == "machine_credential_invalid":
+            raise StaleMachineCredential(stale_message("invalid")) from None
+        if exc.code == "not_machine_owner":
+            raise NotMachineOwner(stale_message("not_owner")) from None
         if exc.code == "invalid" or exc.status == 400:
             raise InvalidRequest("the server refused a person session for this machine: sign in with the "
                                  "email and password of the machine's owner, or sign in again") from None

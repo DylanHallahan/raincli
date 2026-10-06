@@ -206,6 +206,88 @@ def person_session_checks(machine, agent, server):
           "(no rotation, no password or session anywhere else)", flush=True)
 
 
+def stale_credential_new_machine(root, server):
+    """§16.17: an old revoked machine-mode setup. `login --person` explains and points to
+    `--new-machine`, which sets the old setup aside (state included) and signs in fresh, on a pty."""
+    from raincli_agent import person
+    from raincli_agent.config import load_config
+    old = root / "stale"
+    agent = old / "agent.json"
+    write_config(agent, server.url, server.state.add_agent("stale-box"))
+    atomic_write_json(old / "runtime.json", {"machine_config": str(agent), "state_dir": "runtime-state"})
+    (old / "runtime-state" / "queue").mkdir(parents=True)
+    (old / "runtime-state" / "machine-salt").write_text("old-salt")
+    token = load_config(str(agent)).token.reveal()
+    server.state.agents[server.state.tokens.pop(token)]["active"] = False  # revoked on the website
+    status, transcript = login_on_pty([sys.executable, "-m", "raincli_agent", "--config", str(agent), "login",
+                                       "--person", "--email", "smoke@example.test"], PASSWORD)
+    assert status == 1 and "belongs to a machine that was revoked" in transcript, scrub(transcript)
+    assert "raincli login --new-machine" in transcript and "Password:" not in transcript
+    status, transcript = login_on_pty([sys.executable, "-m", "raincli_agent", "--config", str(agent), "login",
+                                       "--new-machine", "--email", "smoke@example.test", "--machine-name",
+                                       "smoke-fresh", "--api-url", server.url], PASSWORD)
+    assert status == 0 and "signed in as smoke-fresh" in transcript, scrub(transcript)
+    assert PASSWORD not in transcript
+    [backup] = old.glob("replaced-*")
+    for name in ("agent.json", "runtime.json", "runtime-state/queue", "runtime-state/machine-salt"):
+        assert (backup / name).exists(), name
+    assert not (old / "runtime-state" / "machine-salt").exists()  # a fresh state directory
+    assert load_config(str(agent)).token.reveal() != token and person.load_session(str(agent)) is not None
+    print("PASS: stale credential: login --person explains a revoked machine; login --new-machine on a pty set "
+          "the old setup and its state aside and signed in as a new machine", flush=True)
+
+
+def windows_scan_stage():
+    """§16.19 2 on a real Windows process: the Toolhelp table, the full image path and the
+    token-SID owner check. A standalone system executable copied into Claude Code's native
+    layout is listed; the same copy under a Claude desktop app path is not; a SYSTEM process
+    fails the owner check."""
+    import shutil
+    from raincli_agent.runtime import discovery, procinfo
+    work = Path(tempfile.mkdtemp(prefix="rcs-"))
+    source = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "PING.EXE"
+    layouts = {"code": work / "home" / ".local" / "bin" / "claude.exe",
+               "desktop": work / "AppData" / "Local" / "AnthropicClaude" / "app-0.14.10" / "Claude.exe",
+               "codex": work / "tools" / "codex-x86_64-pc-windows-msvc.exe"}
+    processes = {}
+    try:
+        for name, path in layouts.items():
+            path.parent.mkdir(parents=True)
+            shutil.copyfile(source, path)
+            processes[name] = subprocess.Popen([str(path), "-n", "120", "127.0.0.1"], stdout=subprocess.DEVNULL,
+                                               stderr=subprocess.DEVNULL, creationflags=0x08000000)
+        time.sleep(1.5)
+        assert all(p.poll() is None for p in processes.values()), "a copied process exited early"
+        same_user = procinfo.owner_check()
+        table = procinfo.process_table()
+        for name, proc in processes.items():
+            assert proc.pid in table, name
+            assert same_user(proc.pid), f"{name}: not recognised as this user's process"
+            image = procinfo.image_path(proc.pid)
+            same = os.path.normcase(os.path.realpath(image or "")) == os.path.normcase(os.path.realpath(layouts[name]))
+            assert same, (name, image)  # compared resolved: the temp directory may be an 8.3 short path
+        assert procinfo.windows_kind(procinfo.image_path(processes["code"].pid)) == "claude"
+        assert procinfo.windows_kind(procinfo.image_path(processes["desktop"].pid)) is None
+        assert procinfo.windows_kind(procinfo.image_path(processes["codex"].pid)) == "codex"
+        system = [pid for pid, (exe, _) in table.items() if exe in ("lsass", "services", "wininit")]
+        assert system and not any(same_user(pid) for pid in system), "a SYSTEM process passed the owner check"
+        salt = b"s" * 32
+        found = {a["key"]: a["type"] for a in discovery.windows_scan(salt, set())}
+        key = lambda kind, name: sessions.agent_key(salt, f"scan:{kind}:{processes[name].pid}")  # noqa: E731
+        assert found.get(key("claude", "code")) == "claude", found
+        assert found.get(key("codex", "codex")) == "codex", found
+        assert key("claude", "desktop") not in found and key("codex", "desktop") not in found, found
+        print("PASS: Windows scan: Toolhelp table, full image path and token-SID owner on real processes; the "
+              "Claude Code layout and the Codex release asset listed, a Claude desktop path not; SYSTEM refused",
+              flush=True)
+    finally:
+        for proc in processes.values():
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def herdr_stage(server):
     """Real Herdr delivery (Phase 2): see scripts/herdr_smoke.py."""
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -227,7 +309,20 @@ def person_stage():
     return person_smoke.run_stage(ROOT, login_on_pty, scrub, show)
 
 
+def isolate_home():
+    """The runtimes started here repair hook entries in ~/.claude and ~/.codex on a version change
+    (§16.19 item 6): on a developer machine they get a throwaway HOME, never the real one. The
+    Windows runner is disposable and keeps its profile (the scan and Codex stages need it)."""
+    if os.name != "nt":
+        home = Path(tempfile.mkdtemp(prefix="raincli-smoke-home-"))
+        os.environ["HOME"] = str(home)
+        os.environ.pop("CODEX_HOME", None)
+
+
 def main():
+    isolate_home()
+    if os.name == "nt":
+        windows_scan_stage()
     if "--person-only" in sys.argv[1:]:
         person_stage()
         return
@@ -371,6 +466,8 @@ def main():
         print("PASS: hook-session liveness: the agent's pid is recorded, live however long it idles, gone once it exits", flush=True)
         machine_config = machine_runtime = None
         machine_config, machine_runtime = headless_login_and_machine_mode(root, server)
+        if sys.platform.startswith("linux"):
+            stale_credential_new_machine(root, server)
         if os.name == "nt":
             import winreg
             from raincli_agent.runtime import startup

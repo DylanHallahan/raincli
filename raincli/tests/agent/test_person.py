@@ -105,7 +105,7 @@ def test_login_person_adds_a_session_without_rotation(account, home):
 def test_login_person_by_someone_else_is_refused(account, home):
     account.state.add_user("mallory@example.test", "pw-mallory-123", teams=("alpha",))
     sign_in(account, home, person_session=False)
-    with pytest.raises(login.InvalidRequest):
+    with pytest.raises(login.NotMachineOwner):
         person.add_session(agent(home), "mallory@example.test", Secret("pw-mallory-123"))
     assert person.load_session(agent(home)) is None
 

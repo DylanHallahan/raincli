@@ -706,13 +706,18 @@ def cmd_login(args):
         return login_person(args)
     _need_tty("raincli login")
     api_url = validate_api_url(args.api_url)
+    suggested = None
+    if args.new_machine:
+        if args.force:
+            raise UsageError("use either --new-machine or --force")
+        suggested = set_aside_for_new_machine(args)
     plan = login.prepare(args.agent_config, force=args.force)
     email = args.email or _ask("Email: ")
     if not email:
         raise UsageError("an email address is required")
     name = args.machine_name
     if not name:
-        default = plan["handle"] or login.default_machine_name()
+        default = suggested or plan["handle"] or login.default_machine_name()
         name = _ask(f"Machine name [{default}]: ") or default
     password = Secret(getpass.getpass("Password: "))
     team, replace = args.team, False
@@ -763,9 +768,58 @@ def cmd_login(args):
         out(f"wrote {result['runtime_config']} (machine mode: presence, version, the agent directory and "
             "delivery to your named agents; messages to the machine itself stay stored)")
         out(login.logon_start_hint(result["runtime_config"]))
+        print_hooks_hint(result["runtime_config"])
     else:
         out(f"kept {result['runtime_config']}: this machine's connector delivery continues unchanged")
     return EXIT_OK
+
+
+HOOK_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+
+
+def print_hooks_hint(runtime_config):
+    """§16.19 3: after sign-in, name each installed agent that isn't connected, with the command
+    that connects it. Hooks are never installed without the user's command. Best effort."""
+    from .runtime import hooks_install
+    for kind in ("claude", "codex"):
+        try:
+            state = hooks_install.status(kind, runtime_config)
+        except Exception:  # noqa: BLE001 - a hint never fails a sign-in
+            continue
+        if state != "not_connected":
+            continue
+        line = (f"{HOOK_NAMES[kind]} is installed here but not connected, so its sessions are only listed by type. "
+                f"To list them by name and let them receive messages: raincli hooks install --{kind} "
+                f"--config {runtime_config}")
+        if kind == "codex":
+            line += " (then approve the hooks once in Codex's /hooks and start a new session)"
+        out(line)
+
+
+def set_aside_for_new_machine(args):
+    """``raincli login --new-machine`` (§16.17 4, 5): move this computer's old setup aside, then
+    sign in fresh (the caller continues with a new password prompt, §16.18 V7). Returns the
+    suggested machine name, never the old handle."""
+    from . import login
+    from .config import default_config_path
+    path = os.path.abspath(args.agent_config or default_config_path())
+    if not os.path.lexists(path):
+        raise UsageError(f"there is no old setup to set aside ({path} does not exist); run raincli login")
+    old = login.known_handle(path)
+    result = login.set_aside(path)
+    out(f"moved this computer's old RainCLI setup to {result['backup']} (nothing was deleted):")
+    for item in result["moved"]:
+        out(f"  {item['from']}")
+    for item in result["rewritten"]:
+        out(f"  rewrote {item['path']} without its connectors (original kept in the backup)")
+    for path in result["kept_queues"]:
+        out(f"  kept the queue {path} in place")
+    if result["run_value"] == "removed":
+        out("removed the old RainCLI Run value, which started the old setup")
+    for entry in result["startup_entries"]:
+        out(f"  note: {escape_line(entry)}")
+    out("now signing in as a new machine; if this doesn't finish, run raincli login")
+    return login.suggest_new_machine_name(old)
 
 
 def cmd_logout(args):
@@ -819,7 +873,10 @@ def cmd_hooks_install(args):
     from .runtime import hooks_install
     kind = "claude" if args.claude else "codex"
     state_dir = hooks_install.state_dir_from_runtime(args.config)
-    out_json(hooks_install.install(kind, state_dir, remove=args.remove))
+    result = hooks_install.install(kind, state_dir, remove=args.remove)
+    if not args.remove:  # §16.19 item 6: the other agent's owned entries too, in the current form
+        result["repaired"] = hooks_install.repair(state_dir, log=lambda text: print(text, file=sys.stderr))
+    out_json(result)
     return EXIT_OK
 
 
@@ -962,6 +1019,10 @@ def build_parser():
                               help="server (default https://raincli.com; https unless the host is loopback)")
     login_parser.add_argument("--force", action="store_true",
                               help="sign in again over an existing machine-mode credential")
+    login_parser.add_argument("--new-machine", action="store_true",
+                              help="set this computer's old RainCLI setup aside (kept in a replaced-<time> "
+                                   "folder) and sign in as a new machine; for a revoked, unreadable or "
+                                   "another account's machine")
     login_parser.add_argument("--person", action="store_true",
                               help="add a person session to this signed-in machine (for raincli me and the app); "
                                    "rotates nothing")

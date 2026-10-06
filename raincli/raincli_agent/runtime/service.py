@@ -533,6 +533,21 @@ def stop_requested(state, instance):
     return isinstance(request, dict) and request.get("instance") == instance
 
 
+def repair_hooks(state):
+    """§16.19 item 6: on the first start of a new client version, bring our hook entries to the
+    current form. Never fatal; the log gets each change (paths only) and any notice."""
+    from .. import __version__
+    from . import hooks_install
+    log = lambda text: print(text, file=sys.stderr, flush=True)  # noqa: E731 - the runtime log
+    try:
+        hooks_install.repair_on_version_change(str(state), __version__, log=log)
+        notice = _hooks_notice(state)
+        if notice:
+            log(f"notice: {notice}")
+    except Exception as exc:  # noqa: BLE001 - a repair never stops the runtime
+        log(f"hooks: repair failed ({type(exc).__name__})")
+
+
 def notification_feed(configs):
     """Machine mode with a person session: long-poll the person inbox into the app's
     notification queue (§16.10). The feed idles while there is no session."""
@@ -556,6 +571,7 @@ def run(path, once=False, pushed=None):
     # The per-machine salt and the hook sessions directory (14.7 H3, M7).
     salt = sessions.ensure_salt(str(state))
     sessions.sessions_dir(str(state), create=True)
+    repair_hooks(state)
     pushed = pushed or PushedUpdates()
     pushed.machine_mode = machine_mode(configs)
     pushed.state_dir = state
@@ -645,7 +661,18 @@ def status(path):
     if not isinstance(data, dict) or not isinstance(data.get("updated_at"), (int, float)):
         return {"status": "not_observed"}
     data["stale"] = time.time() - data["updated_at"] > 120
+    notice = _hooks_notice(state)
+    if notice:
+        data["notice"] = notice  # §16.19 item 6: "trust them again" in Codex
     return data
+
+
+def _hooks_notice(state):
+    try:
+        data = json.loads((Path(state) / "hooks-notice.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data.get("message") if isinstance(data, dict) else None
 
 
 def request_stop(path):

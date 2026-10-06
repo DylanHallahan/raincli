@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 
 CODEX_VERSION = "0.160.0"
 RELEASE = f"https://github.com/openai/codex/releases/download/rust-v{CODEX_VERSION}/"
@@ -138,6 +139,78 @@ def hooks_list(codex, codex_home, cwd, env):
             proc.kill()
 
 
+class MockResponses:
+    """A loopback stand-in for the Responses API, as Codex's own tests use (core/tests/common:
+    CODEX_API_KEY=dummy, ``-c openai_base_url=...``). Every POST gets one short assistant reply."""
+
+    def __init__(self):
+        import http.server
+
+        events = [
+            {"type": "response.created", "response": {"id": "resp_1"}},
+            {"type": "response.output_item.done", "item": {"type": "message", "role": "assistant", "id": "msg_1",
+                                                           "content": [{"type": "output_text", "text": "done"}]}},
+            {"type": "response.completed", "response": {"id": "resp_1", "usage": {
+                "input_tokens": 0, "input_tokens_details": None, "output_tokens": 0,
+                "output_tokens_details": None, "total_tokens": 0}}},
+        ]
+        body = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+def real_exec(codex, project, env, base_url, state=None):
+    """One credential-free ``codex exec`` turn. Trust comes only from Codex's own switch, set
+    here in the test job (``--dangerously-bypass-hook-trust``, as codex-rs/exec/tests/suite/hooks.rs
+    uses it); shipped code never writes or bypasses trust. With ``state``, returns also every
+    codex session record seen while it ran (our SessionEnd hook removes it at the end)."""
+    seen, done = {}, threading.Event()
+
+    def watch():
+        while not done.is_set():
+            for record in codex_records(state, 0):
+                seen[record["key"]] = record
+            time.sleep(0.05)
+    if state is not None:
+        threading.Thread(target=watch, daemon=True).start()
+    try:
+        ran = subprocess.run([str(codex), "exec", "--skip-git-repo-check", "--dangerously-bypass-hook-trust",
+                              "-c", f"openai_base_url={json.dumps(base_url)}", "say done"],
+                             cwd=project, env={**env, "CODEX_API_KEY": "dummy"}, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=240, stdin=subprocess.DEVNULL, **NO_WINDOW)
+    finally:
+        time.sleep(0.2)
+        done.set()
+    return ran, list(seen.values())
+
+
+def codex_records(state, since):
+    from raincli_agent.runtime import sessions
+    return [r for r in sessions.all_records(str(state))  # live or not: codex exec has ended by now
+            if r.get("type") == "codex" and r.get("updated_at", 0) >= since]
+
+
 def fake_codex_interpreter(work):
     """An interpreter whose process is named codex: a venv launcher copy (Windows) or a
     symlink to this Python (Linux, where the process comm is the link's name)."""
@@ -236,6 +309,83 @@ def run_stage(root, server, wait_for, show, kill_tree):
             assert hook_entry["timeoutSec"] <= 5 and hook_entry["trustStatus"] == "untrusted"
         print("PASS: Codex: real codex app-server lists our 5 hooks with our command, additionalContextLimit "
               f"{hooks_install.CODEX_CONTEXT_LIMIT}, no warnings, and trust status untrusted", flush=True)
+
+        # 2b. §16.19 item 5: REAL Codex executes our installed hook, in its own session shell
+        # (PowerShell on Windows, the user's shell elsewhere), with paths that contain a space.
+        mock = MockResponses()
+        keep = {r["key"] for r in codex_records(state, 0)}
+        try:
+            if os.name == "nt":
+                # Evidence for the bug: the v0.5.0 form, a line starting with a quoted path.
+                new_text = hooks_file.read_text(encoding="utf-8")
+                old_line = data["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"].split(" /d /c call ", 1)[1]
+                old = json.loads(new_text)
+                for groups in old["hooks"].values():  # every event in the v0.5.0 form
+                    for entry in groups[0]["hooks"]:
+                        entry["command"] = entry["commandWindows"] = entry["commandWindows"].split(" /d /c call ", 1)[1]
+                # Evidence only (job-only probes, trusted by the job's bypass switch): which shell
+                # Codex runs hooks in. "ver" works only in cmd, $PSVersionTable only in PowerShell.
+                probe_cmd, probe_ps = work / "shell-cmd.txt", work / "shell-ps.txt"
+                old["hooks"]["SessionStart"].append({"hooks": [
+                    {"type": "command", "command": f'ver > "{probe_cmd}"', "commandWindows": f'ver > "{probe_cmd}"'},
+                    {"type": "command", "command": f"$PSVersionTable.PSEdition > '{probe_ps}'",
+                     "commandWindows": f"$PSVersionTable.PSEdition > '{probe_ps}'"}]})
+                hooks_file.write_text(json.dumps(old, indent=2), encoding="utf-8")
+                before = {r["key"] for r in codex_records(state, 0)}
+                ran, seen = real_exec(codex, project, env, mock.url, state)
+                old_recorded = [r for r in seen if r["key"] not in before]
+                hooks_file.write_text(new_text, encoding="utf-8")
+                shell = ("cmd" if probe_cmd.exists() else "") + ("PowerShell" if probe_ps.exists() else "")
+                print(f"EVIDENCE: Codex {CODEX_VERSION} exec runs hooks in: {shell or 'neither probe ran'}; "
+                      f"with the v0.5.0 hook form: exit {ran.returncode}, {len(old_recorded)} session(s) recorded",
+                      flush=True)
+                assert shell == "PowerShell" and not old_recorded, (shell, old_recorded)  # the bug, reproduced
+                for label, argv in (("powershell -Command", ["powershell", "-NoProfile", "-Command", old_line]),
+                                    ("pwsh -Command", ["pwsh", "-NoProfile", "-Command", old_line])):
+                    exe = shutil.which(argv[0])
+                    if exe:
+                        before = {r["key"] for r in codex_records(state, 0)}
+                        payload = json.dumps({"session_id": str(uuid.uuid4()), "cwd": str(project),
+                                              "hook_event_name": "SessionStart", "source": "startup"}).encode()
+                        proc = subprocess.run(subprocess.list2cmdline([exe] + argv[1:]), input=payload,
+                                              capture_output=True, timeout=60, **NO_WINDOW)
+                        got = [r for r in codex_records(state, 0) if r["key"] not in before]
+                        print(f"EVIDENCE: the v0.5.0 line under {label}: exit {proc.returncode}, {len(got)} recorded; "
+                              f"{proc.stderr.decode(errors='replace').strip()[:300]!r}", flush=True)
+                comspec = os.environ.get("COMSPEC", "cmd.exe")
+                before = {r["key"] for r in codex_records(state, 0)}
+                proc = subprocess.run(f"{comspec} /C {old_line}", input=b"{}", capture_output=True, timeout=60,
+                                      **NO_WINDOW)
+                print(f"EVIDENCE: the v0.5.0 line under cmd /C unwrapped: exit {proc.returncode}; "
+                      f"{proc.stderr.decode(errors='replace').strip()[:300]!r}", flush=True)
+            before = {r["key"] for r in codex_records(state, 0)}
+            ran, seen = real_exec(codex, project, env, mock.url, state)
+            recorded = [r for r in seen if r["key"] not in before]
+            assert recorded and recorded[0]["name"] == "smoke project", (ran.returncode, ran.stderr[-2000:])
+            assert "hook: SessionStart Completed" in ran.stderr, ran.stderr[-2000:]
+            print(f"PASS: Codex: real codex {CODEX_VERSION} exec ran our installed SessionStart hook in its session "
+                  f"shell (exit {ran.returncode}); the session was recorded under a profile path with a space",
+                  flush=True)
+        finally:
+            mock.close()
+        if os.name == "nt":
+            line = data["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"]
+            payload = json.dumps({"session_id": "019a7f2e-4c1d-7b3e-9a21-0f6c5d4e3b2b", "cwd": str(project),
+                                  "hook_event_name": "SessionStart", "source": "startup"}).encode()
+            comspec = os.environ.get("COMSPEC", "cmd.exe")
+            shells = {"cmd /C wrapped": f'{comspec} /C "{line}"', "cmd /C unwrapped": f"{comspec} /C {line}"}
+            for name in ("powershell", "pwsh"):
+                exe = shutil.which(name)
+                if exe:
+                    shells[f"{name} -Command"] = subprocess.list2cmdline([exe, "-NoProfile", "-Command", line])
+            for label, cmdline in shells.items():
+                since = time.time()
+                proc = subprocess.run(cmdline, input=payload, capture_output=True, timeout=60, **NO_WINDOW)
+                assert proc.returncode == 0 and codex_records(state, since), (label, proc.stderr[-1000:])
+            print(f"PASS: Codex: the hook line runs the same under {', '.join(shells)}", flush=True)
+        for record in codex_records(state, 0):  # the evidence sessions above end here
+            if record["key"] not in keep:
+                sessions.remove_record(str(state), record["key"])
 
         # 3. A connector maps the inbox to this Codex session and hands over a long message.
         agent_cfg = profile / "bob-agent.json"

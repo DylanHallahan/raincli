@@ -52,6 +52,7 @@ CODEX_MIN_WINDOWS = (0, 145, 0)
 # cmd.exe interprets these inside `cmd /C "…"` (Codex runs Windows hooks that way:
 # codex-rs/hooks/src/engine/command_runner.rs, build_command), so no path may contain them.
 CMD_SPECIAL = set('%^&|<>"!')  # "!": cmd delayed expansion (§16.14 K3)
+SHELL_SPECIAL = CMD_SPECIAL | set("$`")  # PowerShell expands these inside "..." (§16.19 item 5)
 TRUST_NOTE = ("Codex runs these hooks only after you trust them once in Codex: open /hooks and trust the "
               "raincli hooks. Trust again after any reinstall that changes the command (a new state "
               "directory or install path).")
@@ -95,17 +96,40 @@ def launcher_prefix():
                       "raincli entry point on PATH, then run hooks install again")
 
 
-def windows_command_line(argv):
-    """The command line cmd.exe receives as ``cmd /C "<line>"``: every argument quoted.
-    Paths with cmd-special characters are refused (they would be expanded or split)."""
+def system_cmd():
+    """cmd.exe by absolute path, so a ``cmd.exe`` or ``cmd.bat`` in the session's working
+    directory (cmd searches it first) is never run instead."""
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or "C:\\Windows"
+    return root.rstrip("\\") + "\\System32\\cmd.exe"
+
+
+def windows_command_line(argv, cmd=None):
+    """The Codex hook command on Windows (§16.19 item 5).
+
+    Codex 0.160 runs a hook in the session's shell: by default PowerShell, as
+    ``powershell -NoProfile -Command <line>`` (codex-rs/core/src/shell.rs derive_exec_args,
+    core/src/session/mod.rs), or cmd as ``cmd /C "<line>"`` (hooks/src/engine/command_runner.rs
+    build_command). A line that begins with a quoted path fails in PowerShell (a string, then
+    stray tokens) and, unwrapped, in cmd (which strips its first and last quote). So the line
+    starts with cmd.exe's unquoted absolute path and runs the hook through ``call``:
+
+        C:\\Windows\\System32\\cmd.exe /d /c call "<raincli.exe>" hook codex <Event> --state-dir "<dir>"
+
+    which runs the same under ``cmd /C "<line>"``, ``cmd /C <line>`` and PowerShell ``-Command``
+    (``/d``: no AutoRun). Paths with characters cmd or PowerShell would interpret are refused."""
+    cmd = cmd or system_cmd()
+    if any(ch in cmd for ch in ' "') or set(cmd) & SHELL_SPECIAL:
+        raise ConfigError(f"cannot install Codex hooks: cmd.exe's path {cmd!r} has a space or a special character")
     for arg in argv:
-        bad = sorted(set(arg) & CMD_SPECIAL) or [ch for ch in arg if ord(ch) < 32]
+        bad = sorted(set(arg) & SHELL_SPECIAL) or [ch for ch in arg if ord(ch) < 32]
         if not bad and arg.endswith("\\"):
             bad = ["a trailing backslash"]  # it would escape the closing quote
         if bad:
-            raise ConfigError(f"cannot install Codex hooks: the path {arg!r} contains characters cmd.exe "
-                              f"interprets ({' '.join(bad)}); use a state directory and install path without them")
-    return " ".join(f'"{arg}"' if (" " in arg or not arg or "\\" in arg or "/" in arg) else arg for arg in argv)
+            raise ConfigError(f"cannot install Codex hooks: the path {arg!r} contains characters cmd.exe or "
+                              f"PowerShell interpret ({' '.join(bad)}); use a state directory and install path "
+                              "without them")
+    quoted = " ".join(f'"{arg}"' if (" " in arg or not arg or "\\" in arg or "/" in arg) else arg for arg in argv)
+    return f"{cmd} /d /c call {quoted}"
 
 
 def handler(kind, event, prefix, state_dir, windows=None):
@@ -306,3 +330,246 @@ def state_dir_from_runtime(config):
     from .service import _read_runtime
     return _read_runtime(config)[-1]
 
+
+
+# -- §16.19 3: "Connect Codex / Claude Code", shared by the app and the CLI ------------------------
+
+STATUSES = ("not_installed_agent", "too_old", "not_connected", "connected", "needs_approval")
+CONNECTED_FILE = "hooks-connected.json"  # in the runtime state dir: {kind: connect time}
+
+
+def find_claude(env=None, windows=None, home=None):
+    """Claude Code on this machine: ``claude`` (``claude.exe``) in an absolute PATH entry, or the
+    native installer's ``~/.local/bin`` (code.claude.com/docs/en/setup). None when absent."""
+    env = os.environ if env is None else env
+    windows = os.name == "nt" if windows is None else windows
+    name = "claude.exe" if windows else "claude"
+    entries = [e.strip().strip('"') for e in (env.get("PATH") or "").split(os.pathsep)]
+    entries.append(str(Path(home or os.path.expanduser("~")) / ".local" / "bin"))
+    for entry in entries:
+        if not entry or entry == "." or not os.path.isabs(entry):
+            continue
+        candidate = os.path.join(entry, name)
+        if os.path.isfile(candidate) and (windows or os.access(candidate, os.X_OK)):
+            return candidate
+    return None
+
+
+def _installed_for(kind, state_dir, home=None):
+    """Whether our hooks for ``kind`` are installed and write to ``state_dir``."""
+    link = config_path(kind, home)
+    path = Path(os.path.realpath(link)) if link.is_symlink() else link
+    try:
+        _, data = load(path)
+    except ConfigError:
+        return False
+    hooks = data.get("hooks") or {}
+    want = os.path.normcase(os.path.abspath(str(state_dir)))
+    for event in EVENTS[kind]:
+        found = False
+        for group in hooks.get(event) or []:
+            for entry in (group.get("hooks") if isinstance(group, dict) else None) or []:
+                if owned(entry):
+                    text = " ".join(str(entry.get(k, "")) for k in ("command", "commandWindows")) + " " + \
+                        " ".join(str(a) for a in entry.get("args") or [])
+                    found = found or want in os.path.normcase(text.replace('"', "").replace("'", ""))
+        if not found:
+            return False
+    return True
+
+
+def _connected_at(state_dir, kind):
+    try:
+        data = json.loads((Path(state_dir) / CONNECTED_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get(kind) if isinstance(data, dict) else None
+    return value if isinstance(value, (int, float)) else None
+
+
+def status(kind, runtime_config, *, home=None, probe=codex_support, find=None, windows=None, now=None):
+    """One of ``STATUSES`` for Codex or Claude Code on this machine (§16.19 3):
+
+    - ``not_installed_agent``: the agent isn't found;
+    - ``too_old``: Codex without the hooks feature, or older than 0.145.0 on Windows;
+    - ``not_connected``: our hooks aren't installed for this runtime's state dir;
+    - ``needs_approval``: Codex hooks are installed but no hook event was recorded since
+      (approve them once in Codex's /hooks, then start a new session);
+    - ``connected``."""
+    if kind not in EVENTS:
+        raise ConfigError("hooks status supports claude or codex")
+    windows = os.name == "nt" if windows is None else windows
+    state_dir = state_dir_from_runtime(runtime_config)
+    if kind == "claude":
+        if (find or find_claude)() is None:
+            return "not_installed_agent"
+        return "connected" if _installed_for(kind, state_dir, home) else "not_connected"
+    if (find or find_codex)() is None:
+        return "not_installed_agent"
+    supported, evidence = probe()
+    version = codex_version(evidence)
+    if not supported or (windows and (version is None or version < CODEX_MIN_WINDOWS)):
+        return "too_old"
+    if not _installed_for(kind, state_dir, home):
+        return "not_connected"
+    since = _connected_at(state_dir, kind) or 0
+    from . import sessions
+    recorded = [r for r in sessions.all_records(str(state_dir))
+                if r.get("type") == "codex" and (r.get("updated_at") or 0) >= since]
+    return "connected" if recorded else "needs_approval"
+
+
+def connect(kind, runtime_config, *, home=None, prefix=None, probe=codex_support, windows=None, now=None):
+    """The same operation as ``raincli hooks install --<kind> --config <runtime_config>`` (K1
+    resolution, the Codex version gate), and records when, for ``needs_approval``. Only
+    ever run on the user's click or command."""
+    state_dir = state_dir_from_runtime(runtime_config)
+    result = install(kind, state_dir, home=home, prefix=prefix, probe=probe, windows=windows)
+    if result.get("status") in ("installed", "unchanged"):
+        try:
+            data = json.loads((Path(state_dir) / CONNECTED_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        if result["status"] == "installed" or kind not in data:
+            data[kind] = time.time() if now is None else now
+        Path(state_dir).mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(str(Path(state_dir) / CONNECTED_FILE), (json.dumps(data) + "\n").encode(), 0o600)
+    return result
+
+
+def disconnect(kind, runtime_config, *, home=None, windows=None):
+    """Remove only our hooks for ``kind`` (``raincli hooks install --<kind> --remove``)."""
+    return install(kind, state_dir_from_runtime(runtime_config), remove=True, home=home, windows=windows)
+
+
+# -- §16.19 item 6: repairing owned entries on update ---------------------------------------------
+
+REPAIRED_FILE = "hooks-repaired.json"  # in the runtime state dir: the client version last repaired for
+NOTICE_FILE = "hooks-notice.json"
+CODEX_NOTICE = "RainCLI updated its Codex hooks; open /hooks in Codex and trust them again"
+
+
+def entry_state_dir(entry):
+    """The ``--state-dir`` an owned entry writes to, from its args or its command line, or None."""
+    args = entry.get("args")
+    if isinstance(args, list) and "--state-dir" in args[:-1]:
+        return str(args[args.index("--state-dir") + 1])
+    text = entry.get("commandWindows") or entry.get("command") or ""
+    at = text.find("--state-dir ")
+    if at < 0:
+        return None
+    rest = text[at + len("--state-dir "):].lstrip()
+    if rest.startswith('"'):
+        end = rest.find('"', 1)
+        return rest[1:end] if end > 0 else None
+    try:
+        return shlex.split(rest.split(" 2>/dev/null", 1)[0])[0] if rest.startswith("'") else rest.split()[0]
+    except (ValueError, IndexError):
+        return None
+
+
+def repair(state_dir, *, home=None, prefix=None, windows=None, log=lambda text: None, now=None):
+    """Regenerate every RainCLI-owned hook entry in the Codex and Claude Code configs in the
+    current form (§16.19 item 6). Only owned entries change; nothing is written when they
+    already match; a backup comes first and the write is atomic. An agent without our hooks
+    gets none. Returns ``{kind: [changed events]}`` and raises the one-time Codex notice in
+    ``state_dir`` when a Codex command changed."""
+    windows = os.name == "nt" if windows is None else windows
+    try:
+        prefix = prefix or launcher_prefix()[0]
+    except ConfigError as exc:
+        log(f"hooks: not repaired: {exc}")
+        return {}
+    if isinstance(prefix, tuple):
+        prefix = prefix[0]
+    changed = {}
+    for kind in EVENTS:
+        link = config_path(kind, home)
+        path = Path(os.path.realpath(link)) if link.is_symlink() else link
+        try:
+            raw, data = load(path)
+        except ConfigError as exc:
+            log(f"hooks: {kind} config not repaired: {exc}")
+            continue
+        if raw is None:
+            continue
+        hooks = data.get("hooks") or {}
+        events = []
+        new_hooks = {}
+        for event, groups in hooks.items():
+            if not isinstance(groups, list) or event not in EVENTS[kind]:
+                new_hooks[event] = groups
+                continue
+            out = []
+            for group in groups:
+                if isinstance(group, dict) and isinstance(group.get("hooks"), list):
+                    entries = []
+                    for entry in group["hooks"]:
+                        if owned(entry):
+                            try:
+                                fresh = handler(kind, event, prefix, entry_state_dir(entry) or state_dir, windows)
+                            except ConfigError as exc:
+                                log(f"hooks: {kind} {event} not repaired: {exc}")
+                                fresh = entry
+                            if fresh != entry:
+                                events.append(event)
+                                log(f"hooks: repaired {kind} {event}: "
+                                    f"{entry.get('commandWindows') or entry.get('command')} -> "
+                                    f"{fresh.get('commandWindows') or fresh.get('command')}")
+                                if kind == "codex" and (fresh.get("command"), fresh.get("commandWindows")) != (
+                                        entry.get("command"), entry.get("commandWindows")):
+                                    raise_notice(state_dir, now)
+                            entry = fresh
+                        entries.append(entry)
+                    group = {**group, "hooks": entries}
+                out.append(group)
+            new_hooks[event] = out
+        if events:
+            write(path, raw, {**data, "hooks": new_hooks}, backup_dir=link.parent)
+            changed[kind] = events
+    return changed
+
+
+def raise_notice(state_dir, now=None):
+    """The one-time "trust them again" notice, and Codex counts as needs_approval until a hook runs."""
+    stamp = time.time() if now is None else now
+    Path(state_dir).mkdir(parents=True, exist_ok=True)
+    atomic_write_bytes(str(Path(state_dir) / NOTICE_FILE),
+                       (json.dumps({"message": CODEX_NOTICE, "at": stamp}) + "\n").encode(), 0o600)
+    try:
+        data = json.loads((Path(state_dir) / CONNECTED_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    data["codex"] = stamp
+    atomic_write_bytes(str(Path(state_dir) / CONNECTED_FILE), (json.dumps(data) + "\n").encode(), 0o600)
+
+
+def pending_notice(runtime_config):
+    """The notice text while it is pending (the app's tray, ``raincli runtime status``), else None."""
+    try:
+        data = json.loads((Path(state_dir_from_runtime(runtime_config)) / NOTICE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError, ConfigError):
+        return None
+    return data.get("message") if isinstance(data, dict) else None
+
+
+def dismiss_notice(runtime_config):
+    try:
+        os.unlink(Path(state_dir_from_runtime(runtime_config)) / NOTICE_FILE)
+    except (FileNotFoundError, ConfigError):
+        pass
+
+
+def repair_on_version_change(state_dir, version, log=lambda text: None, **kwargs):
+    """The runtime's first start on a new client version (app or managed update): repair once."""
+    marker = Path(state_dir) / REPAIRED_FILE
+    try:
+        if json.loads(marker.read_text(encoding="utf-8")).get("version") == version:
+            return None
+    except (OSError, ValueError, AttributeError):
+        pass
+    result = repair(state_dir, log=log, **kwargs)
+    atomic_write_bytes(str(marker), (json.dumps({"version": version}) + "\n").encode(), 0o600)
+    return result

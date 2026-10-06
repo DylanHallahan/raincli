@@ -1287,3 +1287,47 @@ Found on a real v0.5.0 machine: a Codex CLI session running, but zero directory 
 - **Pinned to the bottom:** when the page refreshes or new messages are added, it stays at the bottom only if the user was already within about 80 px of it. Otherwise their scroll position is kept, and a small "New messages ↓" control appears.
 - **Script rules:** plain same-origin script under the existing CSP, with no inline script. Without JavaScript, the page still works (anchor `#latest`).
 - **Tests:** Playwright covers on-open at the bottom, staying pinned, keeping the position when scrolled up, and the anchor taking precedence.
+
+**§16.19 item 2, added (main): telling the Claude desktop app apart from Claude Code.**
+- **Never by name alone:** the Claude desktop app's main executable is also `Claude.exe` (Electron, under `%LOCALAPPDATA%\AnthropicClaude\…` or a Microsoft Store `WindowsApps` path), so `claude.exe` is never mapped to Claude Code by name alone.
+- **Classification:** it uses the process's **full image path** (`QueryFullProcessImageNameW`), plus its parent when needed, and never the command line (§14.7 M5).
+  - **Claude Code** only for the native installer's layout (`…\.local\bin\claude.exe`, or the `claude\versions\<n>` layout), or a path the builder verifies from primary sources.
+  - **Ignored entirely:** the desktop app's executable and its Electron helper processes (anything under `AnthropicClaude` or a `WindowsApps\Claude…` package), the same as any unrelated process.
+  - **Codex:** the same rule. A Codex desktop app, if it ships its own executable, is recognised only by a verified path.
+- **Tests:** fixture paths for each layout, including the desktop app and its helpers, which must NOT be classified.
+
+**§16.19 item 3, added (main): desktop-app sessions and hooks, documented in v0.5.1.**
+- `docs/windows-client.md` states, from primary sources (the vendor docs and settings references, with versions and URLs cited):
+  - whether Claude Code sessions inside the Claude desktop app run the hooks from `~/.claude/settings.json`;
+  - whether sessions in the Codex desktop app run the hooks from `~/.codex/hooks.json`;
+  - how the Codex `/hooks` approval works when only the desktop app is installed (for example, whether the desktop app has its own review screen, or whether the CLI's `codex /hooks` must be run once).
+- **Unverified points** are marked unverified, with what the user should check on a real machine.
+- **The This computer page** wording follows those facts.
+
+**§16.19 item 5 (main; real-user bug on Codex CLI 0.160): the Windows Codex hook command.**
+- **The rule:** the generated `commandWindows`/`command` line must run the same way whether or not Codex wraps it as `cmd /C "<line>"`.
+- **Why:** after `/C`, cmd removes the first and last quote character whenever the line starts with a quote and the "exactly two quotes" exception doesn't apply. A line that begins with a quoted path therefore breaks if it reaches cmd unwrapped, for example the executable path or state directory under a profile with a space.
+- **The required form:** the line must not begin with a quote character. For example `call "<raincli.exe>" hook codex <Event> --state-dir "<state_dir>"`, or another form the builder proves equivalent.
+- **Kept from before:** paths are refused as before (`% ^ & | < > " !`, controls, a trailing backslash).
+- **Proof:** the form is decided by evidence from Codex 0.160's real Windows hook execution, not by reading its source alone.
+- **Tests:**
+  - a unit test of cmd's quote rule, both wrapped and unwrapped;
+  - **real Windows CI in which a pinned real Codex (≥ 0.145.0, and 0.160) actually executes the installed hook**, with a user profile path containing a space. It starts a session through `codex app-server` (or any credential-free path that fires `SessionStart`), and checks that our hook recorded the session.
+  - Trust in CI may come only from Codex's own test or bypass switch, set in the test job. Shipped code never writes or bypasses trust.
+
+**§16.19 item 6: repairing owned hook entries automatically on update.**
+- **When it runs:** on the first runtime start after the client version changes (app update or managed update), and after `raincli hooks install`.
+- **What it does:** the runtime regenerates every RainCLI-owned hook entry (`statusMessage: "raincli"`) in `~/.codex/hooks.json` (and `$CODEX_HOME`) and `~/.claude/settings.json`, in the current correct form.
+- **What it touches:** only owned entries. Others are never changed, and nothing is written when the entries already match.
+- **Safety:**
+  - a backup is written first (the existing rotation of 3);
+  - the write is atomic;
+  - the old and new commands go to the runtime log, as paths only.
+- **Telling the user when a Codex command changed:**
+  - a one-time notice: "RainCLI updated its Codex hooks; open /hooks in Codex and trust them again";
+  - in the app, a tray notice plus a This computer state of `needs_approval`;
+  - on Linux, a line in `raincli runtime status` and the log.
+
+  Claude Code needs no approval, so it gets no notice.
+- **Never added:** repair never installs hooks for an agent that had none.
+- **Tests:** an old-form entry repaired with a backup; foreign entries untouched; no write when current; the notice raised only when a Codex command changed.

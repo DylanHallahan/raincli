@@ -18,6 +18,10 @@ TYPES_BY_NAME = {
 # runs a hook as codex.exe -> cmd.exe /C -> raincli.exe -> raincli.exe.
 PASS_THROUGH = {"sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "tcsh", "csh", "busybox", "env", "nu",
                 "pwsh", "powershell", "cmd", "conhost", "raincli"}
+# Codex's own helper executables (release assets of openai/codex rust-v0.160.1): never a
+# session of their own, so the scan ignores them and liveness passes through them (§16.19 2).
+CODEX_HELPERS = {"codex-command-runner", "codex-windows-sandbox-setup", "codex-code-mode-host", "codex-voice-host"}
+PASS_THROUGH |= CODEX_HELPERS
 
 
 def plain(name):
@@ -33,9 +37,46 @@ def exe_name(path):
     if len(parts) >= 3 and parts[-2] == "versions" and parts[-3] == "claude":
         return "claude"
     name = plain(parts[-1] if parts else "")
-    if name.startswith("codex-"):
+    if name.startswith("codex-") and name not in CODEX_HELPERS:
         return "codex"  # a release binary as shipped, e.g. codex-x86_64-pc-windows-msvc.exe (§16.14 K2)
     return name
+
+
+import re as _re
+
+# §16.19 item 2 (added): on Windows an agent is recognised by its full image path, never by its
+# name alone, because the Claude desktop app's executable is also Claude.exe. The layouts are
+# the verified ones recorded in docs/windows-client.md ("Which processes are listed"). Paths are
+# compared lowercased with "/" separators.
+_IGNORED_ROOTS = ("/anthropicclaude/", "/windowsapps/")  # the desktop apps and Store packages
+_CLAUDE_CODE = (
+    _re.compile(r"/\.local/bin/claude\.exe$"),  # the native installer's launcher
+    _re.compile(r"/claude/versions/[^/]+(/claude\.exe)?$"),  # its versioned binaries
+    _re.compile(r"/node_modules/@anthropic-ai/claude-code/bin/claude\.exe$"),  # npm: the linked native binary
+    _re.compile(r"/node_modules/@anthropic-ai/claude-code-win32-[a-z0-9]+/claude\.exe$"),
+    # The Claude desktop app's embedded Claude Code (its Code tab), which runs the user's hooks:
+    # %APPDATA%\Claude\claude-code\<version>\claude.exe. The desktop app itself is never listed.
+    _re.compile(r"/appdata/roaming/claude/claude-code/[^/]+/claude\.exe$"),
+)
+_CODEX = (
+    _re.compile(r"/node_modules/@openai/codex[^/]*/vendor/[^/]+/bin/codex\.exe$"),  # npm
+    _re.compile(r"/microsoft/winget/(packages/openai\.codex[^/]*|links)/codex[^/]*\.exe$"),  # winget
+    _re.compile(r"/codex-(x86_64|aarch64)-pc-windows-msvc\.exe$"),  # the release asset, kept as shipped
+)
+
+
+def windows_kind(path):
+    """``claude``, ``codex`` or None for a Windows full image path (§16.19 item 2, added)."""
+    if not path:
+        return None
+    norm = path.replace("\\", "/").lower()
+    if any(root in norm for root in _IGNORED_ROOTS) or plain(norm) in CODEX_HELPERS:
+        return None
+    if any(p.search(norm) for p in _CLAUDE_CODE):
+        return "claude"
+    if any(p.search(norm) for p in _CODEX):
+        return "codex"
+    return None
 
 
 def kind_of(exe, comm=""):
@@ -152,6 +193,86 @@ def windows_snapshot():
         return out
     finally:
         k.CloseHandle(snap)
+
+
+def process_table():
+    """{pid: (exe name, parent pid)} from one Toolhelp snapshot (§16.19 2). Windows only."""
+    return windows_snapshot()
+
+
+def image_path(pid):
+    """The process's full image path (``QueryFullProcessImageNameW``), or None. Never the
+    command line (§14.7 M5)."""
+    c, w, k, _ = _windows()
+    k.QueryFullProcessImageNameW.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD)]
+    k.QueryFullProcessImageNameW.restype = w.BOOL
+    handle = k.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        size = w.DWORD(32768)
+        buffer = c.create_unicode_buffer(size.value)
+        if not k.QueryFullProcessImageNameW(handle, 0, buffer, c.byref(size)):
+            return None
+        return buffer.value
+    finally:
+        k.CloseHandle(handle)
+
+
+def _advapi():
+    import ctypes as c
+    from ctypes import wintypes as w
+    a = c.WinDLL("advapi32", use_last_error=True)
+    a.OpenProcessToken.argtypes, a.OpenProcessToken.restype = [w.HANDLE, w.DWORD, c.POINTER(w.HANDLE)], w.BOOL
+    a.GetTokenInformation.argtypes = [w.HANDLE, c.c_int, c.c_void_p, w.DWORD, c.POINTER(w.DWORD)]
+    a.GetTokenInformation.restype = w.BOOL
+    a.EqualSid.argtypes, a.EqualSid.restype = [c.c_void_p, c.c_void_p], w.BOOL
+    return a
+
+
+def _token_user(c, w, k, a, process):
+    """The TOKEN_USER buffer of an open process handle, or None."""
+    token = w.HANDLE()
+    if not a.OpenProcessToken(process, 0x0008, c.byref(token)):  # TOKEN_QUERY
+        return None
+    try:
+        size = w.DWORD()
+        a.GetTokenInformation(token, 1, None, 0, c.byref(size))  # TokenUser: ask the size
+        if not size.value or size.value > 4096:
+            return None
+        buffer = c.create_string_buffer(size.value)
+        if not a.GetTokenInformation(token, 1, buffer, size, c.byref(size)):
+            return None
+        return buffer
+    finally:
+        k.CloseHandle(token)
+
+
+def owner_check():
+    """A function ``pid -> bool``: whether that process's token user is this process's user,
+    compared as SIDs (§16.19 2: tasklist's USERNAME filter can miss domain and Azure AD
+    accounts). A process that can't be opened or queried counts as not ours."""
+    c, w, k, _ = _windows()
+    a = _advapi()
+    k.GetCurrentProcess.restype = w.HANDLE
+    mine = _token_user(c, w, k, a, k.GetCurrentProcess())
+    if mine is None:
+        raise OSError("cannot read this process's user")
+    my_sid = c.cast(mine, c.POINTER(c.c_void_p))[0]  # TOKEN_USER.User.Sid
+
+    def same_user(pid):
+        handle = k.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            theirs = _token_user(c, w, k, a, handle)
+            if theirs is None:
+                return False
+            return bool(a.EqualSid(my_sid, c.cast(theirs, c.POINTER(c.c_void_p))[0]))
+        finally:
+            k.CloseHandle(handle)
+    same_user.sid_buffer = mine  # keeps the memory my_sid points into alive
+    return same_user
 
 
 def windows_start(pid, alive_only=True):
