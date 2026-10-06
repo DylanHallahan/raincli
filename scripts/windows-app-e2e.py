@@ -869,6 +869,28 @@ def window_sign_in(page, password, machine=None):
     page.click("#submit")
 
 
+CODEX_PROBE = """
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from raincli_agent.login import runtime_config_path
+from raincli_agent.config import default_config_path
+from raincli_agent.runtime import hooks_install
+t = time.monotonic()
+print(hooks_install.status("codex", runtime_config_path(str(default_config_path()))), round(time.monotonic() - t, 1))
+"""
+
+
+def codex_status_probe(codex):
+    """hooks_install.status("codex") in a fresh process with the pinned Codex first on PATH, bounded."""
+    env = dict(os.environ, PATH=str(codex.parent) + os.pathsep + os.environ.get("PATH", ""))
+    try:
+        out = subprocess.run([sys.executable, "-c", CODEX_PROBE, str(PKG)], env=env, capture_output=True, text=True,
+                             timeout=90)
+        return (out.stdout + out.stderr).strip()[-600:]
+    except subprocess.TimeoutExpired:
+        return "hooks_install.status did not return within 90 s"
+
+
 def inbox_after_sign_in(window, page, timeout=180):
     """The inbox after a sign-in, or a failure naming what the sign-in page said."""
     try:
@@ -1103,7 +1125,13 @@ def part_e(app, server, installers, password, observer, work, codex=None):
             page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it
             page = window.page("this-computer.html", timeout=60)
             row = "#hooks li[data-agent=codex]"
-            wait_for("Codex's state", lambda: page.locator(f"{row} [data-state]").count() == 1, timeout=120, interval=1)
+            try:
+                wait_for("Codex's state", lambda: page.locator(f"{row} [data-state]").count() == 1, timeout=120,
+                         interval=1)
+            except Failure:
+                raise Failure(f"no Codex state on This computer; the card says {page.inner_text('#hooks')!r}, "
+                              f"message {page.inner_text('#hooks-message')!r}; the core directly: "
+                              f"{codex_status_probe(codex)}") from None
             state = page.get_attribute(f"{row} [data-state]", "data-state")
             check(state == "not_connected", f"Codex shows {state!r}: {page.inner_text(row)!r}; "
                                             f"codex at {codex} (on the app's PATH)")
