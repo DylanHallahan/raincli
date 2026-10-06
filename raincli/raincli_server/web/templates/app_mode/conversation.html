@@ -15,9 +15,9 @@
   </div>
   <span class="rc-pill">{{ 'Teammate' if kind == 'person' else 'Agent' if kind == 'agent' else 'Machine inbox' }}</span>
 </header>
-<div class="rc-scroll">
+<div class="rc-scroll" data-thread-scroll>
   {% if view.truncated %}<p class="rc-flash">Showing the most recent {{ view.lines|length }} messages.</p>{% endif %}
-  <ol class="rc-thread">
+  <ol class="rc-thread" data-thread>
     {% for line in view.lines %}{% set m = line.message %}{% set st = line.shown_state %}
     <li class="rc-msg{{ ' rc-out' if line.outgoing else '' }}" id="m-{{ m.id }}">
       <span class="rc-avatar" aria-hidden="true">{{ initials(line.sender.display) }}</span>
@@ -37,6 +37,8 @@
     </li>
     {% endfor %}
   </ol>
+  <span id="latest" class="rc-thread-end"></span>
+  <a class="rc-new-messages" href="#latest" data-new-messages hidden>New messages ↓</a>
 </div>
 {% if view.can_send %}{% include "app_mode/_composer.html" %}{% else %}<p class="rc-compose rc-help">You can't reply here: {{ view.peer.display }} is no longer active.</p>{% endif %}
 {% endblock %}

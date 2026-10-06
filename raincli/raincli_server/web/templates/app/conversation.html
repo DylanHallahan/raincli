@@ -12,7 +12,7 @@
   </div>
   {% if view.truncated %}<p class="flash">Showing the most recent {{ view.messages|length }} messages.</p>{% endif %}
 
-  <ol class="thread">
+  <ol class="thread" data-thread>
     {% for line in view.lines %}{% set m = line.message %}{% set outgoing = line.outgoing %}
     <li class="msg {{ 'msg-out' if outgoing else 'msg-in' }}" id="m-{{ m.id }}">
       <div class="msg-meta">
@@ -50,6 +50,9 @@
     </li>
     {% endfor %}
   </ol>
+  {# §16.19 item 4: links open here (#latest) without JavaScript; app.js keeps the reader at the newest message. #}
+  <span id="latest" class="thread-end"></span>
+  <p class="new-messages-row"><a class="btn btn-quiet btn-small new-messages" href="#latest" data-new-messages hidden>New messages ↓</a></p>
 
   {% if view.can_send %}
   <form id="compose" method="post" action="{{ url('/app/conversations/' ~ view.conversation.id ~ '/send') }}" enctype="multipart/form-data" class="card form composer">

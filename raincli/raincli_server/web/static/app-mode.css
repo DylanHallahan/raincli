@@ -143,3 +143,10 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
   body.app-mode .rc-list { display: none; }
   .rc-to { display: none; }
 }
+
+/* §16.19 item 4: "New messages" when the reader is scrolled up */
+.rc-new-messages { position: sticky; bottom: var(--rc-s-3); display: block; width: max-content; margin: var(--rc-s-3) auto 0;
+  padding: var(--rc-s-1) var(--rc-s-3); border-radius: var(--rc-radius-pill); background: var(--rc-accent); color: var(--rc-on-accent);
+  font-size: var(--rc-fs-sm); font-weight: 600; text-decoration: none; box-shadow: var(--rc-shadow-sm); }
+:where(.app-mode) a.rc-new-messages:hover { background: var(--rc-accent-hover); color: var(--rc-on-accent); }
+.rc-new-messages[hidden], .new-messages[hidden] { display: none; }

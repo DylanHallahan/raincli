@@ -21,7 +21,7 @@
   <ul class="conv-list">
     {% for row in conversations %}
     <li>
-      <a class="conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}">
+      <a class="conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}#latest">
         <div class="conv-top">
           <span class="conv-peers"><span class="handle">{{ row.me.display }}</span> <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> <span class="handle">{{ row.peer.display }}</span></span>
           <span class="conv-team">{{ row.team.slug }}</span>

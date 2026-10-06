@@ -642,3 +642,9 @@ pre.code {
 .md blockquote { border-left: 2px solid var(--border); padding-left: var(--s-3); color: var(--text-2); }
 .md a { overflow-wrap: anywhere; }
 .md hr { border: 0; border-top: 1px solid var(--border); margin: var(--s-4) 0; }
+
+/* §16.19 item 4: "New messages" when the reader is scrolled up */
+.new-messages-row { position: sticky; bottom: var(--s-3); margin: var(--s-3) 0 0; text-align: center; pointer-events: none; }
+.new-messages-row .new-messages { pointer-events: auto; }
+.new-messages[hidden] { display: none; }
+.thread-end { display: block; height: 1px; }
