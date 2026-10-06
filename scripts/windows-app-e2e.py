@@ -638,6 +638,11 @@ def part_d(app, server, installers, password, observer, menu, work):
         "logged it")
 
     # D4. `RainCLI.exe --open` with the CDP switch for this launch only; local sign-in; the handoff.
+    # The v0.5 `raincli login` already added a person session (§16.12 C15): end only that one, so the
+    # window's own sign-in (person_only, no machine rotation) is what adds it back.
+    app.cli("me", "sign-out")
+    check(not (default_agent_config().parent / "person.json").exists(), "raincli me sign-out left person.json")
+    check(window_machine_active(server, observer), "raincli me sign-out revoked the machine")
     port = free_port()
     env = dict(os.environ, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f"--remote-debugging-port={port}")
     subprocess.Popen([str(app.root / "RainCLI.exe"), "--open"], env=env, close_fds=True, stdin=subprocess.DEVNULL,
@@ -745,6 +750,10 @@ def part_d(app, server, installers, password, observer, menu, work):
     app.quit()
     app.uninstall(signout=False, label="d-again")
     say("PASS: D9. a full install restored the no-argument shortcut, with stub 2 and a new install_stamp")
+
+
+def window_machine_active(server, observer):
+    return (entry(server, observer, WINDOW_MACHINE) or {}).get("active") is not False
 
 
 def free_port():
