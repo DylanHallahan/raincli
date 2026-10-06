@@ -441,3 +441,135 @@ def connect(kind, runtime_config, *, home=None, prefix=None, probe=codex_support
 def disconnect(kind, runtime_config, *, home=None, windows=None):
     """Remove only our hooks for ``kind`` (``raincli hooks install --<kind> --remove``)."""
     return install(kind, state_dir_from_runtime(runtime_config), remove=True, home=home, windows=windows)
+
+
+# -- §16.19 item 6: repairing owned entries on update ---------------------------------------------
+
+REPAIRED_FILE = "hooks-repaired.json"  # in the runtime state dir: the client version last repaired for
+NOTICE_FILE = "hooks-notice.json"
+CODEX_NOTICE = "RainCLI updated its Codex hooks; open /hooks in Codex and trust them again"
+
+
+def entry_state_dir(entry):
+    """The ``--state-dir`` an owned entry writes to, from its args or its command line, or None."""
+    args = entry.get("args")
+    if isinstance(args, list) and "--state-dir" in args[:-1]:
+        return str(args[args.index("--state-dir") + 1])
+    text = entry.get("commandWindows") or entry.get("command") or ""
+    at = text.find("--state-dir ")
+    if at < 0:
+        return None
+    rest = text[at + len("--state-dir "):].lstrip()
+    if rest.startswith('"'):
+        end = rest.find('"', 1)
+        return rest[1:end] if end > 0 else None
+    try:
+        return shlex.split(rest.split(" 2>/dev/null", 1)[0])[0] if rest.startswith("'") else rest.split()[0]
+    except (ValueError, IndexError):
+        return None
+
+
+def repair(state_dir, *, home=None, prefix=None, windows=None, log=lambda text: None, now=None):
+    """Regenerate every RainCLI-owned hook entry in the Codex and Claude Code configs in the
+    current form (§16.19 item 6). Only owned entries change; nothing is written when they
+    already match; a backup comes first and the write is atomic. An agent without our hooks
+    gets none. Returns ``{kind: [changed events]}`` and raises the one-time Codex notice in
+    ``state_dir`` when a Codex command changed."""
+    windows = os.name == "nt" if windows is None else windows
+    try:
+        prefix = prefix or launcher_prefix()[0]
+    except ConfigError as exc:
+        log(f"hooks: not repaired: {exc}")
+        return {}
+    if isinstance(prefix, tuple):
+        prefix = prefix[0]
+    changed = {}
+    for kind in EVENTS:
+        link = config_path(kind, home)
+        path = Path(os.path.realpath(link)) if link.is_symlink() else link
+        try:
+            raw, data = load(path)
+        except ConfigError as exc:
+            log(f"hooks: {kind} config not repaired: {exc}")
+            continue
+        if raw is None:
+            continue
+        hooks = data.get("hooks") or {}
+        events = []
+        new_hooks = {}
+        for event, groups in hooks.items():
+            if not isinstance(groups, list) or event not in EVENTS[kind]:
+                new_hooks[event] = groups
+                continue
+            out = []
+            for group in groups:
+                if isinstance(group, dict) and isinstance(group.get("hooks"), list):
+                    entries = []
+                    for entry in group["hooks"]:
+                        if owned(entry):
+                            try:
+                                fresh = handler(kind, event, prefix, entry_state_dir(entry) or state_dir, windows)
+                            except ConfigError as exc:
+                                log(f"hooks: {kind} {event} not repaired: {exc}")
+                                fresh = entry
+                            if fresh != entry:
+                                events.append(event)
+                                log(f"hooks: repaired {kind} {event}: "
+                                    f"{entry.get('commandWindows') or entry.get('command')} -> "
+                                    f"{fresh.get('commandWindows') or fresh.get('command')}")
+                                if kind == "codex" and (fresh.get("command"), fresh.get("commandWindows")) != (
+                                        entry.get("command"), entry.get("commandWindows")):
+                                    raise_notice(state_dir, now)
+                            entry = fresh
+                        entries.append(entry)
+                    group = {**group, "hooks": entries}
+                out.append(group)
+            new_hooks[event] = out
+        if events:
+            write(path, raw, {**data, "hooks": new_hooks}, backup_dir=link.parent)
+            changed[kind] = events
+    return changed
+
+
+def raise_notice(state_dir, now=None):
+    """The one-time "trust them again" notice, and Codex counts as needs_approval until a hook runs."""
+    stamp = time.time() if now is None else now
+    Path(state_dir).mkdir(parents=True, exist_ok=True)
+    atomic_write_bytes(str(Path(state_dir) / NOTICE_FILE),
+                       (json.dumps({"message": CODEX_NOTICE, "at": stamp}) + "\n").encode(), 0o600)
+    try:
+        data = json.loads((Path(state_dir) / CONNECTED_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    data["codex"] = stamp
+    atomic_write_bytes(str(Path(state_dir) / CONNECTED_FILE), (json.dumps(data) + "\n").encode(), 0o600)
+
+
+def pending_notice(runtime_config):
+    """The notice text while it is pending (the app's tray, ``raincli runtime status``), else None."""
+    try:
+        data = json.loads((Path(state_dir_from_runtime(runtime_config)) / NOTICE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError, ConfigError):
+        return None
+    return data.get("message") if isinstance(data, dict) else None
+
+
+def dismiss_notice(runtime_config):
+    try:
+        os.unlink(Path(state_dir_from_runtime(runtime_config)) / NOTICE_FILE)
+    except (FileNotFoundError, ConfigError):
+        pass
+
+
+def repair_on_version_change(state_dir, version, log=lambda text: None, **kwargs):
+    """The runtime's first start on a new client version (app or managed update): repair once."""
+    marker = Path(state_dir) / REPAIRED_FILE
+    try:
+        if json.loads(marker.read_text(encoding="utf-8")).get("version") == version:
+            return None
+    except (OSError, ValueError, AttributeError):
+        pass
+    result = repair(state_dir, log=log, **kwargs)
+    atomic_write_bytes(str(marker), (json.dumps({"version": version}) + "\n").encode(), 0o600)
+    return result

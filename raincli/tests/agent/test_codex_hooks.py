@@ -329,3 +329,96 @@ def test_cmd_path_is_absolute_and_checked(monkeypatch):
     assert hooks_install.system_cmd() == "D:\\Win\\System32\\cmd.exe"
     with pytest.raises(ConfigError, match="cmd.exe's path"):
         hooks_install.windows_command_line(["x"], cmd="C:\\Program Files\\cmd.exe")
+
+
+# -- §16.19 item 6: repair on update ------------------------------------------------------------------
+
+def old_windows_codex(home, state):
+    """A v0.5.0 entry (a line starting with a quoted path) next to someone else's hook."""
+    path = home / ".codex" / "hooks.json"
+    path.parent.mkdir(parents=True)
+    old = f'"{SHIM}" hook codex SessionStart --state-dir "{state}"'
+    data = {"hooks": {"SessionStart": [
+        {"hooks": [{"type": "command", "command": old, "commandWindows": old, "timeout": 5,
+                    "statusMessage": "raincli", "additionalContextLimit": hooks_install.CODEX_CONTEXT_LIMIT}]},
+        {"hooks": [{"type": "command", "command": "echo mine", "statusMessage": "someone else"}]}]},
+        "other": {"keep": True}}
+    path.write_text(json.dumps(data))
+    return path, old
+
+
+def test_repair_regenerates_an_old_codex_entry_with_a_backup(tmp_path, monkeypatch):
+    monkeypatch.setenv("SystemRoot", "C:\\WINDOWS")
+    home, state = tmp_path / "home", tmp_path / "state"
+    path, old = old_windows_codex(home, "C:\\Users\\First Last\\state")
+    lines = []
+    changed = hooks_install.repair(str(state), home=home, prefix=PREFIX, windows=True, log=lines.append, now=50.0)
+    assert changed == {"codex": ["SessionStart"]}
+    data = json.loads(path.read_text())
+    [ours, theirs] = data["hooks"]["SessionStart"]
+    assert ours["hooks"][0]["commandWindows"] == (
+        f'C:\\WINDOWS\\System32\\cmd.exe /d /c call "{SHIM}" hook codex SessionStart '
+        '--state-dir "C:\\Users\\First Last\\state"')  # its own state dir kept
+    assert theirs == {"hooks": [{"type": "command", "command": "echo mine", "statusMessage": "someone else"}]}
+    assert data["other"] == {"keep": True}
+    [backup] = list(path.parent.glob("hooks.json.raincli-backup-*"))
+    assert json.loads(backup.read_text())["hooks"]["SessionStart"][0]["hooks"][0]["command"] == old
+    assert any(old in line and "cmd.exe /d /c call" in line for line in lines)
+    notice = json.loads((state / hooks_install.NOTICE_FILE).read_text())
+    assert notice["message"] == "RainCLI updated its Codex hooks; open /hooks in Codex and trust them again"
+    assert json.loads((state / hooks_install.CONNECTED_FILE).read_text())["codex"] == 50.0  # needs_approval
+
+
+def test_repair_writes_nothing_when_current_and_adds_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("SystemRoot", "C:\\WINDOWS")
+    home, state = tmp_path / "home", tmp_path / "state"
+    hooks_install.install("codex", "C:\\state", home=home, prefix=PREFIX, probe=probe("0.160.0"), windows=True)
+    path = home / ".codex" / "hooks.json"
+    before = path.read_bytes()
+    assert hooks_install.repair(str(state), home=home, prefix=PREFIX, windows=True) == {}
+    assert path.read_bytes() == before and not list(path.parent.glob("*.raincli-backup-*"))
+    assert not (home / ".claude" / "settings.json").exists()  # never installs for an agent without our hooks
+    assert not (state / hooks_install.NOTICE_FILE).exists()
+
+
+def test_claude_repair_raises_no_notice(tmp_path):
+    home, state = tmp_path / "home", tmp_path / "state"
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    old = {"type": "command", "command": "/old/raincli hook claude SessionStart --state-dir /s 2>/dev/null || true",
+           "timeout": 5, "statusMessage": "raincli"}
+    settings.write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [old]}]}, "theme": "dark"}))
+    changed = hooks_install.repair(str(state), home=home, prefix=(["/new/raincli"], "x"), windows=False)
+    assert changed == {"claude": ["SessionStart"]}
+    data = json.loads(settings.read_text())
+    assert data["theme"] == "dark" and "/new/raincli" in data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert "--state-dir /s" in data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert not (state / hooks_install.NOTICE_FILE).exists()
+
+
+def test_repair_runs_once_per_client_version(tmp_path, monkeypatch):
+    monkeypatch.setenv("SystemRoot", "C:\\WINDOWS")
+    home, state = tmp_path / "home", tmp_path / "state"
+    path, _ = old_windows_codex(home, "C:\\s")
+    calls = []
+    real = hooks_install.repair
+    monkeypatch.setattr(hooks_install, "repair", lambda *a, **k: calls.append(1) or real(*a, **k))
+    for _ in range(2):
+        hooks_install.repair_on_version_change(str(state), "0.5.1", home=home, prefix=PREFIX, windows=True)
+    assert len(calls) == 1
+    hooks_install.repair_on_version_change(str(state), "0.5.2", home=home, prefix=PREFIX, windows=True)
+    assert len(calls) == 2
+
+
+def test_runtime_status_shows_the_notice_until_dismissed(tmp_path):
+    from raincli_agent.runtime import service
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text(json.dumps({"machine_config": "agent.json", "state_dir": "st"}))
+    (tmp_path / "st").mkdir()
+    (tmp_path / "st" / "status.json").write_text(json.dumps({"status": "running", "updated_at": 1.0}))
+    os.chmod(tmp_path / "st" / "status.json", 0o600)
+    hooks_install.raise_notice(str(tmp_path / "st"), now=1.0)
+    assert service.status(str(runtime))["notice"] == hooks_install.CODEX_NOTICE
+    assert hooks_install.pending_notice(str(runtime)) == hooks_install.CODEX_NOTICE
+    hooks_install.dismiss_notice(str(runtime))
+    assert "notice" not in service.status(str(runtime)) and hooks_install.pending_notice(str(runtime)) is None

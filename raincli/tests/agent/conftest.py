@@ -14,6 +14,17 @@ from .fake_server import FakeApi, Recorder
 
 
 @pytest.fixture(autouse=True)
+def isolated_agent_configs(tmp_path_factory, monkeypatch):
+    """No test reads or writes the real ~/.claude or ~/.codex (§16.19 item 6 repairs them on a
+    runtime start): HOME and USERPROFILE point at a throwaway directory, and CODEX_HOME is unset.
+    A test that needs its own HOME sets it again."""
+    home = tmp_path_factory.mktemp("isolated-home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def fast_backoff(monkeypatch):
     monkeypatch.setattr(api_mod, "BACKOFF_BASE", 0.001)
     monkeypatch.setattr(api_mod, "BACKOFF_CAP", 0.01)

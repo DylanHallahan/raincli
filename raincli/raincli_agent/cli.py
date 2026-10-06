@@ -873,7 +873,10 @@ def cmd_hooks_install(args):
     from .runtime import hooks_install
     kind = "claude" if args.claude else "codex"
     state_dir = hooks_install.state_dir_from_runtime(args.config)
-    out_json(hooks_install.install(kind, state_dir, remove=args.remove))
+    result = hooks_install.install(kind, state_dir, remove=args.remove)
+    if not args.remove:  # §16.19 item 6: the other agent's owned entries too, in the current form
+        result["repaired"] = hooks_install.repair(state_dir, log=lambda text: print(text, file=sys.stderr))
+    out_json(result)
     return EXIT_OK
 
 

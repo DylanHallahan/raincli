@@ -271,12 +271,12 @@ def windows_scan_stage():
         assert procinfo.windows_kind(procinfo.image_path(processes["codex"].pid)) == "codex"
         system = [pid for pid, (exe, _) in table.items() if exe in ("lsass", "services", "wininit")]
         assert system and not any(same_user(pid) for pid in system), "a SYSTEM process passed the owner check"
-        ours = {p.pid for p in processes.values()}
-        found = discovery.windows_scan(b"s" * 32, set())
-        claimed = set(table) - ours  # only ours count below
-        mine = discovery.windows_scan(b"s" * 32, claimed)
-        assert sorted(a["type"] for a in mine) == ["claude", "codex"], mine
-        assert len(found) >= 2
+        salt = b"s" * 32
+        found = {a["key"]: a["type"] for a in discovery.windows_scan(salt, set())}
+        key = lambda kind, name: sessions.agent_key(salt, f"scan:{kind}:{processes[name].pid}")  # noqa: E731
+        assert found.get(key("claude", "code")) == "claude", found
+        assert found.get(key("codex", "codex")) == "codex", found
+        assert key("claude", "desktop") not in found and key("codex", "desktop") not in found, found
         print("PASS: Windows scan: Toolhelp table, full image path and token-SID owner on real processes; the "
               "Claude Code layout and the Codex release asset listed, a Claude desktop path not; SYSTEM refused",
               flush=True)
@@ -309,7 +309,18 @@ def person_stage():
     return person_smoke.run_stage(ROOT, login_on_pty, scrub, show)
 
 
+def isolate_home():
+    """The runtimes started here repair hook entries in ~/.claude and ~/.codex on a version change
+    (§16.19 item 6): on a developer machine they get a throwaway HOME, never the real one. The
+    Windows runner is disposable and keeps its profile (the scan and Codex stages need it)."""
+    if os.name != "nt":
+        home = Path(tempfile.mkdtemp(prefix="raincli-smoke-home-"))
+        os.environ["HOME"] = str(home)
+        os.environ.pop("CODEX_HOME", None)
+
+
 def main():
+    isolate_home()
     if os.name == "nt":
         windows_scan_stage()
     if "--person-only" in sys.argv[1:]:
