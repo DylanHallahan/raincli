@@ -706,7 +706,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
         shot(page, "d6-this-computer")
-        page.click("nav.rc-nav button[data-open=settings]")
+        page.click("nav.rc-nav button[data-open=settings]", no_wait_after=True)  # the app navigates, not the click
         page.wait_for_url("**/settings.html**", timeout=60000)
         page.wait_for_selector("#routing-all:checked", timeout=60000)
         shot(page, "d6-settings")
@@ -714,11 +714,11 @@ def part_d(app, server, installers, password, observer, menu, work):
 
         # D7. Offline and Retry.
         server.stop()
-        page.click("nav.rc-nav button[data-open=inbox]")
+        page.click("nav.rc-nav button[data-open=inbox]", no_wait_after=True)  # the app navigates, not the click
         page.wait_for_url("**/offline.html**", timeout=120000)
         shot(page, "d7-offline")
         server.start()
-        page.click("#retry")
+        page.click("#retry", no_wait_after=True)  # the app navigates, not the click
         page.wait_for_url("**/app/inbox", timeout=120000)
         say("PASS: D7. with the server stopped the window showed the offline page; Retry returned to the inbox")
 
@@ -727,7 +727,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         page.wait_for_url("**/this-computer.html**", timeout=60000)
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
-        page.click("#sign-out")
+        page.click("#sign-out", no_wait_after=True)  # the app navigates, not the click
         click_dialog_ok("Sign out")
         page.wait_for_url("**/sign-in.html**", timeout=120000)
         shot(page, "d8-signed-out")
