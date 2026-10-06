@@ -48,6 +48,43 @@ The window uses the **Microsoft Edge WebView2 Runtime** (part of Windows 11, and
 
 A machine signed in through the app runs in **machine mode**: it reports its presence, client version and agent list to your team, takes pushed updates, and delivers teammates' messages to your named agents (a named Herdr agent at once; a Claude Code or Codex session with RainCLI hooks at its next turn). It has no inbox, so messages to the machine itself are stored on the server. Who may reach your agents is set with `raincli trust` (any teammate by default); see [SETUP.md](../SETUP.md#messages-to-your-agents-and-to-you). Machines moved over from an existing connector setup (below) keep delivering exactly as before.
 
+### Which coding agents are listed
+The runtime finds this computer's agents in three ways: Herdr, the agents' own hooks, and a process scan. A failing source never hides the others; it is logged once.
+
+**The process scan** reads the Toolhelp process table. It keeps only this Windows account's processes, compared by token SID, so domain and Azure AD accounts work. It classifies each candidate by its **full image path**, never by name alone and never by command line. A scanned agent is listed by type only ("codex", "claude"), with status unknown.
+
+| Install | Process found | Listed as |
+|---|---|---|
+| Codex CLI, standalone release or winget | `codex-x86_64-pc-windows-msvc.exe` (winget: under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\OpenAI.Codex_…`, alias `WinGet\Links\codex.exe`) | Codex |
+| Codex CLI via npm | `node.exe` runs `bin\codex.js`, which starts `…\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe` | Codex (the `codex.exe` child; `node.exe` is never classified) |
+| Claude Code, native installer | `%USERPROFILE%\.local\bin\claude.exe` | Claude Code |
+| Claude Code via npm | `…\node_modules\@anthropic-ai\claude-code\bin\claude.exe` (the package links its native binary over a stub at install) | Claude Code |
+| The Claude desktop app | `Claude.exe` under `WindowsApps\Claude_…` (Store) or `%LOCALAPPDATA%\AnthropicClaude` | never listed |
+| The Claude desktop app's Code tab | its embedded Claude Code, `%APPDATA%\Claude\claude-code\<version>\claude.exe` | Claude Code |
+| The Codex (ChatGPT) desktop app | `Codex.exe` under `WindowsApps\OpenAI.Codex_…` | never listed |
+| Codex's helpers | `codex-command-runner.exe`, `codex-windows-sandbox-setup.exe`, `codex-code-mode-host.exe`, `codex-voice-host.exe` | never listed |
+
+Sources, checked 2026-10-06:
+- openai/codex release `rust-v0.160.1` assets, and `codex-cli/bin/codex.js` (lines 16–22, 79–95, 241);
+- microsoft/winget-pkgs `manifests/o/OpenAI/Codex/0.160.1/OpenAI.Codex.installer.yaml`;
+- the npm tarballs of `@openai/codex@0.160.1-win32-x64` and `@anthropic-ai/claude-code@2.1.291` (`package.json`, `install.cjs`);
+- https://claude.ai/install.ps1 and https://code.claude.com/docs/en/setup;
+- Claude desktop paths: support.claude.com/en/articles/12622703 and anthropics/claude-code issues #59692 and #53478;
+- the Codex app: developers.openai.com/codex/enterprise/windows-deployment and openai/codex issue #28031.
+
+**Unverified; check on your machine with `Get-CimInstance Win32_Process | select Name,ExecutablePath`:**
+- the exact name Windows reports for winget's `codex` alias;
+- the Codex app's per-user CLI copy (`%LOCALAPPDATA%\OpenAI\Codex\bin\codex.exe`, inferred from #40700), which is not classified;
+- whether the Claude desktop app's executable is still `Claude.exe` in the current Store build.
+
+**An agent run by `node.exe`** (an npm install whose native binary was not linked, for example with install scripts disabled) can't be recognised by its image. Connect its hooks so it is listed by name: `raincli hooks install --claude` or `--codex`, or **Connect** on This computer.
+
+### Desktop apps and hooks
+- **Claude desktop app, Code tab:** it runs Claude Code with your `~/.claude/settings.json`. The docs say "Hooks and skills defined in settings apply to both" and that `~/.claude/settings.json` is shared with the CLI (code.claude.com/docs/en/desktop, "Shared configuration"). So once Claude Code is connected, sessions in the Code tab report too. Cloud sessions don't run your local hooks. *Check on your machine:* start a Code-tab session and look for it in `raincli agents`.
+- **Codex app:** Codex reads hooks from `~/.codex/hooks.json` (learn.chatgpt.com/docs/hooks). The docs don't say which surfaces run them, so whether the app or the IDE extension does is **unverified**.
+- **Approving Codex hooks:** "Non-managed hooks must be reviewed and trusted before they run", and the docs say to use `/hooks` **in the CLI**. Approval writes a `hooks.state."<key>".trusted_hash` to `config.toml` (codex-rs `hook_config.rs`). With only the desktop app, openai/codex issue #47283 (open, 2026-09-22) reports that its `/hooks` screen shows our hooks but can't trust them, so they are skipped. Until that is fixed, run `codex` once in a terminal, open `/hooks` and trust RainCLI's hooks, then check that `hooks.state` appears in `%USERPROFILE%\.codex\config.toml`. The copy inside `WindowsApps` can't be run directly; use the CLI from winget or npm.
+- **When RainCLI updates its Codex hooks** (a new command form, as in v0.5.1), Codex treats them as changed: you'll see "RainCLI updated its Codex hooks; open /hooks in Codex and trust them again". Claude Code needs no approval.
+
 ### Updates
 Updates are automatic. When your team's operator sets a new version, the app:
 1. looks up the stable release with exactly that tag in `DylanHallahan/raincli`;

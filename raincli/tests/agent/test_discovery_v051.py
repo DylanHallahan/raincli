@@ -19,6 +19,7 @@ CLAUDE_CODE = [
     r"C:\Users\d\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe",  # npm, linked native
     r"C:\Users\d\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\node_modules"
     r"\@anthropic-ai\claude-code-win32-x64\claude.exe",
+    r"C:\Users\d\AppData\Roaming\Claude\claude-code\2.1.119\claude.exe",  # the desktop app's embedded Claude Code
 ]
 CODEX = [
     r"C:\Users\d\AppData\Roaming\npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64"
@@ -38,6 +39,8 @@ NEVER = [
     r"D:\Tools\codex-command-runner.exe",  # Codex's helpers
     r"D:\Tools\codex-windows-sandbox-setup.exe",
     r"C:\Program Files\nodejs\node.exe",  # npm-run agents need hooks
+    r"C:\Users\d\AppData\Local\AnthropicClaude\Update.exe",
+    r"C:\Users\d\AppData\Local\OpenAI\Codex\bin\codex.exe",  # the Codex app's bundled CLI: path unverified
     r"D:\somewhere\claude.exe",  # a name alone never counts
     r"D:\somewhere\codex.exe",
     "",

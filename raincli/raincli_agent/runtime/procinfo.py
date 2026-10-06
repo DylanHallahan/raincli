@@ -54,6 +54,9 @@ _CLAUDE_CODE = (
     _re.compile(r"/claude/versions/[^/]+(/claude\.exe)?$"),  # its versioned binaries
     _re.compile(r"/node_modules/@anthropic-ai/claude-code/bin/claude\.exe$"),  # npm: the linked native binary
     _re.compile(r"/node_modules/@anthropic-ai/claude-code-win32-[a-z0-9]+/claude\.exe$"),
+    # The Claude desktop app's embedded Claude Code (its Code tab), which runs the user's hooks:
+    # %APPDATA%\Claude\claude-code\<version>\claude.exe. The desktop app itself is never listed.
+    _re.compile(r"/appdata/roaming/claude/claude-code/[^/]+/claude\.exe$"),
 )
 _CODEX = (
     _re.compile(r"/node_modules/@openai/codex[^/]*/vendor/[^/]+/bin/codex\.exe$"),  # npm

@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 
 CODEX_VERSION = "0.160.0"
 RELEASE = f"https://github.com/openai/codex/releases/download/rust-v{CODEX_VERSION}/"
@@ -320,14 +321,40 @@ def run_stage(root, server, wait_for, show, kill_tree):
                 old = json.loads(new_text)
                 old_entry = old["hooks"]["SessionStart"][0]["hooks"][0]
                 old_entry["command"] = old_entry["commandWindows"] = old_line
+                # Evidence only (job-only probes, trusted by the job's bypass switch): which shell
+                # Codex runs hooks in. "ver" works only in cmd, $PSVersionTable only in PowerShell.
+                probe_cmd, probe_ps = work / "shell-cmd.txt", work / "shell-ps.txt"
+                old["hooks"]["SessionStart"].append({"hooks": [
+                    {"type": "command", "command": f'ver > "{probe_cmd}"', "commandWindows": f'ver > "{probe_cmd}"'},
+                    {"type": "command", "command": f"$PSVersionTable.PSEdition > '{probe_ps}'",
+                     "commandWindows": f"$PSVersionTable.PSEdition > '{probe_ps}'"}]})
                 hooks_file.write_text(json.dumps(old, indent=2), encoding="utf-8")
                 before = {r["key"] for r in codex_records(state, 0)}
                 ran, seen = real_exec(codex, project, env, mock.url, state)
                 old_recorded = [r for r in seen if r["key"] not in before]
                 hooks_file.write_text(new_text, encoding="utf-8")
-                print(f"EVIDENCE: Codex {CODEX_VERSION} with the v0.5.0 hook form: exec exit {ran.returncode}, "
-                      f"{len(old_recorded)} session(s) recorded", flush=True)
-                assert not old_recorded, "the old form ran; item 5's diagnosis would not hold"
+                shell = ("cmd" if probe_cmd.exists() else "") + ("PowerShell" if probe_ps.exists() else "")
+                print(f"EVIDENCE: Codex {CODEX_VERSION} exec runs hooks in: {shell or 'neither probe ran'}; "
+                      f"with the v0.5.0 hook form: exit {ran.returncode}, {len(old_recorded)} session(s) recorded",
+                      flush=True)
+                for label, argv in (("powershell -Command", ["powershell", "-NoProfile", "-Command", old_line]),
+                                    ("pwsh -Command", ["pwsh", "-NoProfile", "-Command", old_line])):
+                    exe = shutil.which(argv[0])
+                    if exe:
+                        before = {r["key"] for r in codex_records(state, 0)}
+                        payload = json.dumps({"session_id": str(uuid.uuid4()), "cwd": str(project),
+                                              "hook_event_name": "SessionStart", "source": "startup"}).encode()
+                        proc = subprocess.run(subprocess.list2cmdline([exe] + argv[1:]), input=payload,
+                                              capture_output=True, timeout=60, **NO_WINDOW)
+                        got = [r for r in codex_records(state, 0) if r["key"] not in before]
+                        print(f"EVIDENCE: the v0.5.0 line under {label}: exit {proc.returncode}, {len(got)} recorded; "
+                              f"{proc.stderr.decode(errors='replace').strip()[:300]!r}", flush=True)
+                comspec = os.environ.get("COMSPEC", "cmd.exe")
+                before = {r["key"] for r in codex_records(state, 0)}
+                proc = subprocess.run(f"{comspec} /C {old_line}", input=b"{}", capture_output=True, timeout=60,
+                                      **NO_WINDOW)
+                print(f"EVIDENCE: the v0.5.0 line under cmd /C unwrapped: exit {proc.returncode}; "
+                      f"{proc.stderr.decode(errors='replace').strip()[:300]!r}", flush=True)
             before = {r["key"] for r in codex_records(state, 0)}
             ran, seen = real_exec(codex, project, env, mock.url, state)
             recorded = [r for r in seen if r["key"] not in before]
