@@ -706,13 +706,18 @@ def cmd_login(args):
         return login_person(args)
     _need_tty("raincli login")
     api_url = validate_api_url(args.api_url)
+    suggested = None
+    if args.new_machine:
+        if args.force:
+            raise UsageError("use either --new-machine or --force")
+        suggested = set_aside_for_new_machine(args)
     plan = login.prepare(args.agent_config, force=args.force)
     email = args.email or _ask("Email: ")
     if not email:
         raise UsageError("an email address is required")
     name = args.machine_name
     if not name:
-        default = plan["handle"] or login.default_machine_name()
+        default = suggested or plan["handle"] or login.default_machine_name()
         name = _ask(f"Machine name [{default}]: ") or default
     password = Secret(getpass.getpass("Password: "))
     team, replace = args.team, False
@@ -766,6 +771,32 @@ def cmd_login(args):
     else:
         out(f"kept {result['runtime_config']}: this machine's connector delivery continues unchanged")
     return EXIT_OK
+
+
+def set_aside_for_new_machine(args):
+    """``raincli login --new-machine`` (§16.17 4, 5): move this computer's old setup aside, then
+    sign in fresh (the caller continues with a new password prompt, §16.18 V7). Returns the
+    suggested machine name, never the old handle."""
+    from . import login
+    from .config import default_config_path
+    path = os.path.abspath(args.agent_config or default_config_path())
+    if not os.path.lexists(path):
+        raise UsageError(f"there is no old setup to set aside ({path} does not exist); run raincli login")
+    old = login.known_handle(path)
+    result = login.set_aside(path)
+    out(f"moved this computer's old RainCLI setup to {result['backup']} (nothing was deleted):")
+    for item in result["moved"]:
+        out(f"  {item['from']}")
+    for item in result["rewritten"]:
+        out(f"  rewrote {item['path']} without its connectors (original kept in the backup)")
+    for path in result["kept_queues"]:
+        out(f"  kept the queue {path} in place")
+    if result["run_value"] == "removed":
+        out("removed the old RainCLI Run value, which started the old setup")
+    for entry in result["startup_entries"]:
+        out(f"  note: {escape_line(entry)}")
+    out("now signing in as a new machine; if this doesn't finish, run raincli login")
+    return login.suggest_new_machine_name(old)
 
 
 def cmd_logout(args):
@@ -962,6 +993,10 @@ def build_parser():
                               help="server (default https://raincli.com; https unless the host is loopback)")
     login_parser.add_argument("--force", action="store_true",
                               help="sign in again over an existing machine-mode credential")
+    login_parser.add_argument("--new-machine", action="store_true",
+                              help="set this computer's old RainCLI setup aside (kept in a replaced-<time> "
+                                   "folder) and sign in as a new machine; for a revoked, unreadable or "
+                                   "another account's machine")
     login_parser.add_argument("--person", action="store_true",
                               help="add a person session to this signed-in machine (for raincli me and the app); "
                                    "rotates nothing")

@@ -82,7 +82,7 @@ class Plan:
 class Migration:
     def __init__(self, *, env=None, registry=None, app_root=None, managed_root=None, home=None,
                  sleep=time.sleep, clock=time.monotonic, connector_configs=(), own_runtime=None,
-                 stop_own=None, restart_own=None, own_running=None, spawn=None, inbox=None):
+                 stop_own=None, restart_own=None, own_running=None, spawn=None, inbox=None, check=None):
         """``own_runtime`` is the app's runtime config; ``own_running()`` tells whether
         the tray's runtime host is running it now, and ``stop_own``/``restart_own``
         pause and resume it. ``connector_configs``
@@ -94,6 +94,7 @@ class Migration:
         self.own_running = own_running or (lambda: False)
         self.spawn = spawn or self._spawn
         self.inbox = inbox or self.inbox_role
+        self.check = check or (lambda agent: _check_credential(agent))  # §16.17 3
         self.env = os.environ if env is None else env
         self.registry = winapp.WindowsRegistry() if registry is None else registry
         self.app_root = Path(app_root) if app_root else None
@@ -103,7 +104,7 @@ class Migration:
 
     # -- 1. detect, normalize and validate (nothing written) ---------------------------------
 
-    def detect(self):
+    def detect(self, validate=True):
         from .runtime import winapp
         plan = Plan()
         plan.run_value = self.registry.get(winapp.RUN_VALUE)
@@ -180,7 +181,8 @@ class Migration:
                 plan.runtime = {"machine_config": agents[0], "state_dir": str(plan.state_dir)}
             if plan.runtime is not None and mode == "machine":
                 plan.old_runtimes.append(plan.runtime_config)
-        self.validate(plan)
+        if validate:
+            self.validate(plan)
         return plan
 
     def _directories(self, agent):
@@ -466,8 +468,11 @@ class Migration:
         if lock is None:
             return {"status": "busy", "message": "another migration is running"}
         try:
+            stale = self.set_aside_stale()
             plan = self.detect()
             if plan is None:
+                if stale:  # §16.18 V2: no valid credential remains
+                    return {"status": "fresh_sign_in_needed", "set_aside": stale}
                 return {"status": "nothing_to_migrate"}
             log = MigrationLog(plan.state_dir)
             log.write("detected", **plan.summary())
@@ -491,7 +496,10 @@ class Migration:
             finally:
                 for queue in locks:
                     queue.release_run_lock()
-            result = {"status": "migrated", **plan.summary(), "converted": converted, "run_value": "unchanged"}
+            result = {"status": "migrated_with_stale_set_aside" if stale else "migrated", **plan.summary(),
+                      "converted": converted, "run_value": "unchanged"}
+            if stale:
+                result["set_aside"] = stale
             if config_mod.protects_tokens() and converted:
                 result["notice"] = PIP_NOTICE
                 notify(PIP_NOTICE)
@@ -516,6 +524,34 @@ class Migration:
             return result
         finally:
             self._unlock(lock)
+
+    def set_aside_stale(self):
+        """§16.17 3, §16.18 V2, V4: before adopting anything, check every credential migration
+        would keep. An ``invalid`` or ``unreadable`` one is never adopted: its setup is set
+        aside and logged ``stale_credential_set_aside``. ``unknown`` (offline, an older server)
+        is adopted as before; migration has no signing-in user, so it never decides ``not_owner``.
+        Returns the set-aside results."""
+        from .setaside import set_aside
+        try:
+            plan = self.detect(validate=False)
+        except ConfigError:
+            return []
+        if plan is None:
+            return []
+        log = MigrationLog(Path(default_config_path(self.env)).absolute().parent / "runtime-state")
+        out = []
+        for agent in plan.agent_configs:
+            try:
+                outcome = self.check(agent)
+            except ConfigError:
+                continue
+            if outcome not in ("invalid", "unreadable"):
+                continue
+            result = set_aside(agent, migration=self, locked=True, log=log,
+                               stop_own=self.stop_own if self.own_running() else None)
+            log.write("stale_credential_set_aside", agent_config=agent, result=outcome, backup=result["backup"])
+            out.append({"agent_config": agent, "result": outcome, **result})
+        return out
 
     def write(self, plan, log):
         for path, data in plan.connectors.items():
@@ -572,6 +608,11 @@ class Migration:
             filelock.unlock(fd)
         finally:
             os.close(fd)
+
+
+def _check_credential(agent):
+    from .setaside import check_credential
+    return check_credential(agent)
 
 
 class MigrationLog:

@@ -264,12 +264,24 @@ def login_person(args):
     email = args.email or _cli._ask("Email: ")
     if not email:
         raise UsageError("an email address is required")
+    # §16.17 4: a stale, foreign or unreadable machine credential is explained, never a generic error.
+    from . import login
+    outcome = login.check_credential(_agent_config(args), email)
+    if outcome in ("invalid", "not_owner", "unreadable"):
+        raise RainError(new_machine_hint(login.stale_message(outcome)))
     password = Secret(getpass.getpass("Password: "))
-    result = person.add_session(_agent_config(args), email, password)
+    try:
+        result = person.add_session(_agent_config(args), email, password)
+    except (login.StaleMachineCredential, login.NotMachineOwner) as exc:
+        raise RainError(new_machine_hint(str(exc))) from None
     protection = "DPAPI-protected, private Windows ACL" if os.name == "nt" else "mode 0600"
     out(f"added a person session for {escape_line(email)} to this machine")
     out(f"wrote {result['config']} ({protection})")
     return EXIT_OK
+
+
+def new_machine_hint(sentence):
+    return f"{sentence} To set up this computer as a new machine, run: raincli login --new-machine"
 
 
 # -- raincli trust / routing / app ----------------------------------------------------------------------

@@ -160,8 +160,12 @@ class FakeState:
             raise ApiFail(401, "invalid_credentials")
         if body.get("person_only") is True:  # §16.3: a person session for the proven machine's owner
             machine = self.tokens.get(body.get("previous_token") or "")
-            if "machine_name" in body or machine is None or self.owners.get(machine) != body["email"]:
+            if "machine_name" in body:
                 raise ApiFail(400, "invalid")
+            if machine is None or not self.agents[machine]["active"]:  # §16.17 (1)
+                raise ApiFail(409, "machine_credential_invalid")
+            if self.owners.get(machine) != body["email"]:
+                raise ApiFail(409, "not_machine_owner")
             return 200, {"person_session": self.new_person_session(body["email"], machine)}
         teams = user["teams"]
         team = body.get("team")
