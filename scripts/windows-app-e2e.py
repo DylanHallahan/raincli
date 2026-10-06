@@ -565,7 +565,7 @@ def window_page(browser, fragment, port, timeout=120):
     def page():
         for context in browser.contexts:
             for candidate in context.pages:
-                if fragment in candidate.url:
+                if not candidate.is_closed() and fragment in url_of(candidate):
                     return candidate
         return None
     try:
@@ -711,12 +711,12 @@ def part_d(app, server, installers, password, observer, menu, work):
         # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
         # hosted navigation and loads its own page, so the click must not wait for that navigation.
         page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
-        wait_for("the window to show this-computer.html", lambda: "this-computer.html" in url_of(page), timeout=60, interval=1)
+        page = window_page(browser, "this-computer.html", port, timeout=60)  # re-attached after the swap
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
         shot(page, "d6-this-computer")
         page.click("nav.rc-nav button[data-open=settings]", no_wait_after=True)  # the app navigates, not the click
-        wait_for("the window to show settings.html", lambda: "settings.html" in url_of(page), timeout=60, interval=1)
+        page = window_page(browser, "settings.html", port, timeout=60)  # re-attached after the swap
         page.wait_for_selector("#routing-all:checked", timeout=60000)
         shot(page, "d6-settings")
         say("PASS: D6. This computer shows the machine; Settings shows the routing policy")
@@ -724,21 +724,21 @@ def part_d(app, server, installers, password, observer, menu, work):
         # D7. Offline and Retry.
         server.stop()
         page.click("nav.rc-nav button[data-open=inbox]", no_wait_after=True)  # the app navigates, not the click
-        wait_for("the window to show offline.html", lambda: "offline.html" in url_of(page), timeout=120, interval=1)
+        page = window_page(browser, "offline.html", port, timeout=120)  # re-attached after the swap
         shot(page, "d7-offline")
         server.start()
         page.click("#retry", no_wait_after=True)  # the app navigates, not the click
-        wait_for("the window to show app/inbox", lambda: "app/inbox" in url_of(page), timeout=120, interval=1)
+        page = window_page(browser, "app/inbox", port, timeout=120)  # re-attached after the swap
         say("PASS: D7. with the server stopped the window showed the offline page; Retry returned to the inbox")
 
         # D8. Sign-out from This computer: confirmed, revoked, the profile marked for reset.
         page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
-        wait_for("the window to show this-computer.html", lambda: "this-computer.html" in url_of(page), timeout=60, interval=1)
+        page = window_page(browser, "this-computer.html", port, timeout=60)  # re-attached after the swap
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
         page.click("#sign-out", no_wait_after=True)  # the app navigates, not the click
         click_dialog_ok("Sign out")
-        wait_for("the window to show sign-in.html", lambda: "sign-in.html" in url_of(page), timeout=120, interval=1)
+        page = window_page(browser, "sign-in.html", port, timeout=120)  # re-attached after the swap
         shot(page, "d8-signed-out")
         browser.close()
     wait_for("the window machine to be revoked",
