@@ -57,7 +57,9 @@ E. A stale or foreign saved setup (protocol §16.17, §16.18), each case on a fr
    5. an app machine (signed in from the CLI as another account) with an agent_held record and a by-name
       handover box, then revoked: the window's refused handoff shows sign-in, the owner's sign-in offers a
       new machine, and after it neither the record nor the box is in the new state, only in the backup
-      (§16.18 V1).
+      (§16.18 V1);
+   6. This computer with the pinned real Codex on the app's PATH: Not connected, Connect only on the click
+      (RainCLI's hooks written, the /hooks approval sentence), then Disconnect (§16.19 item 3).
    Skipped with --real.
 
 Release traffic goes to the REAL hostnames (api.github.com, github.com,
@@ -97,6 +99,9 @@ sys.path.insert(0, str(PKG))
 _spec = importlib.util.spec_from_file_location("release_e2e", ROOT / "scripts" / "windows-release-update-e2e.py")
 release_e2e = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(release_e2e)
+_codex_spec = importlib.util.spec_from_file_location("codex_smoke", ROOT / "scripts" / "codex_smoke.py")
+codex_smoke = importlib.util.module_from_spec(_codex_spec)
+_codex_spec.loader.exec_module(codex_smoke)  # the pinned real Codex (fetch_codex), as in the client smoke
 from raincli_agent.runtime import updates  # noqa: E402  (REPO, the canonical repository: a constant)
 
 Failure, SECRETS, say, wait_for, tail = (release_e2e.Failure, release_e2e.SECRETS, release_e2e.say,
@@ -822,10 +827,13 @@ def free_port():
 OTHER_EMAIL, OTHER_TEAM = "e2e-other@example.invalid", "e2e-other-team"
 
 
-def open_window_cdp(app):
-    """Start the app with ``RainCLI.exe --open`` and the CDP switch for this launch only; the port."""
+def open_window_cdp(app, path_first=None):
+    """Start the app with ``RainCLI.exe --open`` and the CDP switch for this launch only; the port.
+    ``path_first`` is put first on the app's PATH (the pinned Codex for E6)."""
     port = free_port()
     env = dict(os.environ, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f"--remote-debugging-port={port}")
+    if path_first is not None:
+        env["PATH"] = str(path_first) + os.pathsep + env.get("PATH", "")
     subprocess.Popen([str(app.root / "RainCLI.exe"), "--open"], env=env, close_fds=True, stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
@@ -867,7 +875,7 @@ def signed_in_fresh(server, observer, handle, config_dir):
             and (config_dir / "person.json").is_file() and (config_dir / "agent.json").is_file())
 
 
-def part_e(app, server, installers, password, observer, work):
+def part_e(app, server, installers, password, observer, work, codex=None):
     """Stale or foreign saved setups; see E in the module docstring."""
     from playwright.sync_api import sync_playwright
 
@@ -1057,6 +1065,42 @@ def part_e(app, server, installers, password, observer, work):
         "handoff showed sign-in, the owner's sign-in offered a new machine, and neither the record nor the box "
         "is in the new state (both are in the backup)")
     app.quit()
+
+    # E6. This computer connects the pinned real Codex, only on the click (§16.19 item 3).
+    if codex is None:
+        say("SKIP: E6. no pinned Codex for this platform")
+    else:
+        codex_hooks = profile() / ".codex" / "hooks.json"
+        before = codex_hooks.read_text("utf-8") if codex_hooks.is_file() else None
+        port = open_window_cdp(app, path_first=codex.parent)
+        with sync_playwright() as pw:
+            window = WindowCDP(pw, port)
+            page = window.page("app/inbox", timeout=180)
+            page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it
+            page = window.page("this-computer.html", timeout=60)
+            row = "#hooks li[data-agent=codex]"
+            wait_for("Codex's state", lambda: page.is_visible(f"{row} button"), timeout=120, interval=1)
+            check(page.inner_text(f"{row} button") == "Connect", f"Codex shows {page.inner_text(row)!r}")
+            check((codex_hooks.read_text("utf-8") if codex_hooks.is_file() else None) == before,
+                  "hooks were installed before the click")
+            shot(page, "e6-this-computer")
+            page.click(f"{row} button", no_wait_after=True)
+            wait_for("Codex connected", lambda: "/hooks" in page.inner_text("#hooks-message"), timeout=120,
+                     interval=1)
+            wait_for("needs_approval", lambda: page.locator(f"{row} [data-state=needs_approval]").count() == 1,
+                     timeout=60, interval=1)
+            check("raincli" in codex_hooks.read_text("utf-8").lower(), "Connect did not write RainCLI's Codex hooks")
+            shot(page, "e6-connected")
+            page.click(f"{row} button", no_wait_after=True)  # Disconnect
+            wait_for("Codex disconnected", lambda: page.locator(f"{row} [data-state=not_connected]").count() == 1,
+                     timeout=120, interval=1)
+            check(not codex_hooks.is_file() or "raincli" not in codex_hooks.read_text("utf-8").lower(),
+                  "Disconnect left RainCLI's Codex hooks")
+            window.close()
+        say(f"PASS: E6. This computer showed the pinned Codex {codex_smoke.CODEX_VERSION} as Not connected; "
+            "Connect (only on the click) wrote RainCLI's hooks and said to approve them in /hooks; Disconnect "
+            "removed them")
+        app.quit()
     app.uninstall(signout=True, label="e5")
 
 
@@ -1292,6 +1336,7 @@ def run_e2e(args, work, stack):
     old_venv = prepare_old_pip_client(work)
     say(f"PASS: old pip client {OLD_PIP} installed from its release archive")
     managed = prepare_managed_install(work)
+    codex = None if args.real else codex_smoke.fetch_codex(work)  # before the hosts file: the real GitHub
     stack.callback(lambda: release_e2e.kill_marked({str(managed)}))
     say(f"PASS: managed {OLD_MANAGED} installed in {managed} through the real updater")
     rollback = None if args.real else build_rollback_installer(work)
@@ -1442,7 +1487,7 @@ def run_e2e(args, work, stack):
     if args.real:
         say("SKIP: E. the published v0.4 installers have no v0.5.1 stale-setup handling")
     else:
-        part_e(app, server, installers, password, observer, work)
+        part_e(app, server, installers, password, observer, work, codex=codex)
 
     # == B. an old pip client's foreground connector ============================================
     fresh_slate(app)
