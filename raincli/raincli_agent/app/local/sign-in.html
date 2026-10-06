@@ -23,6 +23,7 @@
         <div class="field"><label for="machine">Machine name</label><input id="machine" name="machine" type="text" autocomplete="off" spellcheck="false" required maxlength="32" pattern="[a-z][a-z0-9-]{1,31}" aria-describedby="machine-help"><p class="muted small" id="machine-help">How teammates address this computer: lowercase letters, digits and dashes.</p></div>
         <div class="field hidden" id="team-field"><label for="team">Team</label><select id="team" name="team"></select></div>
         <div class="choice hidden" id="replace-field"><input id="replace" name="replace" type="checkbox"><label for="replace" id="replace-label">Replace machine</label></div>
+        <div class="row hidden" id="new-machine-field"><button class="btn btn-quiet btn-wide" type="button" id="new-machine">Set up this computer as a new machine</button></div>
         <div class="row"><button class="btn btn-wide" type="submit" id="submit">Sign in</button></div>
       </form>
     </div>

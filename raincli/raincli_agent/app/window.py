@@ -479,13 +479,19 @@ class AppWindow:
     # -- sign-in and sign-out --------------------------------------------------------------------------------
 
     def sign_in(self, request, password):
-        """The local sign-in page's form. The password goes to ``services.sign_in`` (``login.login``) only."""
+        """The local sign-in page's form. The password goes to ``services.sign_in`` (``login.login``) only.
+        ``request["new_machine"]`` is the user's press of "Set up this computer as a new machine"
+        (§16.17): the password is asked for again, never kept from the refused attempt."""
         from .. import login
+        from .services import StaleCredential
         try:
             self.services.sign_in(str(request.get("email") or "").strip(), password,
                                   machine_name=str(request.get("machine_name") or "").strip(),
                                   team=request.get("team") or None, replace=bool(request.get("replace")),
-                                  again=bool(request.get("again")))
+                                  again=bool(request.get("again")), new_machine=request.get("new_machine") is True)
+        except StaleCredential as exc:  # §16.17 item 4: say why, and offer a new machine; never automatic
+            return _result(False, str(exc), code="stale_credential", reason=exc.reason, offer_new_machine=True,
+                           machine_name=self.services.suggested_machine_name(avoid=exc.old_handle))
         except login.TeamChoiceRequired as exc:
             return _result(False, "Choose a team, enter your password again and sign in.", code="team_choice_required",
                            teams=[{"slug": t["slug"], "name": t.get("name", t["slug"])} for t in exc.teams or []])

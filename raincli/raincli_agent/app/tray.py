@@ -327,6 +327,17 @@ class Tray:
                 self.ask_connector_config(result["message"])
             elif result["status"] in ("busy", "waiting"):
                 threading.Timer(10, self.post, (self.first_run,)).start()  # an old window still runs: try again
+            elif result["status"] == "migrated_with_stale_set_aside" and self.root_dir is not None:
+                # §16.18 V2: another credential stays valid and runs; the revoked one was set aside
+                winapp.app_log(self.root_dir, "migration set a revoked credential aside; another one runs")
+                if not self.host.paused and not self.host.running():
+                    self.host.resume()
+            elif result["status"] == "fresh_sign_in_needed":
+                # §16.17 item 3: a revoked credential was set aside, not adopted; this computer signs in fresh
+                if self.root_dir is not None:
+                    winapp.app_log(self.root_dir, "migration set a revoked credential aside: showing sign-in")
+                self.host.stop()
+                self.sign_in()
             elif not self.signed_in():
                 self.sign_in()
             elif not self.host.paused and not self.host.running():

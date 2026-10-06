@@ -115,7 +115,8 @@ def test_sign_in_sends_the_password_only_to_sign_in(browser, local_origin, artif
     assert page.input_value("#password") == ""  # cleared before the call
     sign_ins = [c for c in calls(page) if c[0] == "sign_in"]
     assert sign_ins == [["sign_in", "nonce-1", {"email": "alice@example.test", "machine_name": "alice-laptop",
-                                                 "team": None, "replace": False, "again": False}, PASSWORD]]
+                                                 "team": None, "replace": False, "again": False,
+                                                 "new_machine": False}, PASSWORD]]
     assert all(PASSWORD not in json.dumps(c) for c in calls(page) if c[0] != "sign_in")
     assert page.locator("#team option").all_inner_texts() == ["Acme", "Beta"]
     assert "Choose a team." in page.inner_text("#message")
@@ -208,3 +209,37 @@ def test_offline_retry(browser, local_origin, artifacts):
     page.wait_for_function("document.getElementById('message').textContent.startsWith('Still')")
     assert calls(page) == [["retry", "nonce-1"]]
     context.close()
+
+
+def test_sign_in_offers_a_new_machine_and_asks_for_the_password_again(browser, local_origin, artifacts):
+    """§16.17 item 4, §16.18 V7: the offer is the user's choice; the password is typed again."""
+    sentence = "This computer's saved RainCLI setup belongs to a machine that was revoked."
+    replies = {"sign_in_defaults": {"machine_name": "old-pc"},
+               "sign_in": {"ok": False, "message": sentence, "code": "stale_credential", "reason": "invalid",
+                           "offer_new_machine": True, "machine_name": "old-pc-new"}}
+    context, page, errors = open_page(browser, local_origin, "sign-in", replies, query="?person=1")
+    page.wait_for_function("document.getElementById('machine').value === 'old-pc'")
+    assert not page.is_visible("#new-machine")
+    page.fill("#email", "alice@example.test")
+    page.fill("#password", "first-password")
+    page.click("#submit")
+    page.wait_for_selector("#new-machine", state="visible")
+    assert page.inner_text("#message") == sentence and page.input_value("#machine") == "old-pc-new"
+    shot = artifacts / "local-sign-in-new-machine-offer.png"
+    page.screenshot(path=str(shot))
+    page.click("#new-machine")
+    assert page.inner_text("#submit") == "Set up as a new machine" and not page.is_visible("#new-machine")
+    assert "password again" in page.inner_text("#message") and page.input_value("#password") == ""
+    page.click("#submit")  # without the password: nothing is sent
+    assert "Enter your password." in page.inner_text("#message")
+    assert len([c for c in calls(page) if c[0] == "sign_in"]) == 1
+    page.evaluate("window.__replies.sign_in = {ok: true, message: 'Signed in.'}")
+    page.fill("#password", "second-password")
+    page.click("#submit")
+    page.wait_for_function("window.__calls.filter(c => c[0] === 'sign_in').length === 2")
+    first, second = [c for c in calls(page) if c[0] == "sign_in"]
+    assert first[2]["new_machine"] is False and first[3] == "first-password"
+    assert second[2]["new_machine"] is True and second[3] == "second-password"
+    assert second[2]["machine_name"] == "old-pc-new"
+    context.close()
+    assert not errors

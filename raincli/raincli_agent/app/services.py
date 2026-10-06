@@ -19,6 +19,26 @@ class ServiceError(RainError):
     """A failure the page shows as text."""
 
 
+STALE_SENTENCES = {  # §16.17 item 4, §16.18 V4 and V7
+    "invalid": "This computer's saved RainCLI setup belongs to a machine that was revoked.",
+    "not_owner": "This computer's saved RainCLI setup belongs to a machine owned by another account. "
+                 "The other machine stays active for its owner until they revoke it.",
+    "unreadable": "This computer's saved RainCLI setup can't be read by this Windows account.",
+}
+STALE_CODES = {"machine_credential_invalid": "invalid", "not_machine_owner": "not_owner"}  # person_only's 409s
+
+
+class StaleCredential(ServiceError):
+    """§16.17: the saved machine credential is revoked (``invalid``), another account's (``not_owner``) or
+    can't be read by this Windows account (``unreadable``, §16.18 V4).
+    The page offers "Set up this computer as a new machine"; nothing happens without that choice."""
+
+    def __init__(self, reason, old_handle=None):
+        super().__init__(STALE_SENTENCES[reason])
+        self.reason = reason
+        self.old_handle = old_handle
+
+
 def _person():
     from .. import person  # the client's person-session store, install token and API
     return person
@@ -62,25 +82,76 @@ class Services:
     # -- sign-in and sign-out ----------------------------------------------------------------------------
 
     def sign_in_defaults(self):
-        from .. import login
-        return {"machine_name": login.default_machine_name()}
+        return {"machine_name": self.suggested_machine_name()}
 
-    def sign_in(self, email, password, *, machine_name, team=None, replace=False, again=False):
+    def suggested_machine_name(self, avoid=None):
+        """The computer's name in handle form, never ``avoid`` (the old machine's handle, §16.17 item 4)."""
+        from .. import login
+        name = login.default_machine_name()
+        if avoid and name == avoid:
+            name = (name[:28].rstrip("-") or "pc") + "-new"
+        return name
+
+    def fresh_api_url(self):
+        """The service a fresh sign-in goes to: the saved setup's, else the newest ``replaced-*`` backup's
+        (§16.17 item 5), else the default. Read as plain JSON; nothing in it is decrypted."""
+        import json as _json
+        from .. import login
+        from ..config import validate_api_url
+        config = Path(self.agent_config or default_config_path())
+        candidates = [config] + sorted(config.parent.glob("replaced-*/" + config.name), reverse=True)
+        for path in candidates:
+            try:
+                return validate_api_url(_json.loads(path.read_text(encoding="utf-8"))["api_url"])
+            except (OSError, ValueError, KeyError, TypeError, RainError):
+                continue
+        return login.DEFAULT_API_URL
+
+    def sign_in(self, email, password, *, machine_name, team=None, replace=False, again=False, new_machine=False):
         """``login.login`` with a person session (§15.2, §16.3). ``password`` is a ``Secret``; it is never
         stored, logged or returned. With a credential already here and no ``again``, only a person session
-        is added (``person_only``), never a new machine."""
+        is added (``person_only``), never a new machine, after ``check_credential`` (§16.17 item 4): a
+        revoked or foreign credential raises ``StaleCredential``. ``new_machine`` (the user's explicit
+        choice) moves the old setup aside, then signs in fresh."""
         from .. import login
         if not isinstance(password, Secret):
             raise TypeError("the password must be a Secret")
+        if new_machine:
+            return self._sign_in_new_machine(email, password, machine_name=machine_name, team=team)
         if self.signed_in() and not again:
-            _person().add_session(self.agent_config, email, password)  # person_only: no rotation (§16.3)
+            state = login.check_credential(self.agent_config, email)
+            if state in STALE_SENTENCES:
+                raise StaleCredential(state, self.machine_handle() if state == "not_owner" else None)
+            try:
+                _person().add_session(self.agent_config, email, password)  # person_only: no rotation (§16.3)
+            except login.LoginError as exc:
+                reason = STALE_CODES.get(getattr(exc, "code", None))
+                if reason is None:
+                    raise
+                raise StaleCredential(reason, self.machine_handle() if reason == "not_owner" else None) from None
             return {"handle": login.describe(self.agent_config)[1]}
         if again:
             self.host.pause()  # the runtime would otherwise publish with a credential being replaced
         config_path = self.agent_config or default_config_path()
         plan = login.prepare(config_path, force=again)
         return login.login(email, password, plan=plan, machine_name=machine_name, team=team or None,
-                           replace=replace, person_session=True)
+                           replace=replace, person_session=True, api_url=self.fresh_api_url())
+
+    def _sign_in_new_machine(self, email, password, *, machine_name, team=None):
+        """§16.17 items 4 and 5: set the old setup aside (``login.set_aside``), then a normal fresh sign-in
+        with ``person_session``, under a name that is never the old handle."""
+        from .. import login
+        api_url = self.fresh_api_url()
+        old_handle = self.machine_handle() if os.path.exists(self.agent_config or "") else None
+        if old_handle and machine_name == old_handle:
+            machine_name = self.suggested_machine_name(avoid=old_handle)
+        self.host.pause()  # §16.18 V6: stop the app's own runtime first; the fresh sign-in starts the new one
+        if os.path.exists(self.agent_config or ""):
+            login.set_aside(self.agent_config)
+        config_path = str(default_config_path())  # app.json's entries were cleared: the default paths
+        plan = login.prepare(config_path)
+        return login.login(email, password, plan=plan, machine_name=machine_name, team=team or None,
+                           person_session=True, api_url=api_url)
 
     def sign_out(self):
         """Sign-out revokes the machine and its person sessions (§16.3) and deletes them here."""
