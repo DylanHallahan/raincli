@@ -155,8 +155,12 @@ class Services:
         if not machine_name or machine_name == old_handle:
             machine_name = login.suggest_new_machine_name(old_handle)
         if os.path.lexists(config):
-            # A refused or failed move restarts what it stopped: the app's runtime through host.resume.
-            login.set_aside(config, stop_own=self.host.pause, restart_own=self.host.resume)
+            # The app's own runtime holds its queues: set_aside must know it is ours (review 1 R3), stops it
+            # through host.pause, and on a refused or failed move restarts it through host.resume.
+            from ..migrate import Migration
+            migration = Migration(app_root=self.root, own_runtime=self.runtime_config, stop_own=self.host.pause,
+                                  restart_own=self.host.resume, own_running=self.host.running)
+            login.set_aside(config, migration=migration, stop_own=self.host.pause, restart_own=self.host.resume)
         else:
             self.host.pause()
         config_path = str(default_config_path())  # app.json's entries were cleared: the default paths

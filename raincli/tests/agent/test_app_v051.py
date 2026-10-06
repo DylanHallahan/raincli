@@ -36,6 +36,9 @@ class Host:
     def stop(self):
         self.calls.append("stop")
 
+    def running(self):
+        return True
+
 
 class LoginError(login.LoginError):
     def __init__(self, code):
@@ -64,8 +67,9 @@ def setup(tmp_path, monkeypatch):
         if state["add_session_error"]:
             raise LoginError(state["add_session_error"])
 
-    def set_aside(agent_config, stop_own=None, restart_own=None, **kwargs):
+    def set_aside(agent_config, stop_own=None, restart_own=None, migration=None, **kwargs):
         calls["set_aside"].append(agent_config)
+        calls.setdefault("migration", []).append(migration)
         calls.setdefault("restart_own", []).append(restart_own)
         if stop_own is not None:
             stop_own()  # §16.18 V6: the app's runtime stops first
@@ -131,6 +135,8 @@ def test_new_machine_sets_the_old_setup_aside_then_signs_in_fresh(setup):
     setup.svc.sign_in("a@example.test", PASSWORD, machine_name="old-pc", new_machine=True)
     assert setup.calls["set_aside"] == [str(setup.agent)] and setup.host.calls == ["pause"]  # §16.18 V6
     assert setup.calls["restart_own"] == [setup.host.resume]  # a refused or failed move restarts it
+    (migration,) = setup.calls["migration"]  # it knows the app's own runtime (review 1 R3)
+    assert migration.own_runtime == str(setup.dir / "runtime.json") and migration.stop_own == setup.host.pause
     (call,) = setup.calls["login"]
     assert call["person_session"] is True and call["api_url"] == SERVICE  # the old setup's service
     assert call["machine_name"] != "old-pc" and call["machine_name"] == "old-pc-2"

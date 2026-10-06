@@ -869,6 +869,18 @@ def window_sign_in(page, password, machine=None):
     page.click("#submit")
 
 
+def inbox_after_sign_in(window, page, timeout=180):
+    """The inbox after a sign-in, or a failure naming what the sign-in page said."""
+    try:
+        return window.page("app/inbox", timeout=timeout)
+    except Failure as exc:
+        try:
+            said = page.inner_text("#message")
+        except Exception:  # noqa: BLE001 - the page went away
+            said = "(the sign-in page is gone)"
+        raise Failure(f"{exc}; the sign-in page says {said!r}") from None
+
+
 def signed_in_fresh(server, observer, handle, config_dir):
     e = entry(server, observer, handle) or {}
     return (e.get("active") is not False and e.get("handle") == handle
@@ -910,7 +922,7 @@ def part_e(app, server, installers, password, observer, work, codex=None):
         wait_for("the sign-in page's machine name", lambda: page.input_value("#machine"), timeout=60, interval=1)
         shot(page, "e1-sign-in")
         window_sign_in(page, password, "e2e-fresh-one")
-        page = window.page("app/inbox", timeout=180)
+        page = inbox_after_sign_in(window, page)
         check(EMAIL in page.inner_text(".rc-whoami"), "the fresh sign-in did not open the owner's inbox")
         shot(page, "e1-inbox")
         window.close()
@@ -951,7 +963,7 @@ def part_e(app, server, installers, password, observer, work, codex=None):
         page.fill("#machine", "e2e-fresh-two")
         page.fill("#password", password)
         page.click("#submit")
-        page = window.page("app/inbox", timeout=180)
+        page = inbox_after_sign_in(window, page)
         shot(page, "e2-inbox")
         window.close()
     wait_for("the second fresh machine", lambda: signed_in_fresh(server, observer, "e2e-fresh-two", config_dir),
@@ -1065,7 +1077,7 @@ def part_e(app, server, installers, password, observer, work, codex=None):
         page.fill("#machine", "e2e-v1-fresh")
         page.fill("#password", password)
         page.click("#submit")
-        page = window.page("app/inbox", timeout=180)
+        page = inbox_after_sign_in(window, page)
         window.close()
     wait_for("the fresh machine", lambda: signed_in_fresh(server, observer, "e2e-v1-fresh", config_dir), timeout=120)
     backup = backups(config_dir)[-1]
@@ -1087,7 +1099,7 @@ def part_e(app, server, installers, password, observer, work, codex=None):
         port = open_window_cdp(app, path_first=codex.parent)
         with sync_playwright() as pw:
             window = WindowCDP(pw, port)
-            page = window.page("app/inbox", timeout=180)
+            page = inbox_after_sign_in(window, page)
             page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it
             page = window.page("this-computer.html", timeout=60)
             row = "#hooks li[data-agent=codex]"
