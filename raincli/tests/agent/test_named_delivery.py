@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tarfile
 
 import pytest
 
@@ -20,6 +19,35 @@ from raincli_agent.runtime import discovery, floors, hook, sessions
 from .conftest import body_of, write_agent_config
 
 REPO = Path(__file__).resolve().parents[3]
+V040 = Path(__file__).resolve().parents[1] / "fixtures" / "raincli_v040"  # the vendored v0.4.0 loader
+
+
+def v040_files():
+    return sorted(p for p in (V040 / "raincli_agent").rglob("*.py"))
+
+
+def test_the_vendored_v040_loader_is_the_tagged_code():
+    """Each fixture file is ``git show v0.4.0:<path>`` byte for byte after its one-line
+    provenance header. Only this comparison is skipped where the tag is absent (a shallow CI
+    checkout); the C1 test below runs from the fixture either way."""
+    files = v040_files()
+    assert len(files) == 16
+    for path in files:
+        header, _, _ = path.read_bytes().partition(b"\n")
+        rel = path.relative_to(V040).as_posix()
+        assert header.startswith(b"# Vendored from raincli tag v0.4.0 (commit ") and f"path raincli/{rel}.".encode() \
+            in header, rel
+    tag = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "v0.4.0^{commit}"], cwd=REPO,
+                         capture_output=True, text=True)
+    if tag.returncode != 0:
+        pytest.skip("the v0.4.0 tag is not available here (shallow checkout); fixture provenance only")
+    for path in files:
+        rel = path.relative_to(V040).as_posix()
+        tagged = subprocess.run(["git", "show", f"v0.4.0:raincli/{rel}"], cwd=REPO, capture_output=True,
+                                check=True).stdout
+        header, _, body = path.read_bytes().partition(b"\n")
+        assert tag.stdout.strip().encode() in header, rel
+        assert body == tagged, rel
 
 
 @pytest.fixture(autouse=True)
@@ -102,15 +130,9 @@ def test_a_v04_connector_delivers_none_of_the_agent_messages(env, tmp_path):
             rec["state"], rec["hold_reason"] = state, ("offline" if state == q.AGENT_HELD else None)
             rec["attachments_pending"] = state == q.AGENT_RECEIVED
             conn.queue.save(rec)
-    old = tmp_path / "v040"
-    old.mkdir()
-    archive = subprocess.run(["git", "archive", "v0.4.0", "raincli/raincli_agent"], cwd=REPO,
-                             capture_output=True, check=True).stdout
-    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        tar.extractall(old, filter="data")
     script = f"""
 import json, sys
-sys.path.insert(0, {str(old / 'raincli')!r})
+sys.path.insert(0, {str(V040)!r})
 import raincli_agent
 assert raincli_agent.__version__ == "0.4.0", raincli_agent.__version__
 from raincli_agent.connector.config import load_connector_config
