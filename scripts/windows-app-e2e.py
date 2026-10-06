@@ -43,6 +43,19 @@ D. The app window (protocol §16.10, §16.14, §16.15; design §10 GUI coverage)
    marked for reset). A full install afterwards restores the no-argument shortcut. Screenshots go to
    build/e2e-artifacts. Skipped with --real (the published v0.4 installers have no window).
 
+E. A stale or foreign saved setup (protocol §16.17, §16.18), each case on a fresh install of this ref:
+   1. a pip-style config whose credential is revoked and owned by ANOTHER account, plus a connector config
+      naming it: migration sets it aside into replaced-<stamp>, the window shows sign-in, and signing in as
+      the team owner gives a new machine and a person session; the backup holds the old files;
+   2. a live credential owned by another user: it is adopted, then the window's sign-in explains it and
+      offers "Set up this computer as a new machine", which (with the password typed again) works, and
+      the other user's machine stays active;
+   3. a connector config outside the scan directories, named by a connector-mode runtime.json: both move
+      (§16.18 V3);
+   4. a connector runtime with two credentials, one revoked: only the revoked one is set aside, the
+      runtime config is rewritten, and the valid one keeps delivering (§16.18 V2).
+   Skipped with --real.
+
 Release traffic goes to the REAL hostnames (api.github.com, github.com,
 objects.githubusercontent.com, release-assets.githubusercontent.com): a hosts-file entry points
 them at 127.0.0.1:443, where a fake release endpoint serves a certificate from a test root CA
@@ -800,6 +813,199 @@ def free_port():
         return s.getsockname()[1]
 
 
+# -- stale or foreign setups (part E) --------------------------------------------------------------------
+
+OTHER_EMAIL, OTHER_TEAM = "e2e-other@example.invalid", "e2e-other-team"
+
+
+def open_window_cdp(app):
+    """Start the app with ``RainCLI.exe --open`` and the CDP switch for this launch only; the port."""
+    port = free_port()
+    env = dict(os.environ, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f"--remote-debugging-port={port}")
+    subprocess.Popen([str(app.root / "RainCLI.exe"), "--open"], env=env, close_fds=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    wait_for("the window's CDP endpoint", lambda: devtools_answer(f"127.0.0.1:{port}"), timeout=180)
+    return port
+
+
+def register_other(server, handle, revoked=False):
+    """A machine of ANOTHER account, in its own team; optionally revoked. Returns (api_url, token)."""
+    staged = server.work / f"{handle}.json"
+    server.admin("register-agent", "--team", OTHER_TEAM, "--owner", OTHER_EMAIL, "--handle", handle,
+                 "--out", str(staged))
+    issued = json.loads(staged.read_text())
+    staged.unlink()
+    if revoked:
+        server.admin("revoke-agent", "--team", OTHER_TEAM, "--handle", handle)
+    return issued["api_url"], SECRETS.add(issued["token"])
+
+
+def backups(config_dir):
+    return sorted(config_dir.glob("replaced-*"))
+
+
+def backup_files(config_dir):
+    return {p.relative_to(b).as_posix() for b in backups(config_dir) for p in b.rglob("*") if p.is_file()}
+
+
+def window_sign_in(page, password, machine=None):
+    page.fill("#email", EMAIL)
+    if machine is not None:
+        page.fill("#machine", machine)
+    page.fill("#password", password)
+    page.click("#submit")
+
+
+def signed_in_fresh(server, observer, handle, config_dir):
+    e = entry(server, observer, handle) or {}
+    return (e.get("active") is not False and e.get("handle") == handle
+            and (config_dir / "person.json").is_file() and (config_dir / "agent.json").is_file())
+
+
+def part_e(app, server, installers, password, observer, work):
+    """Stale or foreign saved setups; see E in the module docstring."""
+    from playwright.sync_api import sync_playwright
+
+    config_dir = default_agent_config().parent
+    other_password = SECRETS.add(secrets.token_urlsafe(18))
+    server.admin("create-user", "--email", OTHER_EMAIL, "--name", "Other Owner", input=other_password + "\n")
+    server.admin("create-team", "--slug", OTHER_TEAM, "--name", "Other team", "--owner", OTHER_EMAIL)
+
+    # E1. A revoked credential of another account: set aside by migration, then a fresh sign-in.
+    fresh_slate(app)
+    api_url, token = register_other(server, "e2e-other-revoked", revoked=True)
+    write_private(default_agent_config(), {"api_url": api_url, "token": token})
+    write_private(config_dir / "connector.json", {"herdr_agent": "e2e-inbox", "herdr_bin": "raincli-e2e-no-herdr",
+                                                   "state_dir": "e1-queue", "poll_wait": 1})
+    (config_dir / "e1-queue").mkdir()
+    (config_dir / "e1-queue" / "keep.txt").write_text("the old queue stays in place")
+    app.install(NEW, installers, "e1")
+    wait_for("migration to set the revoked credential aside", lambda: backups(config_dir), timeout=300)
+    moved = backup_files(config_dir)
+    check({"agent.json", "connector.json"} <= moved, f"the backup holds {sorted(moved)}")
+    check(not default_agent_config().exists() and not (config_dir / "connector.json").exists(),
+          "the revoked setup was not moved")
+    check((config_dir / "e1-queue" / "keep.txt").is_file(), "the old queue was not left in place")
+    wait_for("the app to show sign-in after the set-aside",
+             lambda: "showing sign-in" in (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace")
+             if (app.root / "app-lock" / "app.log").is_file() else False, timeout=180)
+    app.quit()
+    port = open_window_cdp(app)
+    with sync_playwright() as pw:
+        window = WindowCDP(pw, port)
+        page = window.page("sign-in.html")
+        wait_for("the sign-in page's machine name", lambda: page.input_value("#machine"), timeout=60, interval=1)
+        shot(page, "e1-sign-in")
+        window_sign_in(page, password, "e2e-fresh-one")
+        page = window.page("app/inbox", timeout=180)
+        check(EMAIL in page.inner_text(".rc-whoami"), "the fresh sign-in did not open the owner's inbox")
+        shot(page, "e1-inbox")
+        window.close()
+    wait_for("the fresh machine and its person session",
+             lambda: signed_in_fresh(server, observer, "e2e-fresh-one", config_dir), timeout=120)
+    check("e2e-other-revoked" not in handles(server, observer), "the other account's machine is in this team")
+    say("PASS: E1. a revoked credential of another account: migration set it aside (agent.json and the connector "
+        "config in replaced-<stamp>, the queue left in place); the window's sign-in as the team owner made "
+        "e2e-fresh-one with a person session")
+    app.quit()
+    app.uninstall(signout=True, label="e1")
+
+    # E2. A live credential of another user: adopted, then the window explains it and offers a new machine.
+    fresh_slate(app)
+    api_url, token = register_other(server, "e2e-other-live")
+    write_private(default_agent_config(), {"api_url": api_url, "token": token})
+    write_private(config_dir / "connector.json", {"herdr_agent": "e2e-inbox", "herdr_bin": "raincli-e2e-no-herdr",
+                                                   "state_dir": "e2-queue", "poll_wait": 1})
+    app.install(NEW, installers, "e2")
+    wait_for("migration to adopt the live credential", lambda: migrated(config_dir), timeout=300)
+    check(not backups(config_dir), "a live credential was set aside without the user's choice")
+    app.quit()
+    port = open_window_cdp(app)
+    sentence = ("This computer's saved RainCLI setup belongs to a machine owned by another account. "
+                "The other machine stays active for its owner until they revoke it.")
+    with sync_playwright() as pw:
+        window = WindowCDP(pw, port)
+        page = window.page("sign-in.html")
+        wait_for("the sign-in page's machine name", lambda: page.input_value("#machine"), timeout=60, interval=1)
+        window_sign_in(page, password)
+        wait_for("the new-machine offer", lambda: page.is_visible("#new-machine"), timeout=120, interval=1)
+        check(page.inner_text("#message") == sentence, f"the offer says {page.inner_text('#message')!r}")
+        check(not backups(config_dir), "the setup moved before the user chose to")
+        check(page.input_value("#machine") != "e2e-other-live", "the suggested name is the old handle")
+        shot(page, "e2-offer")
+        page.click("#new-machine")
+        check(page.input_value("#password") == "", "the password was kept for the new-machine sign-in")
+        page.fill("#machine", "e2e-fresh-two")
+        page.fill("#password", password)
+        page.click("#submit")
+        page = window.page("app/inbox", timeout=180)
+        shot(page, "e2-inbox")
+        window.close()
+    wait_for("the second fresh machine", lambda: signed_in_fresh(server, observer, "e2e-fresh-two", config_dir),
+             timeout=120)
+    check({"agent.json", "connector.json", "runtime.json"} <= backup_files(config_dir),
+          f"the backup lacks the old files: {sorted(backup_files(config_dir))}")
+    other = api(server, token, "/api/v1/me")
+    check(other["agent"]["handle"] == "e2e-other-live", "the other user's machine stopped working")
+    say("PASS: E2. a live credential of another user was adopted; the window's sign-in said whose it is and "
+        "offered a new machine, which (password typed again) made e2e-fresh-two; the other machine stays active")
+    app.quit()
+    app.uninstall(signout=True, label="e2")
+
+    # E3. A connector config outside the scan directories, named by a connector-mode runtime.json (V3).
+    fresh_slate(app)
+    api_url, token = register_other(server, "e2e-other-outside", revoked=True)
+    write_private(default_agent_config(), {"api_url": api_url, "token": token})
+    outside = work / "elsewhere" / "outside-connector.json"
+    write_private(outside, {"agent_config": str(default_agent_config()), "herdr_agent": "e2e-inbox",
+                            "herdr_bin": "raincli-e2e-no-herdr", "state_dir": str(work / "elsewhere" / "q"),
+                            "poll_wait": 1})
+    write_private(config_dir / "runtime.json", {"connectors": [str(outside)],
+                                                "state_dir": str(profile() / ".raincli" / "runtime-e3")})
+    app.install(NEW, installers, "e3")
+    wait_for("migration to set the outside setup aside", lambda: backups(config_dir), timeout=300)
+    check(not outside.exists() and not (config_dir / "runtime.json").exists(),
+          "the connector config outside the scan directories, or its runtime.json, was not moved")
+    check({"agent.json", "runtime.json"} <= backup_files(config_dir), f"the backup holds {backup_files(config_dir)}")
+    say("PASS: E3. a connector config outside the scan directories, named by a connector-mode runtime.json, moved "
+        "with the revoked credential")
+    app.quit()
+    app.uninstall(signout=False, label="e3")
+
+    # E4. Two credentials in one connector runtime, one revoked: only that one is set aside (V2).
+    fresh_slate(app)
+    good_url, good_token = register(server, "e2e-two-good")
+    bad_url, bad_token = register_other(server, "e2e-two-revoked", revoked=True)
+    good_agent, bad_agent = config_dir / "good-agent.json", config_dir / "bad-agent.json"
+    write_private(good_agent, {"api_url": good_url, "token": good_token})
+    write_private(bad_agent, {"api_url": bad_url, "token": bad_token})
+    good_connector, bad_connector = config_dir / "good-connector.json", config_dir / "bad-connector.json"
+    for connector, agent, queue in ((good_connector, good_agent, "good-queue"), (bad_connector, bad_agent, "bad-queue")):
+        write_private(connector, {"agent_config": str(agent), "herdr_agent": "e2e-inbox",
+                                  "herdr_bin": "raincli-e2e-no-herdr", "state_dir": queue, "poll_wait": 1})
+    write_private(config_dir / "runtime.json", {"connectors": [str(good_connector), str(bad_connector)],
+                                                "state_dir": str(profile() / ".raincli" / "runtime-e4")})
+    app.install(NEW, installers, "e4")
+    wait_for("migration to set only the revoked credential aside", lambda: backups(config_dir), timeout=300)
+    runtime = json.loads((config_dir / "runtime.json").read_text("utf-8"))
+    check([Path(c).name for c in runtime.get("connectors", [])] == ["good-connector.json"],
+          f"runtime.json was not rewritten without the revoked credential: {runtime}")
+    check(good_agent.exists() and good_connector.exists() and not bad_agent.exists() and not bad_connector.exists(),
+          "the wrong files moved")
+    check({"bad-agent.json", "bad-connector.json", "runtime.json"} <= backup_files(config_dir),
+          f"the backup holds {backup_files(config_dir)}")
+    wait_for("the valid credential's presence", lambda: shows(server, observer, "e2e-two-good", NEW), timeout=300)
+    message = send(server, observer, "e2e-two-good", "after the stale one was set aside")
+    wait_for("delivery to the valid credential", lambda: delivered(server, observer, message), timeout=240)
+    log = (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace")
+    check("another one runs" in log, "migrated_with_stale_set_aside was not logged")
+    say("PASS: E4. two credentials, one revoked: only the revoked one moved (its runtime.json rewritten, the "
+        "original kept in the backup), and the valid one keeps delivering")
+    app.quit()
+    app.uninstall(signout=False, label="e4")
+
+
 # -- the run --------------------------------------------------------------------------------
 
 def check(condition, message):
@@ -1177,6 +1383,12 @@ def run_e2e(args, work, stack):
     else:
         fresh_slate(app)
         part_d(app, server, installers, password, observer, menu, work)
+
+    # == E. a stale or foreign saved setup ==================================================================
+    if args.real:
+        say("SKIP: E. the published v0.4 installers have no v0.5.1 stale-setup handling")
+    else:
+        part_e(app, server, installers, password, observer, work)
 
     # == B. an old pip client's foreground connector ============================================
     fresh_slate(app)
