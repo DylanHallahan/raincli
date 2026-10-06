@@ -664,6 +664,33 @@ class Run:
         return types.SimpleNamespace(returncode=self.code, stdout=self.out + "\n", stderr="")
 
 
+WINDOWS_ENV = {"SystemRoot": r"C:\Windows"}
+
+
+@pytest.mark.parametrize("root,expected", [
+    (r"C:\Windows", r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+    (r"D:\WINNT", r"D:\WINNT\System32\WindowsPowerShell\v1.0\powershell.exe"),
+    (None, None), ("", None), ("Windows", None), (r"\Windows", None), (r"C:Windows", None),
+    (r"\\server\share\Windows", None), (r"C:\Windows\..\Temp", None), ("C:\\Win\ndows", None),
+])
+def test_powershell_runs_only_by_absolute_path_under_systemroot(root, expected):
+    """Review 6 L1: never a bare "powershell.exe", which CreateProcess also seeks in the current directory."""
+    assert shortcut.powershell_path({} if root is None else {"SystemRoot": root}) == expected
+
+
+def test_without_a_valid_systemroot_the_shortcut_is_left_alone(tmp_path):
+    appdata = tmp_path / "AppData"
+    (appdata / shortcut.SHORTCUT).parent.mkdir(parents=True)
+    (appdata / shortcut.SHORTCUT).write_bytes(b"lnk")
+    root = tmp_path / "RainCLI"
+    root.mkdir()
+    winapp.write_install(root, "0.5.0", "0.4.0")
+    never, logged = Run(), []
+    assert shortcut.fix_v04_shortcut(root, run=never, appdata=str(appdata), log=lambda r, t: logged.append(t),
+                                     environ={"SystemRoot": "Windows"}) == "skipped"
+    assert never.calls == [] and "SystemRoot is not an absolute path" in logged[0]
+
+
 def test_v04_shortcut_is_pointed_at_background_once(tmp_path):
     import json
     appdata = tmp_path / "AppData"
@@ -674,15 +701,17 @@ def test_v04_shortcut_is_pointed_at_background_once(tmp_path):
     root.mkdir()
     winapp.write_install(root, "0.5.0", "0.4.0")  # updated in place: no "stub" key
     logged, run = [], Run()
-    assert shortcut.fix_v04_shortcut(root, run=run, appdata=str(appdata), log=lambda r, t: logged.append(t)) == "rewritten"
+    assert shortcut.fix_v04_shortcut(root, run=run, appdata=str(appdata), log=lambda r, t: logged.append(t),
+                                     environ=WINDOWS_ENV) == "rewritten"
     argv, kw = run.calls[0]
-    assert argv[0] == "powershell.exe" and "-NoProfile" in argv and str(link) not in " ".join(argv)
+    assert argv[0] == r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" and "-NoProfile" in argv and str(link) not in " ".join(argv)
     assert kw["env"]["RAINCLI_LNK"] == str(link) and kw["env"]["RAINCLI_STUB"] == str(root / "RainCLI.exe")
     assert logged == ["Start menu shortcut for the v0.4 stub: rewritten (RainCLI.lnk --background)"]
     quiet = []
-    assert shortcut.fix_v04_shortcut(root, run=Run("unchanged"), appdata=str(appdata),
+    assert shortcut.fix_v04_shortcut(root, run=Run("unchanged"), appdata=str(appdata), environ=WINDOWS_ENV,
                                    log=lambda r, t: quiet.append(t)) == "unchanged" and quiet == []
-    assert shortcut.fix_v04_shortcut(root, run=Run("x", code=1), appdata=str(appdata), log=lambda r, t: None) == "failed"
+    assert shortcut.fix_v04_shortcut(root, run=Run("x", code=1), appdata=str(appdata), log=lambda r, t: None,
+                                     environ=WINDOWS_ENV) == "failed"
     (root / "install.json").write_text(json.dumps({"current": "0.5.0", "stub": 2}))  # a full v0.5 install
     never = Run()
     assert shortcut.fix_v04_shortcut(root, run=never, appdata=str(appdata)) is None and never.calls == []
@@ -778,3 +807,41 @@ def test_a_timeout_armed_before_a_successful_load_never_shows_offline(tmp_path):
     app.open_hosted("/app/agents")  # a new load with no success afterwards still times out
     Timer.made[-1].fire()
     assert win.loads[-1] == LOCAL + "offline.html" and "load timed out" in "\n".join(logged)
+
+
+def test_app_log_never_holds_a_query_code_or_the_install_token(tmp_path):
+    """Review 6 L2: app-lock\\app.log carries origins and paths only, whatever the window loads."""
+    root = tmp_path / "RainCLI"
+    root.mkdir()  # the install root always exists; app_log creates app-lock under it
+    services = FakeServices()
+    services.install_token = "SeCrEt_install_token_0123456789abcdefghijklm"
+    services.handoff = lambda: f"{SERVICE}/app/handoff?code=rch_secretcode"
+    app, win, _ = make(tmp_path, services, log=lambda text: winapp.app_log(root, text))
+    starting, completed, init, requested = Events(), Events(), Events(), Events()
+    win.native = types.SimpleNamespace(browser=types.SimpleNamespace(webview=types.SimpleNamespace(
+        NavigationStarting=starting, NavigationCompleted=completed, CoreWebView2InitializationCompleted=init)))
+    app.attach_native()
+    core = types.SimpleNamespace(Settings=types.SimpleNamespace(UserAgent="Mozilla/5.0"), WebResourceRequested=requested,
+                                 AddWebResourceRequestedFilter=lambda uri, ctx: None)
+    app._core_ready(core, context_all="All")
+    app.home()  # the handoff, with its code in the query
+    handoff = win.loads[-1]
+    starting.handlers[0](None, types.SimpleNamespace(Uri=handoff, Cancel=False, NavigationId=1))
+    completed.handlers[0](types.SimpleNamespace(Source=handoff),
+                          types.SimpleNamespace(IsSuccess=True, HttpStatusCode=303, NavigationId=1))
+    sentinel = SERVICE + "/app/local/settings?code=rch_other&x=1#frag"
+    starting.handlers[0](None, types.SimpleNamespace(Uri=sentinel, Cancel=False, NavigationId=2))
+    completed.handlers[0](types.SimpleNamespace(Source=SERVICE + "/app/inbox?code=rch_x"),
+                          types.SimpleNamespace(IsSuccess=False, HttpStatusCode=0, NavigationId=2,
+                                                WebErrorStatus="OperationCanceled"))
+    failed = SERVICE + "/app/conversations/c1?code=rch_failed&reply_to=m1"
+    app.open_hosted("/app/conversations/c1?code=rch_failed")
+    completed.handlers[0](types.SimpleNamespace(Source=failed),
+                          types.SimpleNamespace(IsSuccess=False, HttpStatusCode=0, NavigationId=3,
+                                                WebErrorStatus="CannotConnect"))
+    app.open_hosted("/app/agents?code=rch_timeout")
+    Timer.made[-1].fire()
+    text = (root / "app-lock" / "app.log").read_text("utf-8")
+    assert "sentinel" in text and "load failed" in text and "offline page shown" in text and "load timed out" in text
+    for forbidden in ("code=", "?", "RainCLIApp/", "rch_", services.install_token):
+        assert forbidden not in text, forbidden
