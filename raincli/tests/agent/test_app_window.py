@@ -754,3 +754,27 @@ def test_sentinel_loads_the_local_page_and_its_cancelled_navigation_is_not_offli
     win.url = SERVICE + "/app/handoff?code=rch_secret"
     completed.handlers[0](None, types.SimpleNamespace(IsSuccess=True, HttpStatusCode=303, NavigationId=11))
     assert "rch_secret" not in "\n".join(logged)  # never a query in the log
+
+
+def test_a_timeout_armed_before_a_successful_load_never_shows_offline(tmp_path):
+    """The e2e's D5: a 20 s timer left armed by the js_api thread racing the UI thread fired after the
+    hosted page had loaded, and replaced it with the offline page."""
+    logged = []
+    app, win, _ = make(tmp_path, log=logged.append)
+    completed = Events()
+    win.native = types.SimpleNamespace(browser=types.SimpleNamespace(
+        webview=types.SimpleNamespace(NavigationStarting=Events(), NavigationCompleted=completed,
+                                      CoreWebView2InitializationCompleted=Events())))
+    app.attach_native()
+    app.home()
+    orphan = Timer.made[-1]
+    app.load_timer = None  # lost to the race: never cancelled
+    win.url = None  # get_current_url() can't answer on the UI thread
+    sender = types.SimpleNamespace(Source=SERVICE + "/app/inbox")
+    completed.handlers[0](sender, types.SimpleNamespace(IsSuccess=True, HttpStatusCode=200, NavigationId=3))
+    before = list(win.loads)
+    orphan.fire()
+    assert win.loads == before and "load ok " + SERVICE + "/app/inbox" in "\n".join(logged)
+    app.open_hosted("/app/agents")  # a new load with no success afterwards still times out
+    Timer.made[-1].fire()
+    assert win.loads[-1] == LOCAL + "offline.html" and "load timed out" in "\n".join(logged)
