@@ -1170,3 +1170,55 @@ The reviewer checks the framing specifically in every Phase 2 round.
    - `raincli inbox --agent NAME` polls with `routing=1`, which is safe under S1's server check;
    - `--body` stays on the legacy `send --to` only;
    - `me read` acks, and `me inbox --watch` never acks.
+
+### 16.17 Stale or foreign machine credentials (v0.5.1, binding)
+Found on the first real v0.5.0 install. Migration adopted an old `agent.json` whose credential was revoked and whose machine belonged to another account. The window's sign-in then took the `person_only` path with it, and the server answered a generic `400`.
+
+**1. Server: distinct `person_only` refusals.** Once the email and password are correct (the limiter counts a success, as in §15.8 M2), `/app/login` with `person_only` answers:
+- `409 machine_credential_invalid` when `previous_token` isn't a live credential, because it is unknown, rotated, revoked, or belongs to a revoked machine;
+- `409 not_machine_owner` when the credential is live but the machine isn't owned by the signing-in user.
+
+A wrong password stays the generic `401`, so a wrong password reveals nothing about the token.
+
+**2. Client: checking a credential.** `login.check_credential(agent_config, email=None)` returns exactly one of:
+- `ok`;
+- `invalid`: `GET /me` gives `401`;
+- `not_owner`: `/me`'s `owner.email` differs from `email`, compared case-insensitively. Only checked when `email` is given;
+- `unknown`: the server is unreachable, or older and sends no `owner`.
+
+It never raises for these cases, and never logs the token.
+
+**3. Migration.**
+- Before adopting any `agent.json` (step 1 of §15.8 H6), migration runs `check_credential`.
+- On `invalid` it does **not** adopt that credential. It moves the old setup aside (item 5), logs `stale_credential_set_aside` with the backup path, and finishes with `fresh_sign_in_needed`. The app then shows its sign-in, which creates a new machine.
+- On `unknown` it adopts as before. The sign-in check in item 4 catches anything left over.
+- Migration has no signing-in user, so it never decides `not_owner`.
+
+**4. Sign-in.** Before the `person_only` path, `Services.sign_in` (the window) and `raincli login --person` (the CLI) run `check_credential(…, email)`.
+- **On `invalid` or `not_owner`,** and also when `person_only` answers `machine_credential_invalid` or `not_machine_owner`, they don't fail with a generic error. They explain the cause in one plain sentence:
+  - "This computer's saved RainCLI setup belongs to a machine that was revoked." / "…to a machine owned by another account."
+  
+  and offer **"Set up this computer as a new machine"**.
+  - **Window:** a button.
+  - **CLI:** `raincli login --new-machine`, shown in the message.
+- **Accepting** moves the old setup aside (item 5), then runs a normal fresh `login.login` with `person_session: true`. The suggested machine name is never the old handle.
+- **Never automatic:** this always needs the user's explicit choice.
+
+**5. Setting the old setup aside** (`login.set_aside(agent_config)`, the same for migration, the window and the CLI).
+- **What moves,** into `<config dir>/replaced-<UTC stamp>/` (0700 on POSIX, private ACL on Windows), with `os.replace`:
+  - `agent.json`;
+  - its runtime config, when that is machine-mode or connector-mode and names this `agent.json` or its connectors;
+  - `person.json`, `app-install.json` and `notifications/`;
+  - **every connector config in the scan directories that names this `agent.json`.**
+- **What stays put:** queues, which are left in place as a backup; their configs are moved, so nothing runs them. Nothing is deleted.
+- **After the move:**
+  - `app.json`'s entries are cleared, so the app uses the default paths;
+  - the Run value is kept;
+  - the result lists every moved file, with paths only.
+- **A move that fails part-way** moves the already-moved files back and raises with nothing changed.
+- **Lock:** it holds the migration lock (`.migration.lock`).
+
+**6. Tests and coverage.**
+- **Real-PostgreSQL tests:** both new `409` codes, and the wrong-password `401`.
+- **Client tests:** each `check_credential` outcome, `set_aside` (contents, rollback on failure, lock), migration's `invalid` path, the window's offer, and `--new-machine`.
+- **Windows e2e, part E:** an old pip-style config with a revoked credential owned by **another account**, plus a connector config naming it. The installer runs, and migration sets it aside. Then the window shows sign-in and the user signs in as the team owner, which gives a new machine and a person session; the backup holds the old files. A second case is a live credential owned by another user: the window offers a new machine, and accepting it works.
