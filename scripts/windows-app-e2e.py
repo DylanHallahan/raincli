@@ -561,23 +561,50 @@ def click_dialog_ok(title, timeout=60):
     user32.SendMessageW(ok, 0x00F5, 0, 0)  # BM_CLICK
 
 
-def window_page(browser, fragment, port, timeout=120):
-    def page():
-        for context in browser.contexts:
+class WindowCDP:
+    """Playwright attached to the app window over CDP. Loading a local page after a hosted one swaps the
+    window's main frame (another origin), which an existing Playwright connection may not follow: the
+    page is found through CDP's own target list, and the connection is made again when needed."""
+
+    def __init__(self, pw, port):
+        self.pw, self.port = pw, port
+        self.browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+
+    def targets(self):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list", timeout=5) as response:
+                return [(t.get("type"), t.get("url") or "") for t in json.loads(response.read())]
+        except (OSError, ValueError):
+            return []
+
+    def _find(self, fragment):
+        for context in self.browser.contexts:
             for candidate in context.pages:
                 if not candidate.is_closed() and fragment in url_of(candidate):
                     return candidate
         return None
-    try:
-        return wait_for(f"the app window showing {fragment}", page, timeout=timeout, interval=1)
-    except Failure:
-        seen = [c.url for context in browser.contexts for c in context.pages]
+
+    def page(self, fragment, timeout=120):
+        def found():
+            if not any(kind == "page" and fragment in url for kind, url in self.targets()):
+                return None
+            page = self._find(fragment)
+            if page is None:  # the target is there, this connection hasn't followed it: attach again
+                with contextlib.suppress(Exception):
+                    self.browser.close()  # drops the CDP connection only; the app keeps running
+                self.browser = self.pw.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+                page = self._find(fragment)
+            return page
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
-                targets = [(t.get("type"), t.get("url")) for t in json.loads(response.read())]
-        except (OSError, ValueError) as exc:
-            targets = f"unavailable: {exc}"
-        raise Failure(f"no window page showing {fragment}; Playwright pages {seen}; CDP targets {targets}") from None
+            return wait_for(f"the app window showing {fragment}", found, timeout=timeout, interval=1)
+        except Failure:
+            seen = [c.url for context in self.browser.contexts for c in context.pages]
+            raise Failure(f"no window page showing {fragment}; Playwright pages {seen}; "
+                          f"CDP targets {self.targets()}") from None
+
+    def close(self):
+        with contextlib.suppress(Exception):
+            self.browser.close()
 
 
 def url_of(page):
@@ -669,8 +696,8 @@ def part_d(app, server, installers, password, observer, menu, work):
           "the positive control failed: WebView2's CDP port is not seen as listening, so D2 proved nothing")
     check(devtools_answer(f"127.0.0.1:{port}"), "the positive control failed: no DevTools answer on the CDP port")
     with sync_playwright() as pw:
-        browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
-        page = window_page(browser, "sign-in.html", port)
+        window = WindowCDP(pw, port)
+        page = window.page("sign-in.html")
         # Polled from here: the local pages' CSP (script-src 'self') rightly refuses wait_for_function's eval.
         wait_for("the sign-in page's machine name", lambda: page.input_value("#machine"), timeout=60, interval=1)
         check(page.evaluate("document.visibilityState") == "visible", "--open did not show the window")
@@ -711,12 +738,12 @@ def part_d(app, server, installers, password, observer, menu, work):
         # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
         # hosted navigation and loads its own page, so the click must not wait for that navigation.
         page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
-        page = window_page(browser, "this-computer.html", port, timeout=60)  # re-attached after the swap
+        page = window.page("this-computer.html", timeout=60)  # re-attached after the swap
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
         shot(page, "d6-this-computer")
         page.click("nav.rc-nav button[data-open=settings]", no_wait_after=True)  # the app navigates, not the click
-        page = window_page(browser, "settings.html", port, timeout=60)  # re-attached after the swap
+        page = window.page("settings.html", timeout=60)  # re-attached after the swap
         page.wait_for_selector("#routing-all:checked", timeout=60000)
         shot(page, "d6-settings")
         say("PASS: D6. This computer shows the machine; Settings shows the routing policy")
@@ -724,23 +751,23 @@ def part_d(app, server, installers, password, observer, menu, work):
         # D7. Offline and Retry.
         server.stop()
         page.click("nav.rc-nav button[data-open=inbox]", no_wait_after=True)  # the app navigates, not the click
-        page = window_page(browser, "offline.html", port, timeout=120)  # re-attached after the swap
+        page = window.page("offline.html", timeout=120)  # re-attached after the swap
         shot(page, "d7-offline")
         server.start()
         page.click("#retry", no_wait_after=True)  # the app navigates, not the click
-        page = window_page(browser, "app/inbox", port, timeout=120)  # re-attached after the swap
+        page = window.page("app/inbox", timeout=120)  # re-attached after the swap
         say("PASS: D7. with the server stopped the window showed the offline page; Retry returned to the inbox")
 
         # D8. Sign-out from This computer: confirmed, revoked, the profile marked for reset.
         page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
-        page = window_page(browser, "this-computer.html", port, timeout=60)  # re-attached after the swap
+        page = window.page("this-computer.html", timeout=60)  # re-attached after the swap
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
         page.click("#sign-out", no_wait_after=True)  # the app navigates, not the click
         click_dialog_ok("Sign out")
-        page = window_page(browser, "sign-in.html", port, timeout=120)  # re-attached after the swap
+        page = window.page("sign-in.html", timeout=120)  # re-attached after the swap
         shot(page, "d8-signed-out")
-        browser.close()
+        window.close()
     wait_for("the window machine to be revoked",
              lambda: (entry(server, observer, WINDOW_MACHINE) or {}).get("active") is False, timeout=120)
     check(not default_agent_config().exists(), "sign-out left the credential")
