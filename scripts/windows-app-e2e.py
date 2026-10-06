@@ -1019,10 +1019,13 @@ def part_e(app, server, installers, password, observer, work, codex=None):
     wait_for("the valid credential's presence", lambda: shows(server, observer, "e2e-two-good", NEW), timeout=300)
     message = send(server, observer, "e2e-two-good", "after the stale one was set aside")
     wait_for("delivery to the valid credential", lambda: delivered(server, observer, message), timeout=240)
-    log = (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace")
-    check("another one runs" in log, "migrated_with_stale_set_aside was not logged")
-    say("PASS: E4. two credentials, one revoked: only the revoked one moved (its runtime.json rewritten, the "
-        "original kept in the backup), and the valid one keeps delivering")
+    set_aside_log = config_dir / "runtime-state" / "migration.log"
+    records = [json.loads(line) for line in set_aside_log.read_text("utf-8").splitlines() if line.strip()]
+    check([(Path(r["agent_config"]).name, r["result"]) for r in records if r.get("event") == "stale_credential_set_aside"]
+          == [("bad-agent.json", "invalid")], f"the set-aside log holds {records}")
+    say("PASS: E4. two credentials, one revoked: only the revoked one moved and was logged "
+        "stale_credential_set_aside (runtime.json rewritten, the original kept in the backup), and the valid one "
+        "keeps delivering")
     app.quit()
     app.uninstall(signout=False, label="e4")
 
