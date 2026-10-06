@@ -699,8 +699,9 @@ def part_d(app, server, installers, password, observer, menu, work):
         shot(page, "d5-sent")
         say("PASS: D5. the window read the observer's message, replied and sent a new one; both reached it")
 
-        # D6. This computer and Settings (the /app/local sentinel shows the bundled pages).
-        page.click("nav.rc-nav a:has-text('This computer')")
+        # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
+        # hosted navigation and loads its own page, so the click must not wait for that navigation.
+        page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
         page.wait_for_url("**/this-computer.html**", timeout=60000)
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
@@ -722,7 +723,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         say("PASS: D7. with the server stopped the window showed the offline page; Retry returned to the inbox")
 
         # D8. Sign-out from This computer: confirmed, revoked, the profile marked for reset.
-        page.click("nav.rc-nav a:has-text('This computer')")
+        page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
         page.wait_for_url("**/this-computer.html**", timeout=60000)
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
