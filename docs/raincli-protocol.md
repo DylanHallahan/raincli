@@ -1259,3 +1259,31 @@ It never raises for these cases, and never logs the token.
 - **Real-PostgreSQL or client tests:**
   - (d) a foreign DPAPI blob (V4);
   - (e) an install while the server is unreachable: the credential is adopted as `unknown`, then the sign-in check catches the stale credential.
+
+### 16.19 Agent discovery and connecting agents on Windows; conversations open at the newest message (v0.5.1, binding)
+Found on a real v0.5.0 machine: a Codex CLI session running, but zero directory entries, and no hook offer after an app sign-in.
+
+**1. One failing source never hides the whole directory.**
+- Each discovery source (Herdr, hooks, scan) is wrapped on its own. An exception in one source is logged once per kind to the runtime log, with its type only and no process data. The others are still reported.
+- `windows_scan` decodes `tasklist` output with `errors="replace"`, and never raises on its contents.
+- A directory that is empty because every source failed is reported as `[]`, and the runtime log says why.
+
+**2. The Windows scan recognises real installs.**
+- **What is recognised:** `codex.exe` and `codex-*.exe` (Codex), and `claude.exe` (Claude Code native). Matching is case-insensitive on the image name.
+- **Same-user check:** the scan uses the Toolhelp process table (`procinfo.process_table`), with the process owner checked through its token (`OpenProcess` with `PROCESS_QUERY_LIMITED_INFORMATION`, then `GetTokenInformation(TokenUser)`) against the current user's SID. That replaces `tasklist`'s `USERNAME` filter, which may not match domain or Azure AD accounts. `tasklist` stays as a fallback.
+- **Node:** `node.exe` is never classified, because command lines are never read (§14.7 M5). The docs and the app say that npm-run agents need hooks to be listed by name.
+- **Recorded facts:** the builder records which real install layouts were verified (winget/standalone Codex, npm Codex, Claude Code's native installer, npm Claude Code), from primary sources.
+
+**3. "Connect Codex / Claude Code".**
+- **Client core (shared):**
+  - `hooks_install.status(kind, runtime_config)` returns `not_installed_agent`, `too_old`, `not_connected`, `connected` or `needs_approval` (Codex: hooks are installed, but no hook event has been recorded since);
+  - `hooks_install.connect(kind, runtime_config)` is the same operation as `raincli hooks install --<kind> --config …`, with the K1 resolution and the Codex version gate.
+- **The app's This computer page** shows each agent's state, with a **Connect** button (and **Disconnect**). After connecting Codex it says, in one sentence, that the hooks must be approved once in Codex's `/hooks` and then a new session started.
+- **The tray's first run after a fresh sign-in** shows one dismissible notice pointing to This computer when Codex or Claude Code is installed and not connected. The CLI prints the matching hint after `raincli login`.
+- **Never automatic:** hooks are installed only on the user's click or command.
+
+**4. Conversations open at the newest message.**
+- **On open:** a conversation page, on the website and in app mode, opens scrolled to the **newest** message, the bottom. A `#m-<id>` anchor takes precedence.
+- **Pinned to the bottom:** when the page refreshes or new messages are added, it stays at the bottom only if the user was already within about 80 px of it. Otherwise their scroll position is kept, and a small "New messages ↓" control appears.
+- **Script rules:** plain same-origin script under the existing CSP, with no inline script. Without JavaScript, the page still works (anchor `#latest`).
+- **Tests:** Playwright covers on-open at the bottom, staying pinned, keeping the position when scrolled up, and the anchor taking precedence.
