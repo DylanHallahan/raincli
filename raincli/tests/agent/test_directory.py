@@ -406,10 +406,12 @@ def test_windows_claude_hooks_use_exec_form(monkeypatch, state):
     entry = hooks_install.handler("claude", "Stop", ["C:\\Py\\python.exe", "C:\\u\\launch.py"], "C:\\state dir")
     assert entry["command"] == "C:\\Py\\python.exe"
     assert entry["args"] == ["C:\\u\\launch.py", "hook", "claude", "Stop", "--state-dir", "C:\\state dir"]
-    # Codex on Windows (Phase 2): a quoted cmd.exe command line, also as commandWindows.
+    # Codex on Windows (§16.19 item 5): cmd.exe by absolute path, then call, also as commandWindows.
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
     codex = hooks_install.handler("codex", "Stop", ["C:\\Py\\python.exe", "C:\\u\\launch.py"], "C:\\state dir")
     assert codex["commandWindows"] == codex["command"] == (
-        '"C:\\Py\\python.exe" "C:\\u\\launch.py" hook codex Stop --state-dir "C:\\state dir"')
+        'C:\\Windows\\System32\\cmd.exe /d /c call "C:\\Py\\python.exe" "C:\\u\\launch.py" hook codex Stop '
+        '--state-dir "C:\\state dir"')
 
 
 def test_hook_command_prefers_the_stable_launcher(tmp_path, monkeypatch):

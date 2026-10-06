@@ -313,14 +313,16 @@ def run_stage(root, server, wait_for, show, kill_tree):
         # 2b. §16.19 item 5: REAL Codex executes our installed hook, in its own session shell
         # (PowerShell on Windows, the user's shell elsewhere), with paths that contain a space.
         mock = MockResponses()
+        keep = {r["key"] for r in codex_records(state, 0)}
         try:
             if os.name == "nt":
                 # Evidence for the bug: the v0.5.0 form, a line starting with a quoted path.
                 new_text = hooks_file.read_text(encoding="utf-8")
                 old_line = data["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"].split(" /d /c call ", 1)[1]
                 old = json.loads(new_text)
-                old_entry = old["hooks"]["SessionStart"][0]["hooks"][0]
-                old_entry["command"] = old_entry["commandWindows"] = old_line
+                for groups in old["hooks"].values():  # every event in the v0.5.0 form
+                    for entry in groups[0]["hooks"]:
+                        entry["command"] = entry["commandWindows"] = entry["commandWindows"].split(" /d /c call ", 1)[1]
                 # Evidence only (job-only probes, trusted by the job's bypass switch): which shell
                 # Codex runs hooks in. "ver" works only in cmd, $PSVersionTable only in PowerShell.
                 probe_cmd, probe_ps = work / "shell-cmd.txt", work / "shell-ps.txt"
@@ -337,6 +339,7 @@ def run_stage(root, server, wait_for, show, kill_tree):
                 print(f"EVIDENCE: Codex {CODEX_VERSION} exec runs hooks in: {shell or 'neither probe ran'}; "
                       f"with the v0.5.0 hook form: exit {ran.returncode}, {len(old_recorded)} session(s) recorded",
                       flush=True)
+                assert shell == "PowerShell" and not old_recorded, (shell, old_recorded)  # the bug, reproduced
                 for label, argv in (("powershell -Command", ["powershell", "-NoProfile", "-Command", old_line]),
                                     ("pwsh -Command", ["pwsh", "-NoProfile", "-Command", old_line])):
                     exe = shutil.which(argv[0])
@@ -380,6 +383,9 @@ def run_stage(root, server, wait_for, show, kill_tree):
                 proc = subprocess.run(cmdline, input=payload, capture_output=True, timeout=60, **NO_WINDOW)
                 assert proc.returncode == 0 and codex_records(state, since), (label, proc.stderr[-1000:])
             print(f"PASS: Codex: the hook line runs the same under {', '.join(shells)}", flush=True)
+        for record in codex_records(state, 0):  # the evidence sessions above end here
+            if record["key"] not in keep:
+                sessions.remove_record(str(state), record["key"])
 
         # 3. A connector maps the inbox to this Codex session and hands over a long message.
         agent_cfg = profile / "bob-agent.json"
