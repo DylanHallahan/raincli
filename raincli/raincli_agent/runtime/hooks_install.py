@@ -53,6 +53,9 @@ CODEX_MIN_WINDOWS = (0, 145, 0)
 # codex-rs/hooks/src/engine/command_runner.rs, build_command), so no path may contain them.
 CMD_SPECIAL = set('%^&|<>"!')  # "!": cmd delayed expansion (§16.14 K3)
 SHELL_SPECIAL = CMD_SPECIAL | set("$`")  # PowerShell expands these inside "..." (§16.19 item 5)
+# PowerShell also reads typographic quotes as quotes: U+2018-U+201B single, U+201C-U+201E double
+# (review 1, R4). A Windows account name, so a profile path, can contain them.
+SHELL_SPECIAL |= {chr(c) for c in range(0x2018, 0x201F)}
 TRUST_NOTE = ("Codex runs these hooks only after you trust them once in Codex: open /hooks and trust the "
               "raincli hooks. Trust again after any reinstall that changes the command (a new state "
               "directory or install path).")
@@ -469,17 +472,20 @@ def entry_state_dir(entry):
         return None
 
 
-def repair(state_dir, *, home=None, prefix=None, windows=None, log=lambda text: None, now=None):
+def repair(state_dir, *, home=None, prefix=None, windows=None, log=lambda text: None, now=None, problems=None):
     """Regenerate every RainCLI-owned hook entry in the Codex and Claude Code configs in the
     current form (§16.19 item 6). Only owned entries change; nothing is written when they
     already match; a backup comes first and the write is atomic. An agent without our hooks
     gets none. Returns ``{kind: [changed events]}`` and raises the one-time Codex notice in
-    ``state_dir`` when a Codex command changed."""
+    ``state_dir`` when a Codex command changed. Anything left not current is appended to
+    ``problems`` (review 1, R6)."""
     windows = os.name == "nt" if windows is None else windows
+    problems = [] if problems is None else problems
     try:
         prefix = prefix or launcher_prefix()[0]
     except ConfigError as exc:
         log(f"hooks: not repaired: {exc}")
+        problems.append("no stable raincli command")
         return {}
     if isinstance(prefix, tuple):
         prefix = prefix[0]
@@ -491,6 +497,7 @@ def repair(state_dir, *, home=None, prefix=None, windows=None, log=lambda text: 
             raw, data = load(path)
         except ConfigError as exc:
             log(f"hooks: {kind} config not repaired: {exc}")
+            problems.append(f"{kind} config unreadable")
             continue
         if raw is None:
             continue
@@ -511,6 +518,7 @@ def repair(state_dir, *, home=None, prefix=None, windows=None, log=lambda text: 
                                 fresh = handler(kind, event, prefix, entry_state_dir(entry) or state_dir, windows)
                             except ConfigError as exc:
                                 log(f"hooks: {kind} {event} not repaired: {exc}")
+                                problems.append(f"{kind} {event}")
                                 fresh = entry
                             if fresh != entry:
                                 events.append(event)
@@ -570,6 +578,10 @@ def repair_on_version_change(state_dir, version, log=lambda text: None, **kwargs
             return None
     except (OSError, ValueError, AttributeError):
         pass
-    result = repair(state_dir, log=log, **kwargs)
+    problems = []
+    result = repair(state_dir, log=log, problems=problems, **kwargs)
+    if problems:  # R6: tried again at the next start, until every owned entry is current
+        log("hooks: repair incomplete (" + ", ".join(problems) + "); it runs again at the next start")
+        return result
     atomic_write_bytes(str(marker), (json.dumps({"version": version}) + "\n").encode(), 0o600)
     return result

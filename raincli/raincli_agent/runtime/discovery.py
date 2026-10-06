@@ -211,7 +211,10 @@ def windows_scan(salt, claimed_pids, run=subprocess.run, table=None, same_user=N
         up, seen = parent, set()
         while up in table and up not in seen and len(seen) < 32:
             seen.add(up)
-            if procinfo.kind_of(table[up][0]) == kind or up in claimed_pids:
+            # An ancestor counts only when its image is of this kind (review 1, R1): the Claude
+            # desktop app is Claude.exe too, but its embedded Claude Code is a session of its own.
+            if up in claimed_pids or (procinfo.kind_of(table[up][0]) == kind
+                                      and procinfo.windows_kind(image(up)) == kind):
                 break
             up = table[up][1]
         else:

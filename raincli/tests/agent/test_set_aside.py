@@ -311,7 +311,7 @@ def test_stops_the_apps_own_runtime_first(account, home):
     runtime_lock = Queue(str(state))
     runtime_lock.acquire_run_lock()  # the app's own runtime
     calls = []
-    result = login.set_aside(str(agent(home)), migration=migration(home),
+    result = login.set_aside(str(agent(home)), migration=migration(home, own_runtime=str(cfg(home) / "runtime.json")),
                              stop_own=lambda: calls.append("pause") or runtime_lock.release_run_lock())
     assert calls == ["pause"] and Path(result["backup"]).is_dir()
 
@@ -470,3 +470,127 @@ def test_suggested_name_is_never_the_old_handle(monkeypatch):
     assert login.suggest_new_machine_name("someone-else") == "dylan-win"
     monkeypatch.setattr(login, "default_machine_name", lambda: "a" * 32)
     assert login.suggest_new_machine_name(None) == "a" * 30 + "-2"
+
+
+# -- review 1 ----------------------------------------------------------------------------------------
+
+def shared_runtime(account, home, tmp_path, inbox_name=None):
+    """A connector runtime serving this credential and another one (V2)."""
+    sign_in(account, home)
+    (cfg(home) / "runtime.json").unlink()
+    other = tmp_path / "other" / "agent.json"
+    other.parent.mkdir()
+    write_config(str(other), account.url, account.state.add_agent("other-box"))
+    mine = {"agent_config": str(agent(home)), "state_dir": str(tmp_path / "my-queue")}
+    mine.update({"inbox": {"hook": "claude", "name": inbox_name}} if inbox_name else {"herdr_agent": "a"})
+    (cfg(home) / "mine.json").write_text(json.dumps(mine))
+    (cfg(home) / "theirs.json").write_text(json.dumps({"agent_config": str(other), "herdr_agent": "b",
+                                                        "state_dir": str(tmp_path / "their-queue")}))
+    runtime = cfg(home) / "runtime.json"
+    runtime.write_text(json.dumps({"connectors": ["mine.json", "theirs.json"], "state_dir": "rs"}))
+    (cfg(home) / "rs").mkdir(mode=0o700)
+    return runtime
+
+
+def test_r2_a_running_shared_runtime_is_started_again(account, home, tmp_path):
+    runtime = shared_runtime(account, home, tmp_path)
+    state = Queue(str(cfg(home) / "rs"))
+    state.acquire_run_lock()  # the app's runtime runs it
+    calls = []
+    result = login.set_aside(str(agent(home)), migration=migration(home, own_runtime=str(runtime)),
+                             stop_own=lambda: calls.append("pause") or state.release_run_lock(),
+                             restart_own=lambda: calls.append("resume"))
+    assert calls == ["pause", "resume"] and result["restarted"] == {str(runtime): "restarted"}
+    assert json.loads(runtime.read_text())["connectors"] == ["theirs.json"]
+
+
+def test_r2_without_a_way_to_restart_the_command_is_returned(account, home, tmp_path):
+    runtime = shared_runtime(account, home, tmp_path)
+    state = Queue(str(cfg(home) / "rs"))
+    state.acquire_run_lock()
+    m = migration(home, own_runtime=str(runtime))
+    result = login.set_aside(str(agent(home)), migration=m, stop_own=state.release_run_lock)
+    assert result["restarted"] == {str(runtime): f"raincli runtime run --config {runtime}"}
+
+
+def test_r3_a_refusal_stops_nothing(account, home, tmp_path):
+    """A queue held by something that couldn't be started again (a foreground window): refuse
+    before stopping anything."""
+    runtime = shared_runtime(account, home, tmp_path)
+    window = Queue(str(tmp_path / "my-queue"))  # creates the queue directory
+    window.acquire_run_lock()
+    calls = []
+    try:
+        with pytest.raises(setaside.SetAsideRefused, match="Close the old RainCLI window"):
+            login.set_aside(str(agent(home)), migration=migration(home, own_runtime=str(runtime)),
+                            stop_own=lambda: calls.append("pause"), restart_own=lambda: calls.append("resume"),
+                            wait=0)
+    finally:
+        window.release_run_lock()
+    assert calls == [] and agent(home).exists()
+
+
+def test_r3_a_timeout_starts_again_what_was_stopped(account, home, tmp_path):
+    runtime = shared_runtime(account, home, tmp_path)
+    state = Queue(str(cfg(home) / "rs"))
+    state.acquire_run_lock()
+    calls = []
+    try:
+        with pytest.raises(setaside.SetAsideRefused):
+            login.set_aside(str(agent(home)), migration=migration(home, own_runtime=str(runtime)),
+                            stop_own=lambda: calls.append("pause"),  # but the runtime never lets go
+                            restart_own=lambda: calls.append("resume"), wait=0)
+    finally:
+        state.release_run_lock()
+    assert calls == ["pause", "resume"] and agent(home).exists()
+
+
+def test_r5_a_state_dir_on_another_volume_is_renamed_in_place(account, home):
+    import errno
+    sign_in(account, home)
+    state = cfg(home) / "runtime-state"
+    state.mkdir(mode=0o700, exist_ok=True)
+    (state / "machine-salt").write_text("salt")
+
+    def cross_volume(src, dst):
+        if Path(src) == state and Path(dst).parent.name.startswith("replaced-"):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        os.replace(src, dst)
+    result = login.set_aside(str(agent(home)), migration=migration(home), _replace=cross_volume)
+    [renamed] = result["renamed_in_place"]
+    assert renamed["from"] == str(state) and Path(renamed["to"]).name.startswith("runtime-state.replaced-")
+    assert (Path(renamed["to"]) / "machine-salt").read_text() == "salt" and not state.exists()
+    assert json.loads((Path(result["backup"]) / "set-aside.json").read_text())["renamed_in_place"] == [renamed]
+
+
+def test_r5_another_move_error_still_rolls_back(account, home):
+    sign_in(account, home)
+    before = files(cfg(home))
+
+    def broken(src, dst):
+        if Path(src).name == "runtime.json":
+            raise OSError(5, "I/O error")
+        os.replace(src, dst)
+    with pytest.raises(OSError, match="I/O error"):
+        login.set_aside(str(agent(home)), migration=migration(home), _replace=broken)
+    assert files(cfg(home)) == before
+
+
+def test_r7_a_rewrite_moves_the_removed_connectors_handover_boxes(account, home, tmp_path):
+    runtime = shared_runtime(account, home, tmp_path, inbox_name="old project")
+    state = cfg(home) / "rs"
+    sessions.ensure_salt(str(state))
+    sessions.sessions_dir(str(state), create=True)
+    key = sessions.agent_key(sessions.ensure_salt(str(state)), "claude:s1")
+    sessions.hand_over(str(state), key, "0b7f3c1e-2a4d-4c6e-9f10-1a2b3c4d5e6f", "old account's message")
+    sessions.hand_over(str(state), sessions.name_box("old project"), "1b7f3c1e-2a4d-4c6e-9f10-1a2b3c4d5e6f", "by name")
+    queue_dir = tmp_path / "my-queue" / "messages"
+    queue_dir.mkdir(parents=True)
+    (queue_dir / "0b7f3c1e-2a4d-4c6e-9f10-1a2b3c4d5e6f.json").write_text(json.dumps(
+        {"id": "0b7f3c1e-2a4d-4c6e-9f10-1a2b3c4d5e6f", "state": "handed_over", "handover_key": key}))
+    result = login.set_aside(str(agent(home)), migration=migration(home))
+    assert sessions.claim(str(state), key) == ([], [])
+    assert sessions.claim(str(state), sessions.name_box("old project")) == ([], [])
+    moved = {Path(m["from"]).name for m in result["moved"]}
+    assert key + ".inbox" in moved
+    assert json.loads(runtime.read_text())["connectors"] == ["theirs.json"]
