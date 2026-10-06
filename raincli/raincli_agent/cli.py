@@ -768,9 +768,32 @@ def cmd_login(args):
         out(f"wrote {result['runtime_config']} (machine mode: presence, version, the agent directory and "
             "delivery to your named agents; messages to the machine itself stay stored)")
         out(login.logon_start_hint(result["runtime_config"]))
+        print_hooks_hint(result["runtime_config"])
     else:
         out(f"kept {result['runtime_config']}: this machine's connector delivery continues unchanged")
     return EXIT_OK
+
+
+HOOK_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+
+
+def print_hooks_hint(runtime_config):
+    """§16.19 3: after sign-in, name each installed agent that isn't connected, with the command
+    that connects it. Hooks are never installed without the user's command. Best effort."""
+    from .runtime import hooks_install
+    for kind in ("claude", "codex"):
+        try:
+            state = hooks_install.status(kind, runtime_config)
+        except Exception:  # noqa: BLE001 - a hint never fails a sign-in
+            continue
+        if state != "not_connected":
+            continue
+        line = (f"{HOOK_NAMES[kind]} is installed here but not connected, so its sessions are only listed by type. "
+                f"To list them by name and let them receive messages: raincli hooks install --{kind} "
+                f"--config {runtime_config}")
+        if kind == "codex":
+            line += " (then approve the hooks once in Codex's /hooks and start a new session)"
+        out(line)
 
 
 def set_aside_for_new_machine(args):

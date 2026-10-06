@@ -276,12 +276,15 @@ def test_real_proc_scan_reads_only_this_user(state):
 
 def test_windows_scan_is_type_only(monkeypatch):
     monkeypatch.setenv("USERNAME", "me")
-    csv_out = '"claude.exe","4242","Console","1","100 K"\n"notepad.exe","7","Console","1","1 K"\n' \
-              '"codex.exe","99","Console","1","1 K"\n'
-    run = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, csv_out, "")
+    # The tasklist fallback (the Toolhelp table can't be read here): names only, so only the
+    # Codex release asset's distinctive name counts; claude.exe may be the desktop app (§16.19).
+    csv_out = ('"claude.exe","4242","Console","1","100 K"\n"notepad.exe","7","Console","1","1 K"\n'
+               '"codex.exe","98","Console","1","1 K"\n"codex-x86_64-pc-windows-msvc.exe","99","Console","1","1 K"\n'
+               '"codex-x86_64-pc-windows-msvc.exe","100","Console","1","1 K"\n').encode()
+    run = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, csv_out, b"")
     found = discovery.windows_scan(b"s" * 32, {99}, run=run)
     assert [(a["name"], a["type"], a["status"], a["source"]) for a in found] == [
-        ("claude", "claude", "unknown", "scan")]
+        ("codex", "codex", "unknown", "scan")]
     monkeypatch.delenv("USERNAME")
     assert discovery.windows_scan(b"s" * 32, set(), run=run) == []  # never other users' processes
 

@@ -237,6 +237,57 @@ def stale_credential_new_machine(root, server):
           "the old setup and its state aside and signed in as a new machine", flush=True)
 
 
+def windows_scan_stage():
+    """§16.19 2 on a real Windows process: the Toolhelp table, the full image path and the
+    token-SID owner check. A standalone system executable copied into Claude Code's native
+    layout is listed; the same copy under a Claude desktop app path is not; a SYSTEM process
+    fails the owner check."""
+    import shutil
+    from raincli_agent.runtime import discovery, procinfo
+    work = Path(tempfile.mkdtemp(prefix="rcs-"))
+    source = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "PING.EXE"
+    layouts = {"code": work / "home" / ".local" / "bin" / "claude.exe",
+               "desktop": work / "AppData" / "Local" / "AnthropicClaude" / "app-0.14.10" / "Claude.exe",
+               "codex": work / "tools" / "codex-x86_64-pc-windows-msvc.exe"}
+    processes = {}
+    try:
+        for name, path in layouts.items():
+            path.parent.mkdir(parents=True)
+            shutil.copyfile(source, path)
+            processes[name] = subprocess.Popen([str(path), "-n", "120", "127.0.0.1"], stdout=subprocess.DEVNULL,
+                                               stderr=subprocess.DEVNULL, creationflags=0x08000000)
+        time.sleep(1.5)
+        assert all(p.poll() is None for p in processes.values()), "a copied process exited early"
+        same_user = procinfo.owner_check()
+        table = procinfo.process_table()
+        for name, proc in processes.items():
+            assert proc.pid in table, name
+            assert same_user(proc.pid), f"{name}: not recognised as this user's process"
+            image = procinfo.image_path(proc.pid)
+            same = os.path.normcase(os.path.realpath(image or "")) == os.path.normcase(os.path.realpath(layouts[name]))
+            assert same, (name, image)  # compared resolved: the temp directory may be an 8.3 short path
+        assert procinfo.windows_kind(procinfo.image_path(processes["code"].pid)) == "claude"
+        assert procinfo.windows_kind(procinfo.image_path(processes["desktop"].pid)) is None
+        assert procinfo.windows_kind(procinfo.image_path(processes["codex"].pid)) == "codex"
+        system = [pid for pid, (exe, _) in table.items() if exe in ("lsass", "services", "wininit")]
+        assert system and not any(same_user(pid) for pid in system), "a SYSTEM process passed the owner check"
+        ours = {p.pid for p in processes.values()}
+        found = discovery.windows_scan(b"s" * 32, set())
+        claimed = set(table) - ours  # only ours count below
+        mine = discovery.windows_scan(b"s" * 32, claimed)
+        assert sorted(a["type"] for a in mine) == ["claude", "codex"], mine
+        assert len(found) >= 2
+        print("PASS: Windows scan: Toolhelp table, full image path and token-SID owner on real processes; the "
+              "Claude Code layout and the Codex release asset listed, a Claude desktop path not; SYSTEM refused",
+              flush=True)
+    finally:
+        for proc in processes.values():
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def herdr_stage(server):
     """Real Herdr delivery (Phase 2): see scripts/herdr_smoke.py."""
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -259,6 +310,8 @@ def person_stage():
 
 
 def main():
+    if os.name == "nt":
+        windows_scan_stage()
     if "--person-only" in sys.argv[1:]:
         person_stage()
         return

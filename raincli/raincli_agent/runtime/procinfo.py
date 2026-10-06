@@ -42,6 +42,40 @@ def exe_name(path):
     return name
 
 
+import re as _re
+
+# §16.19 item 2 (added): on Windows an agent is recognised by its full image path, never by its
+# name alone, because the Claude desktop app's executable is also Claude.exe. The layouts are
+# the verified ones recorded in docs/windows-client.md ("Which processes are listed"). Paths are
+# compared lowercased with "/" separators.
+_IGNORED_ROOTS = ("/anthropicclaude/", "/windowsapps/")  # the desktop apps and Store packages
+_CLAUDE_CODE = (
+    _re.compile(r"/\.local/bin/claude\.exe$"),  # the native installer's launcher
+    _re.compile(r"/claude/versions/[^/]+(/claude\.exe)?$"),  # its versioned binaries
+    _re.compile(r"/node_modules/@anthropic-ai/claude-code/bin/claude\.exe$"),  # npm: the linked native binary
+    _re.compile(r"/node_modules/@anthropic-ai/claude-code-win32-[a-z0-9]+/claude\.exe$"),
+)
+_CODEX = (
+    _re.compile(r"/node_modules/@openai/codex[^/]*/vendor/[^/]+/bin/codex\.exe$"),  # npm
+    _re.compile(r"/microsoft/winget/(packages/openai\.codex[^/]*|links)/codex[^/]*\.exe$"),  # winget
+    _re.compile(r"/codex-(x86_64|aarch64)-pc-windows-msvc\.exe$"),  # the release asset, kept as shipped
+)
+
+
+def windows_kind(path):
+    """``claude``, ``codex`` or None for a Windows full image path (§16.19 item 2, added)."""
+    if not path:
+        return None
+    norm = path.replace("\\", "/").lower()
+    if any(root in norm for root in _IGNORED_ROOTS) or plain(norm) in CODEX_HELPERS:
+        return None
+    if any(p.search(norm) for p in _CLAUDE_CODE):
+        return "claude"
+    if any(p.search(norm) for p in _CODEX):
+        return "codex"
+    return None
+
+
 def kind_of(exe, comm=""):
     """The agent type of a process from its executable name or its comm, else None."""
     return TYPES_BY_NAME.get(exe_name(exe)) or TYPES_BY_NAME.get(plain(comm))
@@ -161,6 +195,25 @@ def windows_snapshot():
 def process_table():
     """{pid: (exe name, parent pid)} from one Toolhelp snapshot (§16.19 2). Windows only."""
     return windows_snapshot()
+
+
+def image_path(pid):
+    """The process's full image path (``QueryFullProcessImageNameW``), or None. Never the
+    command line (§14.7 M5)."""
+    c, w, k, _ = _windows()
+    k.QueryFullProcessImageNameW.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD)]
+    k.QueryFullProcessImageNameW.restype = w.BOOL
+    handle = k.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        size = w.DWORD(32768)
+        buffer = c.create_unicode_buffer(size.value)
+        if not k.QueryFullProcessImageNameW(handle, 0, buffer, c.byref(size)):
+            return None
+        return buffer.value
+    finally:
+        k.CloseHandle(handle)
 
 
 def _advapi():

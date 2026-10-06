@@ -8,6 +8,7 @@ directory's basename may become a name.
 import csv
 import io
 import os
+import re
 import subprocess
 import sys
 
@@ -185,18 +186,22 @@ def linux_scan(salt, claimed_pids, herdr_ok, processes=None, cwd_name=_cwd_name,
     return out
 
 
-WINDOWS_KINDS = ("codex", "claude")  # codex.exe, codex-*.exe, claude.exe (§16.19 2); node.exe never
+WINDOWS_KINDS = ("codex", "claude")
+RELEASE_CODEX = re.compile(r"codex-(x86_64|aarch64)-pc-windows-msvc\.exe")  # codex.exe, codex-*.exe, claude.exe (§16.19 2); node.exe never
 
 
-def windows_scan(salt, claimed_pids, run=subprocess.run, table=None, same_user=None):
-    """Type-only: this user's Codex and Claude Code processes, from the Toolhelp table with
-    each candidate's owner checked by token SID (§16.19 2). A process whose ancestor is of
-    the same type is part of it. ``tasklist`` is the fallback when the table can't be read."""
+def windows_scan(salt, claimed_pids, run=subprocess.run, table=None, same_user=None, image=None):
+    """Type-only: this user's Codex and Claude Code processes (§16.19 2), from the Toolhelp
+    table with each candidate's owner checked by token SID, and classified by its full image
+    path, never by its name alone, so the Claude desktop app and its helpers are never listed.
+    A process whose ancestor is of the same type is part of it. ``tasklist`` is the fallback
+    when the table can't be read."""
     try:
         table = procinfo.process_table() if table is None else table
         same_user = procinfo.owner_check() if same_user is None else same_user
     except (OSError, AttributeError, ValueError):
         return tasklist_scan(salt, claimed_pids, run)
+    image = image or procinfo.image_path
     out = []
     for pid in sorted(table):
         exe, parent = table[pid][:2]
@@ -210,7 +215,7 @@ def windows_scan(salt, claimed_pids, run=subprocess.run, table=None, same_user=N
                 break
             up = table[up][1]
         else:
-            if same_user(pid):
+            if procinfo.windows_kind(image(pid)) == kind and same_user(pid):
                 out.append(entry(salt, f"scan:{kind}:{pid}", kind, kind, "unknown", "scan"))
     return out
 
@@ -237,9 +242,11 @@ def tasklist_scan(salt, claimed_pids, run=subprocess.run):
     for row in rows:
         if len(row) < 2 or not row[1].isdigit():
             continue
-        kind = procinfo.kind_of(row[0])
+        # A name alone never identifies Claude Code (the desktop app is Claude.exe too); only the
+        # Codex release asset's distinctive name does.
+        kind = "codex" if RELEASE_CODEX.fullmatch(row[0].lower()) else None
         pid = int(row[1])
-        if kind in WINDOWS_KINDS and pid not in claimed_pids:
+        if kind and pid not in claimed_pids:
             out.append(entry(salt, f"scan:{kind}:{pid}", kind, kind, "unknown", "scan"))
     return out
 
@@ -343,8 +350,9 @@ def discover(state_dir, salt, herdr, inbox, now=None, include_scan=True, log=_ru
     hooked, scanned = without_duplicates(hooked, scanned, herdr_ok, processes, inbox)
     for h in hooked:
         h.pop("_pid", None)  # local only: never reported
-    if failed and len(failed) == attempted:
-        _log_once(log, "every", RuntimeError("all sources failed: " + ", ".join(failed)))
+    if failed and len(failed) == attempted and ("every", tuple(failed)) not in _LOGGED:
+        _LOGGED.add(("every", tuple(failed)))
+        log(f"agent discovery: every source failed ({', '.join(failed)}); reporting an empty directory")
     return normalize(with_reachability(herdr_found + hooked + scanned))
 
 
