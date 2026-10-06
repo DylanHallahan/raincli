@@ -139,7 +139,8 @@ class Tray:
         self.host = LockedHost(winapp.AppHost(root_dir, __version__, self.runtime_config,
                                               log_path=self.state_dir / "runtime.log"))
         self.start_hidden = background
-        self.services = Services(root_dir, self.host, paths=lambda: (self.agent_config, self.runtime_config))
+        self.services = Services(root_dir, self.host, paths=lambda: (self.agent_config, self.runtime_config),
+                                 log=(lambda text: winapp.app_log(root_dir, text)) if root_dir else None)
         self.webview = webview
         self.window = AppWindow(self.services, profile_dir=self.state_dir / "webview", webview=webview,
                                 browser_open=webbrowser.open, confirm=self.confirm,

@@ -393,3 +393,22 @@ def test_a_refused_set_aside_is_shown_and_the_offer_stays(setup, monkeypatch):
     assert result["ok"] is False and result["code"] == "set_aside_refused"
     assert "close the old RainCLI window" in result["message"] and result["offer_new_machine"]
     assert setup.agent.exists() and setup.calls["login"] == []  # nothing changed
+
+
+def test_a_status_check_that_never_answers_reads_unknown_and_is_logged(setup, monkeypatch):
+    import threading
+    logged, release = [], threading.Event()
+
+    class Slow(FakeHooks):
+        def status(self, kind, runtime_config):
+            if kind == "codex":
+                release.wait(5)  # a probe that doesn't answer
+            return super().status(kind, runtime_config)
+    monkeypatch.setattr(services_mod, "_hooks", lambda: Slow({"codex": "not_connected", "claude": "connected"}))
+    setup.svc._log = logged.append
+    try:
+        assert setup.svc.hooks(timeout=0.3) == [{"kind": "codex", "name": "Codex", "state": "unknown"},
+                                                {"kind": "claude", "name": "Claude Code", "state": "connected"}]
+    finally:
+        release.set()
+    assert "hooks status codex: no answer within 0s" in logged and any("claude: connected" in t for t in logged)

@@ -50,9 +50,10 @@ def _person():
 
 
 class Services:
-    def __init__(self, root, host, *, paths, open_file=None):
+    def __init__(self, root, host, *, paths, open_file=None, log=None):
         self.root = root
         self.host = host
+        self._log = log or (lambda text: None)  # app-lock\\app.log: outcomes only, never data
         self._paths = paths  # () -> (agent_config, runtime_config), from app.json or the defaults
         self._open_file = open_file or getattr(os, "startfile", None)
 
@@ -289,15 +290,34 @@ class Services:
 
     # -- coding agents' hooks (§16.19 item 3): only on the user's click --------------------------------------
 
-    def hooks(self):
-        """``[{kind, name, state}]`` for Codex and Claude Code, from ``hooks_install.status``. A failure reads
-        as ``unknown`` for that agent only."""
+    def hooks(self, timeout=20.0):
+        """``[{kind, name, state}]`` for Codex and Claude Code, from ``hooks_install.status``. Each check is
+        bounded (``timeout`` seconds, run in parallel): one that fails or doesn't answer reads as ``unknown``
+        for that agent only, so This computer never waits forever. Outcomes are logged without data."""
+        import threading
+        import time as _time
+        results = {}
+
+        def check(kind):
+            started = _time.monotonic()
+            try:
+                results[kind] = _hooks().status(kind, self.runtime_config)
+            except Exception as exc:  # noqa: BLE001 - one agent's failure never hides the other
+                results[kind] = "unknown"
+                self._log(f"hooks status {kind}: {type(exc).__name__}")
+                return
+            self._log(f"hooks status {kind}: {results[kind]} in {_time.monotonic() - started:.1f}s")
+
+        threads = {kind: threading.Thread(target=check, args=(kind,), daemon=True) for kind in HOOK_AGENTS}
+        for thread in threads.values():
+            thread.start()
+        deadline = _time.monotonic() + timeout
         out = []
         for kind, name in HOOK_AGENTS.items():
-            try:
-                state = _hooks().status(kind, self.runtime_config)
-            except Exception:  # noqa: BLE001 - one agent's failure never hides the other
-                state = "unknown"
+            threads[kind].join(max(0.0, deadline - _time.monotonic()))
+            if threads[kind].is_alive():
+                self._log(f"hooks status {kind}: no answer within {timeout:.0f}s")
+            state = results.get(kind, "unknown")
             out.append({"kind": kind, "name": name, "state": state if state in HOOK_STATES else "unknown"})
         return out
 
