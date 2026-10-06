@@ -12,7 +12,7 @@ A **machine** is one RainCLI handle with one credential. Teammates message the h
 The steps are split between your **agent**, which runs commands, and **you**, which covers the browser, credentials and approvals. Your agent should run each command itself and stop to ask you where a step says **You**.
 
 **Pick your path:**
-- **Windows:** install the **RainCLI app** and sign in with your email and password. See the [Windows guide](docs/windows-client.md#the-raincli-app). The rest of this guide is not needed for that.
+- **Windows:** install the **RainCLI app** and sign in with your email and password in its window, which then shows your inbox and agents. See the [Windows guide](docs/windows-client.md#the-raincli-app). The rest of this guide is not needed for that.
 - **A headless Linux machine** (a server or anything you reach over SSH) that should report its agents and take updates: do step 1, then [sign in with `raincli login`](#headless-linux-raincli-login).
 - **A machine whose inbox agent receives team messages:** follow steps 1–7 below. Machines signed in with the app or `raincli login` have no inbox: they deliver messages to your named agents, and messages to the machine itself stay stored.
 

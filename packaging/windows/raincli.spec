@@ -32,7 +32,7 @@ def analysis(script, excludes=(), hidden=(), datas=()):
 # (pyinstaller-hooks-contrib collects pywebview's scripts and WebView2 loader). No tkinter (§16.10).
 app = analysis("entry_app.py", excludes=["tkinter", "_tkinter"], datas=LOCAL_PAGES,
                hidden=["raincli_agent.app.tray", "raincli_agent.app.window", "raincli_agent.app.services",
-                       "raincli_agent.app.policy", "pystray", "pystray._win32", "PIL.Image", "PIL.ImageDraw",
+                       "raincli_agent.app.policy", "raincli_agent.app.shortcut", "pystray", "pystray._win32", "PIL.Image", "PIL.ImageDraw",
                        "webview", "webview.platforms.winforms", "webview.platforms.edgechromium"])
 cli = analysis("entry_cli.py", excludes=GUI + ["tkinter", "_tkinter"])
 stub = analysis("entry_stub.py", excludes=GUI + ["tkinter", "_tkinter"])

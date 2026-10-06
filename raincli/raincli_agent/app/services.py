@@ -2,8 +2,8 @@
 business logic of its own and the CLI and the app share every behaviour.
 
 Nothing here returns a credential: results are status, names and messages for the page.
-The person session (``person.json``) and the notification queue are the client's (§16.3, §16.10);
-``_person`` is the single seam to them.
+The person session (``person.json``), the app install token and the notification queue are the
+client's (``raincli_agent.person``; §16.3, §16.10, §16.14 S3, §16.15).
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class ServiceError(RainError):
 
 
 def _person():
-    from .. import person  # the client's person-session store and API (§16.3)
+    from .. import person  # the client's person-session store, install token and API
     return person
 
 
@@ -73,7 +73,7 @@ class Services:
         if not isinstance(password, Secret):
             raise TypeError("the password must be a Secret")
         if self.signed_in() and not again:
-            _person().add_session(self.agent_config, email, password)
+            _person().add_session(self.agent_config, email, password)  # person_only: no rotation (§16.3)
             return {"handle": login.describe(self.agent_config)[1]}
         if again:
             self.host.pause()  # the runtime would otherwise publish with a credential being replaced
@@ -113,13 +113,12 @@ class Services:
     def handoff_url(self, path=None):
         """A single-use handoff URL for this person session (§16.10), bound to this app install by
         ``sha256(app_install_token)`` (§16.14 S3)."""
-        import hashlib
-        token = _person().load_session(self.agent_config)
-        install = self.app_install_token()
-        if token is None or not install:
+        person = _person()
+        if person.load_session(self.agent_config) is None:
             raise ServiceError("this computer has no person session; sign in again")
-        body = {"app_install_hash": hashlib.sha256(install.encode("ascii")).hexdigest()}
-        return self._client(token=token).request("POST", "/app/handoff", body=body)["url"]
+        _token, install_hash = person.app_install(self.agent_config)
+        client = person.PersonClient.for_config(self.agent_config, timeout=15, max_attempts=1)
+        return client.api.request("POST", "/app/handoff", body={"app_install_hash": install_hash})[1]["url"]
 
     def service_url(self):
         return self._config().api_url
@@ -127,8 +126,7 @@ class Services:
     def message_summary(self, message_id):
         """``{kind, sender, conversation_id}`` for a toast, from the person API. Never the body (§16.12 C14)."""
         from .policy import toast_sender
-        token = _person().load_session(self.agent_config)
-        message = self._client(token=token).request("GET", f"/person/messages/{message_id}")["message"]
+        message = _person().PersonClient.for_config(self.agent_config, timeout=10, max_attempts=1).message(message_id)
         return {"kind": message.get("kind") or "message", "sender": toast_sender(message),
                 "conversation_id": message.get("conversation_id")}
 
@@ -170,7 +168,7 @@ class Services:
         trust = _trust_settings(self.runtime_config)
         routing = None
         try:
-            routing = self._client(timeout=8).request("GET", "/routing")["routing"]
+            routing = self._client(timeout=8).request("GET", "/routing")[1]["routing"]
         except Exception:  # noqa: BLE001
             pass
         return {"routing": routing, "update_mode": winapp.update_mode(self.root) if self.root else None, **trust}

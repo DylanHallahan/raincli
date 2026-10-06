@@ -20,6 +20,7 @@ import os
 import shutil
 import socket
 import threading
+import time
 from pathlib import Path
 
 from ..config import Secret
@@ -79,6 +80,23 @@ def mark_profile_for_reset(profile_dir):
     marker = Path(profile_dir).parent / PROFILE_RESET_MARKER
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("1")
+
+
+def _navigation_id(args):
+    try:
+        return int(args.NavigationId)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _loggable(url):
+    """Origin and path only: never a query (the handoff code) or a fragment."""
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(url or "")
+        return f"{parts.scheme}://{parts.netloc}{parts.path}" if parts.scheme else "(none)"
+    except ValueError:
+        return "(unparsable)"
 
 
 def _in_thread(fn, *args):
@@ -149,8 +167,12 @@ class AppWindow:
     """The window's behaviour, independent of pywebview (``webview`` is injected) so it is unit-tested."""
 
     def __init__(self, services, *, profile_dir, webview=None, browser_open=None, confirm=None,
-                 local_port=None, timer=threading.Timer, later=_in_thread):
+                 local_port=None, timer=threading.Timer, later=_in_thread, log=None):
         self.services = services
+        self._log = log or (lambda text: None)  # app-lock\\app.log: origins and paths only, never a query
+        self._cancelled = set()  # NavigationIds this window cancelled (sentinel, other origins)
+        self._timer_lock = threading.Lock()  # arm and disarm run on the UI thread and js_api threads
+        self._loads = 0  # successful page loads so far; a timeout armed before one of them is moot
         self.profile_dir = Path(profile_dir)
         self._webview = webview
         self._browser_open = browser_open
@@ -168,6 +190,7 @@ class AppWindow:
         self.quitting = False
         self.install_token = None  # §16.14 S3: sent as "RainCLIApp/<token>" to the service origin only
         self._ua_base = None
+        self._core = None
         self.api = Api(self)
 
     # -- set-up ---------------------------------------------------------------------------------------
@@ -226,27 +249,52 @@ class AppWindow:
         except AttributeError:
             return False
         control.NavigationStarting += lambda sender, args: self._native_starting(args)
-        control.NavigationCompleted += lambda sender, args: self.on_navigation_completed(
-            bool(args.IsSuccess), int(getattr(args, "HttpStatusCode", 0) or 0))
+        control.NavigationCompleted += lambda sender, args: self._native_completed(args, sender)
         control.CoreWebView2InitializationCompleted += lambda sender, args: self._core_ready(sender.CoreWebView2)
         return True
 
-    def _core_ready(self, core):
-        """WebView2 is up (UI thread): add the install token to its User-Agent, and keep every request to
-        the service origin on the current token, which sign-in and sign-out rotate."""
+    def _core_ready(self, core, context_all=None):
+        """WebView2 is up (UI thread). The token never goes into the global User-Agent (§16.14 S3, review
+        4 A2): our own request filter for the service origin, and a hook that adds the CURRENT token to
+        requests for exactly that origin, so sign-in and sign-out rotations apply at once."""
+        if context_all is None:
+            from Microsoft.Web.WebView2.Core import CoreWebView2WebResourceContext
+            context_all = CoreWebView2WebResourceContext.All
+        self._core, self._context_all, self._filtered = core, context_all, set()
         self._ua_base = str(core.Settings.UserAgent)
-        core.Settings.UserAgent = self.user_agent(self._ua_base)
+        self._ensure_filter()
         core.WebResourceRequested += lambda sender, args: self._native_request(args.Request)
 
+    def _ensure_filter(self):
+        """UI thread only (core ready, or NavigationStarting): filter the current service origin."""
+        if getattr(self, "_core", None) is None:
+            return
+        base = self.service_base()
+        if policy.origin(base) is not None and base not in self._filtered:
+            self._core.AddWebResourceRequestedFilter(base + "/*", self._context_all)
+            self._filtered.add(base)
+
     def _native_request(self, request):
-        if self._ua_base is None or self.navigation is None:
+        if self._ua_base is None or not self.install_token:
             return
         if policy.same_origin(str(request.Uri), self.service_url()):
             request.Headers.SetHeader("User-Agent", self.user_agent(self._ua_base))
 
     def _native_starting(self, args):
+        self._ensure_filter()  # the service origin can change at sign-in
         if self.before_navigate(str(args.Uri)):
+            self._cancelled.add(_navigation_id(args))
             args.Cancel = True
+
+    def _native_completed(self, args, sender=None):
+        cancelled = _navigation_id(args) in self._cancelled
+        self._cancelled.discard(_navigation_id(args))
+        status = str(getattr(args, "WebErrorStatus", "") or "")
+        # The control's own Source: window.get_current_url() can't answer on this (the UI) thread.
+        source = getattr(sender, "Source", None) if sender is not None else None
+        self.on_navigation_completed(bool(args.IsSuccess), int(getattr(args, "HttpStatusCode", 0) or 0),
+                                     cancelled=cancelled or status.endswith("OperationCanceled"), status=status,
+                                     url=str(source) if source is not None else None)
 
     # -- navigation -----------------------------------------------------------------------------------------
 
@@ -265,6 +313,7 @@ class AppWindow:
                 self._arm_timeout()
             return False
         if decision == "local":
+            self._log(f"sentinel {_loggable(url)} -> local page {target}")
             self._later(self.load, self.local_url(target))
         elif decision == "external" and self._browser_open is not None:
             self._later(self._browser_open, url)
@@ -273,7 +322,7 @@ class AppWindow:
     def on_loaded(self):
         """A new nonce per load; only the local origin receives it (C4). A page from anywhere else that
         slipped past ``before_navigate`` is replaced at once."""
-        self._disarm_timeout()
+        self._loaded_ok()
         url = self.current_url() or ""
         nonce = self.gate.on_loaded(url)  # every load retires the previous nonce
         decision, target = self.navigation.decide(url)
@@ -299,26 +348,56 @@ class AppWindow:
             self.window.evaluate_js(
                 f"window.__rcNonce = {json.dumps(nonce)}; window.dispatchEvent(new Event('rc-nonce'));")
 
-    def on_navigation_completed(self, success, http_status=0):
+    def on_navigation_completed(self, success, http_status=0, *, cancelled=False, status="", url=None):
         """A network failure shows the offline page. An HTTP error page is the service's own answer
-        (for example "Open on the website"), so it stays."""
+        (for example "Open on the website"), so it stays. A navigation this window cancelled (the
+        /app/local sentinel, another origin) or one replaced by a newer load (OperationCanceled) is not a
+        failure: WebView2 still reports it as unsuccessful, and treating it as offline would replace the
+        page the app is loading instead."""
+        url = url if url is not None else (self.current_url() or "")
+        self._log(f"load {'ok' if success else 'failed'} {_loggable(url)}"
+                  + (f" http {http_status}" if http_status else "") + (f" ({status})" if status and not success else "")
+                  + (" cancelled by the app" if cancelled else ""))
+        if cancelled:
+            return
+        if success or http_status:
+            self._loaded_ok()
+            return
         self._disarm_timeout()
-        url = self.current_url() or ""
-        if not success and not http_status and not self.navigation.is_local(url):
+        if not self.navigation.is_local(url):
             self.show_offline()
 
     def _arm_timeout(self):
-        self._disarm_timeout()
-        self.load_timer = self._timer(LOAD_TIMEOUT, self.show_offline)
-        self.load_timer.daemon = True
-        self.load_timer.start()
+        with self._timer_lock:
+            if self.load_timer is not None:
+                self.load_timer.cancel()
+            armed_at = self._loads
+            self.load_timer = self._timer(LOAD_TIMEOUT, lambda: self._timed_out(armed_at))
+            self.load_timer.daemon = True
+            self.load_timer.start()
 
     def _disarm_timeout(self):
-        if self.load_timer is not None:
-            self.load_timer.cancel()
-            self.load_timer = None
+        with self._timer_lock:
+            if self.load_timer is not None:
+                self.load_timer.cancel()
+                self.load_timer = None
+
+    def _loaded_ok(self):
+        with self._timer_lock:
+            self._loads += 1
+        self._disarm_timeout()
+
+    def _timed_out(self, armed_at):
+        """The 20 s load timeout: offline only when no page has loaded since it was armed."""
+        with self._timer_lock:
+            moot = self._loads > armed_at
+        if moot:
+            return
+        self._log("load timed out")
+        self.show_offline()
 
     def show_offline(self):
+        self._log("offline page shown")
         self.load(self.local_url("offline"))
 
     def load(self, url):

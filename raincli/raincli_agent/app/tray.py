@@ -131,9 +131,11 @@ class Tray:
         self.services = Services(root_dir, self.host, paths=lambda: (self.agent_config, self.runtime_config))
         self.webview = webview
         self.window = AppWindow(self.services, profile_dir=self.state_dir / "webview", webview=webview,
-                                browser_open=webbrowser.open, confirm=self.confirm)
+                                browser_open=webbrowser.open, confirm=self.confirm,
+                                log=(lambda text: winapp.app_log(root_dir, text)) if root_dir else None)
         self.calls = queue.Queue()
         self.stopping = threading.Event()
+        self._started = threading.Event()
         self.exit_code = 0
         self.migrating = False
         self.icon = None
@@ -173,7 +175,7 @@ class Tray:
             tick += 1
             if self.root_dir is not None and winapp.quit_requested(self.root_dir):
                 return self.quit(0)  # RainCLI.exe --quit (the uninstaller)
-            if self.root_dir is not None and winapp.take_open_request(self.root_dir):
+            if self.root_dir is not None and winapp.take_show_request(self.root_dir):
                 self.post(self.window.show)  # a second launch: focus this window
             if tick % STEP_EVERY:
                 continue
@@ -378,21 +380,34 @@ class Tray:
         self.icon = pystray.Icon(TITLE, icon_image("offline"), f"{TITLE}: offline", self.menu())
         hook_toast_click(self.icon, self.toast_clicked)
         self.icon.run_detached()
-        if isinstance(self.window, NoWindow):
+        if not isinstance(self.window, NoWindow):
+            try:
+                self.window.create()
+                self.window.start(self.started)  # blocks on this (the main) thread until the window is destroyed
+            except Exception as exc:  # noqa: BLE001 - the window failed: delivery must go on without it
+                if self.root_dir is not None:
+                    winapp.app_log(self.root_dir, f"the window could not start ({type(exc).__name__}); "
+                                                  "running in the tray only")
+                if self._started.is_set():
+                    self.stopping.wait()
+                else:
+                    self.window = NoWindow(self)
+        if isinstance(self.window, NoWindow) and not self._started.is_set():
             self.started()  # no GUI loop: the supervisor runs here until Quit
-        else:
-            self.window.create()
-            self.window.start(self.started)  # blocks on this (the main) thread until the window is destroyed
         self.stopping.set()
         if self.icon is not None:
             self.icon.stop()
         return self.exit_code
 
     def started(self):
-        """pywebview's GUI loop is running (this is its worker thread)."""
+        """pywebview's GUI loop is running (this is its worker thread), or the tray runs without a window."""
+        self._started.set()
         threading.Thread(target=self.pump, daemon=True).start()
+        if self.root_dir is not None:  # §16.15: a v0.4 stub can't take the shortcut's empty arguments
+            from .shortcut import fix_v04_shortcut
+            threading.Thread(target=fix_v04_shortcut, args=(self.root_dir,), daemon=True).start()
         self.window.home()
-        opened = self.root_dir is not None and winapp.take_open_request(self.root_dir)
+        opened = self.root_dir is not None and winapp.take_show_request(self.root_dir)
         if opened or not self.start_hidden or not self.signed_in() or not self.services.has_person_session():
             self.post(self.window.show)
         self.post(self.first_run)

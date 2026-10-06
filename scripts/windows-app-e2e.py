@@ -2,9 +2,10 @@
 
 Runs ONLY on a disposable GitHub-hosted Actions Windows runner (it edits the runner's hosts
 file, LocalMachine Root store, HKCU Run value and user PATH, and installs into its profile). It
-takes two installers built from the same source as 0.4.0 and 0.4.1 by
-packaging/windows/build.py, builds a third, 0.4.2, from a staging copy whose tray exits 1, and
-checks (protocol §15, §15.8, §15.9):
+takes two installers built from the same source as 0.5.0 and 0.5.1 by
+packaging/windows/build.py, builds a third, 0.5.2, from a staging copy whose tray exits 1, and
+checks (protocol §15, §15.8, §15.9). The test versions are 0.5.x: a runtime whose connector has polled
+with routing=1 refuses targets below v0.5.0 (§16.12 C1):
 
 A. A fresh app install, signed in from the CLI:
    1. a silent per-user install with no admin: the layout, install.json, the HKCU Run value and
@@ -12,13 +13,13 @@ A. A fresh app install, signed in from the CLI:
    2. `RainCLI.exe --quit` stops the installer-started app (exit 0, nothing left running), then
       sign-in through the installed CLI's `raincli login`, with the password typed into a ConPTY
       prompt, never argv or the environment; DPAPI credential, machine-mode runtime config;
-   3. launching exactly what the Run value names; presence reports 0.4.0, automatic, current;
-   4. a pushed upgrade to 0.4.1 through the installer-asset path (API asset URL, exact download
+   3. launching exactly what the Run value names; presence reports 0.5.0, automatic, current;
+   4. a pushed upgrade to 0.5.1 through the installer-asset path (API asset URL, exact download
       hosts), /UPDATE changing neither the Run value nor the uninstall key, install.json swapped,
-      the tray relaunched from versions\0.4.1;
-   5. a pushed 0.4.2 whose tray exits 1: the stub's probation rolls back, `rolled_back` is
-      reported and 0.4.1 runs again;
-   6. the downgrade to 0.4.0 refused, then allowed with --allow-downgrade;
+      the tray relaunched from versions\0.5.1;
+   5. a pushed 0.5.2 whose tray exits 1: the stub's probation rolls back, `rolled_back` is
+      reported and 0.5.1 runs again;
+   6. the downgrade to 0.5.0 refused, then allowed with --allow-downgrade;
    7. an uninstall that signs out (/SIGNOUT=yes): the machine is revoked and M10's removals hold.
 B. Migration of an old pip-installed client (0.2.0 from its release archive) running as a
    foreground `raincli connector run` with no runtime.json, no agent_config and a relative
@@ -31,11 +32,22 @@ C. Migration of a managed v0.3.2 install in the documented layout: the credentia
    running exactly its Run value. The installer records that value, the app's stop request stops
    the launcher, the Run value then starts the stub, and delivery continues on the same handle.
 
+D. The app window (protocol §16.10, §16.14, §16.15; design §10 GUI coverage), on a fresh install of
+   this ref's build, signed in from the CLI: install.json has "stub": 2 and an install_stamp and the Start
+   menu shortcut has no arguments; without WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS no WebView2 process
+   listens on a port, carries a debugging switch or writes DevToolsActivePort; an install without "stub"
+   has its shortcut pointed at --background. Then `RainCLI.exe --open` with that variable set for this
+   launch only: Playwright connects over CDP and drives the window's local sign-in (a person session),
+   the handoff to the inbox, reading, replying and sending, This computer and Settings, the offline
+   page and Retry (the server stopped and started), and sign-out (the machine revoked, the profile
+   marked for reset). A full install afterwards restores the no-argument shortcut. Screenshots go to
+   build/e2e-artifacts. Skipped with --real (the published v0.4 installers have no window).
+
 Release traffic goes to the REAL hostnames (api.github.com, github.com,
 objects.githubusercontent.com, release-assets.githubusercontent.com): a hosts-file entry points
 them at 127.0.0.1:443, where a fake release endpoint serves a certificate from a test root CA
 added to the runner's LocalMachine Root store (§15.8 M11). The shipped client has no override, and
-the 0.4.2 rollback build is patched only in this job's staging copy.
+the 0.5.2 rollback build is patched only in this job's staging copy.
 Every credential is generated here and never printed. See docs/release-testing.md.
 
 With ``--real FROM TO`` (for example ``--real v0.4.0 v0.4.1``) it skips the fake endpoint, the
@@ -76,7 +88,7 @@ Failure, SECRETS, say, wait_for, tail = (release_e2e.Failure, release_e2e.SECRET
 TEAM, EMAIL = "app-e2e", "app-e2e@example.invalid"
 MACHINE, OBSERVER, OLD_MACHINE, MANAGED_MACHINE = "e2e-app-machine", "e2e-observer", "e2e-pip-machine", \
     "e2e-managed-machine"
-OLD, NEW, BROKEN = "0.4.0", "0.4.1", "0.4.2"
+OLD, NEW, BROKEN = "0.5.0", "0.5.1", "0.5.2"  # §16.12 C1: never below v0.5.0
 OLD_PIP, OLD_MANAGED = "v0.2.0", "v0.3.2"
 HOSTS = ("api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
 HOSTS_FILE = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "drivers" / "etc" / "hosts"
@@ -466,6 +478,328 @@ def send(server, token, to, body):
     return message_id
 
 
+# -- the app window (part D) ------------------------------------------------------------------
+
+ARTIFACTS = ROOT / "build" / "e2e-artifacts"
+WINDOW_MACHINE = "e2e-window-machine"
+
+
+def powershell(script, env=None):
+    return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True,
+                          text=True, timeout=120, env=env).stdout
+
+
+def webview_processes(root):
+    """``[(pid, command line)]`` of the WebView2 processes using the app's private profile."""
+    out = powershell("Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | "
+                     "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+    profile_dir = str(root / "state" / "webview").casefold()
+    found = []
+    for line in out.splitlines():
+        pid, _, command = line.partition("\t")
+        if pid.strip().isdigit() and profile_dir in command.casefold():
+            found.append((int(pid), command))
+    return found
+
+
+def app_pids(root):
+    out = powershell("Get-CimInstance Win32_Process -Filter \"Name='RainCLI-app.exe'\" | "
+                     "ForEach-Object { \"$($_.ProcessId)`t$($_.ExecutablePath)\" }")
+    return {int(pid) for pid, _, path in (l.partition("\t") for l in out.splitlines())
+            if pid.strip().isdigit() and path.casefold().startswith(str(root).casefold())}
+
+
+def listening(pids):
+    """``{(address, pid)}`` of TCP sockets in LISTEN owned by ``pids`` (IPv4 and IPv6)."""
+    out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=60).stdout
+    out += subprocess.run(["netstat", "-ano", "-p", "TCPv6"], capture_output=True, text=True, timeout=60).stdout
+    found = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 5 and parts[3] == "LISTENING" and parts[4].isdigit() and int(parts[4]) in pids:
+            found.add((parts[1], int(parts[4])))
+    return found
+
+
+def devtools_answer(address):
+    """True when ``host:port`` answers like a Chromium DevTools endpoint."""
+    try:
+        with urllib.request.urlopen(f"http://{address}/json/version", timeout=5) as response:
+            return "webSocketDebuggerUrl" in response.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return False
+
+
+def shortcut_arguments(link):
+    return powershell("(New-Object -ComObject WScript.Shell).CreateShortcut($env:RAINCLI_LNK).Arguments",
+                      env=dict(os.environ, RAINCLI_LNK=str(link))).strip()
+
+
+def click_dialog_ok(title, timeout=60):
+    """Press OK in the app's native confirmation dialog (a Windows message box titled ``title``)."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        text, cls = ctypes.create_unicode_buffer(256), ctypes.create_unicode_buffer(64)
+        user32.GetWindowTextW(hwnd, text, 256)
+        user32.GetClassNameW(hwnd, cls, 64)
+        if text.value == title and cls.value == "#32770" and user32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+        return True
+
+    def dialog():
+        found.clear()
+        user32.EnumWindows(each, 0)
+        return found[0] if found else None
+    hwnd = wait_for(f"the {title!r} dialog", dialog, timeout=timeout, interval=0.5)
+    ok = user32.GetDlgItem(hwnd, 1)  # IDOK
+    check(ok, f"the {title!r} dialog has no OK button")
+    user32.SendMessageW(ok, 0x00F5, 0, 0)  # BM_CLICK
+
+
+class WindowCDP:
+    """Playwright attached to the app window over CDP. Loading a local page after a hosted one swaps the
+    window's main frame (another origin), which an existing Playwright connection may not follow: the
+    page is found through CDP's own target list, and the connection is made again when needed."""
+
+    def __init__(self, pw, port):
+        self.pw, self.port = pw, port
+        self.browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+
+    def targets(self):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list", timeout=5) as response:
+                return [(t.get("type"), t.get("url") or "") for t in json.loads(response.read())]
+        except (OSError, ValueError):
+            return []
+
+    def _find(self, fragment):
+        for context in self.browser.contexts:
+            for candidate in context.pages:
+                if not candidate.is_closed() and fragment in url_of(candidate):
+                    return candidate
+        return None
+
+    def page(self, fragment, timeout=120):
+        def found():
+            if not any(kind == "page" and fragment in url for kind, url in self.targets()):
+                return None
+            page = self._find(fragment)
+            if page is None:  # the target is there, this connection hasn't followed it: attach again
+                with contextlib.suppress(Exception):
+                    self.browser.close()  # drops the CDP connection only; the app keeps running
+                self.browser = self.pw.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+                page = self._find(fragment)
+            return page
+        try:
+            return wait_for(f"the app window showing {fragment}", found, timeout=timeout, interval=1)
+        except Failure:
+            seen = [c.url for context in self.browser.contexts for c in context.pages]
+            raise Failure(f"no window page showing {fragment}; Playwright pages {seen}; "
+                          f"CDP targets {self.targets()}") from None
+
+    def close(self):
+        with contextlib.suppress(Exception):
+            self.browser.close()
+
+
+def url_of(page):
+    """The window's current URL, polled from here: wait_for_url rejects when the app cancels a navigation
+    (the /app/local sentinel), and an aborted load is expected in D7."""
+    try:
+        return page.url
+    except Exception:  # noqa: BLE001 - a frame in the middle of a navigation
+        return ""
+
+
+def shot(page, name):
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(ARTIFACTS / f"{name}.png"))
+
+
+def inbox_bodies(server, token):
+    data = api(server, token, "/api/v1/inbox?routing=1&wait=0&limit=100")
+    return [m.get("body", "") for m in data.get("messages", [])]
+
+
+def part_d(app, server, installers, password, observer, menu, work):
+    """The app window over CDP; see D in the module docstring."""
+    from playwright.sync_api import sync_playwright
+
+    # D1. A full install of this ref: stub 2, an install_stamp, the no-argument shortcut.
+    app.install(NEW, installers, "window")
+    state = app.install_json()
+    check(state.get("current") == NEW and state.get("stub") == 2 and state.get("install_stamp"),
+          f"install.json after a full install: {state}")
+    link = menu / "RainCLI.lnk"
+    check(shortcut_arguments(link) == "", "the full install's Start menu shortcut has arguments")
+    app.quit()
+    login_through_conpty(app, server, password, WINDOW_MACHINE)
+    say("PASS: D1. full install: install.json has stub 2 and an install_stamp, the Start menu shortcut has no "
+        f"arguments; {WINDOW_MACHINE} signed in from the CLI")
+
+    # D2. No debugging without the job's variable: no port, no switch, no DevToolsActivePort.
+    check("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS" not in os.environ, "the job set the WebView2 variable globally")
+    app.launch_run_value()
+    wait_for("the app window's WebView2 processes", lambda: webview_processes(app.root), timeout=180)
+    time.sleep(10)
+    processes = webview_processes(app.root)
+    webview_listens = listening({pid for pid, _ in processes})
+    check(not webview_listens, f"WebView2 listens without the variable: {webview_listens}")
+    # The app's own loopback server for its local pages is expected; it must never be a DevTools endpoint.
+    for address, _pid in listening(app_pids(app.root)):
+        check(address.startswith("127.0.0.1:"), f"the app listens beyond loopback: {address}")
+        check(not devtools_answer(address), f"{address} answers as a DevTools endpoint")
+    check(not [c for _, c in processes if "remote-debugging" in c or "remote-allow-origins" in c],
+          "a WebView2 process carries a debugging switch without the variable")
+    check(not list((app.root / "state" / "webview").rglob("DevToolsActivePort")), "DevToolsActivePort exists")
+    say(f"PASS: D2. without WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: {len(processes)} WebView2 processes, no listening "
+        "port, no debugging switch, no DevToolsActivePort")
+
+    # D3. §16.15: an install without "stub" (updated in place from v0.4) gets a --background shortcut.
+    app.quit()
+    original = dict(state)
+    write_private(app.root / "install.json", {k: v for k, v in original.items() if k != "stub"})
+    app.launch_run_value()
+    wait_for("the v0.4 shortcut fix", lambda: shortcut_arguments(link) == "--background", timeout=180)
+    log = (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace")
+    check("Start menu shortcut for the v0.4 stub: rewritten" in log, "the shortcut rewrite was not logged")
+    app.quit()
+    write_private(app.root / "install.json", original)
+    say("PASS: D3. without \"stub\" in install.json the app pointed the Start menu shortcut at --background and "
+        "logged it")
+
+    # D4. `RainCLI.exe --open` with the CDP switch for this launch only; local sign-in; the handoff.
+    # The v0.5 `raincli login` already added a person session (§16.12 C15): end only that one, so the
+    # window's own sign-in (person_only, no machine rotation) is what adds it back.
+    app.cli("me", "sign-out")
+    check(not (default_agent_config().parent / "person.json").exists(), "raincli me sign-out left person.json")
+    check(window_machine_active(server, observer), "raincli me sign-out revoked the machine")
+    port = free_port()
+    env = dict(os.environ, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f"--remote-debugging-port={port}")
+    subprocess.Popen([str(app.root / "RainCLI.exe"), "--open"], env=env, close_fds=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+
+    def cdp():
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=5) as response:
+                return json.loads(response.read())
+        except (OSError, ValueError):
+            return None
+    wait_for("the window's CDP endpoint", cdp, timeout=180)
+    check(any(address.endswith(f":{port}") for address, _ in listening({pid for pid, _ in webview_processes(app.root)})),
+          "the positive control failed: WebView2's CDP port is not seen as listening, so D2 proved nothing")
+    check(devtools_answer(f"127.0.0.1:{port}"), "the positive control failed: no DevTools answer on the CDP port")
+    with sync_playwright() as pw:
+        window = WindowCDP(pw, port)
+        page = window.page("sign-in.html")
+        # Polled from here: the local pages' CSP (script-src 'self') rightly refuses wait_for_function's eval.
+        wait_for("the sign-in page's machine name", lambda: page.input_value("#machine"), timeout=60, interval=1)
+        check(page.evaluate("document.visibilityState") == "visible", "--open did not show the window")
+        shot(page, "d4-sign-in")
+        page.fill("#email", EMAIL)
+        page.fill("#password", password)
+        page.click("#submit")
+        page.wait_for_url("**/app/inbox", timeout=120000)
+        whoami = page.inner_text(".rc-whoami")
+        check(EMAIL in whoami and "Signed in as" in whoami, f"the inbox does not say who is signed in: {whoami!r}")
+        check("RainCLIApp/" not in page.evaluate("navigator.userAgent"), "the install token is in the global UA")
+        shot(page, "d4-inbox")
+        say("PASS: D4. RainCLI.exe --open showed the window; the local sign-in added a person session, the "
+            "handoff opened the inbox and the rail shows who is signed in; the token is not in navigator.userAgent")
+
+        # D5. Read, reply and send.
+        send(server, observer, {"person": EMAIL}, "Hello from the observer machine")
+        page.reload()
+        page.click(".rc-conv")
+        page.wait_for_selector(".rc-thread")
+        check("Hello from the observer machine" in page.inner_text(".rc-thread"), "the thread is missing the message")
+        shot(page, "d5-thread")
+        page.click(".rc-msg a:has-text('Reply')")
+        page.fill("#body", "A reply from the app window")
+        page.click("button[type=submit]")
+        page.wait_for_url("**notice=sent**", timeout=60000)
+        page.click(".rc-new")
+        page.fill("#to", OBSERVER)
+        page.fill("#body", "A new message from the app window")
+        page.click("button[type=submit]")
+        page.wait_for_url("**notice=sent**", timeout=60000)
+        wait_for("the observer to receive the reply and the new message",
+                 lambda: {"A reply from the app window", "A new message from the app window"}
+                 <= set(inbox_bodies(server, observer)), timeout=120)
+        shot(page, "d5-sent")
+        say("PASS: D5. the window read the observer's message, replied and sent a new one; both reached it")
+
+        # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
+        # hosted navigation and loads its own page, so the click must not wait for that navigation.
+        page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
+        page = window.page("this-computer.html", timeout=60)  # re-attached after the swap
+        wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
+                 timeout=60, interval=1)
+        shot(page, "d6-this-computer")
+        page.click("nav.rc-nav button[data-open=settings]", no_wait_after=True)  # the app navigates, not the click
+        page = window.page("settings.html", timeout=60)  # re-attached after the swap
+        page.wait_for_selector("#routing-all:checked", timeout=60000)
+        shot(page, "d6-settings")
+        say("PASS: D6. This computer shows the machine; Settings shows the routing policy")
+
+        # D7. Offline and Retry.
+        server.stop()
+        page.click("nav.rc-nav button[data-open=inbox]", no_wait_after=True)  # the app navigates, not the click
+        page = window.page("offline.html", timeout=120)  # re-attached after the swap
+        shot(page, "d7-offline")
+        server.start()
+        page.click("#retry", no_wait_after=True)  # the app navigates, not the click
+        page = window.page("app/inbox", timeout=120)  # re-attached after the swap
+        say("PASS: D7. with the server stopped the window showed the offline page; Retry returned to the inbox")
+
+        # D8. Sign-out from This computer: confirmed, revoked, the profile marked for reset.
+        page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
+        page = window.page("this-computer.html", timeout=60)  # re-attached after the swap
+        wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
+                 timeout=60, interval=1)
+        page.click("#sign-out", no_wait_after=True)  # the app navigates, not the click
+        click_dialog_ok("Sign out")
+        page = window.page("sign-in.html", timeout=120)  # re-attached after the swap
+        shot(page, "d8-signed-out")
+        window.close()
+    wait_for("the window machine to be revoked",
+             lambda: (entry(server, observer, WINDOW_MACHINE) or {}).get("active") is False, timeout=120)
+    check(not default_agent_config().exists(), "sign-out left the credential")
+    check((app.root / "state" / "reset-profile").is_file(), "sign-out did not mark the WebView2 profile for reset")
+    check("RainCLIApp/" not in (work / "server" / "server.log").read_text("utf-8", errors="replace"),
+          "the server log holds the app's User-Agent")
+    say("PASS: D8. sign-out in the window revoked the machine, deleted its credential and marked the profile "
+        "for reset; the server log has no app User-Agent")
+
+    # D9. A full install restores the no-argument shortcut and a new install_stamp.
+    app.quit()
+    app.uninstall(signout=False, label="d")
+    app.install(NEW, installers, "window-again")
+    again = app.install_json()
+    check(shortcut_arguments(link) == "" and again.get("stub") == 2
+          and again.get("install_stamp") not in (None, original.get("install_stamp")),
+          f"a full install did not restore the shortcut or renew the stamp: {again}")
+    app.quit()
+    app.uninstall(signout=False, label="d-again")
+    say("PASS: D9. a full install restored the no-argument shortcut, with stub 2 and a new install_stamp")
+
+
+def window_machine_active(server, observer):
+    return (entry(server, observer, WINDOW_MACHINE) or {}).get("active") is not False
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 # -- the run --------------------------------------------------------------------------------
 
 def check(condition, message):
@@ -529,7 +863,7 @@ def prepare_managed_install(work):
 
 
 def build_rollback_installer(work):
-    """0.4.2 from a STAGING COPY of the client whose tray exits 1 when started in the background, so
+    """0.5.2 from a STAGING COPY of the client whose tray exits 1 when started in the background, so
     the stub's probation must roll it back. The shipped source is untouched (§15.8 M11)."""
     spec = importlib.util.spec_from_file_location("raincli_build", ROOT / "packaging" / "windows" / "build.py")
     build = importlib.util.module_from_spec(spec)
@@ -743,8 +1077,11 @@ def run_e2e(args, work, stack):
               app.root / "bin" / "_internal", app.root / "unins000.exe",
               app.root / "versions" / OLD / "RainCLI-app.exe", app.root / "versions" / OLD / "raincli.exe"]
     check(all(p.exists() for p in layout), f"missing after install: {[str(p) for p in layout if not p.exists()]}")
-    check(app.install_json() == {"current": OLD, "previous": None, "probation": None},
-          f"install.json is {app.install_json()}")
+    first_state = app.install_json()
+    check({k: first_state.get(k) for k in ("current", "previous", "probation")}
+          == {"current": OLD, "previous": None, "probation": None}, f"install.json is {first_state}")
+    if not args.real:
+        check(first_state.get("stub") == 2 and first_state.get("install_stamp"), f"install.json is {first_state}")
     check(app.run_value() == stub_command, f"Run value is {app.run_value()!r}")
     check(reg_values(UNINSTALL_KEY) is not None, "no per-user (HKCU) uninstall key")
     import winreg
@@ -833,6 +1170,13 @@ def run_e2e(args, work, stack):
     check((app.root / "installer-record.log").is_file(), "uninstall removed the installer record")
     say("PASS: A7. uninstall with /SIGNOUT=yes revoked the machine and deleted its credential, and removed the Run "
         "value, PATH entry, shortcuts, versions, stub, shim and install.json; the installer record is kept")
+
+    # == D. the app window over CDP ==================================================================
+    if args.real:
+        say("SKIP: D. the published v0.4 installers have no app window")
+    else:
+        fresh_slate(app)
+        part_d(app, server, installers, password, observer, menu, work)
 
     # == B. an old pip client's foreground connector ============================================
     fresh_slate(app)
@@ -930,7 +1274,9 @@ def run_e2e(args, work, stack):
 def diagnose(work):
     say("===== DIAGNOSTICS (secrets redacted) =====")
     root = app_root()
-    for path in [root / "install.json", root / "installer-record.log", *sorted(root.rglob("*.log")),
+    logs = [p for p in sorted(root.rglob("*.log")) if "webview" not in p.relative_to(root).parts]  # not WebView2's
+    for path in [root / "install.json", root / "installer-record.log", *logs,
+                 *sorted((default_agent_config().parent / "runtime-state").rglob("*.log")),
                  *sorted(work.glob("install-*.log")), *sorted(work.glob("uninstall-*.log")),
                  root / "app-lock" / "quit-blockers.txt", work / "old-connector.log",
                  profile() / ".raincli" / "client" / "runtime.log",

@@ -146,8 +146,25 @@ def read_install(root):
     return {k: _version_or_none(data.get(k)) for k in ("current", "previous", "probation")}
 
 
+_INSTALL_STAMP_RE = re.compile(r"^[A-Za-z0-9T:.+-]{1,64}$")
+
+
+def read_install_meta(root):
+    """What a full install records beside the versions (§16.15): ``stub`` (2 for the v0.5 stub; None when
+    this install was only updated in place from v0.4) and ``install_stamp`` (new on every full install)."""
+    try:
+        data = json.loads(retry_sharing(lambda: (Path(root) / INSTALL).read_bytes()))
+    except (OSError, ValueError):
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    stub, stamp = data.get("stub"), data.get("install_stamp")
+    return {"stub": stub if isinstance(stub, int) and not isinstance(stub, bool) and 0 < stub < 1000 else None,
+            "install_stamp": stamp if isinstance(stamp, str) and _INSTALL_STAMP_RE.match(stamp) else None}
+
+
 def write_install(root, current, previous, probation=None):
-    """One ``install.json``, written to a flushed temporary file and ``os.replace``d (15.8 M6)."""
+    """One ``install.json``, written to a flushed temporary file and ``os.replace``d (15.8 M6). The full
+    installer's ``stub`` and ``install_stamp`` are kept (§16.15)."""
     for value in (current, previous, probation):
         if value is not None and not VERSION_RE.fullmatch(value):
             raise ConfigError("not an X.Y.Z version")
@@ -731,22 +748,35 @@ def quit_requested(root):
     return (Path(root) / "app-lock" / QUIT).exists()
 
 
-OPEN = "open"  # <root>\\app-lock\\open: a second launch asks the running app to show its window
+SHOW = "show"  # <root>\\app-lock\\show: RainCLI.exe without arguments asks the app to show its window (§16.15)
 
 
-def request_open(root):
+def request_show(root):
     directory = Path(root) / "app-lock"
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / OPEN).write_bytes(b"")
+    (directory / SHOW).write_bytes(b"")
 
 
-def take_open_request(root):
+def take_show_request(root):
     """True once per request: the running app shows and focuses its window."""
     try:
-        (Path(root) / "app-lock" / OPEN).unlink()
+        (Path(root) / "app-lock" / SHOW).unlink()
     except OSError:
         return False
     return True
+
+
+def app_log(root, text):
+    """``<root>\\app-lock\\app.log``: the app's own short lines, kept under 64 KiB with one ``.1``."""
+    path = Path(root) / "app-lock" / "app.log"
+    try:
+        path.parent.mkdir(exist_ok=True)
+        if path.exists() and path.stat().st_size > 64 * 1024:
+            os.replace(path, str(path) + ".1")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%dT%H:%M:%S ") + text + "\n")
+    except OSError:
+        pass
 
 
 def clear_quit(root):
@@ -1018,11 +1048,11 @@ def app_running(root, running_from=processes_under):
 def stub_main(root, open_window=False):
     lock = single_instance(root)
     if lock is None:
-        return 0  # already running (an open request reaches its app)
+        return 0  # already running (a show request reaches its app)
     try:
         clear_quit(root)  # a request left by a previous session
         if not open_window:
-            take_open_request(root)  # likewise: a sign-in start stays in the tray
+            take_show_request(root)  # likewise: --background never shows the window (§16.15)
         return Stub(root).run()
     finally:
         clear_quit(root)
