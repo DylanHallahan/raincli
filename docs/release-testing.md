@@ -79,14 +79,14 @@ From v0.4.0, a release also carries the Windows app installer: `RainCLI-Setup-<X
 4. Publish the release as **stable** (non-draft, non-prerelease) only after both assets are attached.
 
 ## The synthetic app e2e (any ref, before a release)
-**Actions → Manual Windows app e2e → Run workflow**, with the inputs left empty, builds 0.4.0 and 0.4.1 test installers from the same ref and runs `scripts/windows-app-e2e.py --installers dist/e2e` on a disposable GitHub-hosted `windows-2022` runner, against a throwaway in-job server (the same PostgreSQL and server setup as the managed e2e above). It also builds a third installer, **0.4.2, from a staging copy of the client whose tray exits 1**. That patch exists only in the job's temporary copy; the shipped source has no hook. It prints a `PASS:` line for each check:
+**Actions → Manual Windows app e2e → Run workflow**, with the inputs left empty, builds 0.5.0 and 0.5.1 test installers from the same ref (never below 0.5.0: a runtime whose connector has polled with `routing=1` refuses older targets, §16.12 C1) and runs `scripts/windows-app-e2e.py --installers dist/e2e` on a disposable GitHub-hosted `windows-2022` runner, against a throwaway in-job server (the same PostgreSQL and server setup as the managed e2e above). It also builds a third installer, **0.5.2, from a staging copy of the client whose tray exits 1**. That patch exists only in the job's temporary copy; the shipped source has no hook. It prints a `PASS:` line for each check:
 
 **A. A fresh install, signed in from the CLI**
 1. A silent per-user install with no admin: the onedir layout, `install.json`, the HKCU Run value and uninstall key (none under HKLM), the shim first on the user `PATH`, the Start menu entries, and `installer-record.log` with the Run value and the Scheduled Tasks.
 2. `RainCLI.exe --quit` exits 0 with nothing left running. Then sign-in through the installed `raincli login`, with the password typed into a pseudo console (ConPTY) at the no-echo prompt, never argv or the environment. `agent.json` holds `token_dpapi` only, and `runtime.json` is machine mode.
 3. Launching exactly the Run value's command line, then presence reporting the version, `automatic` and `current`.
-4. A pushed upgrade 0.4.0 → 0.4.1 through the installer assets: both assets fetched from the API asset URL with `Accept: application/octet-stream` and redirected to `objects.githubusercontent.com` and `release-assets.githubusercontent.com`. `/UPDATE` changes neither the Run value nor the uninstall key, `install.json` is swapped, and the tray relaunches from `versions\0.4.1`.
-5. A pushed 0.4.2 whose tray never starts: the stub's probation rolls it back, the server shows `rolled_back` (`first_start_failed`), and 0.4.1 runs again.
+4. A pushed upgrade 0.5.0 → 0.5.1 through the installer assets: both assets fetched from the API asset URL with `Accept: application/octet-stream` and redirected to `objects.githubusercontent.com` and `release-assets.githubusercontent.com`. `/UPDATE` changes neither the Run value nor the uninstall key, `install.json` is swapped, and the tray relaunches from `versions\0.5.1`.
+5. A pushed 0.5.2 whose tray never starts: the stub's probation rolls it back, the server shows `rolled_back` (`first_start_failed`), and 0.5.1 runs again.
 6. The downgrade refused, then allowed with `--allow-downgrade`, then the target cleared.
 7. An uninstall with `/SIGNOUT=yes`: the machine is revoked, its credential deleted, and what §15.8 M10 removes is gone. The installer record is kept.
 
@@ -101,6 +101,19 @@ A **managed v0.3.2** install is installed through the real updater, in the docum
 - The app installer records that Run value.
 - The app's migration sends the launcher's stop request; the launcher exits.
 - The Run value then starts the stub, and the same handle keeps delivering.
+
+**D. The app window, over the Chrome DevTools Protocol** (on a fresh install of 0.5.1, signed in from the CLI)
+1. `install.json` has `"stub": 2` and an `install_stamp`, and the Start menu shortcut has no arguments.
+2. Without `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`: no WebView2 process using the app's profile listens on a port or carries a debugging switch, there is no `DevToolsActivePort`, and the app's own loopback listener never answers as DevTools.
+3. Without `"stub"` in `install.json` (an install updated in place from v0.4), the app points the Start menu shortcut at `--background` and logs it in `app-lock\app.log`.
+4. `RainCLI.exe --open`, with the variable set for that launch only, shows the window. Playwright `connect_over_cdp` drives the local sign-in, which adds a person session, then the handoff to the inbox: the rail says who is signed in, and the install token is not in `navigator.userAgent`.
+5. The window reads a message, replies and sends a new one; both arrive.
+6. This computer and Settings, through the `/app/local` sentinel.
+7. With the server stopped, the offline page; after a restart, Retry returns to the inbox.
+8. Sign-out in the window revokes the machine, deletes its credential and marks the WebView2 profile for reset; the server log has no app User-Agent.
+9. A full install restores the no-argument shortcut, with a new `install_stamp`.
+
+Screenshots are uploaded as the artifact `app-window-screenshots`. Part D is skipped with `real_from`/`real_to` (published v0.4 installers have no window).
 
 The script refuses to run anywhere but a GitHub-hosted Actions Windows runner (`GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT=github-hosted`).
 

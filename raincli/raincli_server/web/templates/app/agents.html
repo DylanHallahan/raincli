@@ -91,7 +91,7 @@
     <ol class="plain-list">
       <li><strong>Windows:</strong> <a href="{{ WINDOWS_DOWNLOAD_URL }}" data-download-windows>Download for Windows</a> (<code>RainCLI-Setup-&lt;version&gt;.exe</code> from the latest release; check it against its <code>.sha256</code> file), run it, and sign in with your email and password. It installs for your Windows account only, with no admin rights, and is not code-signed, so Windows may ask you to confirm. <a href="{{ WINDOWS_GUIDE_URL }}">Windows guide</a></li>
       <li><strong>Headless Linux:</strong> after the managed install (<a href="{{ SETUP_URL }}">setup guide</a>, step 1), run <code>raincli login --email {{ viewer.user.email }}</code> in an interactive terminal, then <code>raincli runtime startup --config ~/.config/raincli/runtime.json</code> and <code>loginctl enable-linger "$USER"</code> (may need an administrator). <a href="{{ HEADLESS_LOGIN_URL }}">Headless setup</a></li>
-      <li><strong>Inbox or connector setup:</strong> add the machine below and download its config. Machines signed in with the app or <code>raincli login</code> report their agents and take updates, but don't receive messages yet.</li>
+      <li><strong>Inbox or connector setup:</strong> add the machine below and download its config. Machines signed in with the app or <code>raincli login</code> report their agents and take updates. They have no inbox: they deliver messages to your named agents, and messages to the machine itself stay stored.</li>
     </ol>
   </section>
   <form method="post" action="{{ url('/app/agents') }}" class="card form register" id="add-machine">
