@@ -19,12 +19,7 @@ class ServiceError(RainError):
     """A failure the page shows as text."""
 
 
-STALE_SENTENCES = {  # §16.17 item 4, §16.18 V4 and V7
-    "invalid": "This computer's saved RainCLI setup belongs to a machine that was revoked.",
-    "not_owner": "This computer's saved RainCLI setup belongs to a machine owned by another account. "
-                 "The other machine stays active for its owner until they revoke it.",
-    "unreadable": "This computer's saved RainCLI setup can't be read by this Windows account.",
-}
+STALE_OUTCOMES = ("invalid", "not_owner", "unreadable")  # check_credential's outcomes that need the offer
 STALE_CODES = {"machine_credential_invalid": "invalid", "not_machine_owner": "not_owner"}  # person_only's 409s
 
 
@@ -43,7 +38,8 @@ class StaleCredential(ServiceError):
     The page offers "Set up this computer as a new machine"; nothing happens without that choice."""
 
     def __init__(self, reason, old_handle=None):
-        super().__init__(STALE_SENTENCES[reason])
+        from .. import login
+        super().__init__(login.stale_message(reason))  # the client core's one sentence (§16.17 item 4)
         self.reason = reason
         self.old_handle = old_handle
 
@@ -94,12 +90,14 @@ class Services:
         return {"machine_name": self.suggested_machine_name()}
 
     def suggested_machine_name(self, avoid=None):
-        """The computer's name in handle form, never ``avoid`` (the old machine's handle, §16.17 item 4)."""
+        """The computer's name in handle form, never ``avoid`` (§16.17 item 4); ``-2`` when it is unknown."""
         from .. import login
-        name = login.default_machine_name()
-        if avoid and name == avoid:
-            name = (name[:28].rstrip("-") or "pc") + "-new"
-        return name
+        return login.suggest_new_machine_name(avoid) if avoid is not None else login.default_machine_name()
+
+    def offer_machine_name(self):
+        """The name for "Set up this computer as a new machine": never the old handle (``known_handle``)."""
+        from .. import login
+        return login.suggest_new_machine_name(login.known_handle(self.agent_config))
 
     def fresh_api_url(self):
         """The service a fresh sign-in goes to: the saved setup's, else the newest ``replaced-*`` backup's
@@ -129,7 +127,7 @@ class Services:
             return self._sign_in_new_machine(email, password, machine_name=machine_name, team=team)
         if self.signed_in() and not again:
             state = login.check_credential(self.agent_config, email)
-            if state in STALE_SENTENCES:
+            if state in STALE_OUTCOMES:
                 raise StaleCredential(state, self.machine_handle() if state == "not_owner" else None)
             try:
                 _person().add_session(self.agent_config, email, password)  # person_only: no rotation (§16.3)
@@ -147,16 +145,19 @@ class Services:
                            replace=replace, person_session=True, api_url=self.fresh_api_url())
 
     def _sign_in_new_machine(self, email, password, *, machine_name, team=None):
-        """§16.17 items 4 and 5: set the old setup aside (``login.set_aside``), then a normal fresh sign-in
-        with ``person_session``, under a name that is never the old handle."""
+        """§16.17 items 4 and 5, §16.18 V6: set the old setup aside (``login.set_aside``, which stops the
+        app's runtime first through ``host.pause``), then a normal fresh sign-in with ``person_session``
+        under a name that is never the old handle. ``login.SetAsideRefused`` reaches the page as is."""
         from .. import login
         api_url = self.fresh_api_url()
-        old_handle = self.machine_handle() if os.path.exists(self.agent_config or "") else None
-        if old_handle and machine_name == old_handle:
-            machine_name = self.suggested_machine_name(avoid=old_handle)
-        self.host.pause()  # §16.18 V6: stop the app's own runtime first; the fresh sign-in starts the new one
-        if os.path.exists(self.agent_config or ""):
-            login.set_aside(self.agent_config)
+        config = self.agent_config or str(default_config_path())
+        old_handle = login.known_handle(config)  # before the move: it asks the old credential
+        if not machine_name or machine_name == old_handle:
+            machine_name = login.suggest_new_machine_name(old_handle)
+        if os.path.lexists(config):
+            login.set_aside(config, stop_own=self.host.pause)
+        else:
+            self.host.pause()
         config_path = str(default_config_path())  # app.json's entries were cleared: the default paths
         plan = login.prepare(config_path)
         return login.login(email, password, plan=plan, machine_name=machine_name, team=team or None,
@@ -296,17 +297,22 @@ class Services:
         return out
 
     def connect_hooks(self, kind, connect=True):
-        """Connect (or disconnect) one agent: the same operation as ``raincli hooks install --<kind>``."""
+        """Connect (or disconnect) one agent: the same operation as ``raincli hooks install --<kind>``.
+        Returns ``(state, note)``: ``note`` is the core's approval sentence after connecting Codex."""
         if kind not in HOOK_AGENTS:
             raise ServiceError("unknown agent")
         hooks = _hooks()
-        if connect:
-            hooks.connect(kind, self.runtime_config)
-        elif hasattr(hooks, "disconnect"):
-            hooks.disconnect(kind, self.runtime_config)
-        else:
-            hooks.install(kind, hooks.state_dir_from_runtime(self.runtime_config), remove=True)
-        return _hooks().status(kind, self.runtime_config)
+        result = hooks.connect(kind, self.runtime_config) if connect else hooks.disconnect(kind, self.runtime_config)
+        note = (result or {}).get("note") if isinstance(result, dict) else None
+        return hooks.status(kind, self.runtime_config), note
+
+    def pending_hooks_notice(self):
+        """The core's one-time notice (Codex hooks repaired after an update), shown once, then dismissed."""
+        hooks = _hooks()
+        text = hooks.pending_notice(self.runtime_config)
+        if text:
+            hooks.dismiss_notice(self.runtime_config)
+        return text
 
     def unconnected_agents(self):
         """Names of installed agents that are not connected (for the one notice after a fresh sign-in)."""

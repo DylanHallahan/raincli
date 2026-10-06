@@ -10,7 +10,7 @@
     too_old: "Installed, but too old to connect: update it first",
     not_connected: "Not connected",
     connected: "Connected",
-    needs_approval: "Connected: approve the RainCLI hooks once in Codex's /hooks",
+    needs_approval: "Connected: approve RainCLI's hooks once in the Codex CLI's /hooks",
     unknown: "Couldn't check"
   };
   function say(text, isError) {

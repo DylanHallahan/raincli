@@ -42,6 +42,11 @@
       <section class="card" aria-labelledby="hooks-title">
         <h2 id="hooks-title">Coding agents</h2>
         <p class="muted small">Connect Codex or Claude Code so RainCLI can deliver messages to their sessions. Nothing is installed until you choose Connect.</p>
+        <ul class="muted small notes" id="hooks-notes">
+          <li><strong>Claude Code:</strong> sessions in the Claude desktop app&rsquo;s Code tab report too once Claude Code is connected. Cloud sessions don&rsquo;t.</li>
+          <li><strong>Codex:</strong> after connecting, approve RainCLI&rsquo;s hooks once in the Codex CLI: run <code>codex</code> in a terminal, type <code>/hooks</code>, trust them, then start a new session. The Codex desktop app&rsquo;s <code>/hooks</code> may not be able to trust them.</li>
+          <li>Agents started through npm (run by Node.js) are listed once their hooks are connected.</li>
+        </ul>
         <ul class="list" id="hooks"><li class="muted">Checking…</li></ul>
         <p class="message" id="hooks-message" role="status"></p>
       </section>

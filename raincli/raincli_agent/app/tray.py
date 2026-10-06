@@ -256,6 +256,17 @@ class Tray:
         self.window.show()
         self.window.load(self.window.local_url("this-computer"))
 
+    def show_hooks_notice(self):
+        """The client core's one-time notice (for example, Codex hooks repaired after an update: trust them
+        again in /hooks). Shown once in the tray, then dismissed; clicking it opens This computer."""
+        try:
+            text = self.services.pending_hooks_notice()
+        except Exception:  # noqa: BLE001 - not signed in yet, or no runtime config
+            return
+        if text and self.icon is not None:
+            self.toast_opens = "this-computer"
+            self.icon.notify(text[:240], TITLE)
+
     def offer_connect(self):
         """§16.19 item 3: after a fresh sign-in, ONE dismissible notice when Codex or Claude Code is installed
         and not connected, pointing to This computer. It installs nothing: connecting is the user's click."""
@@ -459,6 +470,7 @@ class Tray:
         if opened or not self.start_hidden or not self.signed_in() or not self.services.has_person_session():
             self.post(self.window.show)
         self.post(self.first_run)
+        self.post(self.show_hooks_notice)
         self.supervise()
 
 

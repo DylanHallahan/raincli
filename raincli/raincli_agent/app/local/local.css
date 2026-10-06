@@ -58,3 +58,4 @@ input[type=radio], input[type=checkbox] { accent-color: var(--rc-accent); }
 .center .row { justify-content: center; }
 .hidden { display: none !important; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+ul.notes { margin: 0 0 var(--rc-s-3); padding-left: var(--rc-s-5); display: grid; gap: var(--rc-s-1); }

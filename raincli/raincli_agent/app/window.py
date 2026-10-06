@@ -82,15 +82,6 @@ def mark_profile_for_reset(profile_dir):
     marker.write_text("1")
 
 
-CONNECTED = {  # §16.19 item 3: after connecting Codex, one sentence about /hooks
-    ("codex", "needs_approval"): "Connected. Approve the RainCLI hooks once in Codex (type /hooks in a Codex session), "
-                                 "then start a new Codex session.",
-    ("codex", "connected"): "Connected. Approve the RainCLI hooks once in Codex (type /hooks in a Codex session), "
-                            "then start a new Codex session.",
-    ("claude", "connected"): "Connected. New Claude Code sessions report to RainCLI.",
-}
-
-
 def _navigation_id(args):
     try:
         return int(args.NavigationId)
@@ -162,11 +153,12 @@ class Api:
     def connect_hooks(self, nonce, kind, connect=True):
         """§16.19 item 3: only ever from the user's click on This computer."""
         self._guard(nonce)
+        connecting = connect is not False
         try:
-            state = self._app.services.connect_hooks(str(kind), connect is not False)
-        except Exception as exc:  # noqa: BLE001 - shown on the page
-            return _result(False, f"Could not {'connect' if connect is not False else 'disconnect'}: {exc}")
-        return _result(message=CONNECTED.get((str(kind), state), ""), state=state)
+            state, note = self._app.services.connect_hooks(str(kind), connecting)
+        except Exception as exc:  # noqa: BLE001 - shown on the page (the Codex version gate, a refused path)
+            return _result(False, f"Could not {'connect' if connecting else 'disconnect'}: {exc}")
+        return _result(message=note or ("Connected." if connecting else "Disconnected."), state=state)
 
     def open_log(self, nonce):
         self._guard(nonce)
@@ -515,7 +507,10 @@ class AppWindow:
                                   again=bool(request.get("again")), new_machine=request.get("new_machine") is True)
         except StaleCredential as exc:  # §16.17 item 4: say why, and offer a new machine; never automatic
             return _result(False, str(exc), code="stale_credential", reason=exc.reason, offer_new_machine=True,
-                           machine_name=self.services.suggested_machine_name(avoid=exc.old_handle))
+                           offer=login.OFFER, machine_name=self.services.offer_machine_name())
+        except login.SetAsideRefused as exc:  # §16.18 V3: an old RainCLI window still holds a queue
+            return _result(False, str(exc), code="set_aside_refused", offer_new_machine=True,
+                           offer=login.OFFER, machine_name=str(request.get("machine_name") or ""))
         except login.TeamChoiceRequired as exc:
             return _result(False, "Choose a team, enter your password again and sign in.", code="team_choice_required",
                            teams=[{"slug": t["slug"], "name": t.get("name", t["slug"])} for t in exc.teams or []])
