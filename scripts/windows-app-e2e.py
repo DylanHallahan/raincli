@@ -580,6 +580,15 @@ def window_page(browser, fragment, port, timeout=120):
         raise Failure(f"no window page showing {fragment}; Playwright pages {seen}; CDP targets {targets}") from None
 
 
+def url_of(page):
+    """The window's current URL, polled from here: wait_for_url rejects when the app cancels a navigation
+    (the /app/local sentinel), and an aborted load is expected in D7."""
+    try:
+        return page.url
+    except Exception:  # noqa: BLE001 - a frame in the middle of a navigation
+        return ""
+
+
 def shot(page, name):
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(ARTIFACTS / f"{name}.png"))
@@ -702,12 +711,12 @@ def part_d(app, server, installers, password, observer, menu, work):
         # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
         # hosted navigation and loads its own page, so the click must not wait for that navigation.
         page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
-        page.wait_for_url("**/this-computer.html**", timeout=60000)
+        wait_for("the window to show this-computer.html", lambda: "this-computer.html" in url_of(page), timeout=60, interval=1)
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
         shot(page, "d6-this-computer")
         page.click("nav.rc-nav button[data-open=settings]", no_wait_after=True)  # the app navigates, not the click
-        page.wait_for_url("**/settings.html**", timeout=60000)
+        wait_for("the window to show settings.html", lambda: "settings.html" in url_of(page), timeout=60, interval=1)
         page.wait_for_selector("#routing-all:checked", timeout=60000)
         shot(page, "d6-settings")
         say("PASS: D6. This computer shows the machine; Settings shows the routing policy")
@@ -715,21 +724,21 @@ def part_d(app, server, installers, password, observer, menu, work):
         # D7. Offline and Retry.
         server.stop()
         page.click("nav.rc-nav button[data-open=inbox]", no_wait_after=True)  # the app navigates, not the click
-        page.wait_for_url("**/offline.html**", timeout=120000)
+        wait_for("the window to show offline.html", lambda: "offline.html" in url_of(page), timeout=120, interval=1)
         shot(page, "d7-offline")
         server.start()
         page.click("#retry", no_wait_after=True)  # the app navigates, not the click
-        page.wait_for_url("**/app/inbox", timeout=120000)
+        wait_for("the window to show app/inbox", lambda: "app/inbox" in url_of(page), timeout=120, interval=1)
         say("PASS: D7. with the server stopped the window showed the offline page; Retry returned to the inbox")
 
         # D8. Sign-out from This computer: confirmed, revoked, the profile marked for reset.
         page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
-        page.wait_for_url("**/this-computer.html**", timeout=60000)
+        wait_for("the window to show this-computer.html", lambda: "this-computer.html" in url_of(page), timeout=60, interval=1)
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
         page.click("#sign-out", no_wait_after=True)  # the app navigates, not the click
         click_dialog_ok("Sign out")
-        page.wait_for_url("**/sign-in.html**", timeout=120000)
+        wait_for("the window to show sign-in.html", lambda: "sign-in.html" in url_of(page), timeout=120, interval=1)
         shot(page, "d8-signed-out")
         browser.close()
     wait_for("the window machine to be revoked",
