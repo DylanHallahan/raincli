@@ -1287,3 +1287,19 @@ Found on a real v0.5.0 machine: a Codex CLI session running, but zero directory 
 - **Pinned to the bottom:** when the page refreshes or new messages are added, it stays at the bottom only if the user was already within about 80 px of it. Otherwise their scroll position is kept, and a small "New messages ↓" control appears.
 - **Script rules:** plain same-origin script under the existing CSP, with no inline script. Without JavaScript, the page still works (anchor `#latest`).
 - **Tests:** Playwright covers on-open at the bottom, staying pinned, keeping the position when scrolled up, and the anchor taking precedence.
+
+**§16.19 item 2, added (main): telling the Claude desktop app apart from Claude Code.**
+- **Never by name alone:** the Claude desktop app's main executable is also `Claude.exe` (Electron, under `%LOCALAPPDATA%\AnthropicClaude\…` or a Microsoft Store `WindowsApps` path), so `claude.exe` is never mapped to Claude Code by name alone.
+- **Classification:** it uses the process's **full image path** (`QueryFullProcessImageNameW`), plus its parent when needed, and never the command line (§14.7 M5).
+  - **Claude Code** only for the native installer's layout (`…\.local\bin\claude.exe`, or the `claude\versions\<n>` layout), or a path the builder verifies from primary sources.
+  - **Ignored entirely:** the desktop app's executable and its Electron helper processes (anything under `AnthropicClaude` or a `WindowsApps\Claude…` package), the same as any unrelated process.
+  - **Codex:** the same rule. A Codex desktop app, if it ships its own executable, is recognised only by a verified path.
+- **Tests:** fixture paths for each layout, including the desktop app and its helpers, which must NOT be classified.
+
+**§16.19 item 3, added (main): desktop-app sessions and hooks, documented in v0.5.1.**
+- `docs/windows-client.md` states, from primary sources (the vendor docs and settings references, with versions and URLs cited):
+  - whether Claude Code sessions inside the Claude desktop app run the hooks from `~/.claude/settings.json`;
+  - whether sessions in the Codex desktop app run the hooks from `~/.codex/hooks.json`;
+  - how the Codex `/hooks` approval works when only the desktop app is installed (for example, whether the desktop app has its own review screen, or whether the CLI's `codex /hooks` must be run once).
+- **Unverified points** are marked unverified, with what the user should check on a real machine.
+- **The This computer page** wording follows those facts.
