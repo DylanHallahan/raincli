@@ -28,10 +28,12 @@
     app's stub (app installs) or removed (V5).
   - The result lists every path it moved, rewrote or found, and never a token.
 """
+import errno
 import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import time
 
 from . import filelock
@@ -149,6 +151,7 @@ class _Found:
         self.connectors = []  # connector config paths naming this agent.json
         self.move_runtimes = []  # runtime configs to move, with their state_dir
         self.rewrite_runtimes = {}  # runtime config -> the data to write (other credentials stay)
+        self.rewrite_removed = {}  # runtime config -> the connector configs taken out of it
         self.runtime_states = []  # state dirs of the moved runtime configs
         self.touched_runtimes = []  # every runtime config whose runtime must be stopped
         self.queue_dirs = []  # queue directories whose run lock must be free
@@ -214,6 +217,8 @@ def discover(agent_config, migration):
                 _add(found.move_runtimes, runtime)
             elif ours:
                 found.rewrite_runtimes[str(runtime.absolute())] = dict(data, connectors=others)
+                found.rewrite_removed[str(runtime.absolute())] = [
+                    str((base / Path(str(e)).expanduser()).absolute()) for e in ours]
     for runtime in found.move_runtimes:
         state = _state_dir(runtime, _read_json(runtime) or {})
         if state.is_dir():
@@ -242,23 +247,133 @@ def _busy(directory):
     return False
 
 
-def _stop_runtimes(found, stop_own, migration, clock, sleep, wait):
-    """V6: stop the app's own runtime (the window's ``host.pause()``), or ask every touched
-    runtime to stop (``request_stop``, the CLI), and wait for its state-dir lock. Nothing
-    is resumed here: the fresh sign-in starts the new runtime."""
-    from .runtime.service import request_stop
-    if stop_own is not None:
-        stop_own()
-    else:
-        for runtime in found.touched_runtimes:
+def _runtime_owner(runtime, migration, stop_own):
+    """How a running runtime can be stopped and started again (review 1, R3): ``own`` (the app's
+    host: pause/resume), ``run_value`` (the old Run value starts it) or ``unit`` (this user's
+    systemd unit runs it); None when nothing could start it again (a foreground window)."""
+    from . import migrate
+    from .runtime import startup, winapp
+    if migration.own_runtime and _same(runtime, migration.own_runtime) and (stop_own or migration.own_running()):
+        return ("own", None)
+    value = migration.registry.get(winapp.RUN_VALUE)
+    if value and not (migration.app_root is not None and value == winapp.run_value(migration.app_root)):
+        argv = migrate.parse_command_line(value)
+        if "runtime" in argv and "run" in argv and "--config" in argv[:-1] and \
+                _same(argv[argv.index("--config") + 1], runtime):
+            return ("run_value", argv)
+    if os.name != "nt":
+        try:
+            if startup.installed_for(runtime):
+                return ("unit", None)
+        except (OSError, ConfigError):
+            pass
+    return None
+
+
+class _Stopped:
+    """The runtimes set_aside stopped, so it can start them again (review 1, R2, R3)."""
+
+    def __init__(self, migration, stop_own, restart_own):
+        self.migration, self.stop_own, self.restart_own = migration, stop_own, restart_own
+        self.items = []  # (runtime config, how, argv)
+
+    def stop(self, runtime, how, argv):
+        from .runtime.service import request_stop
+        if how == "own":
+            (self.stop_own or self.migration.stop_own or (lambda: None))()
+        else:
             try:
                 request_stop(runtime)
             except (ConfigError, OSError):
-                continue
-    states = [d for r in found.touched_runtimes for d in migration.runtime_dirs(r)[:1] if Path(d).is_dir()]
+                pass
+        self.items.append((runtime, how, argv))
+
+    def start(self, runtime, how, argv):
+        """Start one again; returns "restarted" or the command for the user."""
+        from .runtime import startup
+        try:
+            if how == "own":
+                restart = self.restart_own or self.migration.restart_own
+                if restart is None:
+                    raise OSError("no restart for the app's runtime")
+                restart()
+            elif how == "run_value":
+                self.migration.spawn(argv)
+            elif how == "unit":
+                startup.systemctl("start", startup.NAME)
+            else:
+                raise OSError("not restartable")
+            return "restarted"
+        except (OSError, subprocess.SubprocessError):
+            return f"raincli runtime run --config {runtime}"
+
+    def start_all(self, only=None):
+        out = {}
+        for runtime, how, argv in self.items:
+            if only is None or any(_same(runtime, r) for r in only):
+                out[runtime] = self.start(runtime, how, argv)
+        return out
+
+
+def _free_queues(found, migration, stop_own, restart_own, clock, sleep, wait):
+    """Probe first (review 1, R3): every held queue must belong to a running runtime that can be
+    started again (the app's own, the Run value's, or the systemd unit's); otherwise refuse with
+    nothing stopped. Then stop those, wait for their locks, and on a timeout start them again
+    and refuse. Returns the ``_Stopped`` record."""
+    stopped = _Stopped(migration, stop_own, restart_own)
+    held = [d for d in found.queue_dirs if _busy(d)]
+    if not held:
+        return stopped
+    owners, covered = [], []
+    for runtime in found.touched_runtimes:
+        dirs = [d for d in migration.runtime_dirs(runtime) if Path(d).is_dir()]
+        if not dirs or not _busy(dirs[0]):
+            continue  # not running
+        owner = _runtime_owner(runtime, migration, stop_own)
+        if owner is None:
+            continue
+        owners.append((runtime,) + owner)
+        covered.extend(dirs)
+    if any(all(not _same(h, c) for c in covered) for h in held):
+        raise SetAsideRefused(CLOSE_OLD)
+    for runtime, how, argv in owners:
+        stopped.stop(runtime, how, argv)
     deadline = clock() + wait
-    while any(_busy(d) for d in states) and clock() < deadline:
+    while any(_busy(d) for d in held):
+        if clock() >= deadline:
+            stopped.start_all()
+            raise SetAsideRefused(CLOSE_OLD)
         sleep(0.5)
+    return stopped
+
+
+def _handover_boxes(found, migration):
+    """Review 1, R7: the next-turn handover boxes of the connectors a V2 rewrite takes out, in
+    the rewritten runtime's state dir, so their hook sessions can't claim them afterwards."""
+    from .runtime import sessions
+    boxes = []
+    for runtime, removed in found.rewrite_removed.items():
+        state = _state_dir(runtime, _read_json(runtime) or {})
+        for connector in removed:
+            data = _read_json(connector) or {}
+            keys = set()
+            inbox = data.get("inbox")
+            if isinstance(inbox, dict) and isinstance(inbox.get("name"), str):
+                keys.add(sessions.name_box(inbox["name"]))
+            for queue in migration.connector_queues(connector, data):
+                messages = Path(queue) / "messages"
+                for record in messages.glob("*.json") if messages.is_dir() else []:
+                    key = (_read_json(record) or {}).get("handover_key")
+                    if isinstance(key, str):
+                        keys.add(key)
+            for key in keys:
+                try:
+                    box = Path(sessions._box_dir(str(state), key))
+                except ConfigError:
+                    continue
+                if box.is_dir():
+                    _add(boxes, box)
+    return boxes
 
 
 def _backup_dir(config_dir):
@@ -284,8 +399,8 @@ def _target(backup, src, used):
     return dst
 
 
-def set_aside(agent_config=None, *, migration=None, stop_own=None, locked=False, log=None, clock=time.monotonic,
-              sleep=time.sleep, wait=STOP_WAIT, _replace=os.replace):
+def set_aside(agent_config=None, *, migration=None, stop_own=None, restart_own=None, locked=False, log=None,
+              clock=time.monotonic, sleep=time.sleep, wait=STOP_WAIT, _replace=os.replace):
     """Move the old setup aside (§16.17 item 5, §16.18 V1-V3, V5, V6). Returns
     ``{"backup", "moved": [{"from", "to"}], "rewritten": [{"path", "original"}], "kept_queues",
     "run_value", "startup_entries", "app_settings"}`` (paths only). Raises ``SetAsideRefused``
@@ -309,23 +424,33 @@ def set_aside(agent_config=None, *, migration=None, stop_own=None, locked=False,
             raise SetAsideRefused("another RainCLI migration or set-aside is running; try again shortly")
     try:
         found = discover(agent, migration)
-        _stop_runtimes(found, stop_own, migration, clock, sleep, wait)
-        held = [d for d in found.queue_dirs if _busy(d)]
-        if held:
-            raise SetAsideRefused(CLOSE_OLD)
+        stopped = _free_queues(found, migration, stop_own, restart_own, clock, sleep, wait)
         sources = [agent] + [config_dir / n for n in ("person.json", "app-install.json", "notifications")]
         sources += [Path(c) for c in found.connectors] + [Path(r) for r in found.move_runtimes]
         sources += [Path(s) for s in found.runtime_states]
+        sources += [Path(b) for b in _handover_boxes(found, migration)]  # R7
         unique = []
         for src in sources:
             if os.path.lexists(src) and all(not _same(src, u) for u in unique):
                 unique.append(src)
-        backup = _backup_dir(config_dir)
-        used, done, rewritten, originals, changed = set(), [], [], {}, []
+        try:
+            backup = _backup_dir(config_dir)
+        except BaseException:
+            stopped.start_all()
+            raise
+        used, done, rewritten, originals, changed, in_place = set(), [], [], {}, [], []
         try:
             for src in unique:
                 dst = _target(backup, src, used)
-                _replace(str(src), str(dst))
+                try:
+                    _replace(str(src), str(dst))
+                except OSError as exc:
+                    if not (_cross_volume(exc) and any(_same(src, r) for r in found.runtime_states)):
+                        raise
+                    # R5: a state_dir on another volume is renamed beside itself and recorded.
+                    dst = src.with_name(f"{src.name}.replaced-{_stamp()}")
+                    _replace(str(src), str(dst))
+                    in_place.append({"from": str(src), "to": str(dst)})
                 done.append((src, dst))
             for runtime in found.rewrite_runtimes:
                 originals[runtime] = read_file_bytes(runtime)
@@ -347,11 +472,15 @@ def set_aside(agent_config=None, *, migration=None, stop_own=None, locked=False,
                 except OSError:
                     pass
             shutil.rmtree(backup, ignore_errors=True)
+            stopped.start_all()
             raise
         moved = [{"from": str(src), "to": str(dst)} for src, dst in done]
         result = {"backup": str(backup), "moved": moved, "rewritten": rewritten,
                   "kept_queues": [d for d in found.queue_dirs if all(not _same(d, s) for s in found.runtime_states)],
-                  "run_value": "unchanged", "startup_entries": [], "app_settings": "unchanged"}
+                  "run_value": "unchanged", "startup_entries": [], "app_settings": "unchanged",
+                  "renamed_in_place": in_place,
+                  # R2: a rewritten runtime that was running serves other credentials: start it again.
+                  "restarted": stopped.start_all(only=list(found.rewrite_runtimes))}
         if migration.app_root is not None:
             winapp.write_settings(migration.app_root, {})  # the default paths from now on
             result["app_settings"] = "cleared"
@@ -363,6 +492,11 @@ def set_aside(agent_config=None, *, migration=None, stop_own=None, locked=False,
     finally:
         if lock is not None:
             unlock_migration(lock)
+
+
+def _cross_volume(exc):
+    """EXDEV, or Windows' ERROR_NOT_SAME_DEVICE (17)."""
+    return exc.errno == errno.EXDEV or getattr(exc, "winerror", None) == 17
 
 
 def _old_run_value(migration, found, log):

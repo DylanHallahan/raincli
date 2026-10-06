@@ -238,3 +238,16 @@ def test_cli_hint_after_login(monkeypatch, capsys, tmp_path):
     out = capsys.readouterr().out
     assert "raincli hooks install --codex --config" in out and "/hooks" in out and "--claude" not in out
     assert calls == ["claude", "codex"]
+
+
+def test_r1_the_desktop_apps_embedded_claude_code_is_listed():
+    """Review 1, R1: an ancestor counts by its image path, not its name."""
+    desktop = r"C:\Users\d\AppData\Local\AnthropicClaude\app-0.14.10\Claude.exe"
+    embedded = r"C:\Users\d\AppData\Roaming\Claude\claude-code\2.1.119\claude.exe"
+    table = {1: ("explorer.exe", 0), 2: ("Claude.exe", 1), 3: ("claude.exe", 2), 4: ("claude.exe", 1),
+             5: ("claude.exe", 4)}
+    paths = {2: desktop, 3: embedded, 4: CLAUDE_CODE[0], 5: CLAUDE_CODE[0]}
+    found = scan(table, paths)
+    assert len(found) == 2 and {a["key"] for a in found} == {
+        discovery.entry(SALT, "scan:claude:3", "claude", "claude", "unknown", "scan")["key"],
+        discovery.entry(SALT, "scan:claude:4", "claude", "claude", "unknown", "scan")["key"]}

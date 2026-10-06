@@ -223,7 +223,9 @@ def test_windows_codex_entry(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("bad", ["C:\\wow!\\state", "C:\\100%\\state", "C:\\a^b", "C:\\a&b", "C:\\a|b", "C:\\a<b", "C:\\a>b",
-                                 'C:\\a"b', "C:\\state\\", "C:\\a$b", "C:\\a`b"])
+                                 'C:\\a"b', "C:\\state\\", "C:\\a$b", "C:\\a`b",
+                                 "C:\\Users\\O\u2019Brien\\s", "C:\\Users\\\u201cx\u201d\\s",
+                                 "C:\\a\u201eb", "C:\\a\u2018b", "C:\\a\u201bb"])
 def test_cmd_special_characters_are_refused(tmp_path, monkeypatch, bad):
     with pytest.raises(ConfigError, match="cmd.exe or PowerShell"):
         hooks_install.install("codex", bad, home=tmp_path / "h", prefix=PREFIX, probe=probe("0.160.0"), windows=True)
@@ -422,3 +424,24 @@ def test_runtime_status_shows_the_notice_until_dismissed(tmp_path):
     assert hooks_install.pending_notice(str(runtime)) == hooks_install.CODEX_NOTICE
     hooks_install.dismiss_notice(str(runtime))
     assert "notice" not in service.status(str(runtime)) and hooks_install.pending_notice(str(runtime)) is None
+
+
+def test_r6_an_incomplete_repair_is_tried_again(tmp_path, monkeypatch):
+    monkeypatch.setenv("SystemRoot", "C:\\WINDOWS")
+    home, state = tmp_path / "home", tmp_path / "state"
+    path, _ = old_windows_codex(home, "C:\\s")
+    lines = []
+
+    def no_command():
+        raise ConfigError("no stable raincli command")
+    monkeypatch.setattr(hooks_install, "launcher_prefix", no_command)
+    hooks_install.repair_on_version_change(str(state), "0.5.1", home=home, windows=True, log=lines.append)
+    assert not (state / hooks_install.REPAIRED_FILE).exists() and "runs again" in lines[-1]
+    path.write_text("{ not json")  # an unreadable config is incomplete too
+    monkeypatch.setattr(hooks_install, "launcher_prefix", lambda: (list(PREFIX[0]), PREFIX[1]))
+    hooks_install.repair_on_version_change(str(state), "0.5.1", home=home, windows=True, log=lines.append)
+    assert not (state / hooks_install.REPAIRED_FILE).exists()
+    path.unlink()
+    old_windows_codex(tmp_path / "home2", "C:\\s")
+    hooks_install.repair_on_version_change(str(state), "0.5.1", home=tmp_path / "home2", windows=True)
+    assert json.loads((state / hooks_install.REPAIRED_FILE).read_text()) == {"version": "0.5.1"}

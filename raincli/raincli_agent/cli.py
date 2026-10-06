@@ -814,6 +814,13 @@ def set_aside_for_new_machine(args):
         out(f"  rewrote {item['path']} without its connectors (original kept in the backup)")
     for path in result["kept_queues"]:
         out(f"  kept the queue {path} in place")
+    for item in result.get("renamed_in_place") or []:
+        out(f"  renamed {item['from']} to {item['to']} (it is on another drive)")
+    for runtime, outcome in (result.get("restarted") or {}).items():
+        if outcome == "restarted":
+            out(f"started the runtime for {runtime} again (it serves other machines' credentials)")
+        else:
+            out(f"the runtime for {runtime} serves other credentials; start it again with: {outcome}")
     if result["run_value"] == "removed":
         out("removed the old RainCLI Run value, which started the old setup")
     for entry in result["startup_entries"]:
