@@ -1000,9 +1000,18 @@ def part_e(app, server, installers, password, observer, work, codex=None):
                                                 "state_dir": str(profile() / ".raincli" / "runtime-e4")})
     app.install(NEW, installers, "e4")
     wait_for("migration to set only the revoked credential aside", lambda: backups(config_dir), timeout=300)
-    runtime = json.loads((config_dir / "runtime.json").read_text("utf-8"))
-    check([Path(c).name for c in runtime.get("connectors", [])] == ["good-connector.json"],
-          f"runtime.json was not rewritten without the revoked credential: {runtime}")
+
+    def connectors_named():
+        try:
+            runtime = json.loads((config_dir / "runtime.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            return None
+        return [Path(c).name for c in runtime.get("connectors", [])]
+    try:  # the backup appears first; the rewrite follows within the same set-aside
+        wait_for("runtime.json rewritten without the revoked credential",
+                 lambda: connectors_named() == ["good-connector.json"], timeout=180)
+    except Failure:
+        raise Failure(f"runtime.json was not rewritten without the revoked credential: {connectors_named()}") from None
     check(good_agent.exists() and good_connector.exists() and not bad_agent.exists() and not bad_connector.exists(),
           "the wrong files moved")
     check({"bad-agent.json", "bad-connector.json", "runtime.json"} <= backup_files(config_dir),
@@ -1586,6 +1595,10 @@ def diagnose(work):
     say("===== DIAGNOSTICS (secrets redacted) =====")
     root = app_root()
     logs = [p for p in sorted(root.rglob("*.log")) if "webview" not in p.relative_to(root).parts]  # not WebView2's
+    config = default_agent_config().parent
+    logs += sorted(p for p in config.rglob("*.log") if p.is_file()) if config.is_dir() else []
+    logs += sorted(config.glob("replaced-*/set-aside.json")) if config.is_dir() else []
+    logs += sorted((profile() / ".raincli").rglob("migration.log")) if (profile() / ".raincli").is_dir() else []
     for path in [root / "install.json", root / "installer-record.log", *logs,
                  *sorted((default_agent_config().parent / "runtime-state").rglob("*.log")),
                  *sorted(work.glob("install-*.log")), *sorted(work.glob("uninstall-*.log")),
