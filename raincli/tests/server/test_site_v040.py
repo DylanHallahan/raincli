@@ -86,3 +86,14 @@ def test_config_page_points_to_the_simpler_paths(client, world):
     assert "This config is for an inbox or connector setup" in page
     assert f'href="{DOWNLOAD}"' in page and f'href="{HEADLESS}"' in page
     assert "Download raincli-alice-two.json" in page  # the config download itself is unchanged
+
+
+def test_home_page_states_the_v05_trust_defaults(client):
+    """Machine mode and inbox connectors default to trust_mode "team"; direct-delivery connector configs
+    to "list" (connector/config.py). The home page says so in one sentence."""
+    page = text(client.get("/").text)
+    assert ("By default your teammates\u2019 messages go straight through; in list mode, the default for "
+            "direct-delivery setups, senders you haven\u2019t trusted wait for your approval.") in page
+    assert "by default asks before passing on messages" not in page
+    from raincli_agent.connector.config import ConnectorConfig
+    assert ConnectorConfig().trust_mode == "list"  # the direct-delivery default the sentence names
