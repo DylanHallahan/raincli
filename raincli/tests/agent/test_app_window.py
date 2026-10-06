@@ -713,3 +713,44 @@ def test_a_window_that_fails_to_start_leaves_the_tray_running(tmp_path, monkeypa
     monkeypatch.setattr(tray, "icon_image", lambda state: None)
     assert t._run(fake_pystray) == 0
     assert ran == ["NoWindow"] and "running in the tray only" in (tmp_path / "app-lock" / "app.log").read_text()
+
+
+def test_sentinel_loads_the_local_page_and_its_cancelled_navigation_is_not_offline(tmp_path):
+    """The e2e's D6 bug: WebView2 reports the navigation the app cancelled (the /app/local sentinel) as an
+    unsuccessful NavigationCompleted (OperationCanceled), while the window still shows the hosted page.
+    That must never trigger the offline page, which would replace the local page being loaded."""
+    logged = []
+    app, win, _ = make(tmp_path, log=logged.append)
+    starting, completed = Events(), Events()
+    win.native = types.SimpleNamespace(browser=types.SimpleNamespace(
+        webview=types.SimpleNamespace(NavigationStarting=starting, NavigationCompleted=completed,
+                                      CoreWebView2InitializationCompleted=Events())))
+    app.attach_native()
+    win.url = SERVICE + "/app/inbox"  # the hosted inbox is showing
+    args = types.SimpleNamespace(Uri=SERVICE + "/app/local/this-computer", Cancel=False, NavigationId=7)
+    starting.handlers[0](None, args)
+    assert args.Cancel is True and win.loads[-1] == LOCAL + "this-computer.html"
+    win.url = SERVICE + "/app/inbox"  # the cancelled navigation completes before the local load commits
+    completed.handlers[0](None, types.SimpleNamespace(IsSuccess=False, HttpStatusCode=0, NavigationId=7,
+                                                      WebErrorStatus="OperationCanceled"))
+    assert win.loads[-1] == LOCAL + "this-computer.html"  # not offline.html
+    # A load replaced by a newer one is also OperationCanceled, even without our id.
+    completed.handlers[0](None, types.SimpleNamespace(IsSuccess=False, HttpStatusCode=0, NavigationId=8,
+                                                      WebErrorStatus="OperationCanceled"))
+    assert win.loads[-1] == LOCAL + "this-computer.html"
+    win.url = LOCAL + "this-computer.html"
+    completed.handlers[0](None, types.SimpleNamespace(IsSuccess=True, HttpStatusCode=200, NavigationId=9,
+                                                      WebErrorStatus="Unknown"))
+    app.on_loaded()
+    assert "__rcNonce" in win.scripts[-1] and app.api.status(nonce_of(win))["machine"] == "alice-laptop"
+    # A real network failure of a hosted load still shows the offline page.
+    win.url = SERVICE + "/app/inbox"
+    completed.handlers[0](None, types.SimpleNamespace(IsSuccess=False, HttpStatusCode=0, NavigationId=10,
+                                                      WebErrorStatus="CannotConnect"))
+    assert win.loads[-1] == LOCAL + "offline.html"
+    text = "\n".join(logged)
+    assert "sentinel " + SERVICE + "/app/local/this-computer -> local page this-computer" in text
+    assert "cancelled by the app" in text and "offline page shown" in text
+    win.url = SERVICE + "/app/handoff?code=rch_secret"
+    completed.handlers[0](None, types.SimpleNamespace(IsSuccess=True, HttpStatusCode=303, NavigationId=11))
+    assert "rch_secret" not in "\n".join(logged)  # never a query in the log

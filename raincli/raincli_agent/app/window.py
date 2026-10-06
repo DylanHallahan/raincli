@@ -81,6 +81,23 @@ def mark_profile_for_reset(profile_dir):
     marker.write_text("1")
 
 
+def _navigation_id(args):
+    try:
+        return int(args.NavigationId)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _loggable(url):
+    """Origin and path only: never a query (the handoff code) or a fragment."""
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(url or "")
+        return f"{parts.scheme}://{parts.netloc}{parts.path}" if parts.scheme else "(none)"
+    except ValueError:
+        return "(unparsable)"
+
+
 def _in_thread(fn, *args):
     threading.Thread(target=fn, args=args, daemon=True).start()
 
@@ -149,8 +166,10 @@ class AppWindow:
     """The window's behaviour, independent of pywebview (``webview`` is injected) so it is unit-tested."""
 
     def __init__(self, services, *, profile_dir, webview=None, browser_open=None, confirm=None,
-                 local_port=None, timer=threading.Timer, later=_in_thread):
+                 local_port=None, timer=threading.Timer, later=_in_thread, log=None):
         self.services = services
+        self._log = log or (lambda text: None)  # app-lock\\app.log: origins and paths only, never a query
+        self._cancelled = set()  # NavigationIds this window cancelled (sentinel, other origins)
         self.profile_dir = Path(profile_dir)
         self._webview = webview
         self._browser_open = browser_open
@@ -227,8 +246,7 @@ class AppWindow:
         except AttributeError:
             return False
         control.NavigationStarting += lambda sender, args: self._native_starting(args)
-        control.NavigationCompleted += lambda sender, args: self.on_navigation_completed(
-            bool(args.IsSuccess), int(getattr(args, "HttpStatusCode", 0) or 0))
+        control.NavigationCompleted += lambda sender, args: self._native_completed(args)
         control.CoreWebView2InitializationCompleted += lambda sender, args: self._core_ready(sender.CoreWebView2)
         return True
 
@@ -262,7 +280,15 @@ class AppWindow:
     def _native_starting(self, args):
         self._ensure_filter()  # the service origin can change at sign-in
         if self.before_navigate(str(args.Uri)):
+            self._cancelled.add(_navigation_id(args))
             args.Cancel = True
+
+    def _native_completed(self, args):
+        cancelled = _navigation_id(args) in self._cancelled
+        self._cancelled.discard(_navigation_id(args))
+        status = str(getattr(args, "WebErrorStatus", "") or "")
+        self.on_navigation_completed(bool(args.IsSuccess), int(getattr(args, "HttpStatusCode", 0) or 0),
+                                     cancelled=cancelled or status.endswith("OperationCanceled"), status=status)
 
     # -- navigation -----------------------------------------------------------------------------------------
 
@@ -281,6 +307,7 @@ class AppWindow:
                 self._arm_timeout()
             return False
         if decision == "local":
+            self._log(f"sentinel {_loggable(url)} -> local page {target}")
             self._later(self.load, self.local_url(target))
         elif decision == "external" and self._browser_open is not None:
             self._later(self._browser_open, url)
@@ -315,11 +342,19 @@ class AppWindow:
             self.window.evaluate_js(
                 f"window.__rcNonce = {json.dumps(nonce)}; window.dispatchEvent(new Event('rc-nonce'));")
 
-    def on_navigation_completed(self, success, http_status=0):
+    def on_navigation_completed(self, success, http_status=0, *, cancelled=False, status=""):
         """A network failure shows the offline page. An HTTP error page is the service's own answer
-        (for example "Open on the website"), so it stays."""
-        self._disarm_timeout()
+        (for example "Open on the website"), so it stays. A navigation this window cancelled (the
+        /app/local sentinel, another origin) or one replaced by a newer load (OperationCanceled) is not a
+        failure: WebView2 still reports it as unsuccessful, and treating it as offline would replace the
+        page the app is loading instead."""
         url = self.current_url() or ""
+        self._log(f"load {'ok' if success else 'failed'} {_loggable(url)}"
+                  + (f" http {http_status}" if http_status else "") + (f" ({status})" if status and not success else "")
+                  + (" cancelled by the app" if cancelled else ""))
+        if cancelled:
+            return
+        self._disarm_timeout()
         if not success and not http_status and not self.navigation.is_local(url):
             self.show_offline()
 
@@ -335,6 +370,7 @@ class AppWindow:
             self.load_timer = None
 
     def show_offline(self):
+        self._log("offline page shown")
         self.load(self.local_url("offline"))
 
     def load(self, url):

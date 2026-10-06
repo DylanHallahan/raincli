@@ -131,7 +131,8 @@ class Tray:
         self.services = Services(root_dir, self.host, paths=lambda: (self.agent_config, self.runtime_config))
         self.webview = webview
         self.window = AppWindow(self.services, profile_dir=self.state_dir / "webview", webview=webview,
-                                browser_open=webbrowser.open, confirm=self.confirm)
+                                browser_open=webbrowser.open, confirm=self.confirm,
+                                log=(lambda text: winapp.app_log(root_dir, text)) if root_dir else None)
         self.calls = queue.Queue()
         self.stopping = threading.Event()
         self._started = threading.Event()
