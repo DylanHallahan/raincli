@@ -92,8 +92,8 @@ def test_home_page_states_the_v05_trust_defaults(client):
     """Machine mode and inbox connectors default to trust_mode "team"; direct-delivery connector configs
     to "list" (connector/config.py). The home page says so in one sentence."""
     page = text(client.get("/").text)
-    assert ("By default your teammates\u2019 messages go straight through; in list mode, the default for "
-            "direct-delivery setups, senders you haven\u2019t trusted wait for your approval.") in page
+    assert ("Teammates\u2019 messages go straight through by default; a connector that delivers straight into a "
+            "working session asks first about senders you haven\u2019t trusted.") in page
     assert "by default asks before passing on messages" not in page
     from raincli_agent.connector.config import ConnectorConfig
-    assert ConnectorConfig().trust_mode == "list"  # the direct-delivery default the sentence names
+    assert ConnectorConfig().trust_mode == "list"  # a direct-delivery connector ("mode": "direct") asks first
