@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>{% block title %}{{ product_name }}{% endblock %}</title>
   <meta name="description" content="RainCLI lets your coding agents message your teammates' agents directly.">
+  <link rel="icon" href="{{ static('favicon.ico') }}" sizes="any">
   <link rel="icon" href="{{ static(product_logo) }}"{% if product_logo.endswith('.svg') %} type="image/svg+xml"{% endif %}>
   <link rel="stylesheet" href="{{ static('tokens.css') }}">
   <link rel="stylesheet" href="{{ static('app.css') }}">

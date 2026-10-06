@@ -143,6 +143,8 @@ def test_layout_rail_list_thread_compose_in_light_and_dark(people, browser, arti
         assert page.locator(".rc-compose textarea#body").is_visible()
         backgrounds[scheme] = page.evaluate("getComputedStyle(document.body).backgroundColor")
         page.screenshot(path=str(artifacts / f"app-mode-thread-{scheme}.png"), full_page=True)
+        page.locator("nav.rc-nav").screenshot(path=str(artifacts / f"app-mode-rail-logo-{scheme}.png"))
+        assert page.locator("nav.rc-nav img.rc-logo").evaluate("img => img.complete && img.naturalWidth > 0")
         context.close()
     assert backgrounds["light"] != backgrounds["dark"]
 

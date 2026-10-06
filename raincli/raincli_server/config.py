@@ -21,7 +21,7 @@ class Settings:
     rate_limit_per_min: int = 120
     # Branding (protocol §16.9): one product name and one logo (a file in web/static).
     product_name: str = "RainCLI"
-    product_logo: str = "favicon.svg"
+    product_logo: str = "mark.svg"
 
     def __repr__(self) -> str:  # never show secrets or DB passwords
         return f"Settings(public_url={self.public_url!r}, root_path={self.root_path!r})"
@@ -49,7 +49,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         max_pending=int(env.get("RAINCLI_MAX_PENDING", "1000")),
         rate_limit_per_min=int(env.get("RAINCLI_RATE_LIMIT_PER_MIN", "120")),
         product_name=_product_name(env.get("RAINCLI_PRODUCT_NAME", "RainCLI")),
-        product_logo=_product_logo(env.get("RAINCLI_PRODUCT_LOGO", "favicon.svg")),
+        product_logo=_product_logo(env.get("RAINCLI_PRODUCT_LOGO", "mark.svg")),
     )
 
 

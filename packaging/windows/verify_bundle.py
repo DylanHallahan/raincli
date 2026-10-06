@@ -10,6 +10,8 @@ executable's archive and checks:
 - the app executable freezes ``raincli_agent.app.tray``, the window and its GUI modules (``pystray``,
   ``PIL``, ``webview``) and never ``tkinter``; the CLI freezes ``raincli_agent.cli``, the stub freezes
   ``raincli_agent.app.stub``, and the PATH shim freezes no client code at all;
+- the app icon (``app.ico``) is embedded in RainCLI-app.exe, raincli.exe and the RainCLI.exe stub, and the
+  four tray icons are bundled with the app;
 - the GUI test boundary (§16.11, §16.12 C16): no ``raincli_agent`` module, entry script or bundled
   ``raincli_agent`` file (the local pages) contains a WebView2 debugging switch or its variable.
   Third-party modules are covered by the test asserting ``debug=False`` and no debugging settings.
@@ -19,8 +21,12 @@ Exit status 0 when clean; 1 with one line per problem otherwise.
 """
 import argparse
 from pathlib import Path
+import struct
 import sys
 import types
+
+HERE = Path(__file__).resolve().parent
+TRAY_STATES = ("ready", "offline", "updating", "error")  # raincli_agent.app.status.ICON_STATES
 
 FORBIDDEN_NAMES = ("TEST_RELEASE_BASE", "TEST_CERT_SHA256", "_build_test")
 FORBIDDEN_MODULES = ("raincli_server", "pytest", "PyInstaller", "fastapi", "sqlalchemy", "uvicorn")
@@ -117,6 +123,51 @@ def check_files(dist):
     return problems
 
 
+def ico_frames(path):
+    """The image data of every frame in an .ico file."""
+    data = Path(path).read_bytes()
+    _, kind, count = struct.unpack_from("<HHH", data)
+    if kind != 1:
+        raise ValueError(f"{path} is not an icon")
+    frames = []
+    for i in range(count):
+        size, offset = struct.unpack_from("<II", data, 6 + 16 * i + 8)
+        frames.append(data[offset:offset + size])
+    return frames
+
+
+def exe_icon_frames(exe):
+    """The RT_ICON resources of a Windows executable (PyInstaller embeds each .ico frame unchanged)."""
+    import pefile
+
+    pe = pefile.PE(str(exe), fast_load=True)
+    pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]])
+    frames = []
+    for kind in getattr(pe, "DIRECTORY_ENTRY_RESOURCE", types.SimpleNamespace(entries=[])).entries:
+        if kind.id != pefile.RESOURCE_TYPE["RT_ICON"]:
+            continue
+        for name in kind.directory.entries:
+            for lang in name.directory.entries:
+                frames.append(pe.get_data(lang.data.struct.OffsetToData, lang.data.struct.Size))
+    return frames
+
+
+def check_icons(dist, folder, exes, ico=HERE / "app.ico", frames_of=exe_icon_frames):
+    """The app's icon is in every executable the user sees, and the tray icons are bundled."""
+    problems = []
+    wanted = ico_frames(ico)
+    for exe in exes:
+        if exe.is_file():
+            have = frames_of(exe)
+            if not all(frame in have for frame in wanted):
+                problems.append(f"{exe.relative_to(dist)} does not carry app.ico")
+    for state in TRAY_STATES:
+        icon = folder / "_internal" / "raincli_agent" / "app" / "icons" / f"tray-{state}-64.png"
+        if not icon.is_file():
+            problems.append(f"{icon.relative_to(dist)} is missing")
+    return problems
+
+
 def verify(dist, version):
     dist = Path(dist)
     folder = dist / f"RainCLI-{version}"
@@ -138,6 +189,7 @@ def verify(dist, version):
                                  ["tkinter"] if exe.name == "RainCLI-app.exe" else ["webview", "pystray", "tkinter"])
         if exe.parent.name == "bin" and any(m.startswith("raincli_agent") for m in modules):
             problems.append("bin/raincli.exe must not bundle the client; it only forwards to the current version")
+    problems += check_icons(dist, folder, [folder / "RainCLI-app.exe", folder / "raincli.exe", dist / "stub" / "RainCLI.exe"])
     return problems
 
 

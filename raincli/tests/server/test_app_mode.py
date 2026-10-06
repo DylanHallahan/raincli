@@ -351,3 +351,11 @@ def test_handoff_url_includes_the_root_path(settings, engine, world):
             assert url == f"{settings.public_url}/raincli/app/handoff?code={r.json()['code']}"
     finally:
         app.state.engine.dispose()
+
+
+def test_the_app_mode_rail_shows_the_mark(alice_app):
+    """v0.5.1: the rail's logo is the product logo setting, by default the new mark."""
+    import re
+    html = alice_app["webview"].get("/app/inbox").text
+    assert re.search(r'<img class="rc-logo" src="/static/mark\.svg\?v=[0-9a-f]{12}"', html)
+    assert re.search(r'<link rel="icon" href="/static/favicon\.ico\?v=[0-9a-f]{12}" sizes="any">', html)

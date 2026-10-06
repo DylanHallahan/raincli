@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html as htmllib
 import re
+from pathlib import Path
 
 from test_web_app import app_csrf, login
 
@@ -97,3 +98,25 @@ def test_home_page_states_the_v05_trust_defaults(client):
     assert "by default asks before passing on messages" not in page
     from raincli_agent.connector.config import ConnectorConfig
     assert ConnectorConfig().trust_mode == "list"  # a direct-delivery connector ("mode": "direct") asks first
+
+
+# The v0.5.1 logo: a speech bubble with two linked agents, in brand blue ------------------------------
+
+STATIC = Path(__file__).resolve().parents[2] / "raincli_server" / "web" / "static"
+
+
+def test_the_logo_and_favicons_are_the_new_mark(client):
+    mark = (STATIC / "mark.svg").read_text("utf-8")
+    assert mark == (STATIC / "favicon.svg").read_text("utf-8") and 'fill="#1f5fd1"' in mark
+    for path in ("/", "/login"):
+        html = client.get(path).text
+        assert re.search(r'<link rel="icon" href="/static/favicon\.ico\?v=[0-9a-f]{12}" sizes="any">', html)
+        assert re.search(r'<link rel="icon" href="/static/mark\.svg\?v=[0-9a-f]{12}" type="image/svg\+xml">', html)
+        logo = re.search(r'<svg class="logo" viewBox="8 10 48 45"[^>]*>(.*?)</svg>', html, re.S)
+        assert logo and 'fill="currentColor"' in logo.group(1) and "#" not in logo.group(1)  # coloured by CSS
+        assert "logo-bg" not in html  # the old rain-cloud mark is gone
+    ico = client.get("/static/favicon.ico")
+    assert ico.status_code == 200 and ico.content[:4] == b"\x00\x00\x01\x00"
+    assert ".logo { flex: none; width: 28px; height: 28px; display: block; color: var(--rc-accent); }" in \
+        client.get("/static/app.css").text
+

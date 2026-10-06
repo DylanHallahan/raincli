@@ -664,7 +664,7 @@ def test_app_self_check(monkeypatch, capsys):
     """15.9: --self-check imports the GUI modules and the tray, no desktop needed."""
     import types
     from raincli_agent.app import tray
-    for name in ("pystray", "PIL", "PIL.Image", "PIL.ImageDraw", "webview"):
+    for name in ("pystray", "PIL", "PIL.Image", "PIL.PngImagePlugin", "webview"):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     assert tray.main(["--self-check"]) == 0 and "self-check: ok" in capsys.readouterr().out
     monkeypatch.setitem(sys.modules, "pystray", None)  # an import that fails

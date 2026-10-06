@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import struct
 import types
 from pathlib import Path
 
@@ -143,3 +144,76 @@ def test_full_install_records_the_v05_stub_and_a_fresh_install_stamp():
     assert "Parameters" not in icon
     assert "WriteInstallJson" in iss[iss.index("procedure CurStepChanged"):]
     assert "raincli_agent.app.shortcut" in (WIN / "raincli.spec").read_text()
+
+
+# -- the v0.5.1 logo: exe and installer icons, tray icons ------------------------------------------------------
+
+def test_every_tray_state_has_its_bundled_icon():
+    from raincli_agent.app import status, tray
+    for state in status.ICON_STATES:
+        path = tray.icon_path(state)
+        assert path.name == f"tray-{state}-64.png" and path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+        width, height = struct.unpack(">II", path.read_bytes()[16:24])
+        assert (width, height) == (64, 64)
+    with pytest.raises(ValueError):
+        tray.icon_path("paused")
+    assert tray.icon_view(True, "ready") == ("offline", "RainCLI: Paused")
+    assert tray.icon_view(False, "updating") == ("updating", "RainCLI: updating")
+    assert not hasattr(tray, "COLOURS")
+
+
+def test_paused_shows_the_offline_icon_and_says_paused(monkeypatch):
+    from raincli_agent.app import tray
+    monkeypatch.setattr(tray, "icon_image", lambda state: f"<{state}>")
+    t = tray.Tray.__new__(tray.Tray)
+    t.host = types.SimpleNamespace(paused=True)
+    t.icon, t.icon_state = types.SimpleNamespace(icon=None, title=None), None
+    t.status = lambda: {"status": "running"}
+    t.refresh_icon()
+    assert (t.icon.icon, t.icon.title) == ("<offline>", "RainCLI: Paused")
+    t.host.paused = False
+    monkeypatch.setattr(tray.model, "icon_state", lambda status: "ready")
+    t.refresh_icon()
+    assert (t.icon.icon, t.icon.title) == ("<ready>", "RainCLI: ready")
+
+
+def test_app_ico_has_every_size_and_a_png_256_frame():
+    data = (WIN / "app.ico").read_bytes()
+    _, kind, count = struct.unpack_from("<HHH", data)
+    sizes, frames = [], {}
+    for i in range(count):
+        w, h, _c, _r, _p, bpp, size, offset = struct.unpack_from("<BBBBHHII", data, 6 + 16 * i)
+        sizes.append(w or 256)
+        frames[w or 256] = data[offset:offset + size]
+    assert kind == 1 and sorted(sizes) == [16, 20, 24, 32, 40, 48, 64, 256]
+    assert frames[256][:8] == b"\x89PNG\r\n\x1a\n" and len(data) < 64 * 1024  # re-encoded losslessly
+    assert all(frames[s][:4] == b"\x28\x00\x00\x00" for s in sizes if s != 256)  # the others untouched
+
+
+def test_executables_and_installer_carry_the_app_icon():
+    spec = (WIN / "raincli.spec").read_text()
+    assert spec.count("icon=ICON") == 3 and 'ICON = str(HERE / "app.ico")' in spec
+    assert "datas=LOCAL_PAGES + TRAY_ICONS" in spec and '"raincli_agent/app/icons").glob("tray-*-64.png")' in spec
+    assert "SetupIconFile=app.ico" in (WIN / "RainCLI.iss").read_text()
+
+
+def test_bundle_check_requires_the_icons(tmp_path):
+    vb = load_verify_bundle()
+    folder = tmp_path / "RainCLI-1.0.0"
+    icons = folder / "_internal" / "raincli_agent" / "app" / "icons"
+    icons.mkdir(parents=True)
+    exes = [folder / "RainCLI-app.exe", folder / "raincli.exe", tmp_path / "stub" / "RainCLI.exe"]
+    for exe in exes:
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_bytes(b"MZ")
+    frames = vb.ico_frames(WIN / "app.ico")
+    embedded = {str(exe): list(frames) for exe in exes}
+    check = lambda: vb.check_icons(tmp_path, folder, exes, frames_of=lambda exe: embedded[str(exe)])  # noqa: E731
+    assert check() == [f"RainCLI-1.0.0/_internal/raincli_agent/app/icons/tray-{s}-64.png is missing"
+                       for s in ("ready", "offline", "updating", "error")]
+    for state in ("ready", "offline", "updating", "error"):
+        (icons / f"tray-{state}-64.png").write_bytes(b"\x89PNG")
+    assert check() == []
+    embedded[str(exes[1])] = frames[:-1]  # raincli.exe without the 256 px frame
+    assert check() == ["RainCLI-1.0.0/raincli.exe does not carry app.ico"]
+    assert vb.TRAY_STATES == __import__("raincli_agent.app.status", fromlist=["x"]).ICON_STATES

@@ -23,20 +23,31 @@ from ..runtime import winapp
 from . import policy
 from . import status as model
 
-COLOURS = {"ready": "#2e9d5b", "offline": "#8a8f98", "updating": "#d29a1e", "error": "#c23b3b"}
+ICONS = Path(__file__).resolve().parent / "icons"  # tray-<state>-64.png, bundled with the app
 TITLE = "RainCLI"
 NIN_BALLOONUSERCLICK = 0x0405
 TICK = 1.0  # seconds: open and quit requests are answered within this
 STEP_EVERY = 2  # ticks between runtime steps, icon refreshes and notification reads
 
 
+def icon_path(state):
+    """The bundled tray icon for one of ``status.ICON_STATES``; pystray scales it for the DPI."""
+    if state not in model.ICON_STATES:
+        raise ValueError(f"no tray icon for {state!r}")
+    return ICONS / f"tray-{state}-64.png"
+
+
 def icon_image(state):
-    from PIL import Image, ImageDraw
-    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    draw.ellipse((6, 6, 58, 58), fill=COLOURS[state])
-    draw.ellipse((22, 22, 42, 42), fill="#ffffff")
-    return image
+    from PIL import Image
+    with Image.open(icon_path(state)) as image:
+        return image.convert("RGBA")
+
+
+def icon_view(paused, state):
+    """``(icon state, tooltip)``: paused shows the offline icon and says "Paused"."""
+    if paused:
+        return "offline", f"{TITLE}: Paused"
+    return state, f"{TITLE}: {state}"
 
 
 class LockedHost:
@@ -200,11 +211,11 @@ class Tray:
             return {"status": "not_observed"}
 
     def refresh_icon(self):
-        state = "offline" if self.host.paused else model.icon_state(self.status())
-        if self.icon is not None and state != self.icon_state:
-            self.icon_state = state
+        state, title = icon_view(self.host.paused, None if self.host.paused else model.icon_state(self.status()))
+        if self.icon is not None and (state, title) != (self.icon_state, getattr(self, "icon_title", None)):
+            self.icon_state, self.icon_title = state, title
             self.icon.icon = icon_image(state)
-            self.icon.title = f"{TITLE}: {state}"
+            self.icon.title = title
 
     # -- toasts (§16.10, §16.12 C14) ------------------------------------------------------------
 
@@ -429,7 +440,7 @@ def self_check():
     """``RainCLI-app.exe --self-check`` (15.9): import the app and its GUI modules, with no desktop,
     so a build proves the frozen app can start. 0 on success."""
     import importlib
-    modules = ("pystray", "PIL.Image", "PIL.ImageDraw", "webview", "raincli_agent.app.window",
+    modules = ("pystray", "PIL.Image", "PIL.PngImagePlugin", "webview", "raincli_agent.app.window",
                "raincli_agent.app.services", "raincli_agent.app.status", "raincli_agent.login",
                "raincli_agent.migrate", "raincli_agent.runtime.service", "raincli_agent.runtime.winapp")
     for name in modules:
@@ -440,8 +451,9 @@ def self_check():
             return 1
     from .window import LOCAL_DIR
     missing = [p for p in policy.LOCAL_PAGES if not (LOCAL_DIR / f"{p}.html").is_file()]
+    missing += [icon_path(state).name for state in model.ICON_STATES if not icon_path(state).is_file()]
     if missing:
-        print(f"RainCLI-app self-check: missing local pages: {', '.join(missing)}", file=sys.stderr)
+        print(f"RainCLI-app self-check: missing bundled files: {', '.join(missing)}", file=sys.stderr)
         return 1
     print(f"RainCLI-app self-check: ok ({__version__})")
     return 0

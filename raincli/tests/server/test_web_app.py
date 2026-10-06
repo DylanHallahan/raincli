@@ -839,7 +839,7 @@ def test_static_urls_carry_current_content_hash(client, world):
     pages = [client.get("/").text, client.get("/login").text]
     login(client)
     pages.append(client.get("/app").text)
-    for name in ("app.css", "app.js", "favicon.svg"):
+    for name in ("app.css", "app.js", "mark.svg", "favicon.ico"):
         digest = hashlib.sha256((static_dir / name).read_bytes()).hexdigest()[:12]
         for html in pages:
             assert f"/static/{name}?v={digest}" in html, name
@@ -990,8 +990,8 @@ def test_every_web_html_redirect_and_error_response_is_no_store(client, world, s
 def test_hashed_static_urls_return_immutable(client):
     html = client.get("/").text
     urls = re.findall(r'(?:href|src)="(/static/[^"?]+\?v=[0-9a-f]{12})"', html)
-    assert {u.split("?")[0] for u in urls} == {"/static/app.css", "/static/app.js", "/static/favicon.svg",
-                                               "/static/tokens.css"}
+    assert {u.split("?")[0] for u in urls} == {"/static/app.css", "/static/app.js", "/static/mark.svg",
+                                               "/static/favicon.ico", "/static/tokens.css"}
     for url in urls:
         r = client.get(url)
         assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=31536000, immutable"

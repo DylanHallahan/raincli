@@ -54,6 +54,7 @@ CloseApplications=no
 RestartApplications=no
 ChangesEnvironment=yes
 UninstallDisplayName=RainCLI
+SetupIconFile=app.ico
 UninstallDisplayIcon={app}\RainCLI.exe
 
 [Files]

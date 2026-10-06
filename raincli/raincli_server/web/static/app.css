@@ -160,9 +160,7 @@ code, .mono, pre, kbd { font-family: var(--mono); font-size: .875em; }
 .header-row { display: flex; align-items: center; gap: var(--s-5); min-height: var(--header-h); }
 .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 750; font-size: var(--fs-md); letter-spacing: -.01em; color: var(--text); text-decoration: none; flex: none; }
 .brand:hover { color: var(--text); }
-.logo { flex: none; width: 28px; height: 28px; display: block; }
-.logo .logo-bg { fill: var(--ink); }
-.logo path { stroke: var(--on-ink); }
+.logo { flex: none; width: 28px; height: 28px; display: block; color: var(--rc-accent); }  /* the glyph, brand blue */
 .app-nav { display: flex; gap: var(--s-1); align-items: center; }
 .app-nav a {
   position: relative; color: var(--muted); text-decoration: none; font-weight: 550; font-size: .95rem;
