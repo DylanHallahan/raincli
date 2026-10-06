@@ -53,7 +53,11 @@ E. A stale or foreign saved setup (protocol §16.17, §16.18), each case on a fr
    3. a connector config outside the scan directories, named by a connector-mode runtime.json: both move
       (§16.18 V3);
    4. a connector runtime with two credentials, one revoked: only the revoked one is set aside, the
-      runtime config is rewritten, and the valid one keeps delivering (§16.18 V2).
+      runtime config is rewritten, and the valid one keeps delivering (§16.18 V2);
+   5. an app machine (signed in from the CLI as another account) with an agent_held record and a by-name
+      handover box, then revoked: the window's refused handoff shows sign-in, the owner's sign-in offers a
+      new machine, and after it neither the record nor the box is in the new state, only in the backup
+      (§16.18 V1).
    Skipped with --real.
 
 Release traffic goes to the REAL hostnames (api.github.com, github.com,
@@ -411,12 +415,12 @@ class App:
         wait_for("the uninstaller to finish", finished, timeout=300)
 
 
-def login_through_conpty(app, server, password, machine):
+def login_through_conpty(app, server, password, machine, email=None):
     """`raincli.exe login` with the password typed at its no-echo prompt in a pseudo console."""
     from winpty import PtyProcess
 
     exe = str(app.root / "bin" / "raincli.exe")
-    proc = PtyProcess.spawn([exe, "login", "--email", EMAIL, "--machine-name", machine, "--api-url", server.url],
+    proc = PtyProcess.spawn([exe, "login", "--email", email or EMAIL, "--machine-name", machine, "--api-url", server.url],
                             dimensions=(30, 160))
     output, done = [], threading.Event()
 
@@ -1004,6 +1008,56 @@ def part_e(app, server, installers, password, observer, work):
         "original kept in the backup), and the valid one keeps delivering")
     app.quit()
     app.uninstall(signout=False, label="e4")
+
+    # E5. An old machine-mode setup's held named-agent record and by-name handover box are never delivered (V1).
+    from raincli_agent.connector.config import load_connector_config
+    from raincli_agent.connector.queue import AGENT_HELD, Queue
+    from raincli_agent.runtime import sessions
+
+    fresh_slate(app)
+    app.install(NEW, installers, "e5")
+    app.quit()
+    login_through_conpty(app, server, other_password, "e2e-v1-old", email=OTHER_EMAIL)
+    connector = load_connector_config(str(config_dir / "runtime.json"))
+    state = runtime_state_dir(config_dir)
+    held_id = str(uuid.uuid4())
+    Queue(connector.state_dir).save({"id": held_id, "seq": 1, "from": "e2e-old-teammate", "agent": "reviewer",
+                                     "body": "an old held message", "state": AGENT_HELD, "hold_reason": "offline",
+                                     "history": []})
+    sessions.ensure_salt(str(state))
+    sessions.sessions_dir(str(state), create=True)
+    box = sessions.name_box("notes")
+    sessions.hand_over(str(state), box, str(uuid.uuid4()), "an old by-name handover")
+    held_files = lambda root: [p for p in root.rglob(f"{held_id}.json")]  # noqa: E731
+    check(held_files(state), "the held record was not written")
+    server.admin("revoke-agent", "--team", OTHER_TEAM, "--handle", "e2e-v1-old")
+    revoked = ("This computer's saved RainCLI setup belongs to a machine that was revoked.")
+    port = open_window_cdp(app)
+    with sync_playwright() as pw:
+        window = WindowCDP(pw, port)
+        page = window.page("sign-in.html", timeout=180)  # the handoff was refused: sign-in, not offline
+        wait_for("the sign-in page's machine name", lambda: page.input_value("#machine"), timeout=60, interval=1)
+        window_sign_in(page, password)
+        wait_for("the new-machine offer", lambda: page.is_visible("#new-machine"), timeout=120, interval=1)
+        check(page.inner_text("#message") == revoked, f"the offer says {page.inner_text('#message')!r}")
+        shot(page, "e5-offer")
+        page.click("#new-machine")
+        page.fill("#machine", "e2e-v1-fresh")
+        page.fill("#password", password)
+        page.click("#submit")
+        page = window.page("app/inbox", timeout=180)
+        window.close()
+    wait_for("the fresh machine", lambda: signed_in_fresh(server, observer, "e2e-v1-fresh", config_dir), timeout=120)
+    backup = backups(config_dir)[-1]
+    check(held_files(backup), "the backup lacks the old held record")
+    check(not state.exists() or not held_files(state), "the old held record is in the new state directory")
+    check(sessions.claim(str(state), box) == ([], []), "the new state hands over the old by-name message")
+    check(any((backup / "runtime-state" / "sessions").rglob("*")), "the backup lacks the old handover box")
+    say("PASS: E5. an app machine's agent_held record and by-name handover box, after a revoke: the refused "
+        "handoff showed sign-in, the owner's sign-in offered a new machine, and neither the record nor the box "
+        "is in the new state (both are in the backup)")
+    app.quit()
+    app.uninstall(signout=True, label="e5")
 
 
 # -- the run --------------------------------------------------------------------------------
