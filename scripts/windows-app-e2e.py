@@ -662,7 +662,8 @@ def part_d(app, server, installers, password, observer, menu, work):
     with sync_playwright() as pw:
         browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
         page = window_page(browser, "sign-in.html", port)
-        page.wait_for_function("document.getElementById('machine').value.length > 0", timeout=60000)
+        # Polled from here: the local pages' CSP (script-src 'self') rightly refuses wait_for_function's eval.
+        wait_for("the sign-in page's machine name", lambda: page.input_value("#machine"), timeout=60, interval=1)
         check(page.evaluate("document.visibilityState") == "visible", "--open did not show the window")
         shot(page, "d4-sign-in")
         page.fill("#email", EMAIL)
@@ -701,8 +702,8 @@ def part_d(app, server, installers, password, observer, menu, work):
         # D6. This computer and Settings (the /app/local sentinel shows the bundled pages).
         page.click("nav.rc-nav a:has-text('This computer')")
         page.wait_for_url("**/this-computer.html**", timeout=60000)
-        page.wait_for_function(f"document.getElementById('machine').textContent === {json.dumps(WINDOW_MACHINE)}",
-                               timeout=60000)
+        wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
+                 timeout=60, interval=1)
         shot(page, "d6-this-computer")
         page.click("nav.rc-nav button[data-open=settings]")
         page.wait_for_url("**/settings.html**", timeout=60000)
@@ -723,8 +724,8 @@ def part_d(app, server, installers, password, observer, menu, work):
         # D8. Sign-out from This computer: confirmed, revoked, the profile marked for reset.
         page.click("nav.rc-nav a:has-text('This computer')")
         page.wait_for_url("**/this-computer.html**", timeout=60000)
-        page.wait_for_function(f"document.getElementById('machine').textContent === {json.dumps(WINDOW_MACHINE)}",
-                               timeout=60000)
+        wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
+                 timeout=60, interval=1)
         page.click("#sign-out")
         click_dialog_ok("Sign out")
         page.wait_for_url("**/sign-in.html**", timeout=120000)
