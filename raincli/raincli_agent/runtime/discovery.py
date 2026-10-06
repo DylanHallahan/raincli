@@ -185,37 +185,88 @@ def linux_scan(salt, claimed_pids, herdr_ok, processes=None, cwd_name=_cwd_name,
     return out
 
 
-def windows_scan(salt, claimed_pids, run=subprocess.run):
-    """Type-only: tasklist image names for this user's processes; the name is the type."""
+WINDOWS_KINDS = ("codex", "claude")  # codex.exe, codex-*.exe, claude.exe (§16.19 2); node.exe never
+
+
+def windows_scan(salt, claimed_pids, run=subprocess.run, table=None, same_user=None):
+    """Type-only: this user's Codex and Claude Code processes, from the Toolhelp table with
+    each candidate's owner checked by token SID (§16.19 2). A process whose ancestor is of
+    the same type is part of it. ``tasklist`` is the fallback when the table can't be read."""
+    try:
+        table = procinfo.process_table() if table is None else table
+        same_user = procinfo.owner_check() if same_user is None else same_user
+    except (OSError, AttributeError, ValueError):
+        return tasklist_scan(salt, claimed_pids, run)
+    out = []
+    for pid in sorted(table):
+        exe, parent = table[pid][:2]
+        kind = procinfo.kind_of(exe)
+        if kind not in WINDOWS_KINDS or pid in claimed_pids:
+            continue
+        up, seen = parent, set()
+        while up in table and up not in seen and len(seen) < 32:
+            seen.add(up)
+            if procinfo.kind_of(table[up][0]) == kind or up in claimed_pids:
+                break
+            up = table[up][1]
+        else:
+            if same_user(pid):
+                out.append(entry(salt, f"scan:{kind}:{pid}", kind, kind, "unknown", "scan"))
+    return out
+
+
+def tasklist_scan(salt, claimed_pids, run=subprocess.run):
+    """The fallback: tasklist image names for this user's processes, decoded with
+    ``errors="replace"`` and never raising on its contents."""
     user = os.environ.get("USERNAME", "")
     if not user:
         return []  # never list other users' processes
     argv = ["tasklist", "/FO", "CSV", "/NH", "/FI", f"USERNAME eq {user}"]
     try:
-        proc = run(argv, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+        proc = run(argv, capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.TimeoutExpired):
         return []
+    raw = proc.stdout or b""
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
     out = []
-    for row in csv.reader(io.StringIO(proc.stdout or "")):
+    try:
+        rows = list(csv.reader(io.StringIO(text)))
+    except csv.Error:
+        return []
+    for row in rows:
         if len(row) < 2 or not row[1].isdigit():
             continue
         kind = procinfo.kind_of(row[0])
         pid = int(row[1])
-        if kind and pid not in claimed_pids:
+        if kind in WINDOWS_KINDS and pid not in claimed_pids:
             out.append(entry(salt, f"scan:{kind}:{pid}", kind, kind, "unknown", "scan"))
     return out
 
 
 def scan(salt, claimed_pids, herdr_ok, processes=None, namespaces=()):
-    try:
-        if sys.platform.startswith("linux"):
-            return linux_scan(salt, claimed_pids, herdr_ok, processes, namespaces=namespaces)
-        if os.name == "nt":
-            return windows_scan(salt, claimed_pids)
-    except OSError:
-        pass
+    """Raises on a failure: ``discover`` isolates each source."""
+    if sys.platform.startswith("linux"):
+        return linux_scan(salt, claimed_pids, herdr_ok, processes, namespaces=namespaces)
+    if os.name == "nt":
+        return windows_scan(salt, claimed_pids)
     return []
+
+
+_LOGGED = set()
+
+
+def _log_once(log, source, exc):
+    """One line per source and exception type for this process; the type only, no process data."""
+    key = (source, type(exc).__name__)
+    if key not in _LOGGED:
+        _LOGGED.add(key)
+        log(f"agent discovery: the {source} source failed ({type(exc).__name__}); the other sources are "
+            "still reported")
+
+
+def _runtime_log(text):
+    print(text, file=sys.stderr, flush=True)  # the runtime log or journal keeps it
 
 
 # -- the report --------------------------------------------------------------------
@@ -260,22 +311,40 @@ def without_duplicates(hooked, scanned, herdr_ok, processes, inbox):
     return hooked, kept
 
 
-def discover(state_dir, salt, herdr, inbox, now=None, include_scan=True):
+def discover(state_dir, salt, herdr, inbox, now=None, include_scan=True, log=_runtime_log):
     """The directory for one report. ``inbox`` is ("herdr", name),
-    ("hook", type, name) or None (list sessions without marking an inbox)."""
-    hooked, pids = hook_entries(salt, state_dir, inbox, now)
-    herdr_found, herdr_ok = herdr_entries(salt, herdr, inbox) if herdr is not None else ([], False)
-    processes = None
-    if sys.platform.startswith("linux"):
+    ("hook", type, name) or None (list sessions without marking an inbox).
+
+    §16.19 1: each source (hooks, Herdr, the scan) runs on its own; a failing one is logged
+    once per kind and the others are still reported. If every source failed the directory
+    is ``[]`` and the log says why."""
+    failed, attempted = [], 0
+
+    def source(name, work, default):
+        nonlocal attempted
+        attempted += 1
         try:
-            processes = linux_processes()
-        except OSError:
-            processes = None
-    namespaces = foreign_namespaces(state_dir, now) if include_scan and processes is not None else ()
-    scanned = scan(salt, pids, herdr_ok, processes, namespaces) if include_scan else []
+            return work()
+        except Exception as exc:  # noqa: BLE001 - one source never hides the others
+            failed.append(name)
+            _log_once(log, name, exc)
+            return default
+    hooked, pids = source("hooks", lambda: hook_entries(salt, state_dir, inbox, now), ([], set()))
+    herdr_found, herdr_ok = source("Herdr", lambda: herdr_entries(salt, herdr, inbox),
+                                   ([], False)) if herdr is not None else ([], False)
+    processes = None
+    if sys.platform.startswith("linux") and include_scan:
+        processes = source("process table", linux_processes, None)
+    scanned = []
+    if include_scan:
+        namespaces = source("namespaces", lambda: foreign_namespaces(state_dir, now), ()) \
+            if processes is not None else ()
+        scanned = source("scan", lambda: scan(salt, pids, herdr_ok, processes, namespaces), [])
     hooked, scanned = without_duplicates(hooked, scanned, herdr_ok, processes, inbox)
     for h in hooked:
         h.pop("_pid", None)  # local only: never reported
+    if failed and len(failed) == attempted:
+        _log_once(log, "every", RuntimeError("all sources failed: " + ", ".join(failed)))
     return normalize(with_reachability(herdr_found + hooked + scanned))
 
 

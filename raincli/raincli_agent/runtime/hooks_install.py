@@ -306,3 +306,114 @@ def state_dir_from_runtime(config):
     from .service import _read_runtime
     return _read_runtime(config)[-1]
 
+
+
+# -- §16.19 3: "Connect Codex / Claude Code", shared by the app and the CLI ------------------------
+
+STATUSES = ("not_installed_agent", "too_old", "not_connected", "connected", "needs_approval")
+CONNECTED_FILE = "hooks-connected.json"  # in the runtime state dir: {kind: connect time}
+
+
+def find_claude(env=None, windows=None, home=None):
+    """Claude Code on this machine: ``claude`` (``claude.exe``) in an absolute PATH entry, or the
+    native installer's ``~/.local/bin`` (code.claude.com/docs/en/setup). None when absent."""
+    env = os.environ if env is None else env
+    windows = os.name == "nt" if windows is None else windows
+    name = "claude.exe" if windows else "claude"
+    entries = [e.strip().strip('"') for e in (env.get("PATH") or "").split(os.pathsep)]
+    entries.append(str(Path(home or os.path.expanduser("~")) / ".local" / "bin"))
+    for entry in entries:
+        if not entry or entry == "." or not os.path.isabs(entry):
+            continue
+        candidate = os.path.join(entry, name)
+        if os.path.isfile(candidate) and (windows or os.access(candidate, os.X_OK)):
+            return candidate
+    return None
+
+
+def _installed_for(kind, state_dir, home=None):
+    """Whether our hooks for ``kind`` are installed and write to ``state_dir``."""
+    link = config_path(kind, home)
+    path = Path(os.path.realpath(link)) if link.is_symlink() else link
+    try:
+        _, data = load(path)
+    except ConfigError:
+        return False
+    hooks = data.get("hooks") or {}
+    want = os.path.normcase(os.path.abspath(str(state_dir)))
+    for event in EVENTS[kind]:
+        found = False
+        for group in hooks.get(event) or []:
+            for entry in (group.get("hooks") if isinstance(group, dict) else None) or []:
+                if owned(entry):
+                    text = " ".join(str(entry.get(k, "")) for k in ("command", "commandWindows")) + " " + \
+                        " ".join(str(a) for a in entry.get("args") or [])
+                    found = found or want in os.path.normcase(text.replace('"', "").replace("'", ""))
+        if not found:
+            return False
+    return True
+
+
+def _connected_at(state_dir, kind):
+    try:
+        data = json.loads((Path(state_dir) / CONNECTED_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get(kind) if isinstance(data, dict) else None
+    return value if isinstance(value, (int, float)) else None
+
+
+def status(kind, runtime_config, *, home=None, probe=codex_support, find=None, windows=None, now=None):
+    """One of ``STATUSES`` for Codex or Claude Code on this machine (§16.19 3):
+
+    - ``not_installed_agent``: the agent isn't found;
+    - ``too_old``: Codex without the hooks feature, or older than 0.145.0 on Windows;
+    - ``not_connected``: our hooks aren't installed for this runtime's state dir;
+    - ``needs_approval``: Codex hooks are installed but no hook event was recorded since
+      (approve them once in Codex's /hooks, then start a new session);
+    - ``connected``."""
+    if kind not in EVENTS:
+        raise ConfigError("hooks status supports claude or codex")
+    windows = os.name == "nt" if windows is None else windows
+    state_dir = state_dir_from_runtime(runtime_config)
+    if kind == "claude":
+        if (find or find_claude)() is None:
+            return "not_installed_agent"
+        return "connected" if _installed_for(kind, state_dir, home) else "not_connected"
+    if (find or find_codex)() is None:
+        return "not_installed_agent"
+    supported, evidence = probe()
+    version = codex_version(evidence)
+    if not supported or (windows and (version is None or version < CODEX_MIN_WINDOWS)):
+        return "too_old"
+    if not _installed_for(kind, state_dir, home):
+        return "not_connected"
+    since = _connected_at(state_dir, kind) or 0
+    from . import sessions
+    recorded = [r for r in sessions.read_sessions(str(state_dir), now, drop=False)
+                if r.get("type") == "codex" and (r.get("updated_at") or 0) >= since]
+    return "connected" if recorded else "needs_approval"
+
+
+def connect(kind, runtime_config, *, home=None, prefix=None, probe=codex_support, windows=None, now=None):
+    """The same operation as ``raincli hooks install --<kind> --config <runtime_config>`` (K1
+    resolution, the Codex version gate), and records when, for ``needs_approval``. Only
+    ever run on the user's click or command."""
+    state_dir = state_dir_from_runtime(runtime_config)
+    result = install(kind, state_dir, home=home, prefix=prefix, probe=probe, windows=windows)
+    if result.get("status") in ("installed", "unchanged"):
+        try:
+            data = json.loads((Path(state_dir) / CONNECTED_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        if result["status"] == "installed" or kind not in data:
+            data[kind] = time.time() if now is None else now
+        Path(state_dir).mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(str(Path(state_dir) / CONNECTED_FILE), (json.dumps(data) + "\n").encode(), 0o600)
+    return result
+
+
+def disconnect(kind, runtime_config, *, home=None, windows=None):
+    """Remove only our hooks for ``kind`` (``raincli hooks install --<kind> --remove``)."""
+    return install(kind, state_dir_from_runtime(runtime_config), remove=True, home=home, windows=windows)

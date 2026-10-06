@@ -18,6 +18,10 @@ TYPES_BY_NAME = {
 # runs a hook as codex.exe -> cmd.exe /C -> raincli.exe -> raincli.exe.
 PASS_THROUGH = {"sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "tcsh", "csh", "busybox", "env", "nu",
                 "pwsh", "powershell", "cmd", "conhost", "raincli"}
+# Codex's own helper executables (release assets of openai/codex rust-v0.160.1): never a
+# session of their own, so the scan ignores them and liveness passes through them (§16.19 2).
+CODEX_HELPERS = {"codex-command-runner", "codex-windows-sandbox-setup", "codex-code-mode-host", "codex-voice-host"}
+PASS_THROUGH |= CODEX_HELPERS
 
 
 def plain(name):
@@ -33,7 +37,7 @@ def exe_name(path):
     if len(parts) >= 3 and parts[-2] == "versions" and parts[-3] == "claude":
         return "claude"
     name = plain(parts[-1] if parts else "")
-    if name.startswith("codex-"):
+    if name.startswith("codex-") and name not in CODEX_HELPERS:
         return "codex"  # a release binary as shipped, e.g. codex-x86_64-pc-windows-msvc.exe (§16.14 K2)
     return name
 
@@ -152,6 +156,67 @@ def windows_snapshot():
         return out
     finally:
         k.CloseHandle(snap)
+
+
+def process_table():
+    """{pid: (exe name, parent pid)} from one Toolhelp snapshot (§16.19 2). Windows only."""
+    return windows_snapshot()
+
+
+def _advapi():
+    import ctypes as c
+    from ctypes import wintypes as w
+    a = c.WinDLL("advapi32", use_last_error=True)
+    a.OpenProcessToken.argtypes, a.OpenProcessToken.restype = [w.HANDLE, w.DWORD, c.POINTER(w.HANDLE)], w.BOOL
+    a.GetTokenInformation.argtypes = [w.HANDLE, c.c_int, c.c_void_p, w.DWORD, c.POINTER(w.DWORD)]
+    a.GetTokenInformation.restype = w.BOOL
+    a.EqualSid.argtypes, a.EqualSid.restype = [c.c_void_p, c.c_void_p], w.BOOL
+    return a
+
+
+def _token_user(c, w, k, a, process):
+    """The TOKEN_USER buffer of an open process handle, or None."""
+    token = w.HANDLE()
+    if not a.OpenProcessToken(process, 0x0008, c.byref(token)):  # TOKEN_QUERY
+        return None
+    try:
+        size = w.DWORD()
+        a.GetTokenInformation(token, 1, None, 0, c.byref(size))  # TokenUser: ask the size
+        if not size.value or size.value > 4096:
+            return None
+        buffer = c.create_string_buffer(size.value)
+        if not a.GetTokenInformation(token, 1, buffer, size, c.byref(size)):
+            return None
+        return buffer
+    finally:
+        k.CloseHandle(token)
+
+
+def owner_check():
+    """A function ``pid -> bool``: whether that process's token user is this process's user,
+    compared as SIDs (§16.19 2: tasklist's USERNAME filter can miss domain and Azure AD
+    accounts). A process that can't be opened or queried counts as not ours."""
+    c, w, k, _ = _windows()
+    a = _advapi()
+    k.GetCurrentProcess.restype = w.HANDLE
+    mine = _token_user(c, w, k, a, k.GetCurrentProcess())
+    if mine is None:
+        raise OSError("cannot read this process's user")
+    my_sid = c.cast(mine, c.POINTER(c.c_void_p))[0]  # TOKEN_USER.User.Sid
+
+    def same_user(pid):
+        handle = k.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            theirs = _token_user(c, w, k, a, handle)
+            if theirs is None:
+                return False
+            return bool(a.EqualSid(my_sid, c.cast(theirs, c.POINTER(c.c_void_p))[0]))
+        finally:
+            k.CloseHandle(handle)
+    same_user.sid_buffer = mine  # keeps the memory my_sid points into alive
+    return same_user
 
 
 def windows_start(pid, alive_only=True):
