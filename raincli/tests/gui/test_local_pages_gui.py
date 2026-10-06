@@ -243,3 +243,30 @@ def test_sign_in_offers_a_new_machine_and_asks_for_the_password_again(browser, l
     assert second[2]["machine_name"] == "old-pc-new"
     context.close()
     assert not errors
+
+
+def test_this_computer_connects_coding_agents_only_on_click(browser, local_origin, artifacts):
+    """§16.19 item 3: each agent's state; Connect or Disconnect only when the user clicks."""
+    approve = ("Connected. Approve the RainCLI hooks once in Codex (type /hooks in a Codex session), "
+               "then start a new Codex session.")
+    replies = {"status": STATUS,
+               "hooks": [{"kind": "codex", "name": "Codex", "state": "not_connected"},
+                         {"kind": "claude", "name": "Claude Code", "state": "not_installed_agent"}],
+               "connect_hooks": {"ok": True, "message": approve, "state": "needs_approval"}}
+    context, page, errors = open_page(browser, local_origin, "this-computer", replies)
+    page.wait_for_selector("#hooks li[data-agent=codex] button")
+    assert page.inner_text("#hooks li[data-agent=codex] button") == "Connect"
+    assert page.locator("#hooks li[data-agent=claude] button").count() == 0
+    assert "Not installed" in page.inner_text("#hooks li[data-agent=claude]")
+    assert not [c for c in calls(page) if c[0] == "connect_hooks"]  # nothing happens by itself
+    page.screenshot(path=str(artifacts / "local-this-computer-connect.png"), full_page=True)
+    page.evaluate("window.__replies.hooks = [{kind: 'codex', name: 'Codex', state: 'needs_approval'},"
+                  " {kind: 'claude', name: 'Claude Code', state: 'not_installed_agent'}]")
+    page.click("#hooks li[data-agent=codex] button")
+    page.wait_for_function("document.getElementById('hooks-message').textContent.includes('/hooks')")
+    assert ["connect_hooks", "nonce-1", "codex", True] in calls(page)
+    assert page.inner_text("#hooks-message") == approve
+    page.wait_for_selector("#hooks li[data-agent=codex] [data-state=needs_approval]")
+    assert page.inner_text("#hooks li[data-agent=codex] button") == "Disconnect"
+    context.close()
+    assert not errors

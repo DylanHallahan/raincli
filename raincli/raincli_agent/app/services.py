@@ -28,6 +28,15 @@ STALE_SENTENCES = {  # §16.17 item 4, §16.18 V4 and V7
 STALE_CODES = {"machine_credential_invalid": "invalid", "not_machine_owner": "not_owner"}  # person_only's 409s
 
 
+HOOK_AGENTS = {"codex": "Codex", "claude": "Claude Code"}  # §16.19 item 3: "Connect Codex / Claude Code"
+HOOK_STATES = ("not_installed_agent", "too_old", "not_connected", "connected", "needs_approval")
+
+
+def _hooks():
+    from ..runtime import hooks_install  # the client core's status/connect (cli-builder, §16.19 item 3)
+    return hooks_install
+
+
 class StaleCredential(ServiceError):
     """§16.17: the saved machine credential is revoked (``invalid``), another account's (``not_owner``) or
     can't be read by this Windows account (``unreadable``, §16.18 V4).
@@ -271,6 +280,37 @@ class Services:
                 trust.remove(self.runtime_config, value)
             return "Saved."
         raise ServiceError("unknown setting")
+
+    # -- coding agents' hooks (§16.19 item 3): only on the user's click --------------------------------------
+
+    def hooks(self):
+        """``[{kind, name, state}]`` for Codex and Claude Code, from ``hooks_install.status``. A failure reads
+        as ``unknown`` for that agent only."""
+        out = []
+        for kind, name in HOOK_AGENTS.items():
+            try:
+                state = _hooks().status(kind, self.runtime_config)
+            except Exception:  # noqa: BLE001 - one agent's failure never hides the other
+                state = "unknown"
+            out.append({"kind": kind, "name": name, "state": state if state in HOOK_STATES else "unknown"})
+        return out
+
+    def connect_hooks(self, kind, connect=True):
+        """Connect (or disconnect) one agent: the same operation as ``raincli hooks install --<kind>``."""
+        if kind not in HOOK_AGENTS:
+            raise ServiceError("unknown agent")
+        hooks = _hooks()
+        if connect:
+            hooks.connect(kind, self.runtime_config)
+        elif hasattr(hooks, "disconnect"):
+            hooks.disconnect(kind, self.runtime_config)
+        else:
+            hooks.install(kind, hooks.state_dir_from_runtime(self.runtime_config), remove=True)
+        return _hooks().status(kind, self.runtime_config)
+
+    def unconnected_agents(self):
+        """Names of installed agents that are not connected (for the one notice after a fresh sign-in)."""
+        return [h["name"] for h in self.hooks() if h["state"] == "not_connected"]
 
     def toggle_pause(self):
         if self.host.paused:

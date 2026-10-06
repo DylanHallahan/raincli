@@ -267,7 +267,7 @@ def test_the_nonce_is_injected_only_into_local_pages(tmp_path):
 def test_js_api_never_returns_a_credential(tmp_path):
     names = [n for n in dir(Api) if not n.startswith("_")]
     assert set(names) == {"sign_in_defaults", "sign_in", "status", "settings", "save_settings", "toggle_pause",
-                          "open_log", "sign_out", "open", "retry"}
+                          "open_log", "sign_out", "open", "retry", "hooks", "connect_hooks"}
     source = (APP_DIR / "services.py").read_text()
     tree = ast.parse(source)
     status = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "status")

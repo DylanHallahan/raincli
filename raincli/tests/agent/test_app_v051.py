@@ -253,3 +253,97 @@ def test_the_sentences_are_the_contracts():
                      "The other machine stays active for its owner until they revoke it.",
         "unreadable": "This computer's saved RainCLI setup can't be read by this Windows account.",
     }
+
+
+# -- §16.19 item 3: connecting Codex and Claude Code, only on the user's click --------------------------------
+
+class FakeHooks:
+    def __init__(self, states):
+        self.states, self.calls = dict(states), []
+
+    def status(self, kind, runtime_config):
+        if self.states.get(kind) == "boom":
+            raise OSError("unreadable")
+        return self.states[kind]
+
+    def connect(self, kind, runtime_config):
+        self.calls.append(("connect", kind, runtime_config))
+        self.states[kind] = "needs_approval" if kind == "codex" else "connected"
+
+    def install(self, kind, state_dir, remove=False):
+        self.calls.append(("install", kind, state_dir, remove))
+        self.states[kind] = "not_connected"
+
+    def state_dir_from_runtime(self, runtime_config):
+        return "state-dir"
+
+
+def test_hooks_status_per_agent_and_connect_only_when_asked(setup, monkeypatch):
+    hooks = FakeHooks({"codex": "not_connected", "claude": "boom"})
+    monkeypatch.setattr(services_mod, "_hooks", lambda: hooks)
+    assert setup.svc.hooks() == [{"kind": "codex", "name": "Codex", "state": "not_connected"},
+                                 {"kind": "claude", "name": "Claude Code", "state": "unknown"}]
+    assert hooks.calls == []  # reading the state installs nothing
+    assert setup.svc.unconnected_agents() == ["Codex"]
+    assert setup.svc.connect_hooks("codex") == "needs_approval"
+    assert hooks.calls == [("connect", "codex", str(setup.dir / "runtime.json"))]
+    assert setup.svc.connect_hooks("codex", connect=False) == "not_connected"
+    assert hooks.calls[-1] == ("install", "codex", "state-dir", True)  # no disconnect(): the remove path
+    with pytest.raises(services_mod.ServiceError):
+        setup.svc.connect_hooks("cursor")
+
+
+def test_the_js_api_connects_with_the_codex_approval_sentence(setup, monkeypatch):
+    from raincli_agent.app.window import CONNECTED
+    hooks = FakeHooks({"codex": "not_connected", "claude": "not_installed_agent"})
+    monkeypatch.setattr(services_mod, "_hooks", lambda: hooks)
+    window = FakeWindow()
+    webview = types.SimpleNamespace(settings={}, create_window=lambda *a, **k: window, start=lambda *a, **k: None)
+    app = AppWindow(setup.svc, profile_dir=setup.dir / "webview", webview=webview, local_port=43123)
+    app.create()
+    window.url = "http://127.0.0.1:43123/this-computer.html"
+    app.on_loaded()
+    nonce = window.scripts[-1].split('"')[1]
+    with pytest.raises(PermissionError):
+        app.api.connect_hooks("stale", "codex")
+    assert hooks.calls == []
+    result = app.api.connect_hooks(nonce, "codex", True)
+    assert result["ok"] and result["state"] == "needs_approval"
+    assert "/hooks" in result["message"] and "new Codex session" in result["message"]
+    assert result["message"] == CONNECTED[("codex", "needs_approval")]
+    assert app.api.hooks(nonce)[0]["state"] == "needs_approval"
+
+
+def test_a_fresh_sign_in_calls_the_notice_once_and_person_only_does_not(setup, monkeypatch):
+    fresh = []
+    window = FakeWindow()
+    webview = types.SimpleNamespace(settings={}, create_window=lambda *a, **k: window, start=lambda *a, **k: None)
+    app = AppWindow(setup.svc, profile_dir=setup.dir / "webview", webview=webview, local_port=43123,
+                    later=lambda fn, *a: fn(*a), on_fresh_sign_in=lambda: fresh.append(1))
+    monkeypatch.setattr(app, "open_hosted", lambda *a, **k: True)
+    app.create()
+    app.sign_in({"email": "a@example.test", "machine_name": "x"}, Secret("pw"))  # person_only on this machine
+    assert fresh == []
+    app.sign_in({"email": "a@example.test", "machine_name": "pc-new", "new_machine": True}, Secret("pw"))
+    assert fresh == [1]
+
+
+def test_the_tray_shows_one_notice_pointing_to_this_computer(tmp_path):
+    notes = []
+    t = tray.Tray.__new__(tray.Tray)
+    t.icon = types.SimpleNamespace(notify=lambda text, title: notes.append(text))
+    t.services = types.SimpleNamespace(unconnected_agents=lambda: ["Codex", "Claude Code"])
+    opened = []
+    t.post = lambda fn, *a: fn(*a)
+    t.window = types.SimpleNamespace(show=lambda: opened.append("show"), local_url=lambda page: page,
+                                     load=lambda url: opened.append(url))
+    t.offer_connect()
+    t.offer_connect()  # once
+    assert notes == ["Codex and Claude Code are installed but not connected to RainCLI. Open This computer to connect."]
+    t.toast_clicked()
+    assert opened == ["show", "this-computer"]
+    t2 = tray.Tray.__new__(tray.Tray)
+    t2.icon = types.SimpleNamespace(notify=lambda text, title: notes.append(text))
+    t2.services = types.SimpleNamespace(unconnected_agents=lambda: [])
+    t2.offer_connect()
+    assert len(notes) == 1  # nothing to connect: no notice

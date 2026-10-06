@@ -143,7 +143,8 @@ class Tray:
         self.webview = webview
         self.window = AppWindow(self.services, profile_dir=self.state_dir / "webview", webview=webview,
                                 browser_open=webbrowser.open, confirm=self.confirm,
-                                log=(lambda text: winapp.app_log(root_dir, text)) if root_dir else None)
+                                log=(lambda text: winapp.app_log(root_dir, text)) if root_dir else None,
+                                on_fresh_sign_in=lambda: self.offer_connect())
         self.calls = queue.Queue()
         self.stopping = threading.Event()
         self._started = threading.Event()
@@ -229,7 +230,7 @@ class Tray:
             return
         for entry in entries or ():
             text, thread = self.toast_for(entry)
-            self.toast_thread = thread
+            self.toast_thread, self.toast_opens = thread, None  # a message toast opens its thread
             if self.icon is not None:
                 self.icon.notify(text, TITLE)
 
@@ -244,8 +245,33 @@ class Tray:
         return policy.toast_text(kind, sender), thread
 
     def toast_clicked(self):
+        if getattr(self, "toast_opens", None) == "this-computer":
+            self.toast_opens = None
+            self.post(self.open_this_computer)
+            return
         thread = self.toast_thread
         self.post(self.open_thread, thread)
+
+    def open_this_computer(self):
+        self.window.show()
+        self.window.load(self.window.local_url("this-computer"))
+
+    def offer_connect(self):
+        """§16.19 item 3: after a fresh sign-in, ONE dismissible notice when Codex or Claude Code is installed
+        and not connected, pointing to This computer. It installs nothing: connecting is the user's click."""
+        if getattr(self, "connect_offered", False):
+            return
+        try:
+            names = self.services.unconnected_agents()
+        except Exception:  # noqa: BLE001 - no notice rather than a wrong one
+            return
+        if not names or self.icon is None:
+            return
+        self.connect_offered = True
+        self.toast_opens = "this-computer"
+        verb = "is" if len(names) == 1 else "are"
+        self.icon.notify(f"{' and '.join(names)} {verb} installed but not connected to {TITLE}. "
+                         "Open This computer to connect.", TITLE)
 
     def open_thread(self, thread):
         self.window.show()

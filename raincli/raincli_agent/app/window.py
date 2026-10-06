@@ -82,6 +82,15 @@ def mark_profile_for_reset(profile_dir):
     marker.write_text("1")
 
 
+CONNECTED = {  # §16.19 item 3: after connecting Codex, one sentence about /hooks
+    ("codex", "needs_approval"): "Connected. Approve the RainCLI hooks once in Codex (type /hooks in a Codex session), "
+                                 "then start a new Codex session.",
+    ("codex", "connected"): "Connected. Approve the RainCLI hooks once in Codex (type /hooks in a Codex session), "
+                            "then start a new Codex session.",
+    ("claude", "connected"): "Connected. New Claude Code sessions report to RainCLI.",
+}
+
+
 def _navigation_id(args):
     try:
         return int(args.NavigationId)
@@ -146,6 +155,19 @@ class Api:
         self._guard(nonce)
         return {"paused": self._app.services.toggle_pause()}
 
+    def hooks(self, nonce):
+        self._guard(nonce)
+        return self._app.services.hooks()
+
+    def connect_hooks(self, nonce, kind, connect=True):
+        """§16.19 item 3: only ever from the user's click on This computer."""
+        self._guard(nonce)
+        try:
+            state = self._app.services.connect_hooks(str(kind), connect is not False)
+        except Exception as exc:  # noqa: BLE001 - shown on the page
+            return _result(False, f"Could not {'connect' if connect is not False else 'disconnect'}: {exc}")
+        return _result(message=CONNECTED.get((str(kind), state), ""), state=state)
+
     def open_log(self, nonce):
         self._guard(nonce)
         return {"opened": self._app.services.open_log()}
@@ -167,9 +189,10 @@ class AppWindow:
     """The window's behaviour, independent of pywebview (``webview`` is injected) so it is unit-tested."""
 
     def __init__(self, services, *, profile_dir, webview=None, browser_open=None, confirm=None,
-                 local_port=None, timer=threading.Timer, later=_in_thread, log=None):
+                 local_port=None, timer=threading.Timer, later=_in_thread, log=None, on_fresh_sign_in=None):
         self.services = services
         self._log = log or (lambda text: None)  # app-lock\\app.log: origins and paths only, never a query
+        self._on_fresh_sign_in = on_fresh_sign_in  # the tray's one notice about unconnected agents (§16.19)
         self._cancelled = set()  # NavigationIds this window cancelled (sentinel, other origins)
         self._timer_lock = threading.Lock()  # arm and disarm run on the UI thread and js_api threads
         self._loads = 0  # successful page loads so far; a timeout armed before one of them is moot
@@ -484,6 +507,7 @@ class AppWindow:
         (§16.17): the password is asked for again, never kept from the refused attempt."""
         from .. import login
         from .services import StaleCredential
+        was_signed_in = self.services.signed_in()
         try:
             self.services.sign_in(str(request.get("email") or "").strip(), password,
                                   machine_name=str(request.get("machine_name") or "").strip(),
@@ -504,9 +528,12 @@ class AppWindow:
             return _result(False, f"Sign-in failed: {type(exc).__name__}: {exc}", code="error")
         finally:
             password = None  # noqa: F841 - drop the reference
+        fresh = not was_signed_in or bool(request.get("again")) or request.get("new_machine") is True
         self.services.host.resume()
         self.refresh_navigation()
         self.handed_off = False  # sign-in rotates the install token: the old app session is gone
+        if fresh and self._on_fresh_sign_in is not None:
+            self._later(self._on_fresh_sign_in)
         self.open_hosted("/app/inbox")
         return _result(message="Signed in.")
 
