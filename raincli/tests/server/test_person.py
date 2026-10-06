@@ -61,8 +61,7 @@ def test_person_only_adds_a_session_without_rotation(client, world, session):
                                                "person_only": True, "previous_token": token})
     assert r.status_code == 200
     assert session.scalar(select(Agent.handle).where(Agent.handle == "alice-laptop")) == "alice-laptop"
-    for bad in ({"previous_token": world["tokens"]["bob"]}, {"previous_token": "rca_nope"}, {},
-                {"previous_token": token, "replace": True}):
+    for bad in ({}, {"previous_token": token, "replace": True}):
         r = client.post("/api/v1/app/login", json={"email": "alice@example.test", "password": PASSWORD,
                                                    "person_only": True, **bad})
         assert r.status_code == 400 and err(r) == "invalid", bad
@@ -76,6 +75,36 @@ def test_person_only_counts_like_any_sign_in(client, world, app):
     r = client.post("/api/v1/app/login", json={"email": "alice@example.test", "password": "wrong password!!",
                                                "person_only": True, "previous_token": token})
     assert r.status_code == 401 and err(r) == "invalid_credentials"
+
+
+def person_only(client, token, password=PASSWORD, email="alice@example.test"):
+    return client.post("/api/v1/app/login", json={"email": email, "password": password, "person_only": True,
+                                                  "previous_token": token})
+
+
+def test_person_only_tells_a_stale_credential_from_a_foreign_one(client, world, session):
+    """§16.17 (1): 409 machine_credential_invalid or not_machine_owner, once the password is right."""
+    token = app_login(client).json()["token"]
+    r = person_only(client, world["tokens"]["bob"])  # live, but bob's machine
+    assert r.status_code == 409 and err(r) == "not_machine_owner"
+    for stale in ("rca_" + "x" * 43, "rca_nope", "not-a-token"):  # unknown
+        r = person_only(client, stale)
+        assert r.status_code == 409 and err(r) == "machine_credential_invalid", stale
+    rotated = app_login(client, previous_token=token).json()["token"]  # signing in again rotates
+    r = person_only(client, token)
+    assert r.status_code == 409 and err(r) == "machine_credential_invalid"
+    identity.revoke_agent(session, session.scalar(select(Agent).where(Agent.handle == "alice-laptop")))
+    session.commit()
+    r = person_only(client, rotated)  # its machine is revoked
+    assert r.status_code == 409 and err(r) == "machine_credential_invalid"
+    assert person_only(client, world["tokens"]["alice"]).status_code == 200  # alice's other machine
+
+
+def test_person_only_with_a_wrong_password_reveals_nothing_about_the_token(client, world):
+    for token in (world["tokens"]["alice"], world["tokens"]["bob"], "rca_nope"):
+        r = person_only(client, token, password="wrong password!!")
+        assert r.status_code == 401 and err(r) == "invalid_credentials"
+        assert set(r.json()) == {"error"} and "machine" not in r.text
 
 
 # Authentication boundaries ------------------------------------------------------------------

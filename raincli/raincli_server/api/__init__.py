@@ -477,8 +477,12 @@ def sign_in(factory, limiter: web_auth.LoginLimiter, data: object, ip: str, api_
 def _person_only(session: Session, user, previous_token: str) -> tuple[int, dict] | ApiError:
     """§16.3: a person session for an already signed-in machine's owner. No rotation, no machine change."""
     auth = identity.authenticate_agent(session, previous_token, touch=False)
-    if auth is None or auth.agent.owner_user_id != user.id:
-        return ApiError(400, "invalid", "person_only needs the current credential of a machine you own")
+    # §16.17 (1): distinct refusals, given only after the email and password were correct.
+    if auth is None:
+        return ApiError(409, "machine_credential_invalid",
+                        "this computer's machine credential is not valid any more (revoked, rotated or unknown)")
+    if auth.agent.owner_user_id != user.id:
+        return ApiError(409, "not_machine_owner", "this computer's machine belongs to another account")
     token = identity.issue_person_session(session, user, auth.agent)
     log.info("app sign-in: person session added for machine %s in team %s", auth.agent.handle, auth.team.slug)
     return 200, {"person_session": token}
