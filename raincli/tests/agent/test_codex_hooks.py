@@ -199,6 +199,7 @@ def test_windows_codex_hooks_need_0_145(tmp_path, monkeypatch):
 
 
 def test_windows_codex_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("SystemRoot", "C:\\WINDOWS")
     home = tmp_path / "home"
     state = "C:\\Users\\First Last\\.config\\raincli\\runtime-state"
     result = hooks_install.install("codex", state, home=home, prefix=PREFIX, probe=probe("0.160.0"), windows=True)
@@ -217,14 +218,14 @@ def test_windows_codex_entry(tmp_path, monkeypatch):
             assert entry["additionalContextLimit"] == hooks_install.CODEX_CONTEXT_LIMIT
         else:
             assert "additionalContextLimit" not in entry
-        expected = (f'"{SHIM}" hook codex {event} --state-dir "{state}"')
+        expected = (f'C:\\WINDOWS\\System32\\cmd.exe /d /c call "{SHIM}" hook codex {event} --state-dir "{state}"')
         assert entry["commandWindows"] == entry["command"] == expected
 
 
 @pytest.mark.parametrize("bad", ["C:\\wow!\\state", "C:\\100%\\state", "C:\\a^b", "C:\\a&b", "C:\\a|b", "C:\\a<b", "C:\\a>b",
-                                 'C:\\a"b', "C:\\state\\"])
+                                 'C:\\a"b', "C:\\state\\", "C:\\a$b", "C:\\a`b"])
 def test_cmd_special_characters_are_refused(tmp_path, monkeypatch, bad):
-    with pytest.raises(ConfigError, match="cmd.exe"):
+    with pytest.raises(ConfigError, match="cmd.exe or PowerShell"):
         hooks_install.install("codex", bad, home=tmp_path / "h", prefix=PREFIX, probe=probe("0.160.0"), windows=True)
     if bad.endswith("\\"):
         return  # only a final path argument can end in a backslash
@@ -292,3 +293,39 @@ def test_codex_release_binaries_count_as_codex(exe):
     """K2: liveness treats codex and codex-* executables as Codex."""
     assert procinfo.kind_of(exe) == "codex"
     assert procinfo.kind_of("C:\\x\\codexx.exe") is None
+
+
+# -- §16.19 item 5: the line runs the same wrapped or not, and never starts with a quote ----------------
+
+def cmd_c(line):
+    """What ``cmd /C <rest>`` executes, by the rule ``cmd /?`` documents: if the text after /C
+    starts with a quote and it is not the "exactly two quotes" case, cmd removes the first
+    quote and the last quote."""
+    rest = line.lstrip()
+    if rest.startswith('"') and not (rest.count('"') == 2 and not any(c in rest for c in '&<>()@^|')
+                                     and " " in rest.split('"')[1]):
+        last = rest.rfind('"')
+        rest = rest[1:last] + rest[last + 1:]
+    return rest
+
+
+def test_cmd_quote_rule_wrapped_and_unwrapped():
+    argv = [SHIM, "hook", "codex", "SessionStart", "--state-dir", "C:\\Users\\First Last\\state"]
+    line = hooks_install.windows_command_line(argv, cmd="C:\\Windows\\System32\\cmd.exe")
+    assert not line.startswith('"')
+    # Codex's cmd path wraps it (raw_arg "\"<line>\""); a plain cmd /C does not: both run the same.
+    assert cmd_c(f'"{line}"') == cmd_c(line) == line
+    # The inner cmd /d /c sees text starting with "call", so it never strips a quote either.
+    inner = line.split(" /d /c ", 1)[1]
+    assert inner.startswith("call ") and cmd_c(inner) == inner
+    assert f'"{SHIM}"' in inner and '"C:\\Users\\First Last\\state"' in inner
+    # The old form survived only when wrapped: unwrapped, cmd broke both paths.
+    old = f'"{SHIM}" hook codex SessionStart --state-dir "C:\\Users\\First Last\\state"'
+    assert cmd_c(f'"{old}"') == old and cmd_c(old) != old
+
+
+def test_cmd_path_is_absolute_and_checked(monkeypatch):
+    monkeypatch.setenv("SystemRoot", "D:\\Win")
+    assert hooks_install.system_cmd() == "D:\\Win\\System32\\cmd.exe"
+    with pytest.raises(ConfigError, match="cmd.exe's path"):
+        hooks_install.windows_command_line(["x"], cmd="C:\\Program Files\\cmd.exe")

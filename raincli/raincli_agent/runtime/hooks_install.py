@@ -52,6 +52,7 @@ CODEX_MIN_WINDOWS = (0, 145, 0)
 # cmd.exe interprets these inside `cmd /C "…"` (Codex runs Windows hooks that way:
 # codex-rs/hooks/src/engine/command_runner.rs, build_command), so no path may contain them.
 CMD_SPECIAL = set('%^&|<>"!')  # "!": cmd delayed expansion (§16.14 K3)
+SHELL_SPECIAL = CMD_SPECIAL | set("$`")  # PowerShell expands these inside "..." (§16.19 item 5)
 TRUST_NOTE = ("Codex runs these hooks only after you trust them once in Codex: open /hooks and trust the "
               "raincli hooks. Trust again after any reinstall that changes the command (a new state "
               "directory or install path).")
@@ -95,17 +96,40 @@ def launcher_prefix():
                       "raincli entry point on PATH, then run hooks install again")
 
 
-def windows_command_line(argv):
-    """The command line cmd.exe receives as ``cmd /C "<line>"``: every argument quoted.
-    Paths with cmd-special characters are refused (they would be expanded or split)."""
+def system_cmd():
+    """cmd.exe by absolute path, so a ``cmd.exe`` or ``cmd.bat`` in the session's working
+    directory (cmd searches it first) is never run instead."""
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or "C:\\Windows"
+    return root.rstrip("\\") + "\\System32\\cmd.exe"
+
+
+def windows_command_line(argv, cmd=None):
+    """The Codex hook command on Windows (§16.19 item 5).
+
+    Codex 0.160 runs a hook in the session's shell: by default PowerShell, as
+    ``powershell -NoProfile -Command <line>`` (codex-rs/core/src/shell.rs derive_exec_args,
+    core/src/session/mod.rs), or cmd as ``cmd /C "<line>"`` (hooks/src/engine/command_runner.rs
+    build_command). A line that begins with a quoted path fails in PowerShell (a string, then
+    stray tokens) and, unwrapped, in cmd (which strips its first and last quote). So the line
+    starts with cmd.exe's unquoted absolute path and runs the hook through ``call``:
+
+        C:\\Windows\\System32\\cmd.exe /d /c call "<raincli.exe>" hook codex <Event> --state-dir "<dir>"
+
+    which runs the same under ``cmd /C "<line>"``, ``cmd /C <line>`` and PowerShell ``-Command``
+    (``/d``: no AutoRun). Paths with characters cmd or PowerShell would interpret are refused."""
+    cmd = cmd or system_cmd()
+    if any(ch in cmd for ch in ' "') or set(cmd) & SHELL_SPECIAL:
+        raise ConfigError(f"cannot install Codex hooks: cmd.exe's path {cmd!r} has a space or a special character")
     for arg in argv:
-        bad = sorted(set(arg) & CMD_SPECIAL) or [ch for ch in arg if ord(ch) < 32]
+        bad = sorted(set(arg) & SHELL_SPECIAL) or [ch for ch in arg if ord(ch) < 32]
         if not bad and arg.endswith("\\"):
             bad = ["a trailing backslash"]  # it would escape the closing quote
         if bad:
-            raise ConfigError(f"cannot install Codex hooks: the path {arg!r} contains characters cmd.exe "
-                              f"interprets ({' '.join(bad)}); use a state directory and install path without them")
-    return " ".join(f'"{arg}"' if (" " in arg or not arg or "\\" in arg or "/" in arg) else arg for arg in argv)
+            raise ConfigError(f"cannot install Codex hooks: the path {arg!r} contains characters cmd.exe or "
+                              f"PowerShell interpret ({' '.join(bad)}); use a state directory and install path "
+                              "without them")
+    quoted = " ".join(f'"{arg}"' if (" " in arg or not arg or "\\" in arg or "/" in arg) else arg for arg in argv)
+    return f"{cmd} /d /c call {quoted}"
 
 
 def handler(kind, event, prefix, state_dir, windows=None):
@@ -390,7 +414,7 @@ def status(kind, runtime_config, *, home=None, probe=codex_support, find=None, w
         return "not_connected"
     since = _connected_at(state_dir, kind) or 0
     from . import sessions
-    recorded = [r for r in sessions.read_sessions(str(state_dir), now, drop=False)
+    recorded = [r for r in sessions.all_records(str(state_dir))
                 if r.get("type") == "codex" and (r.get("updated_at") or 0) >= since]
     return "connected" if recorded else "needs_approval"
 

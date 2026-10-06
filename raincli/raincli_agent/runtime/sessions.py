@@ -243,6 +243,23 @@ def remove_record(state_dir, key):
         pass
 
 
+def all_records(state_dir):
+    """Every hook session record as written, live or not (hooks status: "has a hook run")."""
+    try:
+        base = sessions_dir(state_dir)
+    except (OSError, ConfigError):
+        return []
+    if base is None:
+        return []
+    out = []
+    for entry in os.scandir(base):
+        if RECORD_RE.fullmatch(entry.name) and entry.is_file(follow_symlinks=False):
+            record = load_record(state_dir, entry.name[:-5])
+            if record is not None and record["key"] == entry.name[:-5]:
+                out.append(record)
+    return out
+
+
 def read_sessions(state_dir, now=None, drop=True):
     """Every hook session record, with ``status`` offline once stale.
 
