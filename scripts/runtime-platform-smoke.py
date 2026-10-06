@@ -206,6 +206,37 @@ def person_session_checks(machine, agent, server):
           "(no rotation, no password or session anywhere else)", flush=True)
 
 
+def stale_credential_new_machine(root, server):
+    """§16.17: an old revoked machine-mode setup. `login --person` explains and points to
+    `--new-machine`, which sets the old setup aside (state included) and signs in fresh, on a pty."""
+    from raincli_agent import person
+    from raincli_agent.config import load_config
+    old = root / "stale"
+    agent = old / "agent.json"
+    write_config(agent, server.url, server.state.add_agent("stale-box"))
+    atomic_write_json(old / "runtime.json", {"machine_config": str(agent), "state_dir": "runtime-state"})
+    (old / "runtime-state" / "queue").mkdir(parents=True)
+    (old / "runtime-state" / "machine-salt").write_text("old-salt")
+    token = load_config(str(agent)).token.reveal()
+    server.state.agents[server.state.tokens.pop(token)]["active"] = False  # revoked on the website
+    status, transcript = login_on_pty([sys.executable, "-m", "raincli_agent", "--config", str(agent), "login",
+                                       "--person", "--email", "smoke@example.test"], PASSWORD)
+    assert status == 1 and "belongs to a machine that was revoked" in transcript, scrub(transcript)
+    assert "raincli login --new-machine" in transcript and "Password:" not in transcript
+    status, transcript = login_on_pty([sys.executable, "-m", "raincli_agent", "--config", str(agent), "login",
+                                       "--new-machine", "--email", "smoke@example.test", "--machine-name",
+                                       "smoke-fresh", "--api-url", server.url], PASSWORD)
+    assert status == 0 and "signed in as smoke-fresh" in transcript, scrub(transcript)
+    assert PASSWORD not in transcript
+    [backup] = old.glob("replaced-*")
+    for name in ("agent.json", "runtime.json", "runtime-state/queue", "runtime-state/machine-salt"):
+        assert (backup / name).exists(), name
+    assert not (old / "runtime-state" / "machine-salt").exists()  # a fresh state directory
+    assert load_config(str(agent)).token.reveal() != token and person.load_session(str(agent)) is not None
+    print("PASS: stale credential: login --person explains a revoked machine; login --new-machine on a pty set "
+          "the old setup and its state aside and signed in as a new machine", flush=True)
+
+
 def herdr_stage(server):
     """Real Herdr delivery (Phase 2): see scripts/herdr_smoke.py."""
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -371,6 +402,8 @@ def main():
         print("PASS: hook-session liveness: the agent's pid is recorded, live however long it idles, gone once it exits", flush=True)
         machine_config = machine_runtime = None
         machine_config, machine_runtime = headless_login_and_machine_mode(root, server)
+        if sys.platform.startswith("linux"):
+            stale_credential_new_machine(root, server)
         if os.name == "nt":
             import winreg
             from raincli_agent.runtime import startup
