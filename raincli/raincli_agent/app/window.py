@@ -448,7 +448,11 @@ class AppWindow:
             url = self.services.handoff_url()
         except Exception as exc:  # noqa: BLE001 - offline, or the session ended
             log.warning("handoff failed: %s", type(exc).__name__)
-            if not self.services.has_person_session():
+            # A refused session (401: revoked with its machine, §16.3) is not "offline": sign in, where the
+            # credential check explains a revoked or foreign machine (§16.17 item 4).
+            if not self.services.has_person_session() or getattr(exc, "status", None) == 401:
+                self._log("handoff refused: showing sign-in" if getattr(exc, "status", None) == 401 else
+                          "no person session: showing sign-in")
                 self.load(self.local_url("sign-in", "person=1"))
             else:
                 self.show_offline()

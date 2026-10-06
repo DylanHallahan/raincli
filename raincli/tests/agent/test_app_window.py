@@ -845,3 +845,19 @@ def test_app_log_never_holds_a_query_code_or_the_install_token(tmp_path):
     assert "sentinel" in text and "load failed" in text and "offline page shown" in text and "load timed out" in text
     for forbidden in ("code=", "?", "RainCLIApp/", "rch_", services.install_token):
         assert forbidden not in text, forbidden
+
+
+def test_a_refused_handoff_shows_sign_in_not_offline(tmp_path):
+    """A machine revoked with its person session: the 401 leads to sign-in, whose credential check explains
+    it (§16.17 item 4); a network failure still shows the offline page."""
+    services = FakeServices()
+    app, win, _ = make(tmp_path, services)
+
+    class Refused(Exception):
+        status = 401
+    services.handoff = lambda: (_ for _ in ()).throw(Refused())
+    app.home()
+    assert win.loads[-1] == LOCAL + "sign-in.html?person=1"
+    services.handoff = lambda: (_ for _ in ()).throw(OSError("unreachable"))
+    app.home()
+    assert win.loads[-1] == LOCAL + "offline.html"
