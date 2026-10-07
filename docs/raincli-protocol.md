@@ -1331,3 +1331,11 @@ Found on a real v0.5.0 machine: a Codex CLI session running, but zero directory 
   Claude Code needs no approval, so it gets no notice.
 - **Never added:** repair never installs hooks for an agent that had none.
 - **Tests:** an old-form entry repaired with a backup; foreign entries untouched; no write when current; the notice raised only when a Codex command changed.
+
+### 16.20 Lead decision after the final v0.5.1 review (binding)
+**F1. Which server a fresh sign-in uses.**
+- A fresh sign-in (the window's first sign-in, "Set up this computer as a new machine", and `raincli login --new-machine`) goes to the **default service** (`login.DEFAULT_API_URL`).
+- If the old or adopted setup names a different service, the sign-in shows "Sign in to `<host>`?" and offers that host and the default as two explicit choices. The password is sent only after the user picks one.
+- The CLI uses `--api-url`, as today. Without it, the CLI uses the default and prints the other host as a hint.
+- A backup's `api_url` (`replaced-*/agent.json`) is never read to choose a server.
+- `person_only` for an adopted, valid credential keeps using that credential's own server, as before.
