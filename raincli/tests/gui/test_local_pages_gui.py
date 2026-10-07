@@ -116,7 +116,7 @@ def test_sign_in_sends_the_password_only_to_sign_in(browser, local_origin, artif
     sign_ins = [c for c in calls(page) if c[0] == "sign_in"]
     assert sign_ins == [["sign_in", "nonce-1", {"email": "alice@example.test", "machine_name": "alice-laptop",
                                                  "team": None, "replace": False, "again": False,
-                                                 "new_machine": False}, PASSWORD]]
+                                                 "new_machine": False, "service": None}, PASSWORD]]
     assert all(PASSWORD not in json.dumps(c) for c in calls(page) if c[0] != "sign_in")
     assert page.locator("#team option").all_inner_texts() == ["Acme", "Beta"]
     assert "Choose a team." in page.inner_text("#message")
@@ -290,5 +290,51 @@ def test_a_read_whose_reply_is_dropped_is_asked_again(browser, local_origin):
     page.goto(f"{local_origin}this-computer.html")
     page.wait_for_selector("#hooks li[data-agent=codex] [data-state=not_connected]", timeout=20000)
     assert len([c for c in calls(page) if c[0] == "hooks"]) == 2
+    context.close()
+    assert not errors
+
+
+@pytest.mark.parametrize("pick", ["other", "default"])
+def test_sign_in_asks_which_service_before_sending_the_password(browser, local_origin, artifacts, pick):
+    """§16.20 F1: the saved setup names another service: "Sign in to <host>?" with two explicit choices, and
+    no password leaves the page before one is picked."""
+    replies = {"sign_in_defaults": {"machine_name": "pc", "other_host": "rain.example.org",
+                                    "default_host": "raincli.com"},
+               "sign_in": {"ok": True, "message": "Signed in."}}
+    context, page, errors = open_page(browser, local_origin, "sign-in", replies)
+    page.wait_for_selector("#service-field", state="visible")
+    assert page.inner_text("#service-legend") == "Sign in to rain.example.org?"
+    assert not page.is_checked("#service-other") and not page.is_checked("#service-default")  # no default pick
+    assert "Yes, sign in to rain.example.org" in page.inner_text("#service-field")
+    assert "No, sign in to raincli.com" in page.inner_text("#service-field")
+    page.screenshot(path=str(artifacts / "local-sign-in-service-choice.png"))
+    page.fill("#email", "alice@example.test")
+    page.fill("#password", PASSWORD)
+    page.click("#submit")
+    assert page.inner_text("#message") == "Choose where to sign in."
+    assert [c for c in calls(page) if c[0] == "sign_in"] == []  # nothing sent
+    assert page.input_value("#password") == PASSWORD  # still only in the page
+    page.check(f"#service-{pick}")
+    page.click("#submit")
+    page.wait_for_function("window.__calls.some(c => c[0] === 'sign_in')")
+    (call,) = [c for c in calls(page) if c[0] == "sign_in"]
+    assert call[2]["service"] == pick and call[3] == PASSWORD
+    context.close()
+    assert not errors
+
+
+def test_the_new_machine_offer_asks_which_service(browser, local_origin):
+    replies = {"sign_in_defaults": {"machine_name": "pc"},
+               "sign_in": {"ok": False, "message": "This computer's saved RainCLI setup belongs to a machine owned "
+                           "by another account.", "code": "stale_credential", "offer_new_machine": True,
+                           "machine_name": "pc-2", "other_host": "rain.example.org", "default_host": "raincli.com"}}
+    context, page, errors = open_page(browser, local_origin, "sign-in", replies, query="?person=1")
+    page.wait_for_function("document.getElementById('machine').value === 'pc'")
+    assert not page.is_visible("#service-field")
+    page.fill("#email", "alice@example.test")
+    page.fill("#password", "first")
+    page.click("#submit")
+    page.wait_for_selector("#new-machine", state="visible")
+    assert page.is_visible("#service-field") and page.inner_text("#service-legend") == "Sign in to rain.example.org?"
     context.close()
     assert not errors

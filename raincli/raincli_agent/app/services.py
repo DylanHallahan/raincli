@@ -28,8 +28,23 @@ HOOK_STATES = ("not_installed_agent", "too_old", "not_connected", "connected", "
 
 
 def _hooks():
-    from ..runtime import hooks_install  # the client core's status/connect (cli-builder, §16.19 item 3)
+    from ..runtime import hooks_install  # the client core's status/connect (§16.19 item 3)
     return hooks_install
+
+
+class ServiceChoiceRequired(ServiceError):
+    """§16.20 F1: the old or adopted setup names another service. The page asks "Sign in to <host>?" with
+    that host and the default as two explicit choices; nothing is sent until the user picks one."""
+
+    def __init__(self, host, default_host):
+        super().__init__(f"Sign in to {host}?")
+        self.host = host
+        self.default_host = default_host
+
+
+def _host(url):
+    from urllib.parse import urlsplit
+    return urlsplit(url).netloc
 
 
 class StaleCredential(ServiceError):
@@ -88,7 +103,11 @@ class Services:
     # -- sign-in and sign-out ----------------------------------------------------------------------------
 
     def sign_in_defaults(self):
-        return {"machine_name": self.suggested_machine_name()}
+        """What the sign-in page needs first: the suggested name, and for a fresh sign-in the other service
+        the saved setup names (the page asks "Sign in to <host>?" before any password is sent)."""
+        from .. import login
+        return {"machine_name": self.suggested_machine_name(), "default_host": _host(login.DEFAULT_API_URL),
+                "other_host": None if self.signed_in() else self.other_host()}
 
     def suggested_machine_name(self, avoid=None):
         """The computer's name in handle form, never ``avoid`` (§16.17 item 4); ``-2`` when it is unknown."""
@@ -100,32 +119,51 @@ class Services:
         from .. import login
         return login.suggest_new_machine_name(login.known_handle(self.agent_config))
 
-    def fresh_api_url(self):
-        """The service a fresh sign-in goes to: the saved setup's, else the newest ``replaced-*`` backup's
-        (§16.17 item 5), else the default. Read as plain JSON; nothing in it is decrypted."""
+    def saved_api_url(self):
+        """The ``api_url`` of the live saved setup (``agent.json``), or None. Read as plain JSON; nothing in
+        it is decrypted. A ``replaced-*`` backup is never read (§16.20 F1)."""
         import json as _json
-        from .. import login
         from ..config import validate_api_url
-        config = Path(self.agent_config or default_config_path())
-        candidates = [config] + sorted(config.parent.glob("replaced-*/" + config.name), reverse=True)
-        for path in candidates:
-            try:
-                return validate_api_url(_json.loads(path.read_text(encoding="utf-8"))["api_url"])
-            except (OSError, ValueError, KeyError, TypeError, RainError):
-                continue
-        return login.DEFAULT_API_URL
+        try:
+            return validate_api_url(_json.loads(Path(self.agent_config).read_text(encoding="utf-8"))["api_url"])
+        except (OSError, ValueError, KeyError, TypeError, RainError):
+            return None
 
-    def sign_in(self, email, password, *, machine_name, team=None, replace=False, again=False, new_machine=False):
+    def other_service(self):
+        """The saved setup's service when it isn't the default one, else None."""
+        from .. import login
+        saved = self.saved_api_url()
+        return saved if saved and saved.rstrip("/") != login.DEFAULT_API_URL.rstrip("/") else None
+
+    def other_host(self):
+        other = self.other_service()
+        return _host(other) if other else None
+
+    def fresh_api_url(self, choice=None):
+        """Where a fresh sign-in goes (§16.20 F1): the default service; another one only when the saved setup
+        names it and the user explicitly chose it (``choice`` "other"). Without a choice where one is needed,
+        ``ServiceChoiceRequired``: the password is not sent anywhere."""
+        from .. import login
+        other = self.other_service()
+        if other is None or choice == "default":
+            return login.DEFAULT_API_URL
+        if choice == "other":
+            return other
+        raise ServiceChoiceRequired(_host(other), _host(login.DEFAULT_API_URL))
+
+    def sign_in(self, email, password, *, machine_name, team=None, replace=False, again=False, new_machine=False,
+                service=None):
         """``login.login`` with a person session (§15.2, §16.3). ``password`` is a ``Secret``; it is never
         stored, logged or returned. With a credential already here and no ``again``, only a person session
         is added (``person_only``), never a new machine, after ``check_credential`` (§16.17 item 4): a
         revoked or foreign credential raises ``StaleCredential``. ``new_machine`` (the user's explicit
-        choice) moves the old setup aside, then signs in fresh."""
+        choice) moves the old setup aside, then signs in fresh. A fresh sign-in goes to the default service
+        unless ``service`` is "other" (§16.20 F1); "Sign in again" keeps this machine's own service."""
         from .. import login
         if not isinstance(password, Secret):
             raise TypeError("the password must be a Secret")
         if new_machine:
-            return self._sign_in_new_machine(email, password, machine_name=machine_name, team=team)
+            return self._sign_in_new_machine(email, password, machine_name=machine_name, team=team, service=service)
         if self.signed_in() and not again:
             state = login.check_credential(self.agent_config, email)
             if state in STALE_OUTCOMES:
@@ -140,17 +178,19 @@ class Services:
             return {"handle": login.describe(self.agent_config)[1]}
         if again:
             self.host.pause()  # the runtime would otherwise publish with a credential being replaced
+        # "Sign in again" rotates this machine on its own service; a first sign-in is fresh (§16.20 F1).
+        api_url = (self.saved_api_url() or login.DEFAULT_API_URL) if again else self.fresh_api_url(service)
         config_path = self.agent_config or default_config_path()
         plan = login.prepare(config_path, force=again)
         return login.login(email, password, plan=plan, machine_name=machine_name, team=team or None,
-                           replace=replace, person_session=True, api_url=self.fresh_api_url())
+                           replace=replace, person_session=True, api_url=api_url)
 
-    def _sign_in_new_machine(self, email, password, *, machine_name, team=None):
+    def _sign_in_new_machine(self, email, password, *, machine_name, team=None, service=None):
         """§16.17 items 4 and 5, §16.18 V6: set the old setup aside (``login.set_aside``, which stops the
         app's runtime first through ``host.pause``), then a normal fresh sign-in with ``person_session``
         under a name that is never the old handle. ``login.SetAsideRefused`` reaches the page as is."""
         from .. import login
-        api_url = self.fresh_api_url()
+        api_url = self.fresh_api_url(service)  # before anything moves or is sent (§16.20 F1)
         config = self.agent_config or str(default_config_path())
         old_handle = login.known_handle(config)  # before the move: it asks the old credential
         if not machine_name or machine_name == old_handle:
