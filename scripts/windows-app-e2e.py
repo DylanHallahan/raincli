@@ -91,6 +91,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from urllib.parse import urlsplit
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,6 +114,9 @@ MACHINE, OBSERVER, OLD_MACHINE, MANAGED_MACHINE = "e2e-app-machine", "e2e-observ
 OLD, NEW, BROKEN = "0.5.0", "0.5.1", "0.5.2"  # §16.12 C1: never below v0.5.0
 OLD_PIP, OLD_MANAGED = "v0.2.0", "v0.3.2"
 HOSTS = ("api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
+# The default RainCLI service (login.DEFAULT_API_URL): mapped to this runner, with no certificate for it, so a
+# fresh sign-in to the default (§16.20 F1) fails here and never reaches production.
+PROTECTED = ("raincli.com", "www.raincli.com")
 HOSTS_FILE = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "drivers" / "etc" / "hosts"
 HOSTS_MARK = "# raincli-app-e2e"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -227,10 +231,10 @@ class HostsEntry:
         text = HOSTS_FILE.read_text("utf-8", errors="replace")
         if HOSTS_MARK in text:
             raise Failure("the hosts file already has this e2e's entry; is another run active?")
-        line = "127.0.0.1 " + " ".join(HOSTS) + f"  {HOSTS_MARK}\n"
+        line = "127.0.0.1 " + " ".join(HOSTS + PROTECTED) + f"  {HOSTS_MARK}\n"
         HOSTS_FILE.write_text(text.rstrip("\n") + "\n" + line, "utf-8")
         run(["ipconfig", "/flushdns"], check=False)
-        for host in HOSTS:
+        for host in HOSTS + PROTECTED:
             if socket.gethostbyname(host) != "127.0.0.1":
                 raise Failure(f"{host} does not resolve to 127.0.0.1 through the hosts file")
 
@@ -943,16 +947,31 @@ def part_e(app, server, installers, password, observer, work, codex=None):
         page = window.page("sign-in.html")
         wait_for("the sign-in page's machine name", lambda: page.input_value("#machine"), timeout=60, interval=1)
         shot(page, "e1-sign-in")
+        # §16.20 F1: the backup's server is never read, so nothing asks "Sign in to <host>?"; the fresh
+        # sign-in goes to the default service, which this runner maps to itself (no production traffic).
+        check(not page.is_visible("#service-field"), "the window offered the backup's server")
+        before = handles(server, observer)
         window_sign_in(page, password, "e2e-fresh-one")
-        page = inbox_after_sign_in(window, page)
-        check(EMAIL in page.inner_text(".rc-whoami"), "the fresh sign-in did not open the owner's inbox")
+        wait_for("the default service's refusal",
+                 lambda: "error" in (page.get_attribute("#message", "class") or ""), timeout=120, interval=1)
+        check(handles(server, observer) == before, "a sign-in reached the throwaway server without a choice")
+        shot(page, "e1-default-service")
+        window.close()
+    app.quit()
+    login_through_conpty(app, server, password, "e2e-fresh-one")  # a non-default server: --api-url
+    port = open_window_cdp(app)
+    with sync_playwright() as pw:
+        window = WindowCDP(pw, port)
+        page = window.page("app/inbox", timeout=180)
+        check(EMAIL in page.inner_text(".rc-whoami"), "the fresh machine did not open the owner's inbox")
         shot(page, "e1-inbox")
         window.close()
     wait_for("the fresh machine and its person session",
              lambda: signed_in_fresh(server, observer, "e2e-fresh-one", config_dir), timeout=120)
     check("e2e-other-revoked" not in handles(server, observer), "the other account's machine is in this team")
     say("PASS: E1. a revoked credential of another account: migration set it aside (agent.json and the connector "
-        "config in replaced-<stamp>, the queue left in place); the window's sign-in as the team owner made "
+        "config in replaced-<stamp>, the queue left in place); the window ignored the backup's server (no choice; "
+        "its fresh sign-in went to the default service, mapped away from production) and "
         "e2e-fresh-one with a person session")
     app.quit()
     app.uninstall(signout=True, label="e1")
@@ -983,6 +1002,9 @@ def part_e(app, server, installers, password, observer, work, codex=None):
         page.click("#new-machine")
         check(page.input_value("#password") == "", "the password was kept for the new-machine sign-in")
         page.fill("#machine", "e2e-fresh-two")
+        check(page.inner_text("#service-legend") == f"Sign in to {urlsplit(server.url).netloc}?",
+              f"the offer asks {page.inner_text('#service-legend')!r}")  # §16.20 F1: an explicit choice
+        page.check("#service-other")
         page.fill("#password", password)
         page.click("#submit")
         page = inbox_after_sign_in(window, page)
@@ -1097,6 +1119,9 @@ def part_e(app, server, installers, password, observer, work, codex=None):
         shot(page, "e5-offer")
         page.click("#new-machine")
         page.fill("#machine", "e2e-v1-fresh")
+        check(page.inner_text("#service-legend") == f"Sign in to {urlsplit(server.url).netloc}?",
+              f"the offer asks {page.inner_text('#service-legend')!r}")  # §16.20 F1: an explicit choice
+        page.check("#service-other")
         page.fill("#password", password)
         page.click("#submit")
         page = inbox_after_sign_in(window, page)

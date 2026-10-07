@@ -82,6 +82,12 @@ def mark_profile_for_reset(profile_dir):
     marker.write_text("1")
 
 
+def _default_host():
+    from urllib.parse import urlsplit
+    from .. import login
+    return urlsplit(login.DEFAULT_API_URL).netloc
+
+
 def _navigation_id(args):
     try:
         return int(args.NavigationId)
@@ -502,16 +508,22 @@ class AppWindow:
         ``request["new_machine"]`` is the user's press of "Set up this computer as a new machine"
         (§16.17): the password is asked for again, never kept from the refused attempt."""
         from .. import login
-        from .services import StaleCredential
+        from .services import ServiceChoiceRequired, StaleCredential
         was_signed_in = self.services.signed_in()
         try:
             self.services.sign_in(str(request.get("email") or "").strip(), password,
                                   machine_name=str(request.get("machine_name") or "").strip(),
                                   team=request.get("team") or None, replace=bool(request.get("replace")),
-                                  again=bool(request.get("again")), new_machine=request.get("new_machine") is True)
+                                  again=bool(request.get("again")), new_machine=request.get("new_machine") is True,
+                                  service=request.get("service") if request.get("service") in ("default", "other")
+                                  else None)
+        except ServiceChoiceRequired as exc:  # §16.20 F1: nothing was sent; the page asks which service
+            return _result(False, str(exc), code="service_choice", host=exc.host, default_host=exc.default_host)
         except StaleCredential as exc:  # §16.17 item 4: say why, and offer a new machine; never automatic
+            # The fresh sign-in goes to the default service; another one the setup names is a choice (§16.20).
             return _result(False, str(exc), code="stale_credential", reason=exc.reason, offer_new_machine=True,
-                           offer=login.OFFER, machine_name=self.services.offer_machine_name())
+                           offer=login.OFFER, machine_name=self.services.offer_machine_name(),
+                           other_host=self.services.other_host(), default_host=_default_host())
         except login.SetAsideRefused as exc:  # §16.18 V3: an old RainCLI window still holds a queue
             return _result(False, str(exc), code="set_aside_refused", offer_new_machine=True,
                            offer=login.OFFER, machine_name=str(request.get("machine_name") or ""))

@@ -1,6 +1,6 @@
 """v0.5.1: a stale or foreign saved setup in the app window (protocol §16.17 items 3 and 4).
 
-``login.check_credential`` and ``login.set_aside`` are the client core's (cli-builder); here they are
+``login.check_credential`` and ``login.set_aside`` are the client core's; here they are
 replaced by fakes with the §16.17 signatures, so the window's side is tested on its own.
 """
 
@@ -14,7 +14,7 @@ import pytest
 from raincli_agent import login, person
 from raincli_agent.app import services as services_mod
 from raincli_agent.app import tray
-from raincli_agent.app.services import Services, StaleCredential
+from raincli_agent.app.services import ServiceChoiceRequired, Services, StaleCredential
 from raincli_agent.app.window import AppWindow
 from raincli_agent.config import Secret
 
@@ -132,32 +132,61 @@ def test_person_onlys_409s_become_the_same_offer(setup, code, reason):
 
 
 def test_new_machine_sets_the_old_setup_aside_then_signs_in_fresh(setup):
-    setup.svc.sign_in("a@example.test", PASSWORD, machine_name="old-pc", new_machine=True)
+    setup.svc.sign_in("a@example.test", PASSWORD, machine_name="old-pc", new_machine=True, service="other")
     assert setup.calls["set_aside"] == [str(setup.agent)] and setup.host.calls == ["pause"]  # §16.18 V6
     assert setup.calls["restart_own"] == [setup.host.resume]  # a refused or failed move restarts it
     (migration,) = setup.calls["migration"]  # it knows the app's own runtime (review 1 R3)
     assert migration.own_runtime == str(setup.dir / "runtime.json") and migration.stop_own == setup.host.pause
     (call,) = setup.calls["login"]
-    assert call["person_session"] is True and call["api_url"] == SERVICE  # the old setup's service
+    assert call["person_session"] is True and call["api_url"] == SERVICE  # the other host, explicitly chosen
     assert call["machine_name"] != "old-pc" and call["machine_name"] == "old-pc-2"
     assert (setup.dir / "replaced-20261006T120000Z" / "agent.json").is_file() and not setup.agent.exists()
     assert setup.calls["add_session"] == []  # never person_only with the old credential
 
 
-def test_after_migration_set_it_aside_a_fresh_sign_in_uses_the_backups_service(setup):
-    login.set_aside(str(setup.agent))  # as migration's fresh_sign_in_needed leaves it
-    assert not setup.svc.signed_in()
+# -- §16.20 F1: which server a fresh sign-in uses -------------------------------------------------------------
+
+def test_a_fresh_sign_in_to_another_host_needs_an_explicit_choice_first(setup):
+    with pytest.raises(ServiceChoiceRequired) as exc:
+        setup.svc.sign_in("a@example.test", PASSWORD, machine_name="pc", new_machine=True)
+    assert exc.value.host == "raincli.example" and exc.value.default_host == "raincli.com"
+    assert str(exc.value) == "Sign in to raincli.example?"
+    assert setup.calls["set_aside"] == [] and setup.calls["login"] == [] and setup.host.calls == []  # nothing sent
+
+
+def test_declining_the_other_host_signs_in_to_the_default(setup):
+    setup.svc.sign_in("a@example.test", PASSWORD, machine_name="pc", new_machine=True, service="default")
+    (call,) = setup.calls["login"]
+    assert call["api_url"] == login.DEFAULT_API_URL
+
+
+def test_the_default_service_needs_no_choice(setup):
+    setup.agent.write_text(json.dumps({"api_url": login.DEFAULT_API_URL, "token": "rca_" + "x" * 40}))
+    assert setup.svc.other_host() is None
+    setup.svc.sign_in("a@example.test", PASSWORD, machine_name="pc", new_machine=True)
+    assert setup.calls["login"][0]["api_url"] == login.DEFAULT_API_URL
+
+
+def test_a_backups_server_is_never_used(setup):
+    login.set_aside(str(setup.agent))  # as migration's fresh_sign_in_needed leaves it: the backup names SERVICE
+    assert not setup.svc.signed_in() and setup.svc.other_host() is None
+    assert setup.svc.sign_in_defaults()["other_host"] is None
     setup.svc.sign_in("a@example.test", PASSWORD, machine_name="new-pc")
     (call,) = setup.calls["login"]
-    assert call["api_url"] == SERVICE and call["person_session"] is True and setup.calls["check"] == []
+    assert call["api_url"] == login.DEFAULT_API_URL and call["person_session"] is True
+    assert setup.calls["check"] == []
 
 
-def test_fresh_api_url_falls_back_to_the_default(setup, tmp_path):
-    setup.agent.unlink()
-    assert setup.svc.fresh_api_url() == login.DEFAULT_API_URL
-    (setup.dir / "replaced-20261001T000000Z").mkdir()
-    (setup.dir / "replaced-20261001T000000Z" / "agent.json").write_text(json.dumps({"api_url": "javascript:x"}))
-    assert setup.svc.fresh_api_url() == login.DEFAULT_API_URL  # an unusable URL is ignored
+def test_sign_in_again_keeps_this_machines_own_service(setup):
+    setup.svc.sign_in("a@example.test", PASSWORD, machine_name="old-pc", again=True)
+    assert setup.calls["login"][0]["api_url"] == SERVICE
+
+
+def test_sign_in_defaults_name_the_other_host_only_for_a_fresh_sign_in(setup):
+    assert setup.svc.sign_in_defaults()["other_host"] is None  # signed in: person_only on its own service
+    (setup.dir / "runtime.json").unlink()  # a saved credential, but not signed in
+    defaults = setup.svc.sign_in_defaults()
+    assert defaults["other_host"] == "raincli.example" and defaults["default_host"] == "raincli.com"
 
 
 def test_the_offered_name_is_never_the_old_handle(setup):
@@ -209,15 +238,21 @@ def test_the_window_offers_a_new_machine_and_never_reuses_the_password(setup, mo
     assert result["offer"] == login.OFFER == "Set up this computer as a new machine"
     assert result["message"].endswith("The other machine stays active for its owner until they revoke it.")
     assert "pw-1" not in json.dumps(result) and setup.calls["set_aside"] == []
-    result = app.sign_in({"email": "a@example.test", "machine_name": result["machine_name"], "new_machine": True},
-                         Secret("pw-2"))  # the user pressed the button and typed the password again
+    assert result["other_host"] == "raincli.example" and result["default_host"] == "raincli.com"
+    refused = app.sign_in({"email": "a@example.test", "machine_name": result["machine_name"], "new_machine": True},
+                          Secret("pw-2"))  # no choice of service yet: nothing is sent
+    assert refused["code"] == "service_choice" and refused["host"] == "raincli.example"
+    assert setup.calls["set_aside"] == [] and setup.calls["login"] == []
+    result = app.sign_in({"email": "a@example.test", "machine_name": result["machine_name"], "new_machine": True,
+                          "service": "other"}, Secret("pw-2"))  # the user chose, and typed the password again
     assert result == {"ok": True, "message": "Signed in."}
     assert setup.calls["set_aside"] and setup.calls["login"][0]["machine_name"] == "old-pc-2"
     for truthy in ("yes", 1, "true"):  # only an explicit true is the user's choice
         setup.calls["set_aside"].clear()
         setup.agent.write_text(json.dumps({"api_url": SERVICE, "token": "rca_" + "y" * 40}))
         (setup.dir / "runtime.json").write_text("{}")
-        app.sign_in({"email": "a@example.test", "machine_name": "x", "new_machine": truthy}, Secret("pw"))
+        app.sign_in({"email": "a@example.test", "machine_name": "x", "new_machine": truthy, "service": "other"},
+                    Secret("pw"))
         assert setup.calls["set_aside"] == []
 
 
@@ -343,7 +378,8 @@ def test_a_fresh_sign_in_calls_the_notice_once_and_person_only_does_not(setup, m
     app.create()
     app.sign_in({"email": "a@example.test", "machine_name": "x"}, Secret("pw"))  # person_only on this machine
     assert fresh == []
-    app.sign_in({"email": "a@example.test", "machine_name": "pc-new", "new_machine": True}, Secret("pw"))
+    app.sign_in({"email": "a@example.test", "machine_name": "pc-new", "new_machine": True, "service": "other"},
+                Secret("pw"))
     assert fresh == [1]
 
 
@@ -389,7 +425,8 @@ def test_a_refused_set_aside_is_shown_and_the_offer_stays(setup, monkeypatch):
     def refuse(agent_config, **kwargs):
         raise login.SetAsideRefused("close the old RainCLI window, then try again")
     monkeypatch.setattr(login, "set_aside", refuse)
-    result = app.sign_in({"email": "a@example.test", "machine_name": "pc-2", "new_machine": True}, Secret("pw"))
+    result = app.sign_in({"email": "a@example.test", "machine_name": "pc-2", "new_machine": True, "service": "other"},
+                         Secret("pw"))
     assert result["ok"] is False and result["code"] == "set_aside_refused"
     assert "close the old RainCLI window" in result["message"] and result["offer_new_machine"]
     assert setup.agent.exists() and setup.calls["login"] == []  # nothing changed

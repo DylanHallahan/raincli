@@ -7,6 +7,22 @@
   var form = document.getElementById("sign-in");
   var again = /[?&]again=1\b/.test(location.search);
   var newMachine = false;
+  // §16.20 F1: a fresh sign-in goes to the RainCLI service. When this computer's saved setup names another
+  // one, the user picks between the two, and nothing (no password) is sent before that choice.
+  function offerServices(host, defaultHost) {
+    if (!host) return;
+    rc.text("service-legend", "Sign in to " + host + "?");
+    rc.text("service-other-label", "Yes, sign in to " + host);
+    rc.text("service-default-label", "No, sign in to " + (defaultHost || "the RainCLI service"));
+    document.getElementById("service-other").checked = false;
+    document.getElementById("service-default").checked = false;
+    rc.show("service-field", true);
+  }
+  function chosenService() {
+    if (document.getElementById("service-field").classList.contains("hidden")) return null;
+    var picked = document.querySelector("input[name=service]:checked");
+    return picked ? picked.value : "";
+  }
   document.getElementById("new-machine").addEventListener("click", function () {
     newMachine = true;
     rc.show("new-machine-field", false);
@@ -17,11 +33,14 @@
   rc.read("sign_in_defaults").then(function (d) {
     document.getElementById("machine").value = d.machine_name || "";
     if (d.email) document.getElementById("email").value = d.email;
+    offerServices(d.other_host, d.default_host);
     if (again) rc.text("intro", "Sign in again to replace this computer's credential. Its name and agents stay the same.");
   });
   form.addEventListener("submit", function (event) {
     event.preventDefault();
     var password = document.getElementById("password");
+    var service = chosenService();
+    if (service === "") { rc.message("Choose where to sign in.", true); return; }  // the password stays here
     var secret = password.value;
     password.value = "";
     var team = document.getElementById("team");
@@ -31,7 +50,8 @@
       team: document.getElementById("team-field").classList.contains("hidden") ? null : team.value,
       replace: document.getElementById("replace").checked,
       again: again,
-      new_machine: newMachine
+      new_machine: newMachine,
+      service: service
     };
     if (!secret) { rc.message("Enter your password.", true); return; }
     var button = document.getElementById("submit");
@@ -56,7 +76,9 @@
         rc.text("submit", "Sign in");
         if (result.machine_name) document.getElementById("machine").value = result.machine_name;
         rc.show("new-machine-field", true);
+        offerServices(result.other_host, result.default_host);
       }
+      if (result.code === "service_choice") offerServices(result.host, result.default_host);
       if (result.code === "name_in_use") {
         rc.text("replace-label", "Replace machine " + request.machine_name + " (its current credential stops working)");
         rc.show("replace-field", true);
