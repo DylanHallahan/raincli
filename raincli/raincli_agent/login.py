@@ -124,6 +124,28 @@ def default_machine_name():
     return slugify_machine_name(computer_name())
 
 
+def host_of(api_url):
+    import urllib.parse
+    parts = urllib.parse.urlsplit(api_url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def setup_host(agent_config, default_url=None):
+    """The service of the setup still at ``agent_config`` when it differs from the default, else
+    None (§16.20 F1: shown as a hint only). Only that file is read, never a ``replaced-*`` backup."""
+    path = Path(agent_config).absolute()
+    if any(part.startswith("replaced-") for part in path.parent.parts):
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        url = validate_api_url(data.get("api_url")) if isinstance(data, dict) else None
+    except (OSError, ValueError, ConfigError):
+        return None
+    if url is None or host_of(url) == host_of(validate_api_url(default_url or DEFAULT_API_URL)):
+        return None
+    return host_of(url)
+
+
 def suggest_new_machine_name(old_handle=None):
     """A machine name for "Set up this computer as a new machine" (§16.17 4): the computer name
     in handle form, never the old handle. When the old handle is unknown (its credential no

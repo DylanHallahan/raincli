@@ -705,7 +705,14 @@ def cmd_login(args):
         from .cli_me import login_person
         return login_person(args)
     _need_tty("raincli login")
-    api_url = validate_api_url(args.api_url)
+    # §16.20 F1: a fresh sign-in goes to the default service unless --api-url names another;
+    # a different service in the setup still in place is only a hint (a backup is never read).
+    api_url = validate_api_url(args.api_url or login.DEFAULT_API_URL)
+    if not args.api_url:
+        other = login.setup_host(args.agent_config or default_config_path(), api_url)
+        if other:
+            out(f"note: this computer's current setup uses {other}; this sign-in goes to "
+                f"{login.host_of(api_url)}. To sign in to {other} instead, run again with --api-url {other}")
     suggested = None
     if args.new_machine:
         if args.force:
@@ -1022,8 +1029,9 @@ def build_parser():
     login_parser.add_argument("--machine-name", metavar="NAME",
                               help="this machine's handle (default: the computer name in handle form)")
     login_parser.add_argument("--team", metavar="SLUG", help="team, when you belong to several (asked for otherwise)")
-    login_parser.add_argument("--api-url", default="https://raincli.com",
-                              help="server (default https://raincli.com; https unless the host is loopback)")
+    login_parser.add_argument("--api-url", default=None,
+                              help="server (default https://raincli.com; https unless the host is loopback). A "
+                                   "fresh sign-in never takes the server from an old or backed-up setup")
     login_parser.add_argument("--force", action="store_true",
                               help="sign in again over an existing machine-mode credential")
     login_parser.add_argument("--new-machine", action="store_true",

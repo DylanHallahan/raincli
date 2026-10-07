@@ -594,3 +594,54 @@ def test_r7_a_rewrite_moves_the_removed_connectors_handover_boxes(account, home,
     moved = {Path(m["from"]).name for m in result["moved"]}
     assert key + ".inbox" in moved
     assert json.loads(runtime.read_text())["connectors"] == ["theirs.json"]
+
+
+# -- §16.20 F1: which server a fresh sign-in uses ---------------------------------------------------
+
+def interactive(monkeypatch, answers=("",)):
+    import builtins
+    import getpass
+    monkeypatch.setattr(cli, "_need_tty", lambda what: None)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": PASSWORD)
+    feed = iter(answers)
+    monkeypatch.setattr(builtins, "input", lambda prompt="": next(feed))
+
+
+def test_f1_first_sign_in_uses_the_default_never_a_backup(account, home, monkeypatch, capsys):
+    monkeypatch.setattr(login, "DEFAULT_API_URL", account.url)
+    backup = cfg(home) / "replaced-20261001T000000Z"
+    backup.mkdir()
+    write_config(str(backup / "agent.json"), "https://old-service.example", "rca_" + "Z" * 43)
+    interactive(monkeypatch)
+    assert cli.main(["login", "--email", EMAIL]) == 0
+    output = capsys.readouterr()
+    assert "signed in as work-pc" in output.out and "old-service.example" not in output.out + output.err
+    assert load_config(str(agent(home))).api_url == account.url
+    assert login.setup_host(str(backup / "agent.json")) is None  # a backup is never a source
+
+
+def test_f1_new_machine_uses_the_default_and_hints_the_old_host(account, home, monkeypatch, capsys):
+    monkeypatch.setattr(login, "DEFAULT_API_URL", account.url)
+    write_config(str(agent(home)), "https://old-service.example:8443", "rca_" + "Y" * 43)
+    interactive(monkeypatch)
+    assert cli.main(["login", "--new-machine", "--email", EMAIL]) == 0
+    output = capsys.readouterr()
+    assert ("note: this computer's current setup uses https://old-service.example:8443; this sign-in goes to "
+            f"{login.host_of(account.url)}") in output.out
+    assert "--api-url https://old-service.example:8443" in output.out
+    assert load_config(str(agent(home))).api_url == account.url  # the default, not the old host
+
+
+def test_f1_an_explicit_api_url_wins_and_prints_no_hint(account, home, monkeypatch, capsys):
+    monkeypatch.setattr(login, "DEFAULT_API_URL", "https://raincli.example")
+    write_config(str(agent(home)), "https://old-service.example", "rca_" + "Y" * 43)
+    interactive(monkeypatch)
+    assert cli.main(["login", "--new-machine", "--email", EMAIL, "--api-url", account.url]) == 0
+    assert "note: this computer's current setup" not in capsys.readouterr().out
+    assert load_config(str(agent(home))).api_url == account.url
+
+
+def test_f1_same_host_gives_no_hint(home):
+    write_config(str(agent(home)), "https://raincli.com", "rca_" + "Y" * 43)
+    assert login.setup_host(str(agent(home)), "https://raincli.com") is None
+    assert login.setup_host(str(cfg(home) / "missing.json")) is None
