@@ -148,6 +148,20 @@ def cmd_me_inbox(args):
         return EXIT_OK
 
 
+def cmd_me_conversations(args):
+    """The person's conversations (§17.2: archived ones only with --archived or --all)."""
+    choice = _cli.archived_choice(args)
+    _cli.print_conversations(_person(args).conversations(archived=choice), args.json, choice)
+    return EXIT_OK
+
+
+def cmd_me_archive(args):
+    archived = args.me_command == "archive"
+    _cli.report_archive(_person(args).archive(args.conversation_id, archived), archived, args.json,
+                        args.conversation_id)
+    return EXIT_OK
+
+
 def cmd_me_read(args):
     """Show one message; reading a message to you acks it (§16.4)."""
     api = _person(args)
@@ -342,6 +356,14 @@ def register(sub, parser_class):
                         description="Messages to and from you as a person (§16.4), with this machine's person "
                                     "session. Bodies are read from a file or stdin, never from argv.")
     me_sub = me.add_subparsers(dest="me_command", required=True, parser_class=parser_class)
+    original_add = me_sub.add_parser
+
+    def add_parser(*args, **kwargs):  # every `me` command accepts --utc after its name too (§17.1)
+        sp = original_add(*args, **kwargs)
+        sp.add_argument("--utc", action="store_true", default=argparse.SUPPRESS,
+                        help="show timestamps as UTC ISO instead of local time")
+        return sp
+    me_sub.add_parser = add_parser
     inbox = me_sub.add_parser("inbox", help="messages to you (unread by default)")
     inbox.add_argument("--watch", action="store_true", help="wait for new messages and print them (never marks read)")
     inbox.add_argument("--once", action="store_true", help=argparse.SUPPRESS)
@@ -349,6 +371,16 @@ def register(sub, parser_class):
     inbox.add_argument("--all", action="store_true", help="include messages already read")
     inbox.add_argument("--json", action="store_true", help="print JSON")
     inbox.set_defaults(func=cmd_me_inbox)
+    convs = me_sub.add_parser("conversations", help="your conversations; archived ones only with --archived or --all")
+    _cli.archived_flags(convs)
+    convs.add_argument("--json", action="store_true", help="print JSON (timestamps stay UTC ISO)")
+    convs.set_defaults(func=cmd_me_conversations)
+    for verb, text in (("archive", "archive one of your conversations for both sides (nothing is deleted)"),
+                       ("unarchive", "bring an archived conversation back to the main list")):
+        sp = me_sub.add_parser(verb, help=text)
+        sp.add_argument("conversation_id", metavar="CONV_ID")
+        sp.add_argument("--json", action="store_true", help="print JSON")
+        sp.set_defaults(func=cmd_me_archive)
     read = me_sub.add_parser("read", help="show one message (marks a message to you read)")
     read.add_argument("message_id", metavar="MSG_ID")
     read.add_argument("--json", action="store_true", help="print JSON")

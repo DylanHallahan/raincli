@@ -128,6 +128,7 @@ class FakeState:
         self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id} (§16.3)
         self.person_inbox = {}  # email -> [message JSON] for the notification feed tests
         self.routing = {}  # agent id -> "all" | "inbox-only" (§16.5)
+        self.archive_calls = []  # (handle, conversation id, archived?)
         self.me_owner = True  # False: an older server, whose /me has no "owner" (§16.16)
 
     # -- setup -----------------------------------------------------------
@@ -335,6 +336,7 @@ class FakeState:
         if conv is None:
             conv = str(uuid.uuid4())
             self.conversations[conv] = {"pair": pair, "team": caller["team"]}
+        self.conversations[conv]["archived_at"] = self.conversations[conv]["archived_by"] = None  # §17.2
         self.seq += 1
         ts = now()
         m = {"id": mid, "conversation_id": conv, "in_reply_to": in_reply_to, "sender": caller["id"],
@@ -460,18 +462,38 @@ class FakeState:
         m["delivery_state"], m["delivery_updated_at"] = body["state"], now()
         return 200, {"message": self.render(m)}
 
-    def conversations_list(self, caller):
+    def conversations_list(self, caller, query=None):
+        """§17.2: ``archived=exclude`` (default), ``only`` or ``include``."""
+        archived = ((query or {}).get("archived") or ["exclude"])[0]
+        if archived not in ("exclude", "only", "include"):
+            raise ApiFail(400, "invalid")
         out = []
         for cid, c in self.conversations.items():
             if caller["id"] not in c["pair"]:
+                continue
+            if (archived == "exclude" and c.get("archived_at")) or (archived == "only" and not c.get("archived_at")):
                 continue
             msgs = [m for m in self.messages.values() if m["conversation_id"] == cid]
             peer = next(iter(c["pair"] - {caller["id"]}))
             last = max(msgs, key=lambda m: m["seq"])
             out.append({"id": cid, "peer": self.agents[peer]["handle"], "last_seq": last["seq"],
                         "last_at": last["created_at"],
-                        "unacked": sum(1 for m in msgs if m["recipient"] == caller["id"] and not m["acked_at"])})
+                        "unacked": sum(1 for m in msgs if m["recipient"] == caller["id"] and not m["acked_at"]),
+                        "archived_at": c.get("archived_at"), "archived_by": c.get("archived_by")})
         return 200, {"conversations": out}
+
+    def archive(self, caller, cid, archived):
+        """§17.2: either endpoint archives or unarchives for both; idempotent; others get 404."""
+        c = self.conversations.get(cid)
+        if c is None or caller["id"] not in c["pair"] or c.get("team", caller["team"]) != caller["team"]:
+            raise ApiFail(404, "not_found")
+        if archived and not c.get("archived_at"):
+            c["archived_at"], c["archived_by"] = now(), {"machine": caller["handle"]}
+        elif not archived:
+            c["archived_at"] = c["archived_by"] = None
+        self.archive_calls.append((caller["handle"], cid, archived))
+        return 200, {"conversation": {"id": cid, "archived_at": c.get("archived_at"),
+                                      "archived_by": c.get("archived_by")}}
 
     def conversation_messages(self, caller, cid, query):
         c = self.conversations.get(cid)
@@ -628,7 +650,10 @@ class _Handler(BaseHTTPRequestHandler):
             if method == "GET" and route == "/inbox":
                 return st.inbox(caller, query)
             if method == "GET" and route == "/conversations":
-                return st.conversations_list(caller)
+                return st.conversations_list(caller, query)
+            m = re.fullmatch(r"/conversations/([0-9a-f-]{36})/(archive|unarchive)", route)
+            if m and method == "POST":
+                return st.archive(caller, m.group(1), m.group(2) == "archive")
             m = re.fullmatch(r"/messages/([0-9a-f-]{36})(/ack|/events)?", route)
             if m:
                 mid, tail = m.group(1), m.group(2)

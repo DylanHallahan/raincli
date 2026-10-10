@@ -250,8 +250,17 @@ class PersonClient:
         data = self.api.request("POST", f"/person/messages/{_path_id(message_id)}/ack", body={})[1]
         return data["message"], bool(data.get("acked"))
 
-    def conversations(self, limit=50):
-        return self.api.request("GET", "/person/conversations", query={"limit": int(limit)})[1]["conversations"]
+    def conversations(self, limit=50, archived="exclude"):
+        from .api import archive_query
+        return self.api.request("GET", "/person/conversations",
+                                query=archive_query(limit, archived))[1]["conversations"]
+
+    def archive(self, conversation_id, archived=True):
+        """§17.2: archive (or unarchive) a conversation the person is an endpoint of."""
+        from .api import _path_id
+        verb = "archive" if archived else "unarchive"
+        data = self.api.request("POST", f"/person/conversations/{_path_id(conversation_id)}/{verb}", body={})[1]
+        return data.get("conversation", data)
 
     def conversation(self, conversation_id, *, after=0, limit=100):
         from .api import _path_id

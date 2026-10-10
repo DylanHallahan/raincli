@@ -83,6 +83,33 @@ def out_json(obj):
     out(json.dumps(obj, ensure_ascii=True, sort_keys=True))
 
 
+_UTC = [False]  # --utc: timestamps as the server's ISO UTC text
+
+
+def when(value):
+    """A server timestamp (UTC ISO-8601) for people (§17.1): in this computer's time zone
+    (``astimezone()``), e.g. ``2026-10-10 10:03:07 EDT``, or the ISO UTC text with ``--utc``.
+    ``--json`` output never goes through here: it stays UTC ISO."""
+    if not value:
+        return ""
+    text = str(value)
+    if _UTC[0]:
+        return escape_line(text)
+    try:
+        from datetime import datetime, timezone
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        local = moment.astimezone()
+    except (ValueError, OverflowError, OSError):
+        return escape_line(text)
+    zone = local.strftime("%Z")
+    if not zone or len(zone) > 6 or " " in zone:  # Windows gives long names: use the offset
+        zone = local.strftime("%z")
+        zone = zone[:3] + ":" + zone[3:] if len(zone) == 5 else zone
+    return escape_line(local.strftime("%Y-%m-%d %H:%M:%S ") + zone)
+
+
 def format_message(m):
     """Human rendering. Every field is escaped; body lines are prefixed so
     the body can never forge the frame or inject terminal sequences."""
@@ -93,11 +120,11 @@ def format_message(m):
             + (f" (agent \"{escape_line(str(m['from_agent']))}\")" if m.get("from_agent")
                and not (m.get("from_endpoint") or {}).get("agent") else "")
             + f"  to: {escape_line(endpoint_label(m.get('to_endpoint') or m.get('to', '')))}"
-            f"  seq: {escape_line(str(m.get('seq', '')))}  at: {escape_line(str(m.get('created_at', '')))}")
+            f"  seq: {escape_line(str(m.get('seq', '')))}  at: {when(m.get('created_at'))}")
     lines.append(head)
     state = escape_line(str(m.get("delivery_state", "")))
-    when = m.get("delivery_updated_at")
-    lines.append(f"state: {state}" + (f" ({escape_line(str(when))})" if when else "")
+    updated = m.get("delivery_updated_at")
+    lines.append(f"state: {state}" + (f" ({when(updated)})" if updated else "")
                  + f"  acked: {'yes' if m.get('acked_at') else 'no'}"
                  + f"  conversation: {escape_line(str(m.get('conversation_id', '')))}")
     if m.get("in_reply_to"):
@@ -293,17 +320,53 @@ def cmd_reply(args):
     return EXIT_OK
 
 
-def cmd_conversations(args):
-    conversations = client(args).conversations(limit=args.limit)
-    if args.json:
-        out_json({"conversations": conversations})
-        return EXIT_OK
-    if not conversations:
-        out("No conversations.")
-    for c in conversations:
-        out(f"{escape_line(str(c.get('id', '')))}  peer {escape_line(str(c.get('peer', '')))}"
-            f"  last_seq {escape_line(str(c.get('last_seq', '')))}  last_at {escape_line(str(c.get('last_at', '')))}"
+def archived_choice(args):
+    return "only" if getattr(args, "archived", False) else "include" if getattr(args, "all", False) else "exclude"
+
+
+def format_conversation(c):
+    from .person import endpoint_label
+    line = (f"{escape_line(str(c.get('id', '')))}  peer {escape_line(str(c.get('peer', '')))}"
+            f"  last_seq {escape_line(str(c.get('last_seq', '')))}  last_at {when(c.get('last_at'))}"
             f"  unacked {escape_line(str(c.get('unacked', '')))}")
+    if c.get("archived_at"):
+        by = c.get("archived_by")
+        line += f"  archived {when(c['archived_at'])}" + (f" by {escape_line(endpoint_label(by))}" if by else "")
+    return line
+
+
+def print_conversations(conversations, as_json, archived="exclude"):
+    if as_json:
+        out_json({"conversations": conversations})
+        return
+    if not conversations:
+        out({"only": "No archived conversations.", "include": "No conversations."}.get(archived, "No conversations."))
+    for c in conversations:
+        out(format_conversation(c))
+
+
+def cmd_conversations(args):
+    choice = archived_choice(args)
+    print_conversations(client(args).conversations(limit=args.limit, archived=choice), args.json, choice)
+    return EXIT_OK
+
+
+def report_archive(conversation, archived, as_json, conversation_id):
+    if as_json:
+        out_json({"conversation": conversation})
+        return
+    cid = escape_line(str(conversation.get("id") or conversation_id))
+    if archived:
+        out(f"archived conversation {cid} for both sides (a new message brings it back; "
+            "delivery is not affected)")
+    else:
+        out(f"conversation {cid} is back in the main list for both sides")
+
+
+def cmd_archive(args):
+    """``raincli archive`` / ``unarchive`` (§17.2): shared by both endpoints, idempotent."""
+    archived = args.command == "archive"
+    report_archive(client(args).archive(args.conversation_id, archived), archived, args.json, args.conversation_id)
     return EXIT_OK
 
 
@@ -935,10 +998,17 @@ def cmd_runtime_status(args):
 
 # -- parser ----------------------------------------------------------------
 
+def archived_flags(sp):
+    which = sp.add_mutually_exclusive_group()
+    which.add_argument("--archived", action="store_true", help="only archived conversations")
+    which.add_argument("--all", action="store_true", help="active and archived conversations")
+
+
 def build_parser():
     p = _Parser(prog="raincli", description="RainCLI agent messaging CLI and Herdr connector.")
     p.add_argument("--version", action="version", version=f"raincli {__version__}")
     p.add_argument("--skill", action=_SkillAction, help="print the RainCLI agent skill (SKILL.md) and exit")
+    p.add_argument("--utc", action="store_true", help="show timestamps as UTC ISO instead of local time (§17.1)")
     p.add_argument("--config", dest="agent_config", metavar="PATH",
                    help="agent config file (default: $RAINCLI_CONFIG or ~/.config/raincli/agent.json)")
     sub = p.add_subparsers(dest="command", required=True, parser_class=_Parser)
@@ -1102,7 +1172,9 @@ def build_parser():
     init.set_defaults(func=cmd_config_init)
 
     def with_json(sp):
-        sp.add_argument("--json", action="store_true", help="print JSON")
+        sp.add_argument("--json", action="store_true", help="print JSON (timestamps stay UTC ISO)")
+        sp.add_argument("--utc", action="store_true", default=argparse.SUPPRESS,
+                        help="show timestamps as UTC ISO instead of local time")
         return sp
 
     from . import cli_me
@@ -1139,7 +1211,14 @@ def build_parser():
     reply.set_defaults(func=cmd_reply)
 
     convs = with_json(sub.add_parser("conversations", help="list conversations (id, peer, last_seq, "
-                                     "last_at, unacked)"))
+                                     "last_at, unacked); archived ones only with --archived or --all"))
+    archived_flags(convs)
+    for verb, text in (("archive", "archive a conversation for both sides (nothing is deleted; a new message "
+                                   "brings it back)"),
+                       ("unarchive", "bring an archived conversation back to the main list")):
+        sp = with_json(sub.add_parser(verb, help=text))
+        sp.add_argument("conversation_id", metavar="CONV_ID")
+        sp.set_defaults(func=cmd_archive)
     convs.add_argument("--limit", type=int, default=50, choices=range(1, 201), metavar="N",
                        help=argparse.SUPPRESS)
     convs.set_defaults(func=cmd_conversations)
@@ -1223,6 +1302,7 @@ def main(argv=None, *, herdr=None):
         # nothing an agent passes may print help into its context.
         return run_hook(argv[1:])
     args = build_parser().parse_args(argv)
+    _UTC[0] = bool(getattr(args, "utc", False))
     try:
         if args.func is cmd_connector_run:
             return cmd_connector_run(args, herdr=herdr)

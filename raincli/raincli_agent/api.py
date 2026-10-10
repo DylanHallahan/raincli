@@ -246,13 +246,33 @@ class ApiClient:
             "GET", f"/messages/{_path_id(message_id)}/attachments/{_path_id(attachment_id)}", raw=True)
         return body, headers.get("X-RainCLI-SHA256")
 
-    def conversations(self, limit=50):
-        return self.request("GET", "/conversations", query={"limit": int(limit)})[1]["conversations"]
+    def conversations(self, limit=50, archived="exclude"):
+        """``archived``: ``exclude`` (the default list), ``only`` or ``include`` (§17.2)."""
+        return self.request("GET", "/conversations", query=archive_query(limit, archived))[1]["conversations"]
+
+    def archive(self, conversation_id, archived=True):
+        """``POST /conversations/{id}/archive`` (or ``/unarchive``): idempotent, shared by both
+        endpoints, never affects delivery (§17.2). Returns the conversation JSON."""
+        verb = "archive" if archived else "unarchive"
+        data = self.request("POST", f"/conversations/{_path_id(conversation_id)}/{verb}", body={})[1]
+        return data.get("conversation", data)
 
     def conversation_messages(self, conversation_id, *, after=0, limit=100):
         data = self.request("GET", f"/conversations/{_path_id(conversation_id)}/messages",
                             query={"after": int(after), "limit": int(limit)})[1]
         return data["messages"], data.get("cursor", after)
+
+
+ARCHIVED = ("exclude", "only", "include")
+
+
+def archive_query(limit, archived):
+    if archived not in ARCHIVED:
+        raise UsageError("archived must be exclude, only or include")
+    query = {"limit": int(limit)}
+    if archived != "exclude":  # the default; an older server ignores the parameter anyway
+        query["archived"] = archived
+    return query
 
 
 def _path_id(value):
