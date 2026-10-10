@@ -315,3 +315,54 @@ def test_the_owner_is_shown_in_frames_and_agents(fake_api, connector_env, as_age
     as_agent(fake_api.bob)
     assert cli.main(["agents"]) == 0
     assert "alice (owner Alice Example)" in capsys.readouterr().out
+
+
+# -- §18.1 item 4: an empty answer with Retry-After is honoured ---------------------------------------
+
+def test_the_client_records_retry_after_on_an_empty_answer(fake_api):
+    from raincli_agent.api import ApiClient
+    api = ApiClient(fake_api.url, fake_api.bob)
+    api.inbox(wait=0)
+    assert api.poll_backoff is None
+    fake_api.state.over_cap_retry_after = 7
+    assert api.inbox(wait=25) == ([], 0) and api.poll_backoff == 7.0
+    fake_api.state.over_cap_retry_after = 999
+    api.inbox()
+    assert api.poll_backoff == 60.0  # capped
+
+
+def test_the_connector_waits_instead_of_polling_again(fake_api, connector_env):
+    fake_api.state.over_cap_retry_after = 5
+    conn = connector_env.connector()
+    pauses = []
+    conn._pause = lambda delay, stop: pauses.append(delay)
+    conn.run_forever(max_iterations=3)
+    assert fake_api.state.over_cap_polls == 3 and pauses == [5.0, 5.0, 5.0]
+
+
+def test_the_person_feed_waits(tmp_path):
+    from raincli_agent import person
+
+    class Client:
+        poll_backoff = None
+
+        def inbox(self, after, wait):
+            self.poll_backoff = 9.0
+            return [], after
+    slept = []
+    feed = person.NotificationFeed(str(tmp_path / "agent.json"), client_factory=Client,
+                                   sleep=lambda s: (slept.append(s), feed.stop.set()))
+    feed.session_id = lambda: "s"
+    feed.run()
+    assert slept == [9.0]
+
+
+def test_watch_waits_out_retry_after(fake_api, as_agent, monkeypatch):
+    fake_api.state.over_cap_retry_after = 4
+    as_agent(fake_api.bob)
+    naps = []
+    clock = [0.0]
+    monkeypatch.setattr(cli.time, "sleep", lambda s: (naps.append(s), clock.__setitem__(0, clock[0] + s)))
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    assert cli.main(["watch", "--timeout", "10"]) == 4  # nothing arrived
+    assert naps == [4.0, 4.0, 2.0] and fake_api.state.over_cap_polls == 3

@@ -128,6 +128,8 @@ class FakeState:
         self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id} (§16.3)
         self.known_devices = {}  # known-device token -> email (§18.1 item 2)
         self.owner_names = {}  # agent id -> its owner's display name, as the server shows it (§18.1 item 7)
+        self.over_cap_retry_after = None  # set: every inbox poll is answered at once, empty, with Retry-After
+        self.over_cap_polls = 0
         self.person_inbox = {}  # email -> [message JSON] for the notification feed tests
         self.routing = {}  # agent id -> "all" | "inbox-only" (§16.5)
         self.archive_calls = []  # (handle, conversation id, archived?, archived_through_seq sent)
@@ -424,6 +426,10 @@ class FakeState:
                              "Cache-Control": "no-store"}
 
     def inbox(self, caller, query):
+        if self.over_cap_retry_after is not None:  # §18.1 item 4: answered at once, empty
+            self.over_cap_polls += 1
+            after = int(query.get("after", ["0"])[0])
+            return 200, {"messages": [], "cursor": after}, {"Retry-After": str(self.over_cap_retry_after)}
         after = int(query.get("after", ["0"])[0])
         limit = min(int(query.get("limit", ["100"])[0]), 500)
         wait = min(float(query.get("wait", ["0"])[0]), 25)
@@ -597,13 +603,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
-            status, payload = result
+            status, payload = result[0], result[1]
+            extra_headers = result[2] if len(result) > 2 else None
         except ApiFail as exc:
             status, payload = exc.status, {"error": {"code": exc.code, "message": exc.message,
                                                      **getattr(exc, "extra", {})}}
             headers = exc.headers
         else:
-            headers = None
+            headers = extra_headers
         if action == "drop_after":  # committed, but the response is lost
             return self._drop()
         self._send(status, payload, headers)

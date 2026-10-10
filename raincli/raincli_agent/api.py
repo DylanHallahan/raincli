@@ -82,6 +82,8 @@ class ApiClient:
         self._sleep = sleep
         self._rng = rng or random.Random()
         self._opener = _build_opener(self.api_url)
+        self.retry_after = None  # the last successful answer's Retry-After, in seconds (capped)
+        self.poll_backoff = None  # set by inbox(): how long to wait after an empty answer
 
     @classmethod
     def from_config(cls, config: AgentConfig, **kwargs):
@@ -125,6 +127,7 @@ class ApiClient:
             with self._opener.open(req, timeout=timeout) as resp:
                 status, body = resp.status, resp.read()
                 retry_after, resp_headers = None, resp.headers
+                self.retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
         except urllib.error.HTTPError as exc:
             status, retry_after = exc.code, _parse_retry_after(exc.headers.get("Retry-After"))
             try:
@@ -228,6 +231,8 @@ class ApiClient:
         if timeout is None:
             timeout = max(self.timeout, wait + 15)
         data = self.request("GET", "/inbox", query=query, timeout=timeout)[1]
+        # §18.1 item 4: an over-cap poll is answered at once, empty, with Retry-After; wait that long.
+        self.poll_backoff = self.retry_after if not data["messages"] else None
         return data["messages"], data.get("cursor", after)
 
     def get_message(self, message_id):

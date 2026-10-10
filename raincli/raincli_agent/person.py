@@ -253,6 +253,7 @@ class PersonClient:
 
     def __init__(self, api):
         self.api = api
+        self.poll_backoff = None
 
     @classmethod
     def for_config(cls, agent_config=None, **kwargs):
@@ -273,6 +274,7 @@ class PersonClient:
                  "include_acked": "true" if include_acked else "false"}
         data = self.api.request("GET", "/person/inbox", query=query,
                                 timeout=max(self.api.timeout, wait + 15))[1]
+        self.poll_backoff = self.api.retry_after if not data["messages"] else None  # §18.1 item 4
         return data["messages"], data.get("cursor", after)
 
     def message(self, message_id):
@@ -457,6 +459,7 @@ class NotificationFeed:
         self.now = now
         self.log = log or (lambda text: None)
         self.failures = 0
+        self.backoff = None
 
     def session_id(self):
         token = load_session(self.agent_config)
@@ -469,7 +472,9 @@ class NotificationFeed:
             return None
         queue = _queue(self.agent_config)
         cursor = queue["cursor"] if queue["session"] == session else 0
-        messages, new_cursor = self.client_factory().inbox(after=cursor, wait=wait)
+        client = self.client_factory()
+        messages, new_cursor = client.inbox(after=cursor, wait=wait)
+        self.backoff = getattr(client, "poll_backoff", None)
         return append_notifications(self.agent_config, messages, new_cursor, session, self.now())
 
     def run(self):
@@ -479,6 +484,8 @@ class NotificationFeed:
                 self.failures = 0
                 if added is None:
                     self.sleep(FEED_BACKOFF[1] // 10)
+                elif self.backoff:
+                    self.sleep(self.backoff)  # an empty answer with Retry-After (§18.1 item 4)
             except (ApiError, ConfigError, OSError) as exc:
                 self.failures += 1
                 self.log(f"notification feed: {type(exc).__name__}"

@@ -511,6 +511,9 @@ def cmd_watch(args):
                     return EXIT_OK if received else EXIT_TIMEOUT
                 wait = max(0, min(MAX_WAIT, math.ceil(remaining)))
             page, cursor = api.inbox(after=after, wait=wait)
+            if not page and api.poll_backoff:  # §18.1 item 4: an empty answer with Retry-After
+                time.sleep(api.poll_backoff if deadline is None else
+                           max(0.0, min(api.poll_backoff, deadline - time.monotonic())))
             fresh = [m for m in page if m["id"] not in seen]
             for m in fresh:
                 seen.add(m["id"])

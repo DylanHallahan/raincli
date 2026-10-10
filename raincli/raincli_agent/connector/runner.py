@@ -253,6 +253,7 @@ class Connector:
         after = self.queue.cursor()
         while True:
             messages, cursor = self.api.inbox(after=after, wait=wait, limit=100, routing=True)
+            self.poll_backoff = getattr(self.api, "poll_backoff", None)  # §18.1 item 4
             self._record_routing_capable()
             for message in messages:
                 problem = message_problem(message)
@@ -1020,5 +1021,8 @@ class Connector:
                 self.log(f"iteration failed ({exc}); retrying in {delay:.1f}s")
                 self._pause(delay, stop_requested)
                 continue
-            if pending_wait == 0:
+            backoff = getattr(self, "poll_backoff", None)
+            if backoff:
+                self._pause(backoff, stop_requested)  # an empty answer with Retry-After: never poll at once
+            elif pending_wait == 0:
                 self._pause(self.config.recheck_interval, stop_requested)
