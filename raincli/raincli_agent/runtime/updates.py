@@ -315,7 +315,7 @@ def configure(root=None, mode=None, rollback=False, floor=None, allow_insecure=F
                 raise ConfigError("rollback below v%d.%d.%d is refused: that version cannot run this machine's "
                                   "runtime (machine mode, or messages to named agents)" % floor)
             from .. import security
-            insecure = security.below_min_safe(version_key(previous["tag"]))
+            insecure = security.below_min_safe(version_key(previous["tag"]), root)
             if insecure and not allow_insecure:  # §18.2 item 1
                 raise ConfigError(f"{security.BELOW_MIN_SAFE}: rollback below v{security.MIN_SAFE_VERSION} is "
                                   "refused; older versions lack security fixes. Only a deliberate local "

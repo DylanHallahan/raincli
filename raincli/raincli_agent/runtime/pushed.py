@@ -212,7 +212,7 @@ class PushedUpdates:
             self._fail("switch_timeout", network=True, target=key)
             return
         from .. import security
-        if security.below_min_safe(wanted):  # §18.2 item 1: whatever the server sends
+        if security.below_min_safe(wanted, self.state_dir, self.root if self.managed() else None):  # §18.2 item 1
             self._save(state="failed", error=security.BELOW_MIN_SAFE, target=key, blocked=key)
             return
         if wanted < self.floor():

@@ -86,6 +86,7 @@ def test_same_version_target_is_current(tmp_path):
     assert updater.calls == [] and updater.client()["update_state"] == "current"
 
 
+@pytest.mark.usefixtures("legacy_versions")
 @pytest.mark.skipif(OLDER_OK is None, reason="needs a target-aware version below the current one")
 def test_downgrade_needs_the_flag(tmp_path):
     updater = controller(tmp_path)
@@ -97,6 +98,7 @@ def test_downgrade_needs_the_flag(tmp_path):
     assert [c["tag"] for c in updater.calls] == [OLDER_OK]
 
 
+@pytest.mark.usefixtures("legacy_versions")
 def test_downgrade_with_flag_from_a_newer_client(tmp_path, monkeypatch):
     monkeypatch.setattr(pushed, "__version__", "0.9.0")
     updater = controller(tmp_path)
@@ -125,6 +127,7 @@ def test_bad_targets_are_refused_and_never_name_a_source(tmp_path, bad):
         assert updater.calls == [] and updater.client()["error"] == "bad_target"
 
 
+@pytest.mark.usefixtures("legacy_versions")
 def test_target_below_first_target_aware_version_is_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(pushed, "__version__", "0.3.1")
     updater = controller(tmp_path)
@@ -294,6 +297,7 @@ def test_v020_opted_in_pointer_stays_automatic_without_notice(tmp_path):
     assert (pointer["automatic"], pointer["update_mode"]) == (False, "automatic")
 
 
+@pytest.mark.usefixtures("legacy_versions")
 def test_modes_are_persisted_and_legacy_key_stays_false(tmp_path):
     root, python = managed_root(tmp_path)
     previous = root / "versions/old/venv/bin/python"
@@ -351,6 +355,7 @@ def test_install_keeps_modes_and_writes_legacy_false(tmp_path, monkeypatch):
 
 # -- launcher probation ---------------------------------------------------------------
 
+@pytest.mark.usefixtures("legacy_versions")
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell stand-in for managed interpreters")
 def test_launcher_rolls_back_a_version_that_fails_its_first_start(tmp_path):
     root = tmp_path / "client"
@@ -374,7 +379,9 @@ def test_launcher_rolls_back_a_version_that_fails_its_first_start(tmp_path):
         "v0.3.0", str(old), "automatic", False)
     assert pointer["previous"]["tag"] == "v0.4.0"
     state = json.loads((root / "update-state.json").read_text())
-    assert (state["state"], state["error"], state["blocked"]) == ("rolled_back", "first_start_failed", key)
+    # The launcher runs as its own process: v0.4.0 is below the minimum safe version, and going back to
+    # the version the failed update replaced is still allowed, recorded as such (§18.2 item 1).
+    assert (state["state"], state["error"], state["blocked"]) == ("rolled_back", "rolled_back_below_min_safe", key)
 
 
 def test_launcher_no_longer_pulls_releases():

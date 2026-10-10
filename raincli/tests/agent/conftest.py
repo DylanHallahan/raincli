@@ -24,6 +24,16 @@ def isolated_agent_configs(tmp_path_factory, monkeypatch):
     monkeypatch.delenv("CODEX_HOME", raising=False)
 
 
+@pytest.fixture
+def legacy_versions(monkeypatch):
+    """For tests of the other version floors that use releases older than the minimum safe
+    version (§18.2 item 1): lowers that floor to zero for the test."""
+    from raincli_agent import security
+    from raincli_agent.runtime import launcher
+    monkeypatch.setattr(security, "MIN_SAFE", (0, 0, 0))
+    monkeypatch.setattr(launcher, "MIN_SAFE", (0, 0, 0))
+
+
 @pytest.fixture(autouse=True)
 def fast_backoff(monkeypatch):
     monkeypatch.setattr(api_mod, "BACKOFF_BASE", 0.001)

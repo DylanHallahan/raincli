@@ -180,10 +180,13 @@ class Queue:
         return records
 
     @staticmethod
-    def transition(record, state, reason=None, detail=""):
+    def transition(record, state, reason=None, detail="", code=None):
+        """``detail`` stays local (status, log); ``code``, a fixed reason code, is what the server
+        is told (§18.2 item 4)."""
         if state not in STATES and state not in ESC_STATES:
             raise ValueError(state)
         record["state"] = state
+        record["code"] = code
         record["hold_reason"] = reason if state in (HELD, AGENT_HELD, ESC_PENDING) else None
         if state not in (HELD, AGENT_HELD, ESC_PENDING):
             record["hold_detail"] = ""

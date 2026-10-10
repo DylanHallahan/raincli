@@ -387,6 +387,8 @@ class FakeHerdr(HerdrBoundary):
                 raise HerdrError("fake error")
             if outcome == "crash":
                 raise SimulatedCrash()
+            if isinstance(outcome, Exception):
+                raise outcome
             if self.busy_after_prompt:
                 self.set_status(name, "working")
 

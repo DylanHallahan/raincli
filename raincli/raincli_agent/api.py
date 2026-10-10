@@ -10,6 +10,7 @@
 
 import http.client
 import json
+import re
 import random
 import socket
 import ssl
@@ -230,7 +231,8 @@ class ApiClient:
         return data["messages"], data.get("cursor", after)
 
     def get_message(self, message_id):
-        return self.request("GET", f"/messages/{_path_id(message_id)}")[1]["message"]
+        mid = _path_id(message_id)
+        return checked_message(self.request("GET", f"/messages/{mid}")[1]["message"], mid)
 
     def ack(self, message_id):
         data = self.request("POST", f"/messages/{_path_id(message_id)}/ack", body={})[1]
@@ -279,6 +281,18 @@ def archive_query(limit, archived):
         raise UsageError("archived must be exclude, only or include")
     # Always explicit (§17.3 A4): a machine credential that sends none gets "include".
     return {"limit": int(limit), "archived": archived}
+
+
+CANONICAL_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def checked_message(message, requested):
+    """§18.2 item 4: a message the server returns must carry exactly the canonical id that was
+    asked for, before that id is used in any local path."""
+    mid = message.get("id") if isinstance(message, dict) else None
+    if not isinstance(mid, str) or not CANONICAL_ID_RE.fullmatch(mid) or mid != requested:
+        raise BadResponse("the server returned a different or malformed message id")
+    return message
 
 
 def _path_id(value):

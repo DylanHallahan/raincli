@@ -96,7 +96,7 @@ def validate_api_url(url):
 
 
 def validate_token(token):
-    if not isinstance(token, str) or not TOKEN_RE.match(token):
+    if not isinstance(token, str) or not TOKEN_RE.fullmatch(token):
         raise ConfigError("token must look like rca_ followed by 43 URL-safe characters")
     return Secret(token)
 
@@ -150,7 +150,7 @@ def read_token_source(source, stdin, api_url=None):
     config JSON (``raincli-<handle>.json``: ``{"api_url": ..., "token": ...}``).
     For JSON, its api_url must equal ``api_url`` after normalisation. No error
     message ever includes the token or the file's content."""
-    if TOKEN_RE.match(source.strip()):
+    if TOKEN_RE.fullmatch(source.strip()):
         raise ConfigError("refusing a token on the command line; pass a file path or - for stdin")
     if source == "-":
         text = stdin.read()

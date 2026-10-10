@@ -81,6 +81,7 @@ def test_the_check_never_touches_the_real_root(tmp_path, quick):
 
 
 @POSIX
+@pytest.mark.usefixtures("legacy_versions")
 def test_rollback_checks_the_previous_launcher_without_the_current_client(tmp_path, quick):
     """L1: the current client is broken (the reason for the rollback); the previous
     version's launcher is still checked (against stubs) and restored."""

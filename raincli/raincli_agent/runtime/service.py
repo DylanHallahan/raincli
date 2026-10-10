@@ -575,6 +575,8 @@ def run(path, once=False, pushed=None):
     pushed = pushed or PushedUpdates()
     pushed.machine_mode = machine_mode(configs)
     pushed.state_dir = state
+    from .. import security
+    security.record(state, pushed.root if pushed.managed() else None)  # §18.2 item 1: the ratchet
     if pushed.managed():
         notice = updates.migrate_mode(pushed.root)
         if notice:

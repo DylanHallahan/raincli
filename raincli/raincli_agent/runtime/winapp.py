@@ -159,7 +159,7 @@ def read_install_meta(root):
     data = data if isinstance(data, dict) else {}
     stub, stamp = data.get("stub"), data.get("install_stamp")
     return {"stub": stub if isinstance(stub, int) and not isinstance(stub, bool) and 0 < stub < 1000 else None,
-            "install_stamp": stamp if isinstance(stamp, str) and _INSTALL_STAMP_RE.match(stamp) else None}
+            "install_stamp": stamp if isinstance(stamp, str) and _INSTALL_STAMP_RE.fullmatch(stamp) else None}
 
 
 def write_install(root, current, previous, probation=None):
@@ -275,11 +275,6 @@ def update_mode(root):
     return saved["update_mode"] if saved else "automatic"
 
 
-def _min_safe():
-    from ..security import MIN_SAFE
-    return MIN_SAFE
-
-
 def app_floor(root):
     """v0.4.0, or v0.5.0 once the app's runtime has polled with routing=1 (§16.12 C1)."""
     from . import floors
@@ -306,7 +301,7 @@ def configure(root, mode=None, rollback=False):
             if version_key(previous) < floor:
                 raise ConfigError("rollback below v%d.%d.%d is refused: that version cannot run this machine" % floor)
             from .. import security
-            if security.below_min_safe(version_key(previous)):  # §18.2 item 1: the app has no override
+            if security.below_min_safe(version_key(previous), root):  # §18.2 item 1: the app has no override
                 raise ConfigError(f"{security.BELOW_MIN_SAFE}: rollback below v{security.MIN_SAFE_VERSION} is "
                                   "refused; older versions lack security fixes")
             write_install(root, previous, state["current"])
@@ -738,13 +733,17 @@ def rollback(root, failed):
     state = read_install(root)
     previous = state["previous"]
     if (state["current"] != failed or previous is None or previous == failed
-            or version_key(previous) < max(app_floor(root), _min_safe())
-            or not (version_dir(root, previous) / APP_EXE).is_file()):
+            or version_key(previous) < app_floor(root) or not (version_dir(root, previous) / APP_EXE).is_file()):
         return False
     write_install(root, previous, failed, probation=None)
     update = updates.read_update_state(root)
     try:
-        updates.write_update_state(root, {**update, "state": "rolled_back", "error": "first_start_failed",
+        from .. import security
+        # Back to the version the failed update replaced: always allowed (§18.2 item 1), and
+        # recorded when that version is below the minimum safe version.
+        error = (security.ROLLED_BACK_BELOW if security.below_min_safe(version_key(previous), root)
+                 else "first_start_failed")
+        updates.write_update_state(root, {**update, "state": "rolled_back", "error": error,
                                           "blocked": update.get("target")})
     except OSError:
         pass

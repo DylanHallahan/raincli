@@ -171,7 +171,7 @@ def test_two_named_herdr_agents_each_get_their_own(env, fake_api):
     assert [(n, body_of(t)) for n, t, _ in env.herdr.prompts] == [("reviewer", "review it"), ("planner", "plan it")]
     for mid, name in ((a, "reviewer"), (b, "planner")):
         assert local(conn, mid)["state"] == q.SUBMITTED
-        assert env.events(mid) == [("submitted", f"handed to herdr agent {name}")]
+        assert env.events(mid) == [("submitted", "delivered")]  # a fixed code; the name stays local
     text = env.herdr.prompts[0][1]
     assert "\nTo: reviewer on bob\n" in text and '--from-agent "reviewer"' in text
 
@@ -361,6 +361,7 @@ def test_cli_inbox_pages_by_the_unfiltered_page(env, fake_api, as_agent, capsys)
 
 # -- C1 floors ----------------------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("legacy_versions")
 def test_routing_capable_raises_every_floor(tmp_path, monkeypatch):
     from raincli_agent.runtime import launcher, pushed
     runtime = tmp_path / "runtime.json"

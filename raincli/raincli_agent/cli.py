@@ -469,7 +469,7 @@ def cmd_fetch(args):
     if args.dir:  # the user's choice is trusted as the base; files go straight into it
         directory = att.prepare_dir(args.dir)
     else:  # cwd is the base; raincli-attachments/<mid>/ are ours and must not be symlinks
-        directory = att.prepare_dir(os.getcwd(), "raincli-attachments", message["id"])
+        directory = att.prepare_dir(os.getcwd(), "raincli-attachments", message["id"])  # checked: the id asked for
     status = EXIT_OK
     for meta in items:
         name = meta["filename"]

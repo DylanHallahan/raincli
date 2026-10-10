@@ -207,6 +207,7 @@ def test_launcher_broken_only_in_runtime_run_is_not_adopted(tmp_path):
 
 
 @POSIX
+@pytest.mark.usefixtures("legacy_versions")
 def test_explicit_rollback_checks_the_previous_launcher(tmp_path):
     root, pointer, _ = fake_versions(tmp_path, 'echo "raincli 0.4.0"\n', old_script='echo "raincli 0.3.0"\n')
     old_dir = Path(pointer["previous"]["python"]).parents[2]

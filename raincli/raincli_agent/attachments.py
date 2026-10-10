@@ -108,7 +108,7 @@ def check_metadata(meta):
     name = meta.get("filename") if isinstance(meta, dict) else None
     if not valid_name(name):
         raise AttachmentError(f"server sent an unsafe attachment name {safe_name(name)!r}; refusing it")
-    if not isinstance(meta.get("sha256"), str) or not SHA_RE.match(meta["sha256"]):
+    if not isinstance(meta.get("sha256"), str) or not SHA_RE.fullmatch(meta["sha256"]):
         raise AttachmentError(f"server sent a bad sha256 for {safe_name(name)!r}")
     size = meta.get("size")
     if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= MAX_BYTES:
@@ -139,7 +139,9 @@ def prepare_dir(base, *components):
     current = os.path.realpath(base)
     makedirs_durable(current, 0o700)
     for name in components:
-        if name in ("", ".", "..") or os.sep in name or (os.altsep and os.altsep in name):
+        # Also no drive or stream (":"), and no name Windows would strip or treat as a device.
+        if (name in ("", ".", "..") or os.sep in name or (os.altsep and os.altsep in name) or ":" in name
+                or name != name.rstrip(". ") or name.split(".")[0].lower() in _WINDOWS_RESERVED):
             raise AttachmentError(f"refusing directory component {escape_line(name)!r}")
         path = os.path.join(current, name)
         try:

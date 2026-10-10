@@ -439,7 +439,8 @@ def test_name_dash_h_is_a_name_not_help(state):
                             input=json.dumps({"session_id": "s"}).encode(), capture_output=True, timeout=20,
                             env={**os.environ, "PYTHONPATH": str(RAINCLI)})
     assert (result.returncode, result.stdout, result.stderr) == (0, b"", b"")
-    assert [r["name"] for r in sessions.read_sessions(state.dir)] == ["-h"]
+    # A name, never help; and never starting with "-" (§18.2 item 4).
+    assert [r["name"] for r in sessions.read_sessions(state.dir)] == ["h"]
 
 
 def test_hook_help_has_one_usage_line():

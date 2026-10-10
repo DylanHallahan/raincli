@@ -122,7 +122,8 @@ def normalize_name(name, fallback):
         name = ""
     cleaned = "".join("_" if unicodedata.category(ch) in _UNSAFE or ch in "  " else ch for ch in name)
     cleaned = TOKEN_RE.sub("[redacted]", cleaned)
-    cleaned = " ".join(cleaned.split())[:64].strip()
+    # Never starting with "-" (§18.2 item 4): a name is never read as an option.
+    cleaned = " ".join(cleaned.split())[:64].strip().lstrip("-").strip()
     return cleaned or fallback
 
 

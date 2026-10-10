@@ -242,8 +242,9 @@ class PersonClient:
         return data["messages"], data.get("cursor", after)
 
     def message(self, message_id):
-        from .api import _path_id
-        return self.api.request("GET", f"/person/messages/{_path_id(message_id)}")[1]["message"]
+        from .api import _path_id, checked_message
+        mid = _path_id(message_id)
+        return checked_message(self.api.request("GET", f"/person/messages/{mid}")[1]["message"], mid)
 
     def ack(self, message_id):
         from .api import _path_id
