@@ -38,8 +38,10 @@ D. The app window (protocol §16.10, §16.14, §16.15; design §10 GUI coverage)
    listens on a port, carries a debugging switch or writes DevToolsActivePort; an install without "stub"
    has its shortcut pointed at --background. Then `RainCLI.exe --open` with that variable set for this
    launch only: Playwright connects over CDP and drives the window's local sign-in (a person session),
-   the handoff to the inbox, reading, replying and sending, local times in the thread, archiving the
-   conversation (out of both sides' inboxes, under Archived) and unarchiving it, This computer and Settings
+   the handoff to the inbox (the local pages served only under a per-run path secret, their port bound
+   exclusively), reading, replying and sending, local times in the thread, archiving the
+   conversation (out of both sides' inboxes, under Archived) and unarchiving it, a custom-scheme new
+   window that opens nothing, This computer and Settings
    with the last report in local time, the offline
    page and Retry (the server stopped and started), and sign-out (the machine revoked, the profile
    marked for reset). A full install afterwards restores the no-argument shortcut. Screenshots go to
@@ -93,6 +95,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 import uuid
@@ -636,6 +639,11 @@ class WindowCDP:
             self.browser.close()
 
 
+def _redact_local(url):
+    """A local page URL with its path secret removed, for messages."""
+    return re.sub(r"(http://127\.0\.0\.1:\d+/)[A-Za-z0-9_-]{16,}/", r"\1[secret]/", url or "")
+
+
 def url_of(page):
     """The window's current URL, polled from here: wait_for_url rejects when the app cancels a navigation
     (the /app/local sentinel), and an aborted load is expected in D7."""
@@ -731,6 +739,30 @@ def part_d(app, server, installers, password, observer, menu, work):
         wait_for("the sign-in page's machine name", lambda: page.input_value("#machine"), timeout=60, interval=1)
         check(page.evaluate("document.visibilityState") == "visible", "--open did not show the window")
         shot(page, "d4-sign-in")
+        # D4b. v0.5.3 (§18.2 item 2): the local pages are served by the app's own server, bound exclusively, and
+        # only under this run's path secret.
+        local = re.match(r"http://127\.0\.0\.1:(\d+)/([A-Za-z0-9_-]{32,})/sign-in\.html", url_of(page))
+        check(local, f"the local page URL has no per-run path secret: {_redact_local(url_of(page))}")
+        local_port, local_secret = int(local.group(1)), local.group(2)
+        for path in ("/sign-in.html", "/" + "x" * len(local_secret) + "/sign-in.html"):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{local_port}{path}", timeout=5)
+                check(False, f"the local server answered {path} without the secret")
+            except urllib.error.HTTPError as exc:
+                check(exc.code == 404, f"the local server answered {path} with {exc.code}")
+        with urllib.request.urlopen(f"http://127.0.0.1:{local_port}/{local_secret}/sign-in.html", timeout=5) as r:
+            check(r.headers.get("Referrer-Policy") == "no-referrer", "a local page lacks Referrer-Policy: no-referrer")
+        squatter = socket.socket()
+        try:
+            squatter.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            squatter.bind(("127.0.0.1", local_port))
+            check(False, "a second socket could bind the local page port")
+        except OSError:
+            pass
+        finally:
+            squatter.close()
+        say("PASS: D4b. the local pages are served only under a per-run path secret (404 without it, "
+            "Referrer-Policy no-referrer), and a second bind of their port, even with SO_REUSEADDR, is refused")
         page.fill("#email", EMAIL)
         page.fill("#password", password)
         page.click("#submit")
@@ -799,6 +831,22 @@ def part_d(app, server, installers, password, observer, menu, work):
         say(f"PASS: D5b. the thread shows local times ({label!r}, title {title!r}); Archive moved the conversation "
             "out of both sides' inboxes and under Archived (archived by you); Unarchive brought it back")
 
+        # D5c. v0.5.3 (§18.2 item 3): a new-window link with another scheme opens nothing: no window, no program.
+        before = [url for kind, url in window.targets() if kind == "page"]
+        page.evaluate("""() => { const a = document.createElement("a"); a.id = "rc-e2e-link";
+            a.href = "rc-e2e-scheme://open"; a.target = "_blank"; a.textContent = "x";
+            document.body.appendChild(a); }""")
+        page.click("#rc-e2e-link", no_wait_after=True)
+        page.evaluate("() => { window.open('rc-e2e-scheme://again', '_blank'); }")
+        time.sleep(3)
+        after = [url for kind, url in window.targets() if kind == "page"]
+        check(len(after) == len(before) and not any("rc-e2e-scheme" in url for url in after),
+              f"a new window opened: {after}")
+        app_log = (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace")
+        check("link dropped (scheme 'rc-e2e-scheme')" in app_log, "the dropped link was not logged")
+        say("PASS: D5c. target=_blank and window.open with a custom scheme opened no window and nothing else; "
+            "the drop was logged by scheme only")
+
         # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
         # hosted navigation and loads its own page, so the click must not wait for that navigation.
         page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
@@ -844,6 +892,8 @@ def part_d(app, server, installers, password, observer, menu, work):
     check((app.root / "state" / "reset-profile").is_file(), "sign-out did not mark the WebView2 profile for reset")
     check("RainCLIApp/" not in (work / "server" / "server.log").read_text("utf-8", errors="replace"),
           "the server log holds the app's User-Agent")
+    check(local_secret not in (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace"),
+          "the app log holds the local pages' path secret")
     say("PASS: D8. sign-out in the window revoked the machine, deleted its credential and marked the profile "
         "for reset; the server log has no app User-Agent")
 

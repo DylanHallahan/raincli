@@ -42,6 +42,11 @@
         <div class="choice"><input type="radio" name="update" id="update-automatic" value="automatic"><label for="update-automatic">Install the version my team sets, automatically</label></div>
         <div class="choice"><input type="radio" name="update" id="update-manual" value="manual"><label for="update-manual">Don't update this computer automatically</label></div>
       </section>
+      <section class="card" aria-labelledby="device-title">
+        <h2 id="device-title">This device</h2>
+        <p class="muted small">RainCLI remembers that you signed in here, so this computer can still sign in while your account is temporarily slowed down. It never signs you in by itself.</p>
+        <div class="row"><button class="btn btn-quiet" type="button" id="forget-device">Forget this device</button></div>
+      </section>
       <div class="row">
         <button class="btn btn-quiet" type="button" id="pause">Pause</button>
         <button class="btn btn-quiet" type="button" id="open-log">Open log</button>

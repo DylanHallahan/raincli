@@ -1,4 +1,5 @@
-// Settings: routing policy (§16.5), trust (§16.12 C5), update mode (§14), pause, log, sign out.
+// Settings: routing policy (§16.5), trust (§16.12 C5), update mode (§14), this device (§18.1), pause, log,
+// sign out.
 (function () {
   "use strict";
   function check(name, value) { var el = document.getElementById(name + "-" + value); if (el) el.checked = true; }
@@ -37,6 +38,9 @@
     var input = document.getElementById("trust-add");
     if (input.value.trim()) save({trust_add: input.value.trim()});
     input.value = "";
+  });
+  document.getElementById("forget-device").addEventListener("click", function () {
+    rc.call("forget_device").then(function (r) { rc.message(r.message, !r.ok); });
   });
   load();
 }());

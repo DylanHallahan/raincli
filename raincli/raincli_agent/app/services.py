@@ -243,6 +243,10 @@ class Services:
 
     # -- the hosted site -------------------------------------------------------------------------------
 
+    def forget_device(self):
+        """"Forget this device" on Settings: the recognised-device token goes (§18.1 item 2)."""
+        return _person().forget_known_device(self.agent_config)
+
     def app_install_token(self):
         """This install's ``app_install_token`` (§16.14 S3), kept by the client beside ``person.json``, or
         None. The window sends it only in its User-Agent; it is never logged or put in a URL."""

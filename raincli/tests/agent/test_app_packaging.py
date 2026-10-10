@@ -82,7 +82,8 @@ def test_bundle_check_requires_webview_and_refuses_tkinter_in_the_app():
         "app: tkinter must not be frozen in"]
     assert vb.check_absent("app", {"tkinterx": None}, ["tkinter"]) == []
     source = (WIN / "verify_bundle.py").read_text()
-    assert '"raincli_agent.app.window", "pystray", "PIL",\n                                      "webview"]' in source
+    assert ('"raincli_agent.app.window",\n                                      "raincli_agent.app.localserver", "pystray", '
+            '"PIL", "webview"]') in source  # §18.2 item 2: the app's own local page server is frozen in
 
 
 def test_installer_detects_webview2_and_links_microsofts_bootstrapper():

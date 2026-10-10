@@ -1,11 +1,16 @@
 """The app window (protocol §16.10, §16.12 C4, C14, C16): one pywebview (WebView2) window.
 
-- **Local pages** (sign-in, This computer, Settings, offline) are bundled in ``app/local`` and served
-  by pywebview's built-in server on ``http://127.0.0.1:<port>``. They talk to the app only through
-  ``Api`` (js_api), with a nonce passed per load to that exact origin (``policy.NonceGate``).
+- **Local pages** (sign-in, This computer, Settings, offline) are bundled in ``app/local`` and served by
+  the app's own server (``localserver``) on ``http://127.0.0.1:<port>/<secret>/``, bound before its port
+  is read and under a per-run path secret that is never logged (§18.2 item 2). They talk to the app only
+  through ``Api`` (js_api), with a nonce passed per load to exactly that origin and path, and every call is
+  checked against the window's current URL (``policy.NonceGate``).
 - **Hosted pages** (inbox, threads, agents) come from the service in app mode, signed in through a
-  single-use handoff. The window shows only the service origin and the local origin; anything else
-  opens in the default browser, and ``/app/local/<page>`` shows the bundled page (``policy.Navigation``).
+  single-use handoff. The window shows only the service origin and the local origin, and
+  ``/app/local/<page>`` shows the bundled page (``policy.Navigation``). Only a validated ``https:`` or
+  ``mailto:`` link leaves the app, re-serialized, to the default browser or mail program; everything else
+  is dropped and logged. New-window requests are always cancelled and go through the same rules
+  (§18.2 item 3).
 - **Offline:** a failed or timed-out load shows the local offline page, with Retry.
 - **No debugging**, ever: ``webview.start(debug=False)`` and no debugging-related settings (C16).
   WebView2 debugging can only come from the test environment's own variable.
@@ -18,7 +23,6 @@ import json
 import logging
 import os
 import shutil
-import socket
 import threading
 import time
 from pathlib import Path
@@ -56,15 +60,24 @@ def webview2_version(winreg=None):
     return None
 
 
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 def pywebview_settings():
-    """The only pywebview settings the app changes (§16.12 C16 forbids every debugging one)."""
-    return {"ALLOW_DOWNLOADS": True, "ALLOW_FILE_URLS": False, "OPEN_EXTERNAL_LINKS_IN_BROWSER": True}
+    """The only pywebview settings the app changes (§16.12 C16 forbids every debugging one). pywebview's own
+    external-link opening is off: the window decides about every new window itself (§18.2 item 3)."""
+    return {"ALLOW_DOWNLOADS": True, "ALLOW_FILE_URLS": False, "OPEN_EXTERNAL_LINKS_IN_BROWSER": False}
+
+
+class _Scrub(logging.Filter):
+    """Removes the local path secret from every record of a logger (pywebview's, for one)."""
+
+    def __init__(self, secret):
+        super().__init__()
+        self.secret = secret
+
+    def filter(self, record):
+        text = record.getMessage()
+        if self.secret in text:
+            record.msg, record.args = text.replace(self.secret, "[local]"), None
+        return True
 
 
 def reset_profile_if_marked(profile_dir):
@@ -166,6 +179,13 @@ class Api:
             return _result(False, f"Could not {'connect' if connecting else 'disconnect'}: {exc}")
         return _result(message=note or ("Connected." if connecting else "Disconnected."), state=state)
 
+    def forget_device(self, nonce):
+        """§18.1 item 2: drop this install's recognised-device token; the next sign-in starts afresh."""
+        self._guard(nonce)
+        forgotten = self._app.services.forget_device()
+        return _result(message="This device is forgotten. The next sign-in here counts as a new device."
+                       if forgotten else "This device wasn't remembered.")
+
     def open_log(self, nonce):
         self._guard(nonce)
         return {"opened": self._app.services.open_log()}
@@ -187,9 +207,22 @@ class AppWindow:
     """The window's behaviour, independent of pywebview (``webview`` is injected) so it is unit-tested."""
 
     def __init__(self, services, *, profile_dir, webview=None, browser_open=None, confirm=None,
-                 local_port=None, timer=threading.Timer, later=_in_thread, log=None, on_fresh_sign_in=None):
+                 local_port=None, local_secret=None, timer=threading.Timer, later=_in_thread, log=None,
+                 on_fresh_sign_in=None):
         self.services = services
-        self._log = log or (lambda text: None)  # app-lock\\app.log: origins and paths only, never a query
+        # The local pages' server, bound now (§18.2 item 2). ``local_port`` (tests) names a port and starts none.
+        self._local_server = None
+        if local_port is None:
+            from .localserver import LocalServer
+            self._local_server = LocalServer(LOCAL_DIR, local_secret).start()
+            self.local_base = self._local_server.base
+            self._local_secret = self._local_server.secret
+        else:
+            from .localserver import new_secret
+            self._local_secret = local_secret or new_secret()
+            self.local_base = f"http://127.0.0.1:{local_port}/{self._local_secret}/"
+        sink = log or (lambda text: None)  # app-lock\\app.log: origins and paths only, never a query
+        self._log = lambda text: sink(str(text).replace(self._local_secret, "[local]"))
         self._on_fresh_sign_in = on_fresh_sign_in  # the tray's one notice about unconnected agents (§16.19)
         self._cancelled = set()  # NavigationIds this window cancelled (sentinel, other origins)
         self._timer_lock = threading.Lock()  # arm and disarm run on the UI thread and js_api threads
@@ -200,7 +233,6 @@ class AppWindow:
         self._confirm = confirm
         self._timer = timer
         self._later = later  # WebView2 raises NavigationStarting on the UI thread: act after it returns
-        self.local_base = f"http://127.0.0.1:{local_port or free_port()}/"
         self.window = None
         self.navigation = None
         self.gate = None
@@ -248,7 +280,7 @@ class AppWindow:
             wv.settings[key] = value
         self.refresh_navigation()
         self.refresh_install_token()
-        self.window = wv.create_window(TITLE, url=str(LOCAL_DIR / "sign-in.html"), js_api=self.api,
+        self.window = wv.create_window(TITLE, url=self.local_url("sign-in"), js_api=self.api,
                                        width=1180, height=780, min_size=(760, 520), hidden=True,
                                        text_select=True)
         self.window.events.loaded += self.on_loaded
@@ -259,8 +291,10 @@ class AppWindow:
     def start(self, func):
         """pywebview's loop on this (the main) thread: never debug, a private profile on disk (C16)."""
         reset_profile_if_marked(self.profile_dir)
-        self._webview.start(func, debug=False, http_server=True, http_port=int(self.local_base.rsplit(":", 1)[1].strip("/")),
-                            private_mode=False, storage_path=str(self.profile_dir))
+        logging.getLogger("pywebview").addFilter(_Scrub(self._local_secret))  # it logs URLs it loads
+        # The local pages come from the app's own server, never pywebview's (http_server=False).
+        self._webview.start(func, debug=False, http_server=False, private_mode=False,
+                            storage_path=str(self.profile_dir))
 
     def attach_native(self):
         """WebView2's own NavigationStarting/Completed, to block before a page loads (Windows only).
@@ -270,6 +304,7 @@ class AppWindow:
         except AttributeError:
             return False
         control.NavigationStarting += lambda sender, args: self._native_starting(args)
+        control.CoreWebView2InitializationCompleted += lambda sender, args: self._new_windows(sender.CoreWebView2)
         control.NavigationCompleted += lambda sender, args: self._native_completed(args, sender)
         control.CoreWebView2InitializationCompleted += lambda sender, args: self._core_ready(sender.CoreWebView2)
         return True
@@ -285,6 +320,38 @@ class AppWindow:
         self._ua_base = str(core.Settings.UserAgent)
         self._ensure_filter()
         core.WebResourceRequested += lambda sender, args: self._native_request(args.Request)
+
+    def _new_windows(self, core):
+        """§18.2 item 3: WebView2 never opens a window of its own; each request goes through the policy."""
+        core.NewWindowRequested += lambda sender, args: self._native_new_window(args)
+
+    def _native_new_window(self, args):
+        args.Handled = True  # cancelled, always: no popup, whatever pywebview does
+        self._later(self.new_window, str(args.Uri or ""))
+
+    def new_window(self, url):
+        """A ``target=_blank`` link or ``window.open``: an allowed origin opens in this window, a valid
+        ``https:`` or ``mailto:`` link in the default program, anything else nowhere."""
+        decision, target = self.navigation.decide(url)
+        if decision == "allow":
+            self.load(url)
+        elif decision == "local":
+            self.load(self.local_url(target))
+        else:
+            self.open_external(url)
+
+    def open_external(self, url):
+        """Hand a link to the operating system: only a validated, re-serialized ``https:`` or ``mailto:``
+        URL (``policy.external_url``). Anything else is dropped and logged by scheme only."""
+        safe = policy.external_url(url)
+        if safe is None:
+            scheme = url.split(":", 1)[0][:20] if isinstance(url, str) and ":" in url else "?"
+            self._log(f"link dropped (scheme {scheme!r}): only https and mailto links leave the app")
+            return False
+        if self._browser_open is None:
+            return False
+        self._browser_open(safe)
+        return True
 
     def _ensure_filter(self):
         """UI thread only (core ready, or NavigationStarting): filter the current service origin."""
@@ -336,8 +403,10 @@ class AppWindow:
         if decision == "local":
             self._log(f"sentinel {_loggable(url)} -> local page {target}")
             self._later(self.load, self.local_url(target))
-        elif decision == "external" and self._browser_open is not None:
-            self._later(self._browser_open, url)
+        elif decision == "external":
+            self._later(self.open_external, url)
+        else:
+            self._log(f"navigation blocked: {_loggable(url)}")
         return True
 
     def on_loaded(self):
@@ -351,8 +420,8 @@ class AppWindow:
             self.load(self.local_url(target))
             return
         if decision != "allow":  # slipped past before_navigate: never leave it on screen
-            if decision == "external" and self._browser_open is not None:
-                self._browser_open(url)
+            if decision == "external":
+                self.open_external(url)
             self.show_offline()
             return
         if url and not self.navigation.is_local(url):
@@ -500,6 +569,8 @@ class AppWindow:
         self.quitting = True
         if self.window is not None:
             self.window.destroy()
+        if self._local_server is not None:
+            self._local_server.close()
 
     # -- sign-in and sign-out --------------------------------------------------------------------------------
 

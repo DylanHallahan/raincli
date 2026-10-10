@@ -183,8 +183,8 @@ def verify(dist, version):
     folder = dist / f"RainCLI-{version}"
     problems = check_files(dist)
     targets = [
-        (folder / "RainCLI-app.exe", ["raincli_agent.app.tray", "raincli_agent.app.window", "pystray", "PIL",
-                                      "webview"]),
+        (folder / "RainCLI-app.exe", ["raincli_agent.app.tray", "raincli_agent.app.window",
+                                      "raincli_agent.app.localserver", "pystray", "PIL", "webview"]),
         (folder / "raincli.exe", ["raincli_agent.cli"]),
         (dist / "stub" / "RainCLI.exe", ["raincli_agent.app.stub"]),
         (dist / "bin" / "raincli.exe", []),

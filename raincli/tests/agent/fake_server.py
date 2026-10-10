@@ -124,6 +124,7 @@ class FakeState:
         self.delivered = set()  # agent ids with delivery history (they rotate only with previous_token)
         self.login_failures = {}  # email -> failures
         self.login_bodies = []  # every /app/login body received (tests check what was sent)
+        self.devices_issued = 0
         self.inbox_queries = []  # (handle, routing=1?) for every inbox poll
         self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id} (§16.3)
         self.known_devices = {}  # known-device token -> email (§18.1 item 2)
@@ -216,7 +217,9 @@ class FakeState:
         return status, reply
 
     def new_known_device(self, email):
-        token = "rkd1_" + secrets.token_hex(16) + "." + secrets.token_urlsafe(16)
+        """The server's token shape, deterministic: rkd1_<user>.<device>.<issued>.<epoch>.<signature>."""
+        self.devices_issued += 1
+        token = f"rkd1_{self.devices_issued:032x}.{'d' * 32}.1700000000.0." + format(self.devices_issued, "064x")
         self.known_devices[token] = email
         return token
 
@@ -629,7 +632,7 @@ class _Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     raise ApiFail(400, "invalid") from None
                 st.login_bodies.append(body)
-                return st.app_login(body)
+                return st.app_login(body)  # every success carries a known-device token (§18.1 item 2)
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Bearer rps_") and (route.startswith("/person/") or route == "/app/handoff"):
             with st.lock:

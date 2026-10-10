@@ -111,7 +111,9 @@ class NoWindow:
         if self.tray.icon is not None:
             self.tray.icon.notify("Install the Microsoft Edge WebView2 Runtime to open the window. "
                                   "Messages are still delivered.", TITLE)
-        webbrowser.open(WEBVIEW2_DOWNLOAD)
+        safe = policy.external_url(WEBVIEW2_DOWNLOAD)  # every link leaving the app is checked (§18.2 item 3)
+        if safe is not None:
+            webbrowser.open(safe)
 
     def open_hosted(self, path=None, thread_id=None):
         self.show()

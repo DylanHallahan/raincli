@@ -49,7 +49,10 @@ def same_origin(url, other):
 
 
 class Navigation:
-    """Where a requested URL may go: ``("allow", url)``, ``("local", page)`` or ``("external", url)``."""
+    """Where a requested URL may go: ``("allow", url)``, ``("local", page)`` or ``("external", url)``.
+
+    The local origin includes the app's per-run path secret (§18.2 item 2): ``local_url`` is
+    ``http://127.0.0.1:<port>/<secret>/``, and only URLs under that path count as local."""
 
     def __init__(self, service_url, local_url):
         self.service = origin(service_url)
@@ -58,11 +61,12 @@ class Navigation:
             raise ValueError("the service and local URLs must be http(s) URLs")
         if self.service[0] != "https" and self.service[1] not in ("127.0.0.1", "localhost", "::1"):
             raise ValueError("the service URL must be https unless it is a loopback address")
+        self._local_secret = urlsplit(local_url).path.strip("/")
 
     def decide(self, url):
         where = origin(url)
         if where is not None and where == self.local:
-            return "allow", url
+            return ("allow", url) if self.is_local(url) else ("block", url)  # the right port, not our pages
         if where is not None and where == self.service:
             path = urlsplit(url).path
             match = _LOCAL_SENTINEL.match(path)
@@ -75,7 +79,18 @@ class Navigation:
         return "external", url
 
     def is_local(self, url):
-        return origin(url) == self.local
+        """Exactly the local origin and, when the app has one, under its path secret (compared in constant
+        time)."""
+        if origin(url) != self.local:
+            return False
+        if not self._local_secret:
+            return True
+        try:
+            first = urlsplit(url).path.lstrip("/").split("/", 1)[0]
+        except ValueError:
+            return False
+        return hmac.compare_digest(first.encode(), self._local_secret.encode()) and \
+            urlsplit(url).path.startswith(f"/{self._local_secret}/")
 
 
 class NonceGate:
@@ -99,6 +114,66 @@ class NonceGate:
             current = self._current
         return (isinstance(nonce, str) and current is not None and self.navigation.is_local(current_url)
                 and hmac.compare_digest(nonce.encode(), current.encode()))
+
+
+# Links leaving the app (§18.2 item 3) ------------------------------------------------------------
+
+EXTERNAL_MAX = 2048
+MAILTO_PARAMS = ("subject", "body", "cc", "bcc")
+_UNSAFE = re.compile(r"[\x00-\x20\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def external_url(url):
+    """The URL to hand to the operating system, re-serialized, or None to drop it.
+
+    Only ``https:`` with a host (no user information, whitespace or control characters, at most 2048
+    characters) and ``mailto:`` (only ``subject``, ``body``, ``cc`` and ``bcc`` kept) ever leave the app."""
+    if not isinstance(url, str) or not url or len(url) > EXTERNAL_MAX or _UNSAFE.search(url):
+        return None
+    scheme = url.split(":", 1)[0].lower()
+    if scheme == "https":
+        return _https(url)
+    if scheme == "mailto":
+        return _mailto(url)
+    return None
+
+
+def _https(url):
+    from urllib.parse import urlunsplit
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+        host = parts.hostname
+    except ValueError:
+        return None
+    if parts.scheme != "https" or not host or parts.username is not None or parts.password is not None \
+            or "@" in parts.netloc or not url.lower().startswith("https://"):
+        return None
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None and port != 443:
+        netloc += f":{port}"
+    return urlunsplit(("https", netloc, parts.path or "/", parts.query, parts.fragment))
+
+
+def _mailto(url):
+    from urllib.parse import parse_qsl, quote, unquote, urlencode
+    rest = url.split(":", 1)[1]
+    to, _, query = rest.partition("?")
+    to = to.split("#", 1)[0]
+    try:
+        addresses = [unquote(a).strip() for a in to.split(",") if a.strip()]
+        params = parse_qsl(query.split("#", 1)[0], keep_blank_values=True, strict_parsing=False)
+    except ValueError:
+        return None
+    if any(_UNSAFE.search(a) or a.count("@") != 1 or len(a) > 254 for a in addresses):
+        return None
+    kept = [(k.lower(), v) for k, v in params if k.lower() in MAILTO_PARAMS]
+    head = ",".join(quote(a, safe="@") for a in addresses)
+    return "mailto:" + head + (("?" + urlencode(kept, quote_via=quote)) if kept else "")
 
 
 def toast_text(kind, sender):

@@ -36,11 +36,11 @@ from .fsutil import atomic_write_json, ensure_private_dir, read_private_file, re
 
 PERSON_FILE = "person.json"
 INSTALL_FILE = "app-install.json"
-KNOWN_DEVICE_FILE = "known-device.json"
-KNOWN_DEVICE_RE = re.compile(r"rkd1_[A-Za-z0-9._-]{16,195}")
+DEVICE_FILE = "known-device.json"  # the server's recognised-device token for this install (protocol §18.1)
 NOTIFY_DIR = "notifications"
 PERSON_TOKEN_RE = re.compile(r"^rps_[A-Za-z0-9_-]{43}$")
 INSTALL_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+DEVICE_TOKEN_RE = re.compile(r"rkd1_[0-9a-f]{32}\.[0-9a-f]{32}\.[0-9]{1,12}\.[0-9]{1,9}\.[0-9a-f]{64}")
 NOTIFY_KEEP_SECONDS = 7 * 86400
 NOTIFY_KEEP_COUNT = 500
 FEED_WAIT = 25
@@ -147,11 +147,9 @@ def add_session(agent_config, email, password, *, api_url=None):
     (``person_only`` with the machine credential as ``previous_token``; no rotation)."""
     from . import login
     config = load_config(agent_config or default_config_path())
-    token, device = login.request_person_only(api_url or config.api_url, email, password, config.token,
-                                              known_device=load_known_device(agent_config or config.path))
+    token = login.request_person_only(api_url or config.api_url, email, password, config.token,
+                                      device_config=agent_config or config.path)
     save_session(agent_config or config.path, token)
-    if device:
-        save_known_device(agent_config or config.path, device)
     login.record_owner(agent_config or config.path, email)
     return {"config": str(person_path(agent_config or config.path))}
 
@@ -170,30 +168,50 @@ def owner_email(agent_config=None):
     return PersonClient.for_config(agent_config, max_attempts=1).me()["user"]["email"].lower()
 
 
-# -- the known-device token (§18.1 item 2) --------------------------------------------------------
+# -- the recognised-device token (§18.1 item 2) -------------------------------------------------------
+# It lets this install's sign-ins pass the server's per-account slowdown; it never signs anything in. It is
+# kept across sign-out, and dropped on reinstall (the install it was stored under changed) or when asked.
 
-def known_device_path(agent_config=None):
-    return _dir(agent_config) / KNOWN_DEVICE_FILE
-
-
-def save_known_device(agent_config, token):
-    """Keep the server's known-device token beside ``person.json``, protected the same way. It is
-    kept across sign-out, and cleared by a reinstall of the app or ``forget_known_device``."""
-    if isinstance(token, str) and KNOWN_DEVICE_RE.fullmatch(token):
-        _write_secret(known_device_path(agent_config), "known_device", token)
+def device_path(agent_config=None):
+    return _dir(agent_config) / DEVICE_FILE
 
 
 def load_known_device(agent_config=None):
-    """The stored token, or None. A damaged or foreign file never blocks a sign-in."""
+    """The stored token, or None (none yet, another install's, or a damaged file, which is removed)."""
+    path = device_path(agent_config)
     try:
-        return _read_secret(known_device_path(agent_config), "known_device", KNOWN_DEVICE_RE, "known-device file")
-    except ConfigError:
+        value = _read_secret(path, "known_device", DEVICE_TOKEN_RE, "device file", ("created_under",))
+        if value is None:
+            return None
+        under = json.loads(read_private_file(str(path), "device file")).get("created_under")
+    except (ConfigError, ValueError, OSError):
+        _remove(path)
         return None
+    if not _same_install(under):  # a reinstall (a new install_stamp); an update keeps it
+        _remove(path)
+        return None
+    return value
+
+
+def _same_install(under):
+    """Whether a token stored under ``under`` (``[current, install_stamp]``, or None outside the app)
+    still belongs to this install. Only a new ``install_stamp`` (a full install or reinstall) ends
+    it; a pushed update changes ``current`` and keeps it (§18.1 item 2)."""
+    installed = _installed_under()
+    if under is None or installed is None:
+        return under == installed
+    return len(under) == 2 and under[1] == installed[1]
+
+
+def save_known_device(agent_config, token):
+    """Keep the token from a sign-in reply; anything that is not one is ignored."""
+    if isinstance(token, str) and DEVICE_TOKEN_RE.fullmatch(token):
+        _write_secret(device_path(agent_config), "known_device", token, {"created_under": _installed_under()})
 
 
 def forget_known_device(agent_config=None):
-    """"Forget this device": the next sign-in counts as a new device."""
-    return _remove(known_device_path(agent_config))
+    """"Forget this device": the next sign-in is treated as a new device. Returns whether one was stored."""
+    return _remove(device_path(agent_config))
 
 
 # -- the app install token (§16.14 S3) ------------------------------------------------------------
@@ -227,8 +245,6 @@ def app_install_token(agent_config=None):
         return value, under
     value, under = read()
     installed = _installed_under()
-    if value is not None and under and installed and under[1] != installed[1]:
-        forget_known_device(agent_config)  # a reinstall (a new install_stamp) forgets the device; an update doesn't
     if value is None or under != installed:
         rotate_app_install_token(agent_config)
         value, _ = read()
