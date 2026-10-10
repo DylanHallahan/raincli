@@ -65,7 +65,8 @@ def frame_record(record, identity, guidance="", agent_config=None, held_seconds=
     return wrap_message(record["id"], record["sender"], team, message["body"],
                         record.get("attachments_local") or (), guidance, agent_config,
                         machine=identity.get("handle", ""), target=record.get("target"), person=person,
-                        from_agent=message.get("from_agent"), held_seconds=held_seconds)
+                        from_agent=message.get("from_agent"), held_seconds=held_seconds,
+                        owner=origin.get("owner") if isinstance(origin, dict) and not person else None)
 
 
 EMAIL_SENDER_RE = re.compile(r"^@[^@\s/\\]{1,64}@[^@\s/\\]{1,190}$")

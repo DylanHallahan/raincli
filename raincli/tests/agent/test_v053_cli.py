@@ -299,3 +299,19 @@ def test_the_known_device_never_appears_in_errors(account, tmp_path, monkeypatch
     damaged = person.known_device_path(agent)
     damaged.write_text("{broken")
     assert person.load_known_device(agent) is None  # never blocks a sign-in
+
+
+# -- §18.1 item 7, the owner shown ---------------------------------------------------------------------
+
+def test_the_owner_is_shown_in_frames_and_agents(fake_api, connector_env, as_agent, capsys):
+    from .conftest import body_of, send
+    st = fake_api.state
+    st.owner_names[st.tokens[fake_api.alice]] = "Alice Example"
+    send(fake_api, fake_api.alice, "bob", "hello")
+    conn = connector_env.connector()
+    conn.run_once()
+    [prompt] = [p[1] for p in connector_env.herdr.prompts]
+    assert '\nFrom: machine alice (owner "Alice Example") | team alpha\n' in prompt and body_of(prompt) == "hello"
+    as_agent(fake_api.bob)
+    assert cli.main(["agents"]) == 0
+    assert "alice (owner Alice Example)" in capsys.readouterr().out

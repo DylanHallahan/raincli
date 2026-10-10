@@ -127,6 +127,7 @@ class FakeState:
         self.inbox_queries = []  # (handle, routing=1?) for every inbox poll
         self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id} (§16.3)
         self.known_devices = {}  # known-device token -> email (§18.1 item 2)
+        self.owner_names = {}  # agent id -> its owner's display name, as the server shows it (§18.1 item 7)
         self.person_inbox = {}  # email -> [message JSON] for the notification feed tests
         self.routing = {}  # agent id -> "all" | "inbox-only" (§16.5)
         self.archive_calls = []  # (handle, conversation id, archived?, archived_through_seq sent)
@@ -262,7 +263,8 @@ class FakeState:
         to_handle = self.agents[m["recipient"]]["handle"]
         to_endpoint = {"machine": to_handle, **({"agent": m["agent"]} if m.get("agent") else {})}
         from_endpoint = ({"person": person["email"], "display_name": person["display_name"]} if person
-                         else {"machine": sender})
+                         else {"machine": sender, **({"owner": self.owner_names[m["sender"]]}
+                                                     if m["sender"] in self.owner_names else {})})
         return {"id": m["id"], "conversation_id": m["conversation_id"], "in_reply_to": m["in_reply_to"],
                 "from": sender, "to": to_handle, "from_endpoint": from_endpoint, "to_endpoint": to_endpoint,
                 "from_agent": m.get("from_agent"), "kind": m.get("kind", "message"), "hold_reason": None,
@@ -661,6 +663,7 @@ class _Handler(BaseHTTPRequestHandler):
                                                    "update_state": c["update_state"], "error": c.get("error"),
                                                    "seen_at": "now"}
                 return 200, {"agents": [{"handle": a["handle"], "display_name": a["display_name"],
+                                         **({"owner": st.owner_names[a["id"]]} if a["id"] in st.owner_names else {}),
                                          "active": a["active"], "machine": machine(a["handle"]),
                                          "agents": [{k: v for k, v in e.items() if k != "key"}
                                                     for e in st.directory.get(a["handle"], [])]}

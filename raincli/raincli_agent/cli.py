@@ -247,7 +247,8 @@ def cmd_agents(args):
             client_info = (f"  raincli {escape_line(str(machine.get('client_version') or '?'))}"
                            f" {escape_line(str(machine.get('update_mode') or ''))}"
                            f" {escape_line(state)}{escape_line(error)}")
-        out(f"{escape_line(a['handle'])}  {escape_line(a.get('display_name') or '')}{flag}{status}{client_info}")
+        owner = f" (owner {escape_line(str(a['owner']))[:80]})" if a.get("owner") else ""  # §18.1 item 7
+        out(f"{escape_line(a['handle'])}{owner}  {escape_line(a.get('display_name') or '')}{flag}{status}{client_info}")
         sessions = sorted(a.get("agents") or [], key=lambda s: (s.get("role") != "inbox", str(s.get("name"))))
         for s in sessions:
             role = "inbox" if s.get("role") == "inbox" else "     "
