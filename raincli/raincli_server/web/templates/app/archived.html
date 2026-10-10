@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% from "_state.html" import time %}
+{% block title %}Archived · {{ product_name }}{% endblock %}
+{% block main %}
+<section class="wrap page-pad">
+  <p class="crumbs"><a href="{{ url('/app') }}">Inbox</a> <span aria-hidden="true">/</span> archived</p>
+  <div class="page-head">
+    <div>
+      <h1>Archived</h1>
+      <p class="muted">Archived conversations are hidden from the inbox for both sides. Nothing is deleted, and a new message brings a conversation back.</p>
+    </div>
+  </div>
+  {% if not conversations %}
+  <div class="card empty"><h2>Nothing archived</h2><p class="muted">Archive a conversation from its page to tidy your inbox.</p></div>
+  {% else %}
+  <ul class="conv-list">
+    {% for row in conversations %}
+    <li class="conv-archived">
+      <a class="conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}#latest">
+        <div class="conv-top">
+          <span class="conv-peers"><span class="handle">{{ row.me.display }}</span> <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> <span class="handle">{{ row.peer.display }}</span></span>
+          <span class="conv-team">{{ row.team.slug }}</span>
+          {% if row.unacked %}<span class="badge badge-count" title="Messages to you or your machines not yet read or acknowledged">{{ row.unacked }} new</span>{% endif %}
+          <span class="conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span>
+        </div>
+        <div class="conv-bottom"><span class="conv-preview muted">Archived{% if row.archived_by %} by {{ row.archived_by }}{% endif %}</span></div>
+      </a>
+      <form class="inline-form" method="post" action="{{ url('/app/conversations/' ~ row.conversation.id ~ '/unarchive') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <input type="hidden" name="back" value="archived">
+        <button class="btn btn-quiet btn-small" type="submit">Unarchive</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

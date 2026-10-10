@@ -235,6 +235,8 @@ class ConversationRow:
     last_sender: str = ""
     count: int = 0
     unacked: int = 0
+    archived: bool = False  # §17.2: the effective state (§17.3 A1)
+    archived_by: str = ""  # "Archived by <endpoint>" (§17.3 A8)
 
 
 @dataclass
@@ -260,6 +262,9 @@ class ConversationView:
     events: dict[uuid.UUID, list[DeliveryEvent]] = field(default_factory=dict)
     attachments: dict[uuid.UUID, list] = field(default_factory=dict)
     truncated: bool = False
+    archived: bool = False
+    archived_by: str = ""
+    newest_seq: int = 0  # the archive form sends it as archived_through_seq (§17.3 A1)
 
     @property
     def messages(self) -> list[Message]:
@@ -307,8 +312,20 @@ def _mine_as_recipient(user: User, owned: dict):
     return or_(*clauses)
 
 
-def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID]) -> list[ConversationRow]:
-    """The person's conversations and those of machines they own, newest first (§16.6)."""
+def _archived_by(db: Session, conv: Conversation, user: User, owned: dict) -> str:
+    endpoint = messaging.endpoint_for_key(db, conv.archived_by_key)
+    if endpoint is None:
+        return ""
+    mine = (endpoint.kind == "person" and endpoint.user.id == user.id) or \
+        (endpoint.kind != "person" and endpoint.agent.id in owned)
+    display = Side(endpoint, mine).display
+    return "you" if display == "You" else display  # "Archived by you"
+
+
+def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
+                       archived: str = "exclude") -> list[ConversationRow]:
+    """The person's conversations and those of machines they own, newest first (§16.6). ``archived``:
+    ``exclude`` (the main list), ``only`` (the Archived view) or ``include`` (§17.2)."""
     if not team_ids:
         return []
     owned = _owned_ids(db, user, team_ids)
@@ -334,12 +351,16 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID]) -> li
     for conv, team in convs:
         me, peer = _sides(db, conv, user, owned)
         last_seq, count, unacked = stats.get(conv.id, (None, 0, 0))
+        is_archived = messaging.is_archived(conv, last_seq)
+        if (archived == "exclude" and is_archived) or (archived == "only" and not is_archived):
+            continue
         last = lasts.get(conv.id)
         sender = Side(messaging.sender_endpoint(db, last), False).display if last else ""
         if last is not None and last.sender_user_id == user.id:
             sender = "You"
         rows.append(ConversationRow(conversation=conv, team=team, me=me, peer=peer, last=last,
-                                    last_sender=sender, count=count, unacked=unacked))
+                                    last_sender=sender, count=count, unacked=unacked, archived=is_archived,
+                                    archived_by=_archived_by(db, conv, user, owned) if is_archived else ""))
     rows.sort(key=lambda r: (r.last.seq if r.last else 0), reverse=True)
     return rows
 
@@ -379,8 +400,12 @@ def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], convers
             .order_by(DeliveryEvent.id)
         ):
             events.setdefault(ev.message_id, []).append(ev)
+    newest_seq = newest[0].seq if newest else 0
+    is_archived = messaging.is_archived(conv, newest_seq)
     return ConversationView(conversation=conv, team=team, me=me, peer=peer, lines=lines, events=events,
-                            attachments=attachment_meta(db, [m.id for m in messages]), truncated=truncated)
+                            attachments=attachment_meta(db, [m.id for m in messages]), truncated=truncated,
+                            archived=is_archived, newest_seq=newest_seq,
+                            archived_by=_archived_by(db, conv, user, owned) if is_archived else "")
 
 
 def ack_viewed(db: Session, user: User, view: ConversationView) -> int:

@@ -51,6 +51,8 @@ NOTICES = {
     "password-changed": "Password changed. Other browser sessions have been signed out. Agent credentials still work.",
     "joined": "Welcome aboard. You have joined the team.",
     "sent": "Message stored on the server.",
+    "archived": "Conversation archived. It's under Archived, and a new message brings it back.",
+    "unarchived": "Conversation moved back to your inbox.",
     "duplicate": "That message was already stored; nothing was sent twice.",
     "revoked": "Agent revoked. Its credentials stopped working immediately.",
     "invite-revoked": "Invitation revoked. The link no longer works.",
@@ -184,8 +186,8 @@ def app_viewer(request: Request, db: Session, csrf_token: str | None = None, *,
     """Authenticated viewer; for POSTs also enforces the per-session CSRF token.
 
     App-mode sessions (§16.12 C2) carry only the person scopes: they may use the inbox,
-    conversations, compose and reply, attachments, the agent directory and picker, and
-    ``/app/local/*``. Every other route refuses them with a link to the website.
+    conversations, compose and reply, archive and unarchive (§17.3 A5), attachments, the agent
+    directory and picker, and ``/app/local/*``. Every other route refuses them with a link to the website.
     """
     viewer = require_viewer(request, db)
     if viewer.app_mode and not app_mode_ok:
@@ -498,6 +500,47 @@ def conversation(request: Request, conversation_id: str, reply_to: str = "", db:
         db.commit()
         view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id)
     return _conversation_page(request, db, viewer, view, reply_to=reply_to)
+
+
+@router.get("/app/archived", response_class=HTMLResponse)
+def archived_conversations(request: Request, db: Session = Depends(get_db)):
+    """§17.2: the archived conversations, each with Unarchive; the unread counts stay (§17.3 A3)."""
+    viewer = app_viewer(request, db, app_mode_ok=True)
+    rows = queries.list_conversations(db, viewer.user, _team_ids(viewer), archived="only")
+    template = "app_mode/archived.html" if viewer.app_mode else "app/archived.html"
+    return render(request, template, viewer=viewer, conversations=rows)
+
+
+def _set_archived(request: Request, db: Session, conversation_id: str, csrf_token: str, archived: bool,
+                  through: str = "") -> auth.Viewer:
+    """Archive or unarchive as the person (§17.2): either endpoint, or the owner of a machine endpoint, the
+    same rule as seeing the conversation here. In the app-mode allowlist (§17.3 A5), with CSRF."""
+    viewer = app_viewer(request, db, csrf_token, app_mode_ok=True)
+    if queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id) is None:
+        raise not_found()
+    seq = int(through) if through.isdigit() and len(through) < 19 else None
+    try:
+        messaging.archive_as_person(db, viewer.user, conversation_id, archived, seq)
+    except messaging.MessagingError:
+        raise not_found() from None
+    db.commit()
+    return viewer
+
+
+@router.post("/app/conversations/{conversation_id}/archive")
+def archive_conversation(request: Request, conversation_id: str, csrf_token: str = Form(""),
+                         archived_through_seq: str = Form(""), db: Session = Depends(get_db)):
+    _set_archived(request, db, conversation_id, csrf_token, True, archived_through_seq)
+    return redirect(request, "/app/inbox?notice=archived")
+
+
+@router.post("/app/conversations/{conversation_id}/unarchive")
+def unarchive_conversation(request: Request, conversation_id: str, csrf_token: str = Form(""),
+                           back: str = Form(""), db: Session = Depends(get_db)):
+    _set_archived(request, db, conversation_id, csrf_token, False)
+    if back == "archived":
+        return redirect(request, "/app/archived?notice=unarchived")
+    return redirect(request, f"/app/conversations/{conversation_id}?notice=unarchived#latest")
 
 
 def _reply_target(db: Session, viewer: auth.Viewer, view: queries.ConversationView, parent: Message | None) -> str:

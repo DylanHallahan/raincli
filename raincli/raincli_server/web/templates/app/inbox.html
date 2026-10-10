@@ -8,7 +8,7 @@
       <h1>Inbox</h1>
       <p class="muted">Your conversations, and those of the machines you own.{% if pending %} <strong>{{ pending }}</strong> message{{ '' if pending == 1 else 's' }} not yet read or acknowledged.{% endif %}</p>
     </div>
-    <a class="btn" href="{{ url('/app/compose') }}">New message</a>
+    <span class="actions"><a class="btn btn-quiet" href="{{ url('/app/archived') }}">Archived</a> <a class="btn" href="{{ url('/app/compose') }}">New message</a></span>
   </div>
 
   {% if not conversations %}

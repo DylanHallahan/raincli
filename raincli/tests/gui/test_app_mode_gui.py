@@ -223,7 +223,8 @@ def test_agents_picker_and_listed_agents(people, browser, artifacts):
     page.screenshot(path=str(artifacts / "app-mode-agents-light.png"))
     card = page.locator("section.rc-card", has_text="bob-laptop")
     reviewer = card.locator("li", has_text="reviewer")
-    assert reviewer.locator("a:has-text('Message')").count() == 1 and "instant" in reviewer.inner_text()
+    assert reviewer.locator("a:has-text('Message')").count() == 1
+    assert reviewer.locator(".badge.reach-instant").inner_text() == "Instant"  # the website's reach_badge
     for name, reason in (("scanned", "listed only"), ("twin", "ambiguous")):
         row = card.locator("li", has_text=name)
         assert row.locator("a").count() == 0 and f"can't receive messages ({reason})" in row.inner_text()

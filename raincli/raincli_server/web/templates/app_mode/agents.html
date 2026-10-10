@@ -1,4 +1,5 @@
 {% extends "base_app.html" %}
+{% from "_state.html" import reach_badge %}
 {% block title %}Agents · {{ product_name }}{% endblock %}
 {% block body_class %} no-list{% endblock %}
 {% block main %}
@@ -12,7 +13,7 @@
         <li><span class="rc-agent-name"><span class="rc-dot rc-ok" aria-hidden="true"></span>Inbox</span><span class="rc-reach">the machine's inbox agent</span><a class="rc-btn rc-btn-quiet" href="{{ url('/app/compose') }}?to={{ m.agent.handle|urlencode }}">Message</a></li>
         {% for a in m.agents %}
         <li><span class="rc-agent-name"><span class="rc-dot{{ ' rc-ok' if a.deliverable else '' }}" aria-hidden="true"></span>{{ a.name }}</span>
-          <span class="rc-reach">{{ a.type }} · {{ a.status }} · {% if a.deliverable %}{{ a.reachability }}{% else %}can't receive messages ({{ a.reason }}){% endif %}</span>
+          {{ reach_badge(a.reachability, a.ambiguous) }}<span class="rc-reach">{{ a.type }} · {{ a.status }}{% if not a.deliverable %} · can't receive messages ({{ a.reason }}){% endif %}</span>
           {% if a.deliverable and m.agent.routing != 'inbox-only' %}<a class="rc-btn rc-btn-quiet" href="{{ url('/app/compose') }}?to={{ (m.agent.handle ~ '/' ~ a.name)|urlencode }}">Message</a>{% endif %}</li>
         {% endfor %}
       </ul>

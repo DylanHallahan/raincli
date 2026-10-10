@@ -1,0 +1,14 @@
+{# §17.2: Archive (no confirmation: Unarchive undoes it), or the Archived marker with Unarchive. #}
+{% if view.archived %}
+<span class="archived-marker">Archived{% if view.archived_by %} by {{ view.archived_by }}{% endif %}</span>
+<form class="inline-form" method="post" action="{{ url('/app/conversations/' ~ view.conversation.id ~ '/unarchive') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <button class="{{ btn_class }}" type="submit">Unarchive</button>
+</form>
+{% else %}
+<form class="inline-form" method="post" action="{{ url('/app/conversations/' ~ view.conversation.id ~ '/archive') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <input type="hidden" name="archived_through_seq" value="{{ view.newest_seq }}">
+  <button class="{{ btn_class }}" type="submit" title="Hide it from the inbox for both sides; a new message brings it back">Archive</button>
+</form>
+{% endif %}

@@ -9,6 +9,7 @@
       <h1 class="conv-title"><span class="handle">{{ view.me.display }}</span> <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> <span class="handle">{{ view.peer.display }}</span></h1>
       <p class="muted">{{ view.peer.label }} · {{ view.team.name }} · {{ view.lines|length }} message{{ '' if view.lines|length == 1 else 's' }}{% if not view.peer.active %} · {{ view.peer.display }} is no longer active{% endif %}</p>
     </div>
+    <div class="actions archive-actions">{% with btn_class="btn btn-quiet btn-small" %}{% include "_archive_controls.html" %}{% endwith %}</div>
   </div>
   {% if view.truncated %}<p class="flash">Showing the most recent {{ view.messages|length }} messages.</p>{% endif %}
 
