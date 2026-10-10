@@ -236,6 +236,11 @@ def rollback_floor(config):
     return MACHINE_FLOOR if "machine_config" in data else None
 
 
+# §18.2 item 1: the same value as raincli_agent/security.py (this launcher imports nothing from the
+# client; a test keeps the two equal). An automatic rollback never restores a version below it.
+MIN_SAFE = (0, 5, 3)
+
+
 def tag_key(tag):
     try:
         return tuple(int(part) for part in str(tag).removeprefix("v").split("."))
@@ -268,6 +273,8 @@ def roll_back(root, pointer, timeout=300, floor=None):
             return False
         if floor is not None and tag_key(previous["tag"]) < floor:
             return False  # that version cannot run this runtime config
+        if tag_key(previous["tag"]) < MIN_SAFE:
+            return False  # below_min_safe: older versions lack security fixes
         restored = {**current, **{k: previous[k] for k in ("tag", "commit", "python")},
                     "previous": {k: current[k] for k in ("tag", "commit", "python")}, "automatic": False}
         state = update_state(root)

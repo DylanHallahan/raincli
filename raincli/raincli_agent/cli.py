@@ -733,7 +733,11 @@ def cmd_runtime_update(args):
     from .login import runtime_config_path, runtime_mode
     mode = "manual" if args.manual or args.automatic == "off" else "automatic" if args.automatic else None
     app = winapp.app_root() if not args.root else None
+    if args.allow_insecure and not args.rollback:
+        raise UsageError("--allow-insecure only applies to --rollback")
     if app is not None:
+        if args.allow_insecure:
+            raise UsageError("the RainCLI app never rolls back below the minimum safe version")
         if args.rollback or mode is not None:
             out_json(winapp.configure(app, mode=mode, rollback=args.rollback))
             return EXIT_OK
@@ -749,7 +753,10 @@ def cmd_runtime_update(args):
         from .runtime.startup import installed_config
         from .runtime import floors
         candidates = [args.config, runtime_config_path(default_config_path()), installed_config()]
-        result = updates.configure(args.root, mode=mode, rollback=args.rollback, floor=floors.floor_for(candidates))
+        result = updates.configure(args.root, mode=mode, rollback=args.rollback, floor=floors.floor_for(candidates),
+                                   allow_insecure=args.allow_insecure)
+        if result.get("warning"):
+            print(f"raincli: {result['warning']}", file=sys.stderr)
     elif args.install:
         result = updates.install(args.root)
     else:
@@ -1094,6 +1101,9 @@ def build_parser():
     operation.add_argument("--manual", action="store_true",
                            help="opt out of pushed updates on this machine (persisted); "
                                 "--check and --install still work")
+    update.add_argument("--allow-insecure", action="store_true",
+                        help="with --rollback: allow a previous version older than the minimum safe version "
+                             "(not recommended; the RainCLI app has no such option)")
     update.set_defaults(func=cmd_runtime_update)
 
     startup = runtime_sub.add_parser(
