@@ -86,6 +86,12 @@ def authenticate_user(session: Session, email: str, password: str) -> User | Non
     return user
 
 
+def bump_credential_epoch(user: User) -> None:
+    """Every credential change (a password change, a reset, a disable) calls this: recognised-device tokens
+    name the epoch they were issued under, so all of them stop counting."""
+    user.credential_epoch = (user.credential_epoch or 0) + 1
+
+
 def change_password(session: Session, user_id: uuid.UUID, web_session_id: uuid.UUID,
                     current: str, replacement: str) -> User:
     user = session.scalar(select(User).where(User.id == user_id).with_for_update()
@@ -102,6 +108,7 @@ def change_password(session: Session, user_id: uuid.UUID, web_session_id: uuid.U
     if current == replacement:
         raise IdentityError("choose a different password")
     user.password_hash = security.hash_password(replacement)
+    bump_credential_epoch(user)  # §18.1: ends every recognised device
     session.execute(update(WebSession).where(WebSession.user_id == user_id,
                                             WebSession.revoked_at.is_(None)).values(revoked_at=now()))
     revoke_person_sessions(session, user_id=user_id)  # §16.3, §16.12 C6
@@ -515,6 +522,7 @@ def set_user_active(session: Session, user: User, active: bool, actor: User | No
         raise PermissionDenied("only the operator can enable or disable users")
     user.is_active = bool(active)
     if not active:
+        bump_credential_epoch(user)  # §18.1: a disable ends every recognised device too
         _revoke_web_sessions(session, user)
         revoke_person_sessions(session, user_id=user.id)  # §16.12 C6
         _revoke_owned_agents(session, user)

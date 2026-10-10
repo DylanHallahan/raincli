@@ -53,7 +53,7 @@ def test_person_session_only_when_asked(client, world, session):
 def test_person_only_adds_a_session_without_rotation(client, world, session):
     token = app_login(client).json()["token"]
     r = app_login(client, person_only=True, previous_token=token)
-    assert r.status_code == 200 and set(r.json()) == {"person_session"}
+    assert r.status_code == 200 and set(r.json()) == {"person_session", "known_device"}
     assert client.get("/api/v1/me", headers=auth(token)).status_code == 200  # not rotated
     assert client.get("/api/v1/person/me", headers=auth(r.json()["person_session"])).status_code == 200
     # No machine name needed, and no machine created or renamed.

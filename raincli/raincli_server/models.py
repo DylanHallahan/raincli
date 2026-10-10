@@ -11,6 +11,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Integer,
     LargeBinary,
@@ -60,6 +61,10 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(String(80), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # §18.1: bumped whenever the user's credentials change; recognised-device tokens name the epoch they were
+    # issued under, so a bump ends them all.
+    credential_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    attachment_quota_bytes: Mapped[int | None] = mapped_column(BigInteger)  # daily override; NULL = configured
     created_at: Mapped[datetime] = _created()
     __table_args__ = (Index("uq_users_email_lower", func.lower(email), unique=True),)
 
@@ -69,6 +74,7 @@ class Team(Base):
     id: Mapped[uuid.UUID] = _uuid()
     slug: Mapped[str] = mapped_column(String(40), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
+    attachment_quota_bytes: Mapped[int | None] = mapped_column(BigInteger)  # 30-day override; NULL = configured
     created_at: Mapped[datetime] = _created()
 
 
@@ -292,7 +298,10 @@ class Conversation(Base):
         CheckConstraint("(agent_b_id IS NULL) <> (b_user_id IS NULL)", name="ck_conversations_b_one"),
         CheckConstraint("a_agent_name IS NULL OR agent_a_id IS NOT NULL", name="ck_conversations_a_name"),
         CheckConstraint("b_agent_name IS NULL OR agent_b_id IS NOT NULL", name="ck_conversations_b_name"),
-        Index("uq_conversations_default_pair", "a_key", "b_key", unique=True, postgresql_where="is_default"),
+        # §18.1: one default thread per pair in each team; (id, team_id) is what messages reference.
+        Index("uq_conversations_default_pair", "team_id", "a_key", "b_key", unique=True,
+              postgresql_where="is_default"),
+        UniqueConstraint("id", "team_id", name="uq_conversations_id_team"),
         Index("ix_conversations_agent_a", "agent_a_id"),
         Index("ix_conversations_agent_b", "agent_b_id"),
         Index("ix_conversations_user_a", "a_user_id"),
@@ -306,6 +315,9 @@ class Message(Base):
     seq: Mapped[int] = mapped_column(BigInteger, Identity(always=True), nullable=False, unique=True)
     team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
     conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversations.id"), nullable=False)
+    # Migration 0008: the conversation a message was moved out of (it had another team), so a retried send
+    # naming that conversation is still the same payload.
+    moved_from_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     in_reply_to: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("messages.id"))
     # Endpoints (§16.1): a machine (agent id), an agent on a machine (agent id plus name) or a person.
     sender_agent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id"))
@@ -324,6 +336,9 @@ class Message(Base):
     )
     __table_args__ = (
         CheckConstraint(NOT_SELF_ENDPOINT, name="ck_messages_not_self_endpoint"),
+        # §18.1: a message always lives in a conversation of its own team.
+        ForeignKeyConstraint(["conversation_id", "team_id"], ["conversations.id", "conversations.team_id"],
+                             name="fk_messages_conversation_team"),
         CheckConstraint("(sender_agent_id IS NULL) <> (sender_user_id IS NULL)", name="ck_messages_one_sender"),
         CheckConstraint("(recipient_agent_id IS NULL) <> (recipient_user_id IS NULL)", name="ck_messages_one_recipient"),
         CheckConstraint("sender_agent_name IS NULL OR sender_agent_id IS NOT NULL", name="ck_messages_sender_name"),

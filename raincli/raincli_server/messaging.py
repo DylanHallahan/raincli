@@ -15,8 +15,9 @@ Concurrency is enforced by PostgreSQL, not by the process:
   deadlock.
 * The message insert is ``INSERT ... ON CONFLICT (id) DO NOTHING``; a lost race
   re-reads the winner and answers ``created: false`` or ``id_conflict``.
-* The default conversation for a pair is an upsert against the partial unique
-  index ``uq_conversations_default_pair``.
+* The default conversation for a pair in a team is an upsert against the partial
+  unique index ``uq_conversations_default_pair`` (team, pair). A message's
+  ``(conversation_id, team_id)`` references its conversation's ``(id, team_id)``.
 * Ack is a conditional ``UPDATE ... WHERE acked_at IS NULL``.
 * A send takes ``FOR KEY SHARE`` on its conversation row before it allocates the
   ``seq`` and holds it to commit; archive and unarchive take ``FOR UPDATE``. Sends
@@ -255,7 +256,8 @@ def _endpoint_columns(side: str, ep: Endpoint) -> dict:
 
 def _default_conversation(session: Session, team_id: uuid.UUID, x: Endpoint, y: Endpoint) -> Conversation:
     a, b = sorted((x, y), key=lambda ep: ep.key)
-    where = (Conversation.a_key == a.key, Conversation.b_key == b.key, Conversation.is_default.is_(True))
+    where = (Conversation.team_id == team_id, Conversation.a_key == a.key, Conversation.b_key == b.key,
+             Conversation.is_default.is_(True))  # §18.1: a pair's default thread is per team
     # A plain read first: an existing conversation is found without waiting on any row lock (an archive in
     # progress holds one; §17.3 A1: the send path never contends with it). Insert only the first time.
     existing = session.scalar(select(Conversation).where(*where))
@@ -265,7 +267,7 @@ def _default_conversation(session: Session, team_id: uuid.UUID, x: Endpoint, y: 
         pg_insert(Conversation)
         .values(id=uuid.uuid4(), team_id=team_id, is_default=True, **_endpoint_columns("a", a),
                 **_endpoint_columns("b", b))
-        .on_conflict_do_nothing(index_elements=["a_key", "b_key"], index_where=Conversation.is_default)
+        .on_conflict_do_nothing(index_elements=["team_id", "a_key", "b_key"], index_where=Conversation.is_default)
     )
     return session.scalar(select(Conversation).where(*where))
 
@@ -285,8 +287,10 @@ def _same_payload(session: Session, existing: Message, payload: tuple) -> bool:
         and existing.body == body
         and existing.kind == kind
         and existing.in_reply_to == in_reply_to
-        # An omitted conversation_id means "the server's choice", which the first send made.
-        and (conversation_id is None or existing.conversation_id == conversation_id)
+        # An omitted conversation_id means "the server's choice", which the first send made. A message moved by
+        # migration 0008 still matches the conversation the first send named.
+        and (conversation_id is None or conversation_id in (existing.conversation_id,
+                                                            existing.moved_from_conversation_id))
     )
 
 
@@ -460,7 +464,8 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
         if conv_id is not None and conv_id != parent.conversation_id:
             raise _invalid("conversation_id does not match the parent message")
         candidate = session.get(Conversation, parent.conversation_id)
-        if candidate is not None and {candidate.a_key, candidate.b_key} == {sender.key, recipient.key}:
+        if candidate is not None and candidate.team_id == team_id and \
+                {candidate.a_key, candidate.b_key} == {sender.key, recipient.key}:
             conversation = candidate
     elif conv_id is not None:
         candidate = session.get(Conversation, conv_id)
@@ -671,14 +676,15 @@ def _conversation_rows(session: Session, where, mine, unacked_where, limit: int,
     archived_by}]`` newest first. ``mine(conv)`` returns the viewer's side (``"a"`` or ``"b"``). ``archived``
     filters by the effective archive state (§17.3 A1)."""
     stats = (
-        select(Message.conversation_id.label("cid"), func.max(Message.seq).label("last_seq"),
-               func.max(Message.created_at).label("last_at"),
+        select(Message.conversation_id.label("cid"), Message.team_id.label("tid"),
+               func.max(Message.seq).label("last_seq"), func.max(Message.created_at).label("last_at"),
                func.count().filter(and_(unacked_where, Message.acked_at.is_(None))).label("unacked"))
-        .group_by(Message.conversation_id).subquery()
+        .group_by(Message.conversation_id, Message.team_id).subquery()
     )
     rows = session.execute(
         select(Conversation, stats.c.last_seq, stats.c.last_at, stats.c.unacked)
-        .join(stats, stats.c.cid == Conversation.id).where(where, archive_filter(archived, stats.c.last_seq))
+        # §18.1: only the conversation's own team's messages count, in every summary.
+        .join(stats, and_(stats.c.cid == Conversation.id, stats.c.tid == Conversation.team_id)).where(where, archive_filter(archived, stats.c.last_seq))
         .order_by(stats.c.last_seq.desc()).limit(_clamp(limit, 1, CONVERSATIONS_LIMIT_MAX))
     )
     out = []
@@ -728,7 +734,8 @@ def archive_filter(archived: str, last_seq):
 
 
 def _max_seq(session: Session, conv: Conversation) -> int:
-    return session.scalar(select(func.coalesce(func.max(Message.seq), 0)).where(Message.conversation_id == conv.id))
+    return session.scalar(select(func.coalesce(func.max(Message.seq), 0))
+                          .where(Message.conversation_id == conv.id, Message.team_id == conv.team_id))
 
 
 def is_archived(conv: Conversation, last_seq: int | None) -> bool:
@@ -859,7 +866,8 @@ def get_person_conversation(session: Session, user: User, conversation_id: uuid.
 
 def _messages_of(session: Session, conv: Conversation, after: int, limit: int) -> tuple[list[Message], int]:
     messages = list(session.scalars(
-        select(Message).where(Message.conversation_id == conv.id, Message.seq > after)
+        select(Message).where(Message.conversation_id == conv.id, Message.team_id == conv.team_id,
+                              Message.seq > after)
         .order_by(Message.seq).limit(_clamp(limit, 1, INBOX_LIMIT_MAX))
         .execution_options(populate_existing=True)
     ))

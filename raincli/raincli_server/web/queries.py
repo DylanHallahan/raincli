@@ -336,12 +336,12 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
     if not convs:
         return []
     conv_ids = [c.id for c, _ in convs]
-    stats = {
-        cid: (last_seq, count, unacked)
-        for cid, last_seq, count, unacked in db.execute(
-            select(Message.conversation_id, func.max(Message.seq), func.count(),
+    stats = {  # §18.1: keyed by conversation and team, so only a conversation's own team's messages count
+        (cid, tid): (last_seq, count, unacked)
+        for cid, tid, last_seq, count, unacked in db.execute(
+            select(Message.conversation_id, Message.team_id, func.max(Message.seq), func.count(),
                    func.count().filter(and_(Message.acked_at.is_(None), _mine_as_recipient(user, owned))))
-            .where(Message.conversation_id.in_(conv_ids)).group_by(Message.conversation_id)
+            .where(Message.conversation_id.in_(conv_ids)).group_by(Message.conversation_id, Message.team_id)
         )
     }
     last_seqs = [st[0] for st in stats.values() if st[0] is not None]
@@ -350,7 +350,7 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
     rows = []
     for conv, team in convs:
         me, peer = _sides(db, conv, user, owned)
-        last_seq, count, unacked = stats.get(conv.id, (None, 0, 0))
+        last_seq, count, unacked = stats.get((conv.id, conv.team_id), (None, 0, 0))
         is_archived = messaging.is_archived(conv, last_seq)
         if (archived == "exclude" and is_archived) or (archived == "only" and not is_archived):
             continue
@@ -380,7 +380,7 @@ def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], convers
     conv, team = row
     me, peer = _sides(db, conv, user, owned)
     newest = list(db.scalars(
-        select(Message).where(Message.conversation_id == conv.id)
+        select(Message).where(Message.conversation_id == conv.id, Message.team_id == conv.team_id)
         .order_by(Message.seq.desc()).limit(CONVERSATION_PAGE + 1).execution_options(populate_existing=True)
     ))
     truncated = len(newest) > CONVERSATION_PAGE

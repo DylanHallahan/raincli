@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import itertools
+import re
 import secrets
 import threading
 import time
@@ -204,24 +206,44 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+@dataclass(frozen=True)
+class Attempt:
+    """An admitted sign-in attempt: one provisional failure, tagged so that ``success`` removes exactly it."""
+    keys: tuple[str, ...]
+    entry: tuple[float, int]
+
+
+DEVICE_FAILURES = 10  # §18.1 item 2: failures per window after which a recognised device is ignored
+
+
 class LoginLimiter:
     """In-process sliding windows of failed sign-ins.
 
     Limits: per (email, IP) pair, per IP, and a much looser global ceiling per email.
     A single attacker IP therefore can't lock a user out; only a broad distributed
     attack against one email reaches the per-email ceiling (review LOW-3).
+
+    ``attempt`` checks every limit and records a provisional failure in one locked
+    step, so concurrent requests are admitted no further than the limits (§18.1 item 1).
+    A correct password calls ``success``, which removes exactly that entry and clears
+    the pair. A recognised device (``device``, its id) passes the per-email ceiling
+    only, and only while it has fewer than ``DEVICE_FAILURES`` failures in the window;
+    the pair and IP limits always apply.
     """
 
-    def __init__(self, per_pair: int = 6, per_ip: int = 30, per_email: int = 50, window: float = 15 * 60) -> None:
+    def __init__(self, per_pair: int = 6, per_ip: int = 30, per_email: int = 50, window: float = 15 * 60,
+                 per_device: int = DEVICE_FAILURES) -> None:
         self.per_pair, self.per_ip, self.per_email, self.window = per_pair, per_ip, per_email, window
-        self._hits: dict[str, deque[float]] = {}
+        self.per_device = per_device
+        self._hits: dict[str, deque[tuple[float, int]]] = {}
         self._lock = threading.Lock()
+        self._ids = itertools.count()
 
     def _count(self, key: str, now: float) -> int:
         q = self._hits.get(key)
         if not q:
             return 0
-        while q and q[0] <= now - self.window:
+        while q and q[0][0] <= now - self.window:
             q.popleft()
         if not q:
             del self._hits[key]
@@ -233,26 +255,115 @@ class LoginLimiter:
         email = email.strip().lower()[:254]
         return f"pair:{ip}|{email}", f"ip:{ip}", f"email:{email}"
 
-    def blocked(self, ip: str, email: str) -> bool:
-        pair, ip_key, email_key = self._keys(ip, email)
-        now = time.monotonic()
+    def _exempt(self, device: str | None, now: float) -> bool:
+        return device is not None and self._count(f"device:{device}", now) < self.per_device
+
+    def _full(self, keys: tuple[str, str, str], now: float, device: str | None) -> bool:
+        pair, ip_key, email_key = keys
+        return (self._count(pair, now) >= self.per_pair or self._count(ip_key, now) >= self.per_ip
+                or (not self._exempt(device, now) and self._count(email_key, now) >= self.per_email))
+
+    def _record(self, keys: tuple[str, ...], now: float) -> tuple[float, int]:
+        entry = (now, next(self._ids))
+        for key in keys:
+            self._count(key, now)
+            self._hits.setdefault(key, deque()).append(entry)
+        if len(self._hits) > 50_000:  # bound memory under a spray of distinct keys
+            for key in list(self._hits):
+                self._count(key, now)  # drops keys whose window has expired
+        return entry
+
+    def attempt(self, ip: str, email: str, device: str | None = None) -> Attempt | None:
+        """None when a limit is reached; otherwise the admitted attempt, already counted as a failure."""
+        keys, now = self._keys(ip, email), time.monotonic()
         with self._lock:
-            return (
-                self._count(pair, now) >= self.per_pair
-                or self._count(ip_key, now) >= self.per_ip
-                or self._count(email_key, now) >= self.per_email
-            )
+            if self._full(keys, now, device):
+                return None
+            recorded = keys + ((f"device:{device}",) if device is not None else ())
+            return Attempt(recorded, self._record(recorded, now))
+
+    def success(self, attempt: Attempt) -> None:
+        """The password was right: remove exactly this attempt's entry everywhere, and clear the pair."""
+        with self._lock:
+            for key in attempt.keys:
+                q = self._hits.get(key)
+                if q is not None:
+                    try:
+                        q.remove(attempt.entry)
+                    except ValueError:  # already outside the window
+                        pass
+                    if not q:
+                        del self._hits[key]
+            self._hits.pop(attempt.keys[0], None)
+
+    def blocked(self, ip: str, email: str, device: str | None = None) -> bool:
+        """Whether ``attempt`` would refuse now (for tests and tools; sign-ins never check, then act)."""
+        with self._lock:
+            return self._full(self._keys(ip, email), time.monotonic(), device)
 
     def failure(self, ip: str, email: str) -> None:
-        now = time.monotonic()
+        """Record a failure outright (tests and tools; sign-ins use ``attempt``)."""
         with self._lock:
-            for key in self._keys(ip, email):
-                self._count(key, now)
-                self._hits.setdefault(key, deque()).append(now)
-            if len(self._hits) > 50_000:  # bound memory under a spray of distinct keys
-                for key in list(self._hits):
-                    self._count(key, now)  # drops keys whose window has expired
+            self._record(self._keys(ip, email), time.monotonic())
 
-    def success(self, ip: str, email: str) -> None:
-        with self._lock:
-            self._hits.pop(self._keys(ip, email)[0], None)
+
+# Recognised devices (§18.1 item 2) ------------------------------------------------
+# A signed token for a browser or app where the user signed in successfully. It only lets that device's
+# sign-ins pass the per-email ceiling: it never authenticates, never skips the password and is not a session.
+
+KNOWN_DEVICE_COOKIE = "raincli_device"
+KNOWN_DEVICE_TTL = timedelta(days=30)
+KNOWN_DEVICE_RE = re.compile(r"rkd1_([0-9a-f]{32})\.([0-9a-f]{32})\.([0-9]{1,12})\.([0-9]{1,9})\.([0-9a-f]{64})")
+KNOWN_DEVICE_PATHS = ("/login", "/app/account/password")  # the only routes the cookie is sent to
+
+
+def _known_device_key(settings: Settings) -> bytes:
+    """A key used only for these tokens, derived from the server secret."""
+    return hmac.new(settings.secret_key.encode(), b"raincli-known-device-key-v1", hashlib.sha256).digest()
+
+
+def _known_device_sig(settings: Settings, user_id: str, device: str, issued: int, epoch: int) -> str:
+    message = f"raincli-known-device|{user_id}|{device}|{issued}|{epoch}".encode()
+    return hmac.new(_known_device_key(settings), message, hashlib.sha256).hexdigest()
+
+
+def issue_known_device(settings: Settings, user: User) -> str:
+    """A new token for ``user`` under their current credential epoch, valid for 30 days."""
+    device, issued = secrets.token_hex(16), int(time.time())
+    epoch = user.credential_epoch or 0
+    return f"rkd1_{user.id.hex}.{device}.{issued}.{epoch}.{_known_device_sig(settings, user.id.hex, device, issued, epoch)}"
+
+
+def known_device_id(settings: Settings, token: object, user: User | None) -> str | None:
+    """The device id of a valid token for this user, or None: wrong user, expired, from an older credential
+    epoch, malformed or not signed by this server."""
+    if user is None or not user.is_active or not isinstance(token, str) or len(token) > 200:
+        return None
+    match = KNOWN_DEVICE_RE.fullmatch(token)
+    if match is None:
+        return None
+    user_id, device, issued, epoch, sig = match.groups()
+    if user_id != user.id.hex or int(epoch) != (user.credential_epoch or 0):
+        return None
+    now = time.time()
+    if not now - KNOWN_DEVICE_TTL.total_seconds() < int(issued) <= now + 60:
+        return None
+    if not hmac.compare_digest(sig, _known_device_sig(settings, user_id, device, int(issued), int(epoch))):
+        return None
+    return device
+
+
+def known_device_for(db: Session, settings: Settings, token: object, email: str) -> str | None:
+    """The device id when ``token`` is a valid token of the account ``email`` names (no password check runs)."""
+    if not isinstance(token, str) or not token or not email:
+        return None
+    return known_device_id(settings, token, identity.find_user_by_email(db, email))
+
+
+def set_known_device(response: Response, settings: Settings, user: User) -> None:
+    """The website cookie: HttpOnly, Secure, SameSite=Strict, sent only to the sign-in and password routes."""
+    token = issue_known_device(settings, user)
+    for path in KNOWN_DEVICE_PATHS:
+        response.set_cookie(KNOWN_DEVICE_COOKIE, token, max_age=int(KNOWN_DEVICE_TTL.total_seconds()),
+                            path=(settings.root_path or "") + path, secure=settings.cookie_secure,
+                            httponly=True, samesite="strict")
