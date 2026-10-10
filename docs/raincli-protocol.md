@@ -1339,3 +1339,52 @@ Found on a real v0.5.0 machine: a Codex CLI session running, but zero directory 
 - The CLI uses `--api-url`, as today. Without it, the CLI uses the default and prints the other host as a hint.
 - A backup's `api_url` (`replaced-*/agent.json`) is never read to choose a server.
 - `person_only` for an adopted, valid credential keeps using that credential's own server, as before.
+
+## 17. Local time and archived conversations (v0.5.2, binding)
+
+### 17.1 Local time
+- **Server and API:** unchanged. The server stores UTC and sends UTC ISO-8601 (`…Z`), and every displayed timestamp stays a `<time datetime="<UTC ISO>">` element.
+- **The page formats them:** one same-origin script (`static/localtime.js`, under the existing CSP, with no inline script) formats every `<time datetime>` with `Intl.DateTimeFormat` in the **viewer's own time zone and locale**, using the default 12- or 24-hour clock and date order. It sets `title` to the full date and time, with weekday, seconds and the time-zone name.
+- **Relative labels:** where one exists ("2 min ago"), it is computed in the browser too.
+- **Where it applies:** the website, the hosted app-mode pages, and the app's bundled local pages (which reuse the same formatter).
+- **Without JavaScript:** the element shows the server fallback, `YYYY-MM-DD HH:MM UTC`. With JavaScript, no visible text anywhere contains "UTC".
+- **Dynamic content:** newly inserted messages are formatted too.
+- **The CLI:** prints timestamps in the local time zone (`astimezone()`), with `--utc` for ISO UTC, and `--json` stays UTC ISO.
+- **Tests:**
+  - Playwright runs under at least two forced time zones and locales (for example `America/New_York` with `en-US`, and `Asia/Kolkata` with `en-GB`). The same UTC instant must render differently and correctly in each, the `title` must hold the full form, and no visible "UTC" may appear.
+  - A no-JavaScript test checks the fallback.
+  - CLI tests force `TZ`.
+
+### 17.2 Archived conversations
+- **The model:** a conversation has one shared archive state, not one per participant.
+- **Migration `0007`** adds `conversations.archived_at` (nullable) and `archived_by_key` (the endpoint key or `p:<user id>` that archived it), plus an index on `(team_id, archived_at)`.
+- **Nothing is deleted:** messages, attachments, events and the conversation row stay. Delete stays out of scope.
+- **Who may archive and unarchive:** either endpoint of the conversation, meaning a machine credential whose machine is an endpoint (including through an agent endpoint on it) or a person who is an endpoint. The person who owns a machine endpoint may too.
+  - The check is team-scoped, with membership re-checked on each request.
+  - Anyone else gets `404`, with no hint that the conversation exists.
+  - App-mode sessions (§16.12 C2) may archive and unarchive.
+- **Effect:** archiving removes the conversation from the main list **for both endpoints**. Either side unarchiving restores it for both. Both operations are idempotent (`200` with the current state).
+- **A new message auto-unarchives:** any message stored in an archived conversation clears `archived_at` in the same transaction, so the chat returns to the main list with its full history.
+- **Delivery is never affected:** archiving is a list and visibility state only. It never blocks, holds or reroutes delivery, acks or events. A test proves that messages to an archived conversation are delivered exactly as to an active one.
+- **API:**
+  - `POST /api/v1/conversations/{id}/archive` and `/unarchive` (machine credential, scope `messages:send`);
+  - `POST /api/v1/person/conversations/{id}/archive` and `/unarchive`;
+  - list endpoints take `archived=only|include|exclude` (default `exclude`);
+  - conversation JSON adds `archived_at` and `archived_by` (the endpoint, shown like `from_endpoint`).
+- **Website and app mode:**
+  - each conversation has an **Archive** action, with no confirmation since it can be undone;
+  - an **Archived** view lists archived conversations, each with **Unarchive**;
+  - the main list excludes them;
+  - an archived thread opened directly shows a small "Archived" marker with Unarchive.
+- **The app window:** the app-mode Archived view, reachable from the rail.
+- **CLI:** `raincli archive <conversation-id>`, `raincli unarchive <conversation-id>`, `raincli conversations [--archived|--all]`, and the same under `raincli me`.
+- **Tests (real PostgreSQL):**
+  - archive by either side, and unarchive by either side;
+  - the owning person;
+  - outsiders, other teams and app-mode refusals where applicable;
+  - idempotence;
+  - auto-unarchive on a new message from either side;
+  - delivery unaffected;
+  - the migration upgrade and downgrade (the downgrade drops only the new columns).
+  
+  Plus Playwright for the UI and a Windows app e2e step: archive in the window, see it under Archived, unarchive.
