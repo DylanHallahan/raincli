@@ -48,13 +48,13 @@
       {% for row in team_agents %}
       <tr {% if not row.active %}class="is-revoked"{% endif %}>
         <td data-label="Agent"><span class="handle">{{ row.agent.handle }}</span></td>
-        <td data-label="Owner">{{ row.owner.display_name }}</td>
+        <td data-label="Owner">{{ row.owner_shown }}</td>
         <td data-label="Connection">{{ conn_badge(row.connection) }}</td>
         <td class="row-actions">
           {% if row.active and row.agent.owner_user_id == viewer.user.id %}
           <a class="btn btn-quiet btn-small" href="{{ url('/app/agents') }}">Manage</a>
           {% elif row.active and is_owner %}
-          <form method="post" action="{{ url('/app/teams/' ~ team.slug ~ '/agents/' ~ row.agent.id ~ '/revoke') }}" data-confirm="Revoke {{ row.agent.handle }} (owned by {{ row.owner.display_name }})? Its credentials stop working immediately.">
+          <form method="post" action="{{ url('/app/teams/' ~ team.slug ~ '/agents/' ~ row.agent.id ~ '/revoke') }}" data-confirm="Revoke {{ row.agent.handle }} (owned by {{ row.owner_shown }})? Its credentials stop working immediately.">
             <input type="hidden" name="csrf_token" value="{{ csrf }}">
             <button class="btn btn-danger btn-small" type="submit">Revoke</button>
           </form>

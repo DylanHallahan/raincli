@@ -7,8 +7,6 @@ limit is not refused: it waits ``OVER_LIMIT_HOLD`` seconds without a slot (so a 
 still polls slowly), looks once more, and is answered as a short poll with ``Retry-After``. The counters live
 in this process, which is correct for the single uvicorn worker the service runs (``--workers 1``); several
 workers would need the counters in shared state.
-
-TODO(client): v0.5.3 clients should wait ``Retry-After`` seconds after an empty ``200`` that carries it.
 """
 
 from __future__ import annotations

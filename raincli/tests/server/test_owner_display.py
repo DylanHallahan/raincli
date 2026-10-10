@@ -58,18 +58,21 @@ def member(session, team, email, name):
 
 def assert_all_distinct(shown):
     assert len(set(shown.values())) == len(shown), shown
-    assert len({owners.skeleton(v) for v in shown.values()}) == len(shown), shown
+    assert len({owners.skeleton(v, whole=True) for v in shown.values()}) == len(shown), shown
 
 
 def test_a_name_chosen_to_look_like_a_disambiguated_one_is_still_told_apart(world, session):
     team = world["teams"]["acme"]
     real = member(session, team, "alice.smith@example.test", "Alice Smith")
     member(session, team, "asmith@example.test", "Alice Smith")  # a genuine namesake: both get a suffix
-    copy = member(session, team, "x@example.test", "Alice Smith (alice.smith)")
-    session.commit()
+    copy = member(session, team, "x@example.test", "placeholder")
+    session.execute(update(User).where(User.id == copy.id).values(display_name="Alice Smith (alice.smith)"))
+    session.commit()  # such a name can no longer be chosen, but a row from before may have it
+    session.expire_all()
     shown = owners.displays(session, team.id)
     assert_all_distinct(shown)
-    assert shown[real.id] != shown[copy.id] and owners.skeleton(shown[real.id]) != owners.skeleton(shown[copy.id])
+    assert shown[real.id] != shown[copy.id]
+    assert owners.skeleton(shown[real.id], whole=True) != owners.skeleton(shown[copy.id], whole=True)
 
 
 def test_invisible_characters_are_refused_in_new_names_and_ignored_in_old_ones(world, session):
@@ -95,3 +98,48 @@ def test_letters_from_other_scripts_that_look_latin_are_told_apart(world, sessio
     shown = owners.displays(session, team.id)
     assert shown[real.id] == "Bob Jones (bob.jones)" and shown[lookalike.id] == "Bօb Jones (bj)"
     assert_all_distinct(shown)
+
+
+
+def test_parentheses_and_at_signs_are_refused_in_new_person_names(session):
+    for i, name in enumerate(("Alice (admin)", "Alice)", "alice@example", "Alice （x）", "Bob ＠ work")):
+        with pytest.raises(identity.IdentityError):
+            identity.create_user(session, f"p{i}@example.test", name, "correct horse battery")
+    assert identity.create_user(session, "ok@example.test", "Alice-Marie O'Neil", "correct horse battery")
+
+
+def test_an_old_name_carrying_a_shown_suffix_never_matches_the_real_member(world, session):
+    team = world["teams"]["acme"]
+    real = member(session, team, "alice.smith@example.test", "Alice Smith")
+    old = member(session, team, "x@example.test", "placeholder")
+    session.execute(update(User).where(User.id == old.id)
+                    .values(display_name="Alice Smith (alice.smith) (alice.smith@example.test)"))
+    session.commit()
+    session.expire_all()
+    shown = owners.displays(session, team.id)
+    assert shown[real.id] == "Alice Smith (alice.smith)"  # the trailing groups made the old name clash
+    assert shown[old.id] == "Alice Smith (alice.smith) (alice.smith@example.test) (x)"
+    assert_all_distinct(shown)
+
+
+def test_web_pages_and_revoke_prompts_show_owners_told_apart(app, world, session):
+    from fastapi.testclient import TestClient
+
+    from test_app_mode import open_app, person_session
+    from test_web_app import login
+
+    team = world["teams"]["acme"]
+    robert = member(session, team, "robert@example.test", "Воb")  # Cyrillic В, о: reads like Bob
+    identity.register_agent(session, team, robert, "build-01")
+    session.commit()
+    with TestClient(app) as browser:
+        assert login(browser).status_code == 303  # alice owns acme, so she sees Revoke
+        for path in ("/app/agents", "/app/teams/acme"):
+            page = browser.get(path).text
+            assert "Bob (bob)" in page and "Воb (robert)" in page, path
+            assert "(owned by Воb (robert))" in page and "(owned by Bob (bob))" in page, path
+    with TestClient(app) as client:
+        webview, _ = open_app(app, person_session(client)["person_session"], client)
+        page = webview.get("/app/agents").text
+        assert "Bob (bob)" in page and "Воb (robert)" in page
+        webview.close()
