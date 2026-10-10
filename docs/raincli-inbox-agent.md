@@ -2,9 +2,9 @@
 
 Recommended mapping: a **dedicated inbox agent** receives RainCLI messages, so routine team traffic doesn't interrupt your main work session. Each machine has exactly one inbox, and the runtime reports it to your team with the `inbox` badge and its reachability:
 - **`instant`:** a Herdr agent in its own tab (this document's main path). Messages are submitted as soon as it is idle.
-- **`next-turn`:** a Claude Code session, without Herdr, through the hooks (Claude Code only; not Codex). **Delivery waits until the session is next used**: messages are handed over at its next start or prompt. See [Next-turn inbox](#next-turn-inbox-claude-code-without-herdr).
+- **`next-turn`:** a Claude Code or Codex session, without Herdr, through the hooks. **Delivery waits until the session is next used**: messages are handed over at its next start or prompt. See [Next-turn inbox](#next-turn-inbox-claude-code-without-herdr).
 
-The other agents on the machine are listed for visibility only; teammates can't message them.
+Since v0.5.0 teammates can also message the machine's other named agents directly (`handle/agent`): a named Herdr agent at once, a hook session at its next turn. An agent that is only listed (found by the process scan, or a name two sessions share) is refused, and the sender is told to use the machine handle. See [SETUP.md](../SETUP.md#messages-to-your-agents-and-to-you).
 
 | Component | Handles | Status |
 | --- | --- | --- |
@@ -108,7 +108,7 @@ Instead of `herdr_agent`, the connector config names a hook session. The two are
 - **Per-turn bound:** about **10,000 characters** per turn (Claude Code's limit on a hook's additional context), always at least one message if it fits; the rest waits for the next turn. A single message over the bound is held as `too_large_for_hook`.
 - **Status:** the session reports `blocked` when it asks for input, and **stays `blocked` until its next prompt or stop**, because there are no per-tool hooks.
 - **Idle sessions:** A next-turn inbox waits for the session's next turn however long it is idle, as long as the runtime can see the session's process (Linux; Windows and macOS through a process lookup). Where it can't, an idle session counts as offline after 10 minutes and its messages wait for the next session. While the process is visible, the session stays the handover target and the directory shows it `idle`. Where it isn't (an unrecognised executable, a container or different pid namespace, a failed lookup), messages are held `offline` and the record is dropped after 1 hour. The process lookup is verified on Linux and Windows; on macOS it is implemented but not yet verified.
-- **Codex** can't be a next-turn inbox. Its hooks only list sessions, work on Linux and macOS only, and need a one-time review in Codex's `/hooks` view after `raincli hooks install --codex`.
+- **Codex** can be a next-turn inbox too (`"inbox": {"hook": "codex", …}`, up to 32 KiB per turn). Its hooks need a one-time review in Codex's `/hooks` view after `raincli hooks install --codex`, and on Windows Codex 0.145.0 or later.
 - **No fallback:** with no live session of that name, messages are held `offline`; with more than one, `target_ambiguous`. If the session ends (or its process exits) with messages still waiting, the connector takes them back and holds them `offline`.
 - **After a crash:** a message claimed without a receipt becomes `submission_uncertain` and is never handed over again automatically.
 - **Escalation** targets are Herdr agents. Without Herdr, omit `escalation`; the inbox agent then tells the sender what it can't answer.

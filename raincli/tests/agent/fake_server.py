@@ -128,7 +128,8 @@ class FakeState:
         self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id} (§16.3)
         self.person_inbox = {}  # email -> [message JSON] for the notification feed tests
         self.routing = {}  # agent id -> "all" | "inbox-only" (§16.5)
-        self.archive_calls = []  # (handle, conversation id, archived?)
+        self.archive_calls = []  # (handle, conversation id, archived?, archived_through_seq sent)
+        self.conversation_queries = []  # the archived= parameter of each GET /conversations
         self.me_owner = True  # False: an older server, whose /me has no "owner" (§16.16)
 
     # -- setup -----------------------------------------------------------
@@ -336,7 +337,6 @@ class FakeState:
         if conv is None:
             conv = str(uuid.uuid4())
             self.conversations[conv] = {"pair": pair, "team": caller["team"]}
-        self.conversations[conv]["archived_at"] = self.conversations[conv]["archived_by"] = None  # §17.2
         self.seq += 1
         ts = now()
         m = {"id": mid, "conversation_id": conv, "in_reply_to": in_reply_to, "sender": caller["id"],
@@ -464,14 +464,17 @@ class FakeState:
 
     def conversations_list(self, caller, query=None):
         """§17.2: ``archived=exclude`` (default), ``only`` or ``include``."""
-        archived = ((query or {}).get("archived") or ["exclude"])[0]
+        given = (query or {}).get("archived")
+        self.conversation_queries.append(given[0] if given else None)
+        archived = given[0] if given else "include"  # §17.3 A4: a machine sending none gets include
         if archived not in ("exclude", "only", "include"):
             raise ApiFail(400, "invalid")
         out = []
         for cid, c in self.conversations.items():
             if caller["id"] not in c["pair"]:
                 continue
-            if (archived == "exclude" and c.get("archived_at")) or (archived == "only" and not c.get("archived_at")):
+            is_archived = self.is_archived(cid)
+            if (archived == "exclude" and is_archived) or (archived == "only" and not is_archived):
                 continue
             msgs = [m for m in self.messages.values() if m["conversation_id"] == cid]
             peer = next(iter(c["pair"] - {caller["id"]}))
@@ -479,21 +482,37 @@ class FakeState:
             out.append({"id": cid, "peer": self.agents[peer]["handle"], "last_seq": last["seq"],
                         "last_at": last["created_at"],
                         "unacked": sum(1 for m in msgs if m["recipient"] == caller["id"] and not m["acked_at"]),
-                        "archived_at": c.get("archived_at"), "archived_by": c.get("archived_by")})
+                        **self.archive_json(cid)})
         return 200, {"conversations": out}
 
-    def archive(self, caller, cid, archived):
-        """§17.2: either endpoint archives or unarchives for both; idempotent; others get 404."""
+    def is_archived(self, cid):
+        """§17.3 A1: archived only while no message is newer than archived_through_seq."""
+        c = self.conversations[cid]
+        newest = max((m["seq"] for m in self.messages.values() if m["conversation_id"] == cid), default=0)
+        return bool(c.get("archived_at")) and newest <= c.get("archived_through_seq", 0)
+
+    def archive_json(self, cid):
+        c = self.conversations[cid]
+        if not self.is_archived(cid):
+            return {"archived_at": None, "archived_through_seq": None, "archived_by": None}
+        return {"archived_at": c["archived_at"], "archived_through_seq": c["archived_through_seq"],
+                "archived_by": c["archived_by"]}
+
+    def archive(self, caller, cid, archived, body=None):
+        """§17.2, §17.3 A1: either endpoint archives or unarchives for both; idempotent; the
+        archive records the seq the archiver saw, capped at the newest; others get 404."""
         c = self.conversations.get(cid)
         if c is None or caller["id"] not in c["pair"] or c.get("team", caller["team"]) != caller["team"]:
             raise ApiFail(404, "not_found")
-        if archived and not c.get("archived_at"):
-            c["archived_at"], c["archived_by"] = now(), {"machine": caller["handle"]}
+        newest = max((m["seq"] for m in self.messages.values() if m["conversation_id"] == cid), default=0)
+        seen = (body or {}).get("archived_through_seq", newest)
+        if archived and not self.is_archived(cid):
+            c.update(archived_at=now(), archived_by={"machine": caller["handle"]},
+                     archived_through_seq=min(int(seen), newest))
         elif not archived:
-            c["archived_at"] = c["archived_by"] = None
-        self.archive_calls.append((caller["handle"], cid, archived))
-        return 200, {"conversation": {"id": cid, "archived_at": c.get("archived_at"),
-                                      "archived_by": c.get("archived_by")}}
+            c.update(archived_at=None, archived_by=None, archived_through_seq=None)
+        self.archive_calls.append((caller["handle"], cid, archived, (body or {}).get("archived_through_seq")))
+        return 200, {"conversation": {"id": cid, **self.archive_json(cid)}}
 
     def conversation_messages(self, caller, cid, query):
         c = self.conversations.get(cid)
@@ -653,7 +672,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return st.conversations_list(caller, query)
             m = re.fullmatch(r"/conversations/([0-9a-f-]{36})/(archive|unarchive)", route)
             if m and method == "POST":
-                return st.archive(caller, m.group(1), m.group(2) == "archive")
+                return st.archive(caller, m.group(1), m.group(2) == "archive", body)
             m = re.fullmatch(r"/messages/([0-9a-f-]{36})(/ack|/events)?", route)
             if m:
                 mid, tail = m.group(1), m.group(2)

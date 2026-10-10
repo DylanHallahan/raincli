@@ -1,6 +1,5 @@
 """v0.5.2 in the CLI and client (protocol §17): local time and archived conversations."""
 import json
-import time
 
 import pytest
 
@@ -15,13 +14,15 @@ INSTANT = "2026-10-10T14:03:07Z"
 
 @pytest.fixture
 def zone(monkeypatch):
-    """Force the process time zone (§17.1: CLI tests force TZ)."""
+    """Inject the display zone as a tzinfo (§17.3 A2: Windows ignores TZ)."""
+    zoneinfo = pytest.importorskip("zoneinfo")
+
     def set_zone(name):
-        monkeypatch.setenv("TZ", name)
-        time.tzset()
-    yield set_zone
-    monkeypatch.undo()
-    time.tzset()
+        try:
+            monkeypatch.setattr(cli, "_TZ", [zoneinfo.ZoneInfo(name)])
+        except zoneinfo.ZoneInfoNotFoundError:
+            pytest.skip("no time zone database here")
+    return set_zone
 
 
 @pytest.fixture
@@ -35,12 +36,19 @@ def utc_flag():
 @pytest.mark.parametrize("name,expected", [
     ("America/New_York", "2026-10-10 10:03:07 EDT"),
     ("Asia/Kolkata", "2026-10-10 19:33:07 IST"),
-    ("Australia/Lord_Howe", "2026-10-11 01:03:07 +11:00"),  # no short name: the offset
+    ("Australia/Lord_Howe", "2026-10-11 01:03:07 +11:00"),  # no letters in the zone name: the offset
     ("UTC", "2026-10-10 14:03:07 UTC"),
 ])
 def test_timestamps_print_in_the_local_zone(zone, name, expected):
     zone(name)
     assert cli.when(INSTANT) == expected
+
+
+def test_the_zone_parameter_and_the_computers_own_zone():
+    from datetime import datetime, timedelta, timezone
+    assert cli.when(INSTANT, tz=timezone(timedelta(hours=-3))) == "2026-10-10 11:03:07 -03:00"
+    local = datetime(2026, 10, 10, 14, 3, 7, tzinfo=timezone.utc).astimezone()  # this computer's zone
+    assert cli.when(INSTANT).startswith(local.strftime("%Y-%m-%d %H:%M:%S"))
 
 
 def test_utc_flag_and_unparseable_values(zone, utc_flag):
@@ -110,7 +118,36 @@ def test_archive_unarchive_and_the_lists(fake_api, as_agent, capsys):
     as_agent(fake_api.bob)
     assert cli.main(["conversations", "--json"]) == 0
     assert [c["id"] for c in json.loads(capsys.readouterr().out)["conversations"]] == [cid]
-    assert cli.main(["--config", "x", "conversations", "--archived", "--all"]) == 2  # one or the other
+    with pytest.raises(SystemExit):
+        cli.main(["conversations", "--archived", "--all"])  # one or the other
+
+
+def test_archive_records_the_newest_seq_seen(fake_api, as_agent, capsys):
+    """§17.3 A1: the archive carries the conversation's last_seq as listed, or --through-seq."""
+    first = send(fake_api, fake_api.alice, "bob", "one")
+    second = send(fake_api, fake_api.alice, "bob", "two")
+    seqs = sorted(m["seq"] for m in fake_api.state.messages.values())
+    as_agent(fake_api.bob)
+    assert cli.main(["archive", first["conversation_id"], "--through-seq", str(seqs[0])]) == 0
+    assert fake_api.state.archive_calls[-1][3] == seqs[0]
+    capsys.readouterr()
+    assert cli.main(["conversations", "--json"]) == 0  # a newer message exists: still listed
+    assert [c["id"] for c in json.loads(capsys.readouterr().out)["conversations"]] == [second["conversation_id"]]
+    assert cli.main(["archive", first["conversation_id"]]) == 0
+    assert fake_api.state.archive_calls[-1][3] == seqs[-1]  # last_seq as listed
+    assert "through message seq" in capsys.readouterr().out
+    assert cli.main(["conversations", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["conversations"] == []
+
+
+def test_the_cli_always_sends_archived(fake_api, as_agent):
+    """§17.3 A4: a machine credential sending none would get include."""
+    send(fake_api, fake_api.alice, "bob", "one")
+    as_agent(fake_api.bob)
+    for argv, expected in ((["conversations"], "exclude"), (["conversations", "--archived"], "only"),
+                           (["conversations", "--all"], "include")):
+        assert cli.main(argv + ["--json"]) == 0
+        assert fake_api.state.conversation_queries[-1] == expected
 
 
 def test_a_new_message_brings_an_archived_conversation_back(fake_api, as_agent):
@@ -143,14 +180,19 @@ def test_the_connector_delivers_to_an_archived_conversation_exactly_as_to_an_act
     carol = fake_api.state.add_agent("carol")
     active_first = send(fake_api, carol, "bob", "active thread")
     conn = connector_env.connector(trusted_senders=["alice", "carol"])
-    conn.run_once()
+    for _ in range(3):  # one submission per iteration: deliver both first messages
+        conn.run_once()
     bob_api = ApiClient(fake_api.url, fake_api.bob)
     bob_api.archive(archived_first["conversation_id"])
     assert [c["id"] for c in bob_api.conversations()] == [active_first["conversation_id"]]
-    to_archived = send(fake_api, fake_api.alice, "bob", "to the archived thread")
-    to_active = send(fake_api, carol, "bob", "to the active thread")
-    assert to_archived["conversation_id"] == archived_first["conversation_id"]
     prompts_before = len(connector_env.herdr.prompts)
+    connector_env.herdr.set_status("bob-claude", "idle")  # the same conditions for both messages
+    to_archived = send(fake_api, fake_api.alice, "bob", "to the archived thread")
+    assert to_archived["conversation_id"] == archived_first["conversation_id"]
+    for _ in range(3):  # one at a time, so the agent is idle for each
+        conn.run_once()
+    connector_env.herdr.set_status("bob-claude", "idle")
+    to_active = send(fake_api, carol, "bob", "to the active thread")
     for _ in range(3):
         conn.run_once()
 

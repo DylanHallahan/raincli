@@ -255,12 +255,10 @@ class PersonClient:
         return self.api.request("GET", "/person/conversations",
                                 query=archive_query(limit, archived))[1]["conversations"]
 
-    def archive(self, conversation_id, archived=True):
-        """§17.2: archive (or unarchive) a conversation the person is an endpoint of."""
-        from .api import _path_id
-        verb = "archive" if archived else "unarchive"
-        data = self.api.request("POST", f"/person/conversations/{_path_id(conversation_id)}/{verb}", body={})[1]
-        return data.get("conversation", data)
+    def archive(self, conversation_id, archived=True, through_seq=None):
+        """§17.2, §17.3 A1: archive (or unarchive) a conversation the person is an endpoint of."""
+        from .api import _archive, _path_id
+        return _archive(self.api.request, f"/person/conversations/{_path_id(conversation_id)}", archived, through_seq)
 
     def conversation(self, conversation_id, *, after=0, limit=100):
         from .api import _path_id

@@ -27,7 +27,9 @@ Commands, subject to installed help:
 ```bash
 raincli send ENDPOINT --body-file PATH|- --id UUID4 [--from-agent NAME] [--attach FILE.md]... [--json]
 raincli reply MSG_ID (--body TEXT | --body-file PATH|-) --id UUID4 [--from-agent NAME] [--attach FILE.md]... [--json]
-raincli conversations [--json]          # id, peer, last_seq, last_at, unacked
+raincli conversations [--archived] [--json]      # id, peer, last_seq, last_at, unacked; --archived: only archived
+raincli conversations --all [--json]             # active and archived
+raincli archive CONV_ID [--through-seq SEQ]      # only when your user asks; unarchive CONV_ID undoes it
 raincli show MSG_ID [--json]
 raincli thread CONV_ID [--json]
 raincli inbox [--all] [--agent NAME] [--json]   # unacked only unless --all; --agent: one named agent here
@@ -36,6 +38,8 @@ raincli fetch MSG_ID [--dir DIR] [--name FILENAME]
 ```
 
 `ENDPOINT` is a machine handle (its inbox), `handle/agent` (one named agent on that machine, as `raincli agents` lists it) or `@email` (a person). Pass `--from-agent NAME`, your own agent name, when you write as one named agent of this machine, so answers come back to you; the reply command in a message you received already carries it. A named agent that can't receive (only listed, ambiguous, or the machine takes inbox messages only) is refused with exit 1 and the machine handle to use instead: tell the user, and send to the machine only if that is what they want. `raincli me …` acts as the person (the user), not as an agent: use it only when the user asks you to act as them.
+
+**Archiving** (`raincli archive CONV_ID`, `raincli unarchive CONV_ID`, and the same under `raincli me`) hides a conversation from the conversation list for **both** sides until a newer message arrives or either side unarchives it. Archive or unarchive only when your user asks you to. It never affects delivery, inboxes, unread counts or notifications, and nothing is deleted. `raincli conversations --archived` lists archived ones, with when and by whom. Human output shows times in this computer's time zone; pass `--utc` for UTC ISO, and `--json` always stays UTC ISO.
 
 Generate one version-4 UUID per logical send (`python3 -c 'import uuid; print(uuid.uuid4())'`), pass it as `--id`, and keep it for retries. A uuid1 or any non-UUID is refused with exit 2. If you omit `--id` and the send fails, stderr prints `message id <id> may be stored; retry with --id <id>`, and `--json` errors include `"id"`; reuse that id. A lost response may mean the server stored the message, so retry with the **same id and identical content**. Identical content means the same body (a heredoc through `--body-file -` adds a trailing newline) and the same attachments, with the same names and bytes in the same order. Never switch to a fresh id because a response was lost. To check a first message to a new peer, run `raincli conversations`, then `raincli thread CONV_ID`.
 

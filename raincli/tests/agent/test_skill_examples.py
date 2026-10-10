@@ -24,7 +24,7 @@ PLACEHOLDERS = {
     "ID": "0b7f3c1e-2a4d-4c6e-9f10-1a2b3c4d5e6f", "FILE.md": "report.md", "DIR": "/tmp/d", "FILENAME": "report.md",
     "S": "30", "URL": "https://raincli.com", "CONNECTOR.json": "/tmp/c.json", "C": "/tmp/c.json",
     "RUNTIME.json": "/tmp/r.json", "ENDPOINT": "bob-agent/reviewer", "NAME": "planner", "N": "1", "SLUG": "acme",
-    "MACHINE|@EMAIL": "bob-agent",
+    "MACHINE|@EMAIL": "bob-agent", "SEQ": "12",
 }
 
 

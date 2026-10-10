@@ -250,12 +250,12 @@ class ApiClient:
         """``archived``: ``exclude`` (the default list), ``only`` or ``include`` (§17.2)."""
         return self.request("GET", "/conversations", query=archive_query(limit, archived))[1]["conversations"]
 
-    def archive(self, conversation_id, archived=True):
+    def archive(self, conversation_id, archived=True, through_seq=None):
         """``POST /conversations/{id}/archive`` (or ``/unarchive``): idempotent, shared by both
-        endpoints, never affects delivery (§17.2). Returns the conversation JSON."""
-        verb = "archive" if archived else "unarchive"
-        data = self.request("POST", f"/conversations/{_path_id(conversation_id)}/{verb}", body={})[1]
-        return data.get("conversation", data)
+        endpoints, never affects delivery (§17.2). ``through_seq`` is the newest message ``seq``
+        the user saw (§17.3 A1): a newer message keeps the conversation in the main list.
+        Returns the conversation JSON."""
+        return _archive(self.request, f"/conversations/{_path_id(conversation_id)}", archived, through_seq)
 
     def conversation_messages(self, conversation_id, *, after=0, limit=100):
         data = self.request("GET", f"/conversations/{_path_id(conversation_id)}/messages",
@@ -266,13 +266,19 @@ class ApiClient:
 ARCHIVED = ("exclude", "only", "include")
 
 
+def _archive(request, base, archived, through_seq):
+    body = {}
+    if archived and through_seq is not None:
+        body["archived_through_seq"] = int(through_seq)
+    data = request("POST", f"{base}/{'archive' if archived else 'unarchive'}", body=body)[1]
+    return data.get("conversation", data)
+
+
 def archive_query(limit, archived):
     if archived not in ARCHIVED:
         raise UsageError("archived must be exclude, only or include")
-    query = {"limit": int(limit)}
-    if archived != "exclude":  # the default; an older server ignores the parameter anyway
-        query["archived"] = archived
-    return query
+    # Always explicit (§17.3 A4): a machine credential that sends none gets "include".
+    return {"limit": int(limit), "archived": archived}
 
 
 def _path_id(value):

@@ -157,7 +157,9 @@ def cmd_me_conversations(args):
 
 def cmd_me_archive(args):
     archived = args.me_command == "archive"
-    _cli.report_archive(_person(args).archive(args.conversation_id, archived), archived, args.json,
+    api = _person(args)
+    through = _cli.seen_through(api.conversations, args) if archived else None
+    _cli.report_archive(api.archive(args.conversation_id, archived, through), archived, args.json,
                         args.conversation_id)
     return EXIT_OK
 
@@ -380,6 +382,8 @@ def register(sub, parser_class):
         sp = me_sub.add_parser(verb, help=text)
         sp.add_argument("conversation_id", metavar="CONV_ID")
         sp.add_argument("--json", action="store_true", help="print JSON")
+        if verb == "archive":
+            _cli.through_seq_arg(sp)
         sp.set_defaults(func=cmd_me_archive)
     read = me_sub.add_parser("read", help="show one message (marks a message to you read)")
     read.add_argument("message_id", metavar="MSG_ID")

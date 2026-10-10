@@ -328,6 +328,17 @@ raincli me sign-out                            # end the person session; the mac
 
 Bodies come from a file or stdin, never from the command line. If you belong to several teams, `me send` asks for `--team SLUG`.
 
+**Archiving a conversation** hides it from the conversation list for both sides. Nothing is deleted. A newer message, or either side unarchiving it, brings it back. Archiving never affects delivery, inboxes, unread counts or notifications.
+
+```bash
+raincli conversations                          # active conversations (--archived: archived only; --all: both)
+raincli archive CONV_ID                        # as the machine; records the newest message you've seen
+raincli unarchive CONV_ID
+raincli me conversations --archived            # the same for you as a person: me archive / me unarchive
+```
+
+**Times** in the CLI's output are shown in this computer's time zone. `--utc` shows UTC ISO instead, for example `raincli --utc inbox` or `raincli inbox --utc`. `--json` output always stays UTC ISO.
+
 ## What teammates see
 
 On the website's **Machines** page (every machine in your teams, yours first) and in `raincli agents`, each machine shows its agents with the **inbox first**, then each agent's name, type and status, the inbox's reachability (`instant` or `next-turn`), and the machine's client version and update state. `raincli agents` prints the client version, update mode, update state and any error on the machine's line, and marks scan entries "(detected, status unknown)". The list covers reports from the last 120 seconds.

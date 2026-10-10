@@ -84,12 +84,14 @@ def out_json(obj):
 
 
 _UTC = [False]  # --utc: timestamps as the server's ISO UTC text
+_TZ = [None]  # a tzinfo for tests (§17.3 A2: Windows ignores TZ); None is this computer's zone
 
 
-def when(value):
+def when(value, tz=None):
     """A server timestamp (UTC ISO-8601) for people (§17.1): in this computer's time zone
     (``astimezone()``), e.g. ``2026-10-10 10:03:07 EDT``, or the ISO UTC text with ``--utc``.
-    ``--json`` output never goes through here: it stays UTC ISO."""
+    ``tz`` (or ``_TZ``) replaces the local zone. ``--json`` output never goes through here: it
+    stays UTC ISO."""
     if not value:
         return ""
     text = str(value)
@@ -100,11 +102,11 @@ def when(value):
         moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=timezone.utc)
-        local = moment.astimezone()
+        local = moment.astimezone(tz or _TZ[0])
     except (ValueError, OverflowError, OSError):
         return escape_line(text)
     zone = local.strftime("%Z")
-    if not zone or len(zone) > 6 or " " in zone:  # Windows gives long names: use the offset
+    if not zone or len(zone) > 6 or " " in zone or zone[0] in "+-":  # Windows' long names, or a bare offset
         zone = local.strftime("%z")
         zone = zone[:3] + ":" + zone[3:] if len(zone) == 5 else zone
     return escape_line(local.strftime("%Y-%m-%d %H:%M:%S ") + zone)
@@ -357,16 +359,32 @@ def report_archive(conversation, archived, as_json, conversation_id):
         return
     cid = escape_line(str(conversation.get("id") or conversation_id))
     if archived:
-        out(f"archived conversation {cid} for both sides (a new message brings it back; "
-            "delivery is not affected)")
+        through = conversation.get("archived_through_seq")
+        out(f"archived conversation {cid} for both sides" + (f" through message seq {through}" if through else "")
+            + " (a newer message brings it back; delivery, inboxes and unread counts are not affected)")
     else:
         out(f"conversation {cid} is back in the main list for both sides")
 
 
+def seen_through(lister, args):
+    """§17.3 A1: the newest message ``seq`` this user saw, which the archive records: ``--through-seq``,
+    else the conversation's ``last_seq`` as the list shows it now (None if it isn't listed)."""
+    if getattr(args, "through_seq", None) is not None:
+        return args.through_seq
+    from .api import _path_id
+    cid = _path_id(args.conversation_id)
+    for conversation in lister(limit=200, archived="include"):
+        if conversation.get("id") == cid and isinstance(conversation.get("last_seq"), int):
+            return conversation["last_seq"]
+    return None
+
+
 def cmd_archive(args):
     """``raincli archive`` / ``unarchive`` (§17.2): shared by both endpoints, idempotent."""
+    api = client(args)
     archived = args.command == "archive"
-    report_archive(client(args).archive(args.conversation_id, archived), archived, args.json, args.conversation_id)
+    through = seen_through(api.conversations, args) if archived else None
+    report_archive(api.archive(args.conversation_id, archived, through), archived, args.json, args.conversation_id)
     return EXIT_OK
 
 
@@ -998,6 +1016,12 @@ def cmd_runtime_status(args):
 
 # -- parser ----------------------------------------------------------------
 
+def through_seq_arg(sp):
+    sp.add_argument("--through-seq", type=int, metavar="SEQ",
+                    help="the newest message seq you read (default: the conversation's last_seq now); a newer "
+                         "message keeps it in the main list")
+
+
 def archived_flags(sp):
     which = sp.add_mutually_exclusive_group()
     which.add_argument("--archived", action="store_true", help="only archived conversations")
@@ -1218,6 +1242,8 @@ def build_parser():
                        ("unarchive", "bring an archived conversation back to the main list")):
         sp = with_json(sub.add_parser(verb, help=text))
         sp.add_argument("conversation_id", metavar="CONV_ID")
+        if verb == "archive":
+            through_seq_arg(sp)
         sp.set_defaults(func=cmd_archive)
     convs.add_argument("--limit", type=int, default=50, choices=range(1, 201), metavar="N",
                        help=argparse.SUPPRESS)
