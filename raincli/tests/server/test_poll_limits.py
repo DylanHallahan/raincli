@@ -39,7 +39,9 @@ def test_a_third_concurrent_poll_on_one_credential_returns_at_once(client, world
     third = []
     poll(app, token, third)
     r, took = third[0]
-    assert r.status_code == 200 and r.json()["messages"] == [] and took < 2  # a short poll, not a refusal
+    # Not a refusal: a short poll, held about two seconds without a slot so a client that polls again at once
+    # still polls slowly.
+    assert r.status_code == 200 and r.json()["messages"] == [] and polls.OVER_LIMIT_HOLD - 0.5 < took < 4
     assert r.headers["retry-after"] == str(polls.RETRY_AFTER_SECONDS)
     send(client, world["tokens"]["alice"], "bob-agent", "wake up")
     for t in waiting:
@@ -93,3 +95,46 @@ def test_the_per_user_limit_leaves_room_for_every_machine_and_a_session_each():
     from raincli_server.identity import MACHINE_LIMIT
 
     assert polls.PER_CREDENTIAL == 2 and polls.PER_USER == 2 * MACHINE_LIMIT + 4 == 44
+    assert polls.PER_PROCESS == 150  # of uvicorn's --limit-concurrency 200
+
+
+def test_held_polls_are_capped_per_process():
+    slots = polls.PollSlots(per_credential=5, per_user=5, per_process=3)
+    keys = [(("credential", i), ("user", i)) for i in range(4)]
+    assert [slots.acquire(*k) for k in keys] == [True, True, True, False]
+    assert slots.total == 3
+    slots.release(*keys[0])
+    assert slots.acquire(*keys[3]) and slots.total == 3
+
+
+def test_a_poll_past_the_process_limit_is_a_held_short_poll(client, world, app):
+    slots = app.state.api.state.poll_slots
+    slots.per_process = 1
+    results = []
+    first = threading.Thread(target=poll, args=(app, world["tokens"]["bob"], results))
+    first.start()
+    wait_until(lambda: slots.total == 1)
+    other = []
+    poll(app, world["tokens"]["alice"], other, wait=1)  # another user: only the process limit applies
+    r, took = other[0]
+    assert r.status_code == 200 and r.headers["retry-after"] == str(polls.RETRY_AFTER_SECONDS)
+    assert 0.5 < took < 3  # held for min(wait, 2) seconds
+    send(client, world["tokens"]["alice"], "bob-agent", "wake")
+    first.join(15)
+    assert results[0][0].json()["messages"]
+
+
+def test_a_held_short_poll_still_returns_a_message_that_arrived_meanwhile():
+    slots = polls.PollSlots(per_credential=0, per_user=5)
+    seen = []
+
+    class Here:
+        async def is_disconnected(self):
+            return False
+
+    def poll_once(count):
+        seen.append(count)
+        return {"messages": [] if count else [{"id": "m"}], "cursor": 0}, (("credential", 1), ("user", 1))
+
+    response = asyncio.run(polls.long_poll(Here(), slots, 10, 0.01, poll_once, hold=0.05))
+    assert seen == [True, False] and b'"m"' in response.body and response.headers["retry-after"] == "5"

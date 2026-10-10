@@ -101,6 +101,14 @@ def valid_display_name(value: object) -> bool:
     )
 
 
+def valid_person_name(value: object) -> bool:
+    """A person's display name: a display name with no format characters (category Cf: zero-width, joiner
+    and bidi controls), which would let a name render like another member's (§18.1 item 7)."""
+    import unicodedata
+
+    return valid_display_name(value) and not any(unicodedata.category(ch) == "Cf" for ch in value)
+
+
 def valid_message_body(value: object) -> bool:
     return (
         isinstance(value, str)

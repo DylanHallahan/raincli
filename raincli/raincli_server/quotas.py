@@ -8,7 +8,8 @@ Two budgets, both configurable and each overridable per user or per team by the 
 
 The check and the charge are one locked step inside the send transaction (transaction-scoped advisory locks,
 team first, then user), so concurrent uploads cannot overshoot. Messages without attachments are never
-refused. A refusal is ``413 quota_exceeded`` naming the quota and when it frees up.
+refused. A refusal is ``413 quota_exceeded`` naming the quota and when it frees up, inside ``error``:
+``{"error": {"code", "message", "quota", "resets_at"}}``.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ def _iso(at: datetime) -> str:
 
 def _exceeded(which: str, message: str, resets_at: datetime | None) -> MessagingError:
     return MessagingError(413, "quota_exceeded", message,
-                          {"quota": which, "resets_at": _iso(resets_at) if resets_at else None})
+                          details={"quota": which, "resets_at": _iso(resets_at) if resets_at else None})
 
 
 def charge(session: Session, user_id: uuid.UUID, team_id: uuid.UUID, size: int, quotas: Quotas,

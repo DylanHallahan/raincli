@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+from sqlalchemy import update
+
 from api_helpers import auth, send
 from raincli_server import identity, owners
+from raincli_server.models import User
 
 
 def directory(client, token):
@@ -44,3 +48,50 @@ def test_name_skeletons():
     assert owners.skeleton("Alice") == owners.skeleton("ALICE") == owners.skeleton("Аlice") == owners.skeleton("Al1ce")
     assert owners.skeleton("José") == owners.skeleton("Jose") and owners.skeleton("Ｂob") == owners.skeleton("bob")
     assert owners.skeleton("Alice") != owners.skeleton("Alicia")
+
+
+def member(session, team, email, name):
+    user = identity.create_user(session, email, name, "correct horse battery")
+    identity.add_member(session, team, user)
+    return user
+
+
+def assert_all_distinct(shown):
+    assert len(set(shown.values())) == len(shown), shown
+    assert len({owners.skeleton(v) for v in shown.values()}) == len(shown), shown
+
+
+def test_a_name_chosen_to_look_like_a_disambiguated_one_is_still_told_apart(world, session):
+    team = world["teams"]["acme"]
+    real = member(session, team, "alice.smith@example.test", "Alice Smith")
+    member(session, team, "asmith@example.test", "Alice Smith")  # a genuine namesake: both get a suffix
+    copy = member(session, team, "x@example.test", "Alice Smith (alice.smith)")
+    session.commit()
+    shown = owners.displays(session, team.id)
+    assert_all_distinct(shown)
+    assert shown[real.id] != shown[copy.id] and owners.skeleton(shown[real.id]) != owners.skeleton(shown[copy.id])
+
+
+def test_invisible_characters_are_refused_in_new_names_and_ignored_in_old_ones(world, session):
+    team = world["teams"]["acme"]
+    for name in ("Alice​ Smith", "Alice⁠Smith", "‮Alice Smith", "Ali‍ce"):
+        with pytest.raises(identity.IdentityError):
+            identity.create_user(session, f"{len(name)}{ord(name[3])}@example.test", name, "correct horse battery")
+    real = member(session, team, "alice.smith@example.test", "Alice Smith")
+    old = member(session, team, "old@example.test", "placeholder")
+    session.execute(update(User).where(User.id == old.id).values(display_name="Alice​ Smith"))  # a row from before
+    session.commit()
+    session.expire_all()
+    shown = owners.displays(session, team.id)
+    assert shown[real.id] == "Alice Smith (alice.smith)" and shown[old.id] == "Alice​ Smith (old)"
+    assert_all_distinct(shown)
+
+
+def test_letters_from_other_scripts_that_look_latin_are_told_apart(world, session):
+    team = world["teams"]["acme"]
+    real = member(session, team, "bob.jones@example.test", "Bob Jones")
+    lookalike = member(session, team, "bj@example.test", "Bօb Jones")  # Armenian օ
+    session.commit()
+    shown = owners.displays(session, team.id)
+    assert shown[real.id] == "Bob Jones (bob.jones)" and shown[lookalike.id] == "Bօb Jones (bj)"
+    assert_all_distinct(shown)

@@ -54,8 +54,8 @@ _STATUS_CODES = {
 
 
 def error_response(status: int, code: str, message: str, headers: dict | None = None,
-                   extra: dict | None = None) -> JSONResponse:
-    return JSONResponse({"error": {"code": code, "message": message}, **(extra or {})},
+                   extra: dict | None = None, details: dict | None = None) -> JSONResponse:
+    return JSONResponse({"error": {"code": code, "message": message, **(details or {})}, **(extra or {})},
                         status_code=status, headers=headers)
 
 
@@ -186,7 +186,7 @@ def build_api(parent: FastAPI) -> FastAPI:
     @api.exception_handler(MessagingError)
     async def _messaging_error(request: Request, exc: MessagingError):
         return error_response(exc.status, exc.code, exc.message, getattr(exc, "headers", None),
-                              getattr(exc, "extra", None))
+                              getattr(exc, "extra", None), getattr(exc, "details", None))
 
     @api.exception_handler(StarletteHTTPException)
     async def _http_error(request: Request, exc: StarletteHTTPException):
