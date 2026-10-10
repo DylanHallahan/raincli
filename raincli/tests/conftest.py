@@ -15,6 +15,50 @@ import pytest
 
 TEST_ADMIN_URL = os.environ.get("RAINCLI_TEST_DATABASE_URL", "")
 
+AGENT_SHIMS = ("codex", "claude")
+
+
+@pytest.fixture(autouse=True)
+def no_real_agents(request, monkeypatch, tmp_path_factory):
+    """No test ever executes a real Codex or Claude Code. A real one may be an npx wrapper that
+    downloads hundreds of MB into an empty per-test cache.
+
+    - In this process: the probes find nothing on the real PATH. A call that passes its own
+      ``env`` or ``run`` (a test's fake) still works.
+    - In subprocesses: shims named ``codex`` and ``claude`` come first on PATH, record each call
+      and fail at once. A test whose subprocess called one fails, unless it is marked
+      ``agent_shim_ok`` (the shim answered; no real agent ran).
+    - ``real_agent_probes`` turns all of this off for a test that brings its own fakes."""
+    if request.node.get_closest_marker("real_agent_probes"):
+        yield
+        return
+    from raincli_agent.runtime import hooks_install
+    real_find_codex, real_find_claude = hooks_install.find_codex, hooks_install.find_claude
+    real_support = hooks_install.codex_support
+    monkeypatch.setattr(hooks_install, "find_codex", lambda env=None, windows=None:
+                        None if env is None else real_find_codex(env, windows))
+    monkeypatch.setattr(hooks_install, "find_claude", lambda env=None, windows=None, home=None:
+                        None if env is None else real_find_claude(env, windows, home))
+
+    def support(run=None, find=None, timeout=hooks_install.PROBE_TIMEOUT):
+        if run is None:
+            return False, "codex not found on PATH"
+        return real_support(run, find, timeout)
+    monkeypatch.setattr(hooks_install, "codex_support", support)
+    shims = tmp_path_factory.mktemp("agent-shims")
+    calls = shims / "calls.log"
+    if os.name != "nt":
+        for name in AGENT_SHIMS:
+            shim = shims / name
+            shim.write_text(f'#!/bin/sh\necho "{name} $*" >> "{calls}"\nexit 1\n')
+            shim.chmod(0o755)
+        monkeypatch.setenv("PATH", str(shims) + os.pathsep + os.environ.get("PATH", ""))
+    yield
+    if calls.exists() and not request.node.get_closest_marker("agent_shim_ok"):
+        ran = calls.read_text()
+        calls.unlink()
+        pytest.fail(f"a test subprocess ran an agent executable from PATH: {ran.strip()}")
+
 
 def _psycopg_url(url: str) -> str:
     return "postgresql+psycopg://" + url.split("://", 1)[1]

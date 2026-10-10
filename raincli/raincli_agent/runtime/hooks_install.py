@@ -215,14 +215,20 @@ def find_codex(env=None, windows=None):
     return None
 
 
-def codex_support(run=subprocess.run, find=find_codex):
-    """Feature probe (14.7 M8): ``codex features list`` must show ``hooks`` enabled."""
-    binary = find()
+PROBE_TIMEOUT = 120  # an explicit hooks install may wait for a slow first start
+HINT_TIMEOUT = 5  # the hint after a sign-in never waits longer than this
+
+
+def codex_support(run=None, find=None, timeout=PROBE_TIMEOUT):
+    """Feature probe (14.7 M8): ``codex features list`` must show ``hooks`` enabled. Each command is
+    bounded by ``timeout``; a probe that times out counts as not supported."""
+    run = run or subprocess.run
+    binary = (find or find_codex)()
     if not binary:
         return False, "codex not found on PATH"
     try:
-        version = run([binary, "--version"], capture_output=True, text=True, timeout=120).stdout.strip()
-        features = run([binary, "features", "list"], capture_output=True, text=True, timeout=120).stdout
+        version = run([binary, "--version"], capture_output=True, text=True, timeout=timeout).stdout.strip()
+        features = run([binary, "features", "list"], capture_output=True, text=True, timeout=timeout).stdout
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"codex probe failed: {type(exc).__name__}"
     for line in features.splitlines():
@@ -233,7 +239,7 @@ def codex_support(run=subprocess.run, find=find_codex):
     return False, f"{version or 'codex'}: no hooks feature"
 
 
-def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_support, windows=None):
+def install(kind, state_dir, remove=False, home=None, prefix=None, probe=None, windows=None):
     windows = os.name == "nt" if windows is None else windows
     if kind not in EVENTS:
         raise ConfigError("hooks install supports --claude or --codex")
@@ -242,7 +248,7 @@ def install(kind, state_dir, remove=False, home=None, prefix=None, probe=codex_s
     path = Path(os.path.realpath(link)) if link.is_symlink() else link  # edit a dotfile-managed target in place
     result = {"agent": kind, "config": str(path)}
     if kind == "codex" and not remove:
-        supported, evidence = probe()
+        supported, evidence = (probe or codex_support)()
         result["codex_hooks"] = evidence
         if not supported:
             result.update(status="unsupported", note="Codex sessions stay scan-only (listed, status unknown)")
@@ -390,7 +396,7 @@ def _connected_at(state_dir, kind):
     return value if isinstance(value, (int, float)) else None
 
 
-def status(kind, runtime_config, *, home=None, probe=codex_support, find=None, windows=None, now=None):
+def status(kind, runtime_config, *, home=None, probe=None, find=None, windows=None, now=None):
     """One of ``STATUSES`` for Codex or Claude Code on this machine (§16.19 3):
 
     - ``not_installed_agent``: the agent isn't found;
@@ -409,7 +415,7 @@ def status(kind, runtime_config, *, home=None, probe=codex_support, find=None, w
         return "connected" if _installed_for(kind, state_dir, home) else "not_connected"
     if (find or find_codex)() is None:
         return "not_installed_agent"
-    supported, evidence = probe()
+    supported, evidence = (probe or codex_support)()
     version = codex_version(evidence)
     if not supported or (windows and (version is None or version < CODEX_MIN_WINDOWS)):
         return "too_old"
@@ -422,7 +428,7 @@ def status(kind, runtime_config, *, home=None, probe=codex_support, find=None, w
     return "connected" if recorded else "needs_approval"
 
 
-def connect(kind, runtime_config, *, home=None, prefix=None, probe=codex_support, windows=None, now=None):
+def connect(kind, runtime_config, *, home=None, prefix=None, probe=None, windows=None, now=None):
     """The same operation as ``raincli hooks install --<kind> --config <runtime_config>`` (K1
     resolution, the Codex version gate), and records when, for ``needs_approval``. Only
     ever run on the user's click or command."""

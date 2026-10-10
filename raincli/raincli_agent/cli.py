@@ -880,9 +880,12 @@ def print_hooks_hint(runtime_config):
     """§16.19 3: after sign-in, name each installed agent that isn't connected, with the command
     that connects it. Hooks are never installed without the user's command. Best effort."""
     from .runtime import hooks_install
+    # Bounded: a Codex that is slow to start (an npx install downloading on first run) is skipped,
+    # so a sign-in never waits on it; `raincli hooks install` keeps the long probe.
+    quick = lambda: hooks_install.codex_support(timeout=hooks_install.HINT_TIMEOUT)  # noqa: E731
     for kind in ("claude", "codex"):
         try:
-            state = hooks_install.status(kind, runtime_config)
+            state = hooks_install.status(kind, runtime_config, probe=quick)
         except Exception:  # noqa: BLE001 - a hint never fails a sign-in
             continue
         if state != "not_connected":

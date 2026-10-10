@@ -37,3 +37,9 @@ raincli_agent = ["skill/SKILL.md", "skill/SOURCE.md", "skill/agents/*.yaml"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
+markers = [
+    "real_agent_probes: the test brings its own fakes for the Codex/Claude Code probes",
+    "agent_shim_ok: a subprocess may call the test's codex/claude shim (never a real agent)",
+]
