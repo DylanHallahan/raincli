@@ -19,13 +19,13 @@ def test_the_directory_and_messages_name_the_owner_by_display_name(client, world
 
 
 def test_owners_whose_names_look_alike_are_told_apart_within_the_team(client, world, session):
-    mallory = identity.create_user(session, "mallory@example.test", "Воb", "correct horse battery")  # Cyrillic В, о
-    identity.add_member(session, world["teams"]["acme"], mallory)
-    identity.register_agent(session, world["teams"]["acme"], mallory, "build-01")
+    robert = identity.create_user(session, "robert@example.test", "Воb", "correct horse battery")  # Cyrillic В, о
+    identity.add_member(session, world["teams"]["acme"], robert)
+    identity.register_agent(session, world["teams"]["acme"], robert, "build-01")
     session.commit()
     shown = directory(client, world["tokens"]["alice"])
     assert shown["bob-agent"]["owner"] == "Bob (bob)"
-    assert shown["build-01"]["owner"] == "Воb (mallory)"
+    assert shown["build-01"]["owner"] == "Воb (robert)"
     assert shown["alice-agent"]["owner"] == "Alice"
     # Another team, where the names do not collide, is unaffected.
     assert directory(client, world["tokens"]["eve"])["eve-agent"]["owner"] == "Eve"
