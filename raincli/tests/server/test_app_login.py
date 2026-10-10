@@ -34,7 +34,7 @@ def test_new_machine_created_with_one_credential(client, world, session):
     r = app_login(client)
     assert r.status_code == 201, r.text
     body = r.json()
-    assert set(body) == {"api_url", "token", "handle", "team", "rotated"}
+    assert set(body) == {"api_url", "token", "handle", "team", "rotated", "known_device"}
     assert body["api_url"] == "http://testserver" and body["handle"] == "alice-laptop"
     assert body["team"] == {"slug": "acme", "name": "Acme"} and body["rotated"] is False
     assert body["token"].startswith("rca_")

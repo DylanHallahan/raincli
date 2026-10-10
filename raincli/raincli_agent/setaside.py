@@ -7,7 +7,8 @@
   the CLI, and holds the migration lock (``.migration.lock``).
 
   **What moves** (``os.replace``):
-  - ``agent.json``, ``person.json``, ``app-install.json`` and ``notifications/``;
+  - ``agent.json``, ``person.json``, ``app-install.json`` and ``notifications/`` (``known-device.json``
+    stays: it identifies this computer, and the server ignores another user's token);
   - every connector config naming this ``agent.json``, found as ``migrate.detect`` finds them
     (the scan directories, connector-mode runtime configs, the old Run value's ``--config``,
     ``app.json``'s runtime config, and explicit ``--connector-config`` paths);
@@ -425,7 +426,8 @@ def set_aside(agent_config=None, *, migration=None, stop_own=None, restart_own=N
     try:
         found = discover(agent, migration)
         stopped = _free_queues(found, migration, stop_own, restart_own, clock, sleep, wait)
-        sources = [agent] + [config_dir / n for n in ("person.json", "app-install.json", "notifications")]
+        sources = [agent] + [config_dir / n for n in ("person.json", "app-install.json",
+                                                      "notifications")]
         sources += [Path(c) for c in found.connectors] + [Path(r) for r in found.move_runtimes]
         sources += [Path(s) for s in found.runtime_states]
         sources += [Path(b) for b in _handover_boxes(found, migration)]  # R7

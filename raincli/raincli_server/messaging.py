@@ -15,8 +15,9 @@ Concurrency is enforced by PostgreSQL, not by the process:
   deadlock.
 * The message insert is ``INSERT ... ON CONFLICT (id) DO NOTHING``; a lost race
   re-reads the winner and answers ``created: false`` or ``id_conflict``.
-* The default conversation for a pair is an upsert against the partial unique
-  index ``uq_conversations_default_pair``.
+* The default conversation for a pair in a team is an upsert against the partial
+  unique index ``uq_conversations_default_pair`` (team, pair). A message's
+  ``(conversation_id, team_id)`` references its conversation's ``(id, team_id)``.
 * Ack is a conditional ``UPDATE ... WHERE acked_at IS NULL``.
 * A send takes ``FOR KEY SHARE`` on its conversation row before it allocates the
   ``seq`` and holds it to commit; archive and unarchive take ``FOR UPDATE``. Sends
@@ -129,14 +130,23 @@ def hold_reason(session: Session, msg: Message) -> str | None:
     return None
 
 
-def message_json(session: Session, msg: Message, attachments: list[dict] | None = None) -> dict:
+def message_json(session: Session, msg: Message, attachments: list[dict] | None = None,
+                 owners: dict | None = None) -> dict:
     """Protocol message JSON (M), including attachment metadata and the §16 endpoints.
 
     ``from``/``to`` keep their v0.4 meaning for machine endpoints (the handle); a person is ``@email``.
+    ``from_owner`` is how the sending machine's owner is shown (§18.1 item 7), or null for a person.
     """
     if attachments is None:
         attachments = _attachment_meta(session, [msg.id])[msg.id]
     sender, recipient = sender_endpoint(session, msg), recipient_endpoint(session, msg)
+    from_owner = None
+    if sender.agent is not None:
+        from raincli_server import owners as owners_mod
+        owner = session.get(User, sender.agent.owner_user_id)
+        if owners is None or owner.id not in owners:
+            owners = owners_mod.displays(session, msg.team_id, [owner])
+        from_owner = owners[owner.id]
     hold = hold_reason(session, msg)
     state = "held" if msg.delivery_state == "stored" and hold else msg.delivery_state
     return {
@@ -148,6 +158,7 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
         "from_endpoint": sender.json(),
         "to_endpoint": recipient.json(),
         "from_agent": msg.sender_agent_name,
+        "from_owner": from_owner,
         "kind": msg.kind,
         "from_same_owner": same_owner(sender, recipient),
         "body": msg.body,
@@ -174,8 +185,14 @@ def same_owner(sender: Endpoint, recipient: Endpoint) -> bool:
 
 def messages_json(session: Session, messages: list[Message]) -> list[dict]:
     """``message_json`` for a page of messages with one attachment query."""
+    from raincli_server import owners as owners_mod
+
     meta = _attachment_meta(session, [m.id for m in messages])
-    return [message_json(session, m, meta[m.id]) for m in messages]
+    by_team: dict = {}
+    for m in messages:  # one owner lookup per team in the page
+        if m.team_id not in by_team:
+            by_team[m.team_id] = owners_mod.displays(session, m.team_id)
+    return [message_json(session, m, meta[m.id], by_team[m.team_id]) for m in messages]
 
 
 # Lookups and visibility (§16.6) --------------------------------------------------
@@ -255,7 +272,8 @@ def _endpoint_columns(side: str, ep: Endpoint) -> dict:
 
 def _default_conversation(session: Session, team_id: uuid.UUID, x: Endpoint, y: Endpoint) -> Conversation:
     a, b = sorted((x, y), key=lambda ep: ep.key)
-    where = (Conversation.a_key == a.key, Conversation.b_key == b.key, Conversation.is_default.is_(True))
+    where = (Conversation.team_id == team_id, Conversation.a_key == a.key, Conversation.b_key == b.key,
+             Conversation.is_default.is_(True))  # §18.1: a pair's default thread is per team
     # A plain read first: an existing conversation is found without waiting on any row lock (an archive in
     # progress holds one; §17.3 A1: the send path never contends with it). Insert only the first time.
     existing = session.scalar(select(Conversation).where(*where))
@@ -265,7 +283,7 @@ def _default_conversation(session: Session, team_id: uuid.UUID, x: Endpoint, y: 
         pg_insert(Conversation)
         .values(id=uuid.uuid4(), team_id=team_id, is_default=True, **_endpoint_columns("a", a),
                 **_endpoint_columns("b", b))
-        .on_conflict_do_nothing(index_elements=["a_key", "b_key"], index_where=Conversation.is_default)
+        .on_conflict_do_nothing(index_elements=["team_id", "a_key", "b_key"], index_where=Conversation.is_default)
     )
     return session.scalar(select(Conversation).where(*where))
 
@@ -285,8 +303,10 @@ def _same_payload(session: Session, existing: Message, payload: tuple) -> bool:
         and existing.body == body
         and existing.kind == kind
         and existing.in_reply_to == in_reply_to
-        # An omitted conversation_id means "the server's choice", which the first send made.
-        and (conversation_id is None or existing.conversation_id == conversation_id)
+        # An omitted conversation_id means "the server's choice", which the first send made. A message moved by
+        # migration 0008 still matches the conversation the first send named.
+        and (conversation_id is None or conversation_id in (existing.conversation_id,
+                                                            existing.moved_from_conversation_id))
     )
 
 
@@ -373,6 +393,7 @@ def send_message(
     attachments: list[tuple[str, bytes]] | None = None,
     from_agent: str | None = None,
     kind: str = "message",
+    quotas=None,
 ) -> tuple[Message, bool]:
     """Store a message from a machine credential (§3, §16.1). ``to`` is any §16.1 endpoint form;
     ``to_handle`` is the v0.4 machine-endpoint shorthand. Returns ``(message, created)``."""
@@ -384,12 +405,14 @@ def send_message(
         raise MessagingError(403, "forbidden", "sender agent is revoked")
     return send(session, machine_endpoint(sender_agent, from_agent), sender_agent.team_id, id=id,
                 to=to if to is not None else to_handle, body=body, conversation_id=conversation_id,
-                in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments, kind=kind)
+                in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments, kind=kind,
+                quotas=quotas)
 
 
 def send_as_person(session: Session, user: User, team_id: uuid.UUID, *, id, to: object, body: str,  # noqa: A002
                    conversation_id=None, in_reply_to=None, max_pending: int,
-                   attachments: list[tuple[str, bytes]] | None = None, kind: str = "message") -> tuple[Message, bool]:
+                   attachments: list[tuple[str, bytes]] | None = None, kind: str = "message",
+                   quotas=None) -> tuple[Message, bool]:
     """Store a message from a person (§16.3, §16.4). Only ``kind: message`` (§16.12 C11)."""
     if not user.is_active or session.get(Membership, (team_id, user.id)) is None:
         raise MessagingError(403, "forbidden", "you are not a member of that team")
@@ -397,7 +420,7 @@ def send_as_person(session: Session, user: User, team_id: uuid.UUID, *, id, to: 
         raise _invalid("a person sends kind message only")
     return send(session, Endpoint("person", user=user), team_id, id=id, to=to, body=body,
                 conversation_id=conversation_id, in_reply_to=in_reply_to, max_pending=max_pending,
-                attachments=attachments, kind=kind)
+                attachments=attachments, kind=kind, quotas=quotas)
 
 
 def _sends_as(sender: Endpoint, msg: Message, side: str) -> bool:
@@ -410,8 +433,10 @@ def _sends_as(sender: Endpoint, msg: Message, side: str) -> bool:
 
 def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: object, body: str,  # noqa: A002
          conversation_id=None, in_reply_to=None, max_pending: int,
-         attachments: list[tuple[str, bytes]] | None = None, kind: str = "message") -> tuple[Message, bool]:
-    """The one send path for every sender and endpoint kind (§16.1, §16.2, §16.4, §16.12 C7, C10, C11)."""
+         attachments: list[tuple[str, bytes]] | None = None, kind: str = "message",
+         quotas=None) -> tuple[Message, bool]:
+    """The one send path for every sender and endpoint kind (§16.1, §16.2, §16.4, §16.12 C7, C10, C11).
+    ``quotas`` (a ``quotas.Quotas``) charges attachment bytes to the sending user and the team (§18.1 item 5)."""
     message_id = parse_uuid(id, "id")
     reply_to = parse_uuid(in_reply_to, "in_reply_to") if in_reply_to is not None else None
     conv_id = parse_uuid(conversation_id, "conversation_id") if conversation_id is not None else None
@@ -460,7 +485,8 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
         if conv_id is not None and conv_id != parent.conversation_id:
             raise _invalid("conversation_id does not match the parent message")
         candidate = session.get(Conversation, parent.conversation_id)
-        if candidate is not None and {candidate.a_key, candidate.b_key} == {sender.key, recipient.key}:
+        if candidate is not None and candidate.team_id == team_id and \
+                {candidate.a_key, candidate.b_key} == {sender.key, recipient.key}:
             conversation = candidate
     elif conv_id is not None:
         candidate = session.get(Conversation, conv_id)
@@ -473,6 +499,11 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
 
     if _pending_count(session, recipient) >= max_pending:
         raise MessagingError(429, "inbox_full", "the recipient has too many unacknowledged messages")
+
+    if files and quotas is not None:
+        from raincli_server import quotas as quota_mod
+        owner = sender.user.id if sender.kind == "person" else sender.agent.owner_user_id
+        quota_mod.charge(session, owner, team_id, sum(len(data) for _, data, _ in files), quotas)
 
     # §17.3 A1: KEY SHARE on the conversation before the seq is allocated (the insert below), held to commit.
     # Sends share it; an archive's FOR UPDATE waits for them. Nothing on the send path writes this row.
@@ -671,14 +702,15 @@ def _conversation_rows(session: Session, where, mine, unacked_where, limit: int,
     archived_by}]`` newest first. ``mine(conv)`` returns the viewer's side (``"a"`` or ``"b"``). ``archived``
     filters by the effective archive state (§17.3 A1)."""
     stats = (
-        select(Message.conversation_id.label("cid"), func.max(Message.seq).label("last_seq"),
-               func.max(Message.created_at).label("last_at"),
+        select(Message.conversation_id.label("cid"), Message.team_id.label("tid"),
+               func.max(Message.seq).label("last_seq"), func.max(Message.created_at).label("last_at"),
                func.count().filter(and_(unacked_where, Message.acked_at.is_(None))).label("unacked"))
-        .group_by(Message.conversation_id).subquery()
+        .group_by(Message.conversation_id, Message.team_id).subquery()
     )
     rows = session.execute(
         select(Conversation, stats.c.last_seq, stats.c.last_at, stats.c.unacked)
-        .join(stats, stats.c.cid == Conversation.id).where(where, archive_filter(archived, stats.c.last_seq))
+        # §18.1: only the conversation's own team's messages count, in every summary.
+        .join(stats, and_(stats.c.cid == Conversation.id, stats.c.tid == Conversation.team_id)).where(where, archive_filter(archived, stats.c.last_seq))
         .order_by(stats.c.last_seq.desc()).limit(_clamp(limit, 1, CONVERSATIONS_LIMIT_MAX))
     )
     out = []
@@ -728,7 +760,8 @@ def archive_filter(archived: str, last_seq):
 
 
 def _max_seq(session: Session, conv: Conversation) -> int:
-    return session.scalar(select(func.coalesce(func.max(Message.seq), 0)).where(Message.conversation_id == conv.id))
+    return session.scalar(select(func.coalesce(func.max(Message.seq), 0))
+                          .where(Message.conversation_id == conv.id, Message.team_id == conv.team_id))
 
 
 def is_archived(conv: Conversation, last_seq: int | None) -> bool:
@@ -859,7 +892,8 @@ def get_person_conversation(session: Session, user: User, conversation_id: uuid.
 
 def _messages_of(session: Session, conv: Conversation, after: int, limit: int) -> tuple[list[Message], int]:
     messages = list(session.scalars(
-        select(Message).where(Message.conversation_id == conv.id, Message.seq > after)
+        select(Message).where(Message.conversation_id == conv.id, Message.team_id == conv.team_id,
+                              Message.seq > after)
         .order_by(Message.seq).limit(_clamp(limit, 1, INBOX_LIMIT_MAX))
         .execution_options(populate_existing=True)
     ))

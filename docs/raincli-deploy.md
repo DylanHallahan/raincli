@@ -139,6 +139,59 @@ Existing handles keep working unchanged, and each becomes a machine once its run
 
 The server itself never logs the User-Agent (uvicorn access logging stays off). After the reload, confirm that `grep -c 'RainCLIApp/[^[]' /var/log/nginx/raincli.access.log` stays at 0 once an app has opened its window.
 
+### Upgrading to the v0.5.3 server (migration `0008`)
+
+The server half ships first, ahead of the v0.5.3 client release. Older clients keep working: they ignore the
+new reply fields.
+
+1. **Stop the service before installing.** Migration `0008` changes the conversation indexes that the running
+   release uses, so it must run with the service stopped: `sudo systemctl stop raincli`, then run `install.sh` as
+   above. It backs up, migrates in one transaction, and starts the new release. The migration files any message
+   whose team differs from its conversation's into that team's own conversation; nothing is deleted. To go
+   back, see **Rolling back the v0.5.3 server** below: `rollback.sh` alone is not enough for this release.
+2. **Reinstall both Nginx files** as in step 5 of the first deployment, keeping the host's `ssl_certificate`
+   lines, then run `sudo nginx -t && sudo systemctl reload nginx`. The new files:
+   - add `location = /api/v1/app/login` in its own zone, `raincli_app_login` (10 requests a minute, burst 5),
+     so the app and CLI sign-in and the website sign-in each have a per-IP budget. If the host already has an
+     exact app sign-in location using `raincli_login`, the new file replaces it;
+   - count inbox long-polls (`/api/v1/inbox`, `/api/v1/person/inbox`) in their own connection zone,
+     `raincli_poll_conn`, at 40 per IP, the same as the general limit, and answer `429` past it. Because these two
+     locations set their own `limit_conn`, the server-level `raincli_conn 40` no longer applies to them: one
+     address can hold 40 polls plus 40 other connections. That is intended, so that waiting polls never use up an
+     office's budget for pages and sends. The app is the real limit, below; this is a backstop.
+3. **Long-poll limits (in the app).** At most 2 polls wait at once per credential or person session, 44 per user
+   and 150 in the whole process, which leaves most of uvicorn's 200 connection slots (`--limit-concurrency 200`)
+   for everything else. A poll past a limit waits about 2 seconds without a slot and is answered as an empty poll
+   with `Retry-After`. The counters live in the process, and `raincli.service` runs `--workers 1`: keep it that
+   way, or move the counters to shared state first.
+4. **New settings (optional).** Attachment quotas default to 50 MiB per user per UTC day and 5 GiB per team
+   over a rolling 30 days. Set `RAINCLI_ATTACHMENT_USER_DAILY_BYTES` or `RAINCLI_ATTACHMENT_TEAM_30D_BYTES` in the
+   secrets file to change them for everyone, or use `rc_admin quota --user EMAIL` or `rc_admin quota --team SLUG`
+   (with `--set BYTES` or `--default`) to show usage or change one user's or team's quota.
+5. **Verify** as in step 6. Then, from the operator's own address and with an email that has **no account**
+   (for example `nobody@invalid.example`, so no real account's sign-in limit is touched), send wrong-password
+   requests to `/api/v1/app/login`. Expect `401` for the first 6 and `429` after that. The website sign-in still
+   works from the same address.
+
+#### Rolling back the v0.5.3 server
+
+Only the v0.5.3 release has the code that undoes migration `0008`, so run the downgrade **before** switching back,
+with the service stopped, as the service user with the env file loaded:
+
+```bash
+sudo systemctl stop raincli
+(cd / && sudo runuser -u raincli -- bash -c 'set -a; . /etc/raincli/raincli.env; set +a;
+  exec /opt/raincli/current/venv/bin/python -m raincli_server.migrate downgrade 0007')   # the 0.5.3 code
+sudo bash /opt/raincli/current/deploy/raincli/scripts/rollback.sh
+```
+
+- **`rollback.sh` alone is not safe for this release.** The older code would then run on the `0008` schema, and
+  every first message between a new pair would fail.
+- **What the downgrade does:** it keeps every message where it is. Afterwards the older code again files a pair's
+  new person-to-person messages under that pair's oldest default conversation, as before v0.5.3.
+- **Fallback:** if the downgrade fails, restore the release's recorded backup (`PRE_BACKUP`) as in item 2 of the
+  rollback checklist. Messages written since the backup are lost.
+
 ### Client versions (admin CLI)
 
 The operator chooses which client version each team's managed installs run. The server stores and replies with **a version only**; clients install it only from stable releases of the canonical GitHub repository, so the server can't choose where code comes from. Releases are unsigned (see [SETUP.md](../SETUP.md#updates)).
@@ -287,7 +340,7 @@ Within a minute, the handle's **Machines** page entry shows its client version a
 
 ## Rollback checklist
 
-1. **App-only regression** (the abandoned release added no migrations): run `sudo bash /opt/raincli/current/deploy/raincli/scripts/rollback.sh`. It switches `current` back, restarts the service and runs the health check.
+1. **App-only regression** (the abandoned release added no migrations): run `sudo bash /opt/raincli/current/deploy/raincli/scripts/rollback.sh`. It switches `current` back, restarts the service and runs the health check. Not for v0.5.3 and its migration `0008`: see **Rolling back the v0.5.3 server**.
 2. **Regression that involves a migration:** restore that release's recorded backup, then roll back. Messages written since the backup are lost, so export them first if they matter.
    ```bash
    sudo systemctl stop raincli

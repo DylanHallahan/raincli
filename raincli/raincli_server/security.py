@@ -101,6 +101,20 @@ def valid_display_name(value: object) -> bool:
     )
 
 
+PERSON_NAME_FORBIDDEN = "()@"  # what the shown owner name adds to tell members apart (§18.1 item 7)
+
+
+def valid_person_name(value: object) -> bool:
+    """A person's display name: a display name with no format characters (category Cf: zero-width, joiner
+    and bidi controls) and none of ``(``, ``)`` or ``@`` (in any width), which would let a name render like
+    another member's, or like another member's name as it is shown when two are told apart (§18.1 item 7)."""
+    import unicodedata
+
+    if not valid_display_name(value) or any(unicodedata.category(ch) == "Cf" for ch in value):
+        return False
+    return not any(ch in PERSON_NAME_FORBIDDEN for ch in unicodedata.normalize("NFKC", value))
+
+
 def valid_message_body(value: object) -> bool:
     return (
         isinstance(value, str)

@@ -8,7 +8,7 @@
   <div class="rc-dir">
     {% for m in machines %}
     <section class="rc-card" aria-labelledby="machine-{{ m.agent.id }}">
-      <h3 id="machine-{{ m.agent.id }}">{{ m.agent.handle }} <span class="rc-reach">{{ m.owner.display_name }} · {{ m.team.name }}{% if m.agent.routing == 'inbox-only' %} · inbox only{% endif %}</span></h3>
+      <h3 id="machine-{{ m.agent.id }}">{{ m.agent.handle }} <span class="rc-reach">{{ m.owner_shown }} · {{ m.team.name }}{% if m.agent.routing == 'inbox-only' %} · inbox only{% endif %}</span></h3>
       <ul class="rc-agents">
         <li><span class="rc-agent-name"><span class="rc-dot rc-ok" aria-hidden="true"></span>Inbox</span><span class="rc-reach">the machine's inbox agent</span><a class="rc-btn rc-btn-quiet" href="{{ url('/app/compose') }}?to={{ m.agent.handle|urlencode }}">Message</a></li>
         {% for a in m.agents %}

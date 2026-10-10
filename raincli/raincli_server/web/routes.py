@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from sqlalchemy import select
 
-from raincli_server import identity, messaging, security
+from raincli_server import identity, messaging, quotas, security
 from raincli_server.config import Settings
 from raincli_server.models import Agent, HandoffCode, Message, PersonSession, Team, User
 from raincli_server.web import auth, queries
@@ -282,18 +282,20 @@ def login(
             request, "login.html", status=status, csrf=csrf_token, error=message, email=email, next=next,
         )
 
-    if limiter.blocked(ip, email):
+    device = auth.known_device_for(db, _settings(request), request.cookies.get(auth.KNOWN_DEVICE_COOKIE), email)
+    attempt = limiter.attempt(ip, email, device)
+    if attempt is None:
         return fail(429, "Too many sign-in attempts. Wait a few minutes and try again.")
     user = identity.authenticate_user(db, email, password) if email and password and len(password) <= 256 else None
     if user is None:
-        limiter.failure(ip, email)
-        return fail(400, "That email and password combination is not correct.")
-    limiter.success(ip, email)
+        return fail(400, "That email and password combination is not correct.")  # the attempt stays a failure
+    limiter.success(attempt)
     old = auth.load_viewer(db, request)
     response = redirect(request, next or "/app")
     if old is not None:
         auth.end_session(db, old, response, _settings(request))
     auth.start_session(db, user, response, _settings(request))
+    auth.set_known_device(response, _settings(request), user)
     db.commit()
     return response
 
@@ -399,21 +401,23 @@ def account_password(
     def fail(status: int, message: str):
         return _account_page(request, db, viewer, status=status, error=message)
 
-    if limiter.blocked(ip, email):
-        return fail(429, "Too many attempts. Wait a few minutes and try again.")
     if password != password_confirm:
         return fail(400, "The two new passwords do not match.")
+    device = auth.known_device_id(_settings(request), request.cookies.get(auth.KNOWN_DEVICE_COOKIE), viewer.user)
+    attempt = limiter.attempt(ip, email, device)
+    if attempt is None:
+        return fail(429, "Too many attempts. Wait a few minutes and try again.")
     try:
         user = identity.change_password(db, viewer.user.id, viewer.web_session.id,
                                         current_password, password)
     except identity.IdentityError as exc:
-        db.rollback()
-        limiter.failure(ip, email)
+        db.rollback()  # the attempt stays a failure
         return fail(400, str(exc).capitalize() + ".")
+    limiter.success(attempt)
     response = redirect(request, "/app/account?notice=password-changed")
     auth.start_session(db, user, response, _settings(request))
+    auth.set_known_device(response, _settings(request), user)  # the new password revoked every other device
     db.commit()
-    limiter.success(ip, email)
     return response
 
 
@@ -635,9 +639,10 @@ def send_message(
             db, viewer.user, team_obj, id=mid, to=queries.endpoint_from_text(to), body=body,
             conversation_id=conv_for_send, in_reply_to=parent_id,
             max_pending=_settings(request).max_pending, attachments=attachments,
+            quotas=quotas.Quotas.from_settings(_settings(request)),
         )
     except queries.SendError as exc:
-        status = 429 if exc.code == "inbox_full" else 409 if exc.code == "id_conflict" else 400
+        status = {"inbox_full": 429, "id_conflict": 409, "quota_exceeded": 413}.get(exc.code, 400)
         return fail(status, exc.message)
     db.commit()
     notice = "sent" if created else "duplicate"

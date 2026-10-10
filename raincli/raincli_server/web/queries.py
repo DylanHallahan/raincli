@@ -58,6 +58,7 @@ class AgentRow:
     presence: AgentPresence | None = None
     # Live sessions the machine's runtime published (protocol §14.2): inbox first, never keys.
     sessions: list = field(default_factory=list)
+    owner_shown: str = ""  # §18.1 item 7: the owner as the team sees them (owners.displays)
 
     @property
     def runtime_status(self) -> str:
@@ -112,7 +113,21 @@ def _agent_rows(db: Session, where) -> list[AgentRow]:
     live = live_machine_agents(db, [r.agent.id for r in out if r.active])
     for r in out:
         r.sessions = live.get(r.agent.id, [])
+    _show_owners(db, out)
     return out
+
+
+def _show_owners(db: Session, rows) -> None:
+    """Set ``owner_shown`` on machine rows: the owner's display name, told apart within the team (§18.1)."""
+    from raincli_server import owners
+
+    shown: dict = {}
+    for r in rows:
+        if r.team.id not in shown:
+            shown[r.team.id] = owners.displays(db, r.team.id)
+        if r.owner.id not in shown[r.team.id]:  # an owner who has left the team
+            shown[r.team.id] = owners.displays(db, r.team.id, [r.owner])
+        r.owner_shown = shown[r.team.id][r.owner.id]
 
 
 def my_agents(db: Session, user: User, team_ids: list[uuid.UUID]) -> list[AgentRow]:
@@ -336,12 +351,12 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
     if not convs:
         return []
     conv_ids = [c.id for c, _ in convs]
-    stats = {
-        cid: (last_seq, count, unacked)
-        for cid, last_seq, count, unacked in db.execute(
-            select(Message.conversation_id, func.max(Message.seq), func.count(),
+    stats = {  # §18.1: keyed by conversation and team, so only a conversation's own team's messages count
+        (cid, tid): (last_seq, count, unacked)
+        for cid, tid, last_seq, count, unacked in db.execute(
+            select(Message.conversation_id, Message.team_id, func.max(Message.seq), func.count(),
                    func.count().filter(and_(Message.acked_at.is_(None), _mine_as_recipient(user, owned))))
-            .where(Message.conversation_id.in_(conv_ids)).group_by(Message.conversation_id)
+            .where(Message.conversation_id.in_(conv_ids)).group_by(Message.conversation_id, Message.team_id)
         )
     }
     last_seqs = [st[0] for st in stats.values() if st[0] is not None]
@@ -350,7 +365,7 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
     rows = []
     for conv, team in convs:
         me, peer = _sides(db, conv, user, owned)
-        last_seq, count, unacked = stats.get(conv.id, (None, 0, 0))
+        last_seq, count, unacked = stats.get((conv.id, conv.team_id), (None, 0, 0))
         is_archived = messaging.is_archived(conv, last_seq)
         if (archived == "exclude" and is_archived) or (archived == "only" and not is_archived):
             continue
@@ -380,7 +395,7 @@ def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], convers
     conv, team = row
     me, peer = _sides(db, conv, user, owned)
     newest = list(db.scalars(
-        select(Message).where(Message.conversation_id == conv.id)
+        select(Message).where(Message.conversation_id == conv.id, Message.team_id == conv.team_id)
         .order_by(Message.seq.desc()).limit(CONVERSATION_PAGE + 1).execution_options(populate_existing=True)
     ))
     truncated = len(newest) > CONVERSATION_PAGE
@@ -492,6 +507,7 @@ class PickerMachine:
     team: Team
     owner: User
     agents: list[PickerAgent]
+    owner_shown: str = ""
 
 
 def team_directory(db: Session, user: User, team_ids: list[uuid.UUID]
@@ -509,6 +525,7 @@ def team_directory(db: Session, user: User, team_ids: list[uuid.UUID]
     machines = [PickerMachine(agent, team, owner, [
         PickerAgent(m.name, m.type, m.status, m.role, m.reachability, m.ambiguous, m.source)
         for m in live.get(agent.id, [])]) for agent, team, owner in rows]
+    _show_owners(db, machines)
     people = list(db.execute(
         select(Team, User).join(Membership, Membership.team_id == Team.id).join(User, User.id == Membership.user_id)
         .where(Team.id.in_(team_ids), User.is_active.is_(True), User.id != user.id)
@@ -557,13 +574,13 @@ _FRIENDLY = {
 def send_as_person(
     db: Session, user: User, team: Team, *, id: uuid.UUID, to: object, body: str,  # noqa: A002
     conversation_id: uuid.UUID | None, in_reply_to: uuid.UUID | None, max_pending: int,
-    attachments: list[tuple[str, bytes]] | None = None,
+    attachments: list[tuple[str, bytes]] | None = None, quotas=None,
 ) -> tuple[Message, bool]:
     """Send as the person (§16.9) through ``messaging.send_as_person``. Raises SendError."""
     try:
         return messaging.send_as_person(
             db, user, team.id, id=id, to=to, body=body, conversation_id=conversation_id,
-            in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments or None,
+            in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments or None, quotas=quotas,
         )
     except messaging.MessagingError as exc:
         if exc.code == "not_deliverable":

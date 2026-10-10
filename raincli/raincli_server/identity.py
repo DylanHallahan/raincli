@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -50,8 +50,9 @@ def create_user(session: Session, email: str, display_name: str, password: str) 
     email = email.strip()
     if not security.valid_email(email):
         raise IdentityError("enter a valid email address")
-    if not security.valid_display_name(display_name):
-        raise IdentityError("enter a display name (1-80 characters)")
+    if not security.valid_person_name(display_name):
+        raise IdentityError("enter a display name (1-80 characters, without ( ) @ or invisible or direction "
+                            "characters)")
     if not security.valid_password(password):
         raise IdentityError("password must be 12-256 characters")
     if find_user_by_email(session, email) is not None:
@@ -86,6 +87,12 @@ def authenticate_user(session: Session, email: str, password: str) -> User | Non
     return user
 
 
+def bump_credential_epoch(user: User) -> None:
+    """Every credential change (a password change, a reset, a disable) calls this: recognised-device tokens
+    name the epoch they were issued under, so all of them stop counting."""
+    user.credential_epoch = (user.credential_epoch or 0) + 1
+
+
 def change_password(session: Session, user_id: uuid.UUID, web_session_id: uuid.UUID,
                     current: str, replacement: str) -> User:
     user = session.scalar(select(User).where(User.id == user_id).with_for_update()
@@ -102,6 +109,7 @@ def change_password(session: Session, user_id: uuid.UUID, web_session_id: uuid.U
     if current == replacement:
         raise IdentityError("choose a different password")
     user.password_hash = security.hash_password(replacement)
+    bump_credential_epoch(user)  # §18.1: ends every recognised device
     session.execute(update(WebSession).where(WebSession.user_id == user_id,
                                             WebSession.revoked_at.is_(None)).values(revoked_at=now()))
     revoke_person_sessions(session, user_id=user_id)  # §16.3, §16.12 C6
@@ -219,10 +227,14 @@ def register_agent(
     session: Session, team: Team, owner: User, handle: str, display_name: str | None = None,
     scopes: tuple[str, ...] = SCOPES,
 ) -> tuple[Agent, str]:
-    if membership(session, team.id, owner.id) is None:
+    # The membership row lock serializes this with the user's app sign-ins, so the cap holds (§15.9, §18.1).
+    member = session.scalar(select(Membership).where(Membership.team_id == team.id, Membership.user_id == owner.id)
+                            .with_for_update())
+    if member is None:
         raise PermissionDenied("you are not a member of that team")
     if not security.valid_handle(handle):
         raise IdentityError("handle must match ^[a-z][a-z0-9-]{1,31}$")
+    _check_machine_limit(session, team, owner)
     display_name = (display_name or handle).strip()
     if not security.valid_display_name(display_name):
         raise IdentityError("enter a display name (1-80 characters)")
@@ -310,6 +322,14 @@ class MachineLimit(IdentityError):
 MACHINE_LIMIT = 20
 
 
+def _check_machine_limit(session: Session, team: Team, user: User) -> None:
+    """Every way of adding a machine (the app or CLI sign-in, the website, the operator) is capped."""
+    active = session.scalar(select(func.count()).select_from(Agent).where(
+        Agent.team_id == team.id, Agent.owner_user_id == user.id, Agent.revoked_at.is_(None)))
+    if active >= MACHINE_LIMIT:
+        raise MachineLimit(f"you already have {MACHINE_LIMIT} active machines in this team")
+
+
 class NameInUse(IdentityError):
     """The user's own active machine has that name, and the request lacks proof to replace it (§15.8 H2)."""
 
@@ -341,10 +361,7 @@ def sign_in_machine(session: Session, team: Team, user: User, machine_name: str,
     existing = session.scalar(select(Agent).where(Agent.team_id == team.id, Agent.handle == machine_name)
                               .with_for_update().execution_options(populate_existing=True))
     if existing is None:
-        active = session.scalar(select(func.count()).select_from(Agent).where(
-            Agent.team_id == team.id, Agent.owner_user_id == user.id, Agent.revoked_at.is_(None)))
-        if active >= MACHINE_LIMIT:
-            raise MachineLimit(f"you already have {MACHINE_LIMIT} active machines in this team")
+        _check_machine_limit(session, team, user)
         agent = Agent(team_id=team.id, owner_user_id=user.id, handle=machine_name, display_name=machine_name,
                       signed_in_from=machine_name)
         try:
@@ -385,6 +402,15 @@ class PersonAuth:
 
     def has_scope(self, scope: str) -> bool:
         return scope in self.person_session.scopes
+
+
+def purge_handoff_codes(session: Session) -> int:
+    """Delete handoff codes that were used or have expired (§18.1 item 5); returns how many."""
+    from raincli_server.models import HandoffCode
+
+    result = session.execute(delete(HandoffCode).where(
+        (HandoffCode.used_at.is_not(None)) | (HandoffCode.expires_at <= now())))
+    return result.rowcount or 0
 
 
 def person_session_expires_at(ps: PersonSession) -> datetime:
@@ -515,6 +541,7 @@ def set_user_active(session: Session, user: User, active: bool, actor: User | No
         raise PermissionDenied("only the operator can enable or disable users")
     user.is_active = bool(active)
     if not active:
+        bump_credential_epoch(user)  # §18.1: a disable ends every recognised device too
         _revoke_web_sessions(session, user)
         revoke_person_sessions(session, user_id=user.id)  # §16.12 C6
         _revoke_owned_agents(session, user)

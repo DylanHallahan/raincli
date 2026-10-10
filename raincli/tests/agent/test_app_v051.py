@@ -227,7 +227,7 @@ class Ev:
 def test_the_window_offers_a_new_machine_and_never_reuses_the_password(setup, monkeypatch):
     window = FakeWindow()
     webview = types.SimpleNamespace(settings={}, create_window=lambda *a, **k: window, start=lambda *a, **k: None)
-    app = AppWindow(setup.svc, profile_dir=setup.dir / "webview", webview=webview, local_port=43123,
+    app = AppWindow(setup.svc, profile_dir=setup.dir / "webview", webview=webview, local_port=43123, local_secret="s" * 32,
                     later=lambda fn, *a: fn(*a))
     monkeypatch.setattr(app, "open_hosted", lambda *a, **k: True)
     app.create()
@@ -354,9 +354,9 @@ def test_the_js_api_connects_with_the_codex_approval_sentence(setup, monkeypatch
     monkeypatch.setattr(services_mod, "_hooks", lambda: hooks)
     window = FakeWindow()
     webview = types.SimpleNamespace(settings={}, create_window=lambda *a, **k: window, start=lambda *a, **k: None)
-    app = AppWindow(setup.svc, profile_dir=setup.dir / "webview", webview=webview, local_port=43123)
+    app = AppWindow(setup.svc, profile_dir=setup.dir / "webview", webview=webview, local_port=43123, local_secret="s" * 32)
     app.create()
-    window.url = "http://127.0.0.1:43123/this-computer.html"
+    window.url = app.local_url("this-computer")
     app.on_loaded()
     nonce = window.scripts[-1].split('"')[1]
     with pytest.raises(PermissionError):
@@ -372,7 +372,7 @@ def test_a_fresh_sign_in_calls_the_notice_once_and_person_only_does_not(setup, m
     fresh = []
     window = FakeWindow()
     webview = types.SimpleNamespace(settings={}, create_window=lambda *a, **k: window, start=lambda *a, **k: None)
-    app = AppWindow(setup.svc, profile_dir=setup.dir / "webview", webview=webview, local_port=43123,
+    app = AppWindow(setup.svc, profile_dir=setup.dir / "webview", webview=webview, local_port=43123, local_secret="s" * 32,
                     later=lambda fn, *a: fn(*a), on_fresh_sign_in=lambda: fresh.append(1))
     monkeypatch.setattr(app, "open_hosted", lambda *a, **k: True)
     app.create()
@@ -419,7 +419,7 @@ def test_the_tray_shows_the_cores_hooks_notice_once():
 def test_a_refused_set_aside_is_shown_and_the_offer_stays(setup, monkeypatch):
     window = FakeWindow()
     webview = types.SimpleNamespace(settings={}, create_window=lambda *a, **k: window, start=lambda *a, **k: None)
-    app = AppWindow(setup.svc, profile_dir=setup.dir / "webview", webview=webview, local_port=43123)
+    app = AppWindow(setup.svc, profile_dir=setup.dir / "webview", webview=webview, local_port=43123, local_secret="s" * 32)
     app.create()
 
     def refuse(agent_config, **kwargs):

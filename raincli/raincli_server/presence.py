@@ -21,6 +21,7 @@ TTL_SECONDS = 120
 STATES = {"ready", "busy", "blocked", "offline", "unknown"}
 
 MAX_AGENTS = 100
+KNOWN_AGENTS_MAX = 500  # names remembered per machine (§18.1 item 5)
 AGENT_NAME_MAX = 64
 AGENT_KEY_RE = re.compile(r"^[a-z0-9]{8,64}$")
 AGENT_TYPES = ("claude", "codex", "gemini", "cursor", "opencode", "other")
@@ -71,6 +72,8 @@ def _parse_agents(value) -> list[dict]:
             raise _invalid(f"{where} must have exactly key, name, type, status, source and optionally role, "
                            "reachability, ambiguous")
         key, name = item["key"], item["name"]
+        if isinstance(name, str) and _leading_dash(name):
+            continue  # §18.1 item 6: such a name is never listed or addressed; only this entry is dropped
         if not _is_str(key) or not AGENT_KEY_RE.fullmatch(key):
             raise _invalid(f"{where}.key must match [a-z0-9]{{8,64}}")
         if key in keys:
@@ -107,9 +110,15 @@ def _parse_agents(value) -> list[dict]:
     return out
 
 
+def _leading_dash(name: str) -> bool:
+    return name.strip().startswith("-")
+
+
 def valid_agent_name(name) -> bool:
-    """A display-name-valid name of at most 64 code points (protocol §14.1, §14.7 H4)."""
+    """A display-name-valid name of at most 64 code points (protocol §14.1, §14.7 H4) that does not start
+    with "-" (§18.1 item 6)."""
     return (security.valid_display_name(name) and len(name) <= AGENT_NAME_MAX
+            and not _leading_dash(name)
             and not any(unicodedata.category(ch) in _NAME_FORBIDDEN_CATEGORIES for ch in name)
             and not TOKEN_RE.search(name))
 
@@ -178,7 +187,11 @@ def _remember_known_agents(session, agent, agents: list[dict], now) -> None:
                   "last_seen_at": stmt.excluded.last_seen_at}))
     session.execute(delete(KnownAgent).where(
         KnownAgent.agent_id == agent.id,
-        KnownAgent.last_seen_at < now - timedelta(days=KNOWN_RETENTION_DAYS)))
+        (KnownAgent.last_seen_at < now - timedelta(days=KNOWN_RETENTION_DAYS)) | KnownAgent.name.startswith("-")))
+    # §18.1 item 5: at most KNOWN_AGENTS_MAX names per machine; the least recently seen go first.
+    keep = (select(KnownAgent.name).where(KnownAgent.agent_id == agent.id)
+            .order_by(KnownAgent.last_seen_at.desc(), KnownAgent.name).limit(KNOWN_AGENTS_MAX))
+    session.execute(delete(KnownAgent).where(KnownAgent.agent_id == agent.id, KnownAgent.name.not_in(keep)))
 
 
 def version_tuple(version: str) -> tuple[int, int, int]:
@@ -207,7 +220,8 @@ def live_machine_agents(session, agent_ids) -> dict:
         return {}
     cutoff = identity.now() - timedelta(seconds=TTL_SECONDS)
     rows = session.scalars(
-        select(MachineAgent).where(MachineAgent.agent_id.in_(ids), MachineAgent.seen_at > cutoff)
+        select(MachineAgent).where(MachineAgent.agent_id.in_(ids), MachineAgent.seen_at > cutoff,
+                                   ~MachineAgent.name.startswith("-"))  # rows stored before §18.1 item 6
         .order_by(MachineAgent.agent_id, MachineAgent.role.is_(None), MachineAgent.name, MachineAgent.key))
     out: dict = {}
     for row in rows:
@@ -228,8 +242,17 @@ def directory(session, agents):
     by_id = {r.agent_id: r for r in rows}
     live = live_machine_agents(session, [a.id for a in agents if a.revoked_at is None])
     now = identity.now()  # the server clock shared with the web view
+    from raincli_server import owners as owners_mod
+    from raincli_server.models import User
+
+    shown: dict = {}
     out = []
     for agent in agents:
+        if agent.team_id not in shown:
+            shown[agent.team_id] = owners_mod.displays(session, agent.team_id)
+        owner = shown[agent.team_id].get(agent.owner_user_id)
+        if owner is None:  # an owner who has left the team
+            owner = owners_mod.display(session, agent.team_id, session.get(User, agent.owner_user_id))
         row = by_id.get(agent.id)
         expires = row.seen_at + timedelta(seconds=TTL_SECONDS) if row else None
         status = row.status if row and expires > now else ("offline" if row else "unknown")
@@ -237,6 +260,7 @@ def directory(session, agents):
         if revoked:
             status = "offline"
         out.append({"handle": agent.handle, "display_name": agent.display_name,
+                    "owner": owner,  # §18.1 item 7: the owner's display name, distinguished in the team
                     "active": not revoked,
                     "presence": {"status": status, "seen_at": row.seen_at.isoformat() if row else None,
                                  "expires_at": expires.isoformat() if expires else None},

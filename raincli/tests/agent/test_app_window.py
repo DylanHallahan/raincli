@@ -170,12 +170,14 @@ def make(tmp_path, services=None, **kw):
     webview = FakeWebview()
     opened = []
     app = AppWindow(services or FakeServices(), profile_dir=tmp_path / "state" / "webview", webview=webview,
-                    browser_open=opened.append, local_port=43123, timer=Timer, later=lambda fn, *a: fn(*a), **kw)
+                    browser_open=opened.append, local_port=43123, local_secret=SECRET, timer=Timer,
+                    later=lambda fn, *a: fn(*a), **kw)
     app.create()
     return app, webview.window, opened
 
 
-LOCAL = "http://127.0.0.1:43123/"
+SECRET = "local-pages-secret-" + "x" * 13  # the per-run path secret (§18.2 item 2); random in the app
+LOCAL = f"http://127.0.0.1:43123/{SECRET}/"
 
 
 def nonce_of(win):
@@ -267,6 +269,7 @@ def test_the_nonce_is_injected_only_into_local_pages(tmp_path):
 def test_js_api_never_returns_a_credential(tmp_path):
     names = [n for n in dir(Api) if not n.startswith("_")]
     assert set(names) == {"sign_in_defaults", "sign_in", "status", "settings", "save_settings", "toggle_pause",
+                          "forget_device",
                           "open_log", "sign_out", "open", "retry", "hooks", "connect_hooks"}
     source = (APP_DIR / "services.py").read_text()
     tree = ast.parse(source)
@@ -422,13 +425,15 @@ def test_closing_hides_and_quit_closes(tmp_path):
 
 def test_start_passes_debug_false_and_no_debugging_settings(tmp_path):
     webview = FakeWebview()
-    app = AppWindow(FakeServices(), profile_dir=tmp_path / "webview", webview=webview, local_port=43123)
+    app = AppWindow(FakeServices(), profile_dir=tmp_path / "webview", webview=webview, local_port=43123,
+                    local_secret=SECRET)
     app.create()
     app.start(lambda: None)
     (kwargs,) = webview.started
-    assert kwargs["debug"] is False and kwargs["http_server"] is True and kwargs["http_port"] == 43123
+    # The local pages come from the app's own server (§18.2 item 2), never pywebview's.
+    assert kwargs["debug"] is False and kwargs["http_server"] is False and "http_port" not in kwargs
     assert kwargs["private_mode"] is False and kwargs["storage_path"] == str(tmp_path / "webview")
-    assert webview.settings == {"ALLOW_DOWNLOADS": True, "ALLOW_FILE_URLS": False, "OPEN_EXTERNAL_LINKS_IN_BROWSER": True}
+    assert webview.settings == {"ALLOW_DOWNLOADS": True, "ALLOW_FILE_URLS": False, "OPEN_EXTERNAL_LINKS_IN_BROWSER": False}
     assert not any("DEBUG" in k for k in window.pywebview_settings())
     title, created = webview.created[0]
     assert created["hidden"] is True and created["js_api"] is app.api and "debug" not in created

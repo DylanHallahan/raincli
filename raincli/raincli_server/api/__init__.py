@@ -8,7 +8,6 @@ before the mount.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
@@ -28,6 +27,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message as ASGIMessage, Receive, Scope, Send
 
 from raincli_server import identity, messaging, presence, security
+from raincli_server import quotas
+from raincli_server.api import polls
 from raincli_server.db import session_scope
 from raincli_server.identity import AgentAuth
 from raincli_server.messaging import MessagingError
@@ -53,8 +54,8 @@ _STATUS_CODES = {
 
 
 def error_response(status: int, code: str, message: str, headers: dict | None = None,
-                   extra: dict | None = None) -> JSONResponse:
-    return JSONResponse({"error": {"code": code, "message": message}, **(extra or {})},
+                   extra: dict | None = None, details: dict | None = None) -> JSONResponse:
+    return JSONResponse({"error": {"code": code, "message": message, **(details or {})}, **(extra or {})},
                         status_code=status, headers=headers)
 
 
@@ -170,6 +171,7 @@ def build_api(parent: FastAPI) -> FastAPI:
     settings = parent.state.settings
     api = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     api.state.rate_limiter = RateLimiter(settings.rate_limit_per_min)
+    api.state.poll_slots = polls.PollSlots()  # §18.1 item 4: concurrent long-polls per credential and user
     # The very LoginLimiter the website uses: a lockout on either applies to both (protocol §15.8 H1).
     api.state.login_limiter = parent.state.web_login_limiter
     api.add_middleware(BodySizeLimit, limit=MAX_BODY_BYTES, send_limit=MAX_SEND_BODY_BYTES,
@@ -184,7 +186,7 @@ def build_api(parent: FastAPI) -> FastAPI:
     @api.exception_handler(MessagingError)
     async def _messaging_error(request: Request, exc: MessagingError):
         return error_response(exc.status, exc.code, exc.message, getattr(exc, "headers", None),
-                              getattr(exc, "extra", None))
+                              getattr(exc, "extra", None), getattr(exc, "details", None))
 
     @api.exception_handler(StarletteHTTPException)
     async def _http_error(request: Request, exc: StarletteHTTPException):
@@ -292,6 +294,7 @@ def build_api(parent: FastAPI) -> FastAPI:
                 session, auth.agent, id=req.id, to=req.to, body=req.body,
                 conversation_id=req.conversation_id, in_reply_to=req.in_reply_to,
                 max_pending=settings.max_pending, attachments=req.attachments,
+                quotas=quotas.Quotas.from_settings(settings),
                 from_agent=req.from_agent, kind=req.kind,
             )
             return created, {"message": m(session, msg), "created": created}
@@ -309,23 +312,17 @@ def build_api(parent: FastAPI) -> FastAPI:
     ):
         wait = min(wait, MAX_WAIT_SECONDS)
         limit = min(limit, messaging.INBOX_LIMIT_MAX)
-        deadline = time.monotonic() + wait
-        first = True
-        while True:
-            def poll(count: bool = first):
-                # Re-authenticate on every poll so revocation ends a long-poll immediately.
-                with session_scope(sessionmaker()) as session:
-                    auth = authenticate(session, request, "messages:read", count=count)
-                    msgs, cursor = messaging.inbox(
-                        session, auth.agent, after=after, limit=limit, include_acked=include_acked,
-                        routing_capable=bool(routing))
-                    return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}
-            result = await run_in_threadpool(poll)
-            first = False
-            remaining = deadline - time.monotonic()
-            if result["messages"] or remaining <= 0 or await request.is_disconnected():
-                return result
-            await asyncio.sleep(min(POLL_INTERVAL, remaining))
+
+        def poll(count: bool):
+            # Re-authenticate on every poll so revocation ends a long-poll immediately.
+            with session_scope(sessionmaker()) as session:
+                auth = authenticate(session, request, "messages:read", count=count)
+                msgs, cursor = messaging.inbox(
+                    session, auth.agent, after=after, limit=limit, include_acked=include_acked,
+                    routing_capable=bool(routing))
+                keys = (("credential", auth.credential.id), ("user", auth.agent.owner_user_id))
+                return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}, keys
+        return await polls.long_poll(request, api.state.poll_slots, wait, POLL_INTERVAL, poll)
 
     @api.put("/routing")
     async def set_routing(request: Request):
@@ -439,7 +436,7 @@ def build_api(parent: FastAPI) -> FastAPI:
             raise ApiError(400, "invalid", "request body must be valid JSON") from None
         ip = web_auth.client_ip(request)
         status, body = await run_in_threadpool(
-            sign_in, sessionmaker(), api.state.login_limiter, data, ip, settings.public_url)
+            sign_in, sessionmaker(), api.state.login_limiter, data, ip, settings.public_url, settings)
         return JSONResponse(body, status_code=status)
 
     from raincli_server.api import person as person_api
@@ -460,20 +457,25 @@ def build_api(parent: FastAPI) -> FastAPI:
 
 
 _LOGIN_FIELDS = {"email", "password", "machine_name", "team", "previous_token", "replace", "person_session",
-                 "person_only"}
+                 "person_only", "known_device"}
 
 
-def sign_in(factory, limiter: web_auth.LoginLimiter, data: object, ip: str, api_url: str) -> tuple[int, dict]:
-    """``POST /api/v1/app/login`` (protocol §15.1, §15.8). Never stores, logs or echoes the password.
+def sign_in(factory, limiter: web_auth.LoginLimiter, data: object, ip: str, api_url: str,
+            settings) -> tuple[int, dict]:
+    """``POST /api/v1/app/login`` (protocol §15.1, §15.8, §18.1 items 1-2). Never stores, logs or echoes the
+    password.
 
-    Only a wrong password counts against the limiter. ``blocked`` is checked before scrypt runs, and
-    once the password is right every outcome calls ``success()`` (§15.8 M2).
+    Only a wrong password counts against the limiter: ``attempt`` checks the limits and records a provisional
+    failure before scrypt runs, and once the password is right every outcome calls ``success()`` (§15.8 M2).
+    A valid ``known_device`` from an earlier sign-in passes the per-email ceiling; every success returns a
+    fresh one.
     """
     person_only = data.get("person_only", False) if isinstance(data, dict) else False
     required = {"email", "password"} | (set() if person_only is True else {"machine_name"})
     if not isinstance(data, dict) or set(data) - _LOGIN_FIELDS or not required <= set(data):
         raise ApiError(400, "invalid", 'body must be {"email", "password", "machine_name", "team"?, '
-                                       '"previous_token"?, "replace"?, "person_session"?, "person_only"?}')
+                                       '"previous_token"?, "replace"?, "person_session"?, "person_only"?, '
+                                       '"known_device"?}')
     email, password, machine_name, team_slug, previous_token = (
         data.get(k) for k in ("email", "password", "machine_name", "team", "previous_token"))
     replace, want_person = data.get("replace", False), data.get("person_session", False)
@@ -490,21 +492,28 @@ def sign_in(factory, limiter: web_auth.LoginLimiter, data: object, ip: str, api_
         raise ApiError(400, "invalid", "machine_name must match ^[a-z][a-z0-9-]{1,31}$")
     if team_slug is not None and not security.valid_slug(team_slug):
         raise ApiError(400, "invalid", "unknown team")
+    known_token = data.get("known_device")
+    if known_token is not None and not isinstance(known_token, str):
+        raise ApiError(400, "invalid", "known_device must be a string")
     email = email.strip()[:254]
-    if limiter.blocked(ip, email):
+    with session_scope(factory) as session:
+        device = web_auth.known_device_for(session, settings, known_token, email)
+    attempt = limiter.attempt(ip, email, device)  # checked and counted in one step (§18.1 item 1)
+    if attempt is None:
         raise ApiError(429, "rate_limited", "too many sign-in attempts; wait a few minutes and try again")
     with session_scope(factory) as session:
         user = identity.authenticate_user(session, email, password) if email and password and len(password) <= 256 else None
         if user is None:
-            limiter.failure(ip, email)
             outcome = ApiError(401, "invalid_credentials", "that email and password combination is not correct")
-        elif person_only:
-            limiter.success(ip, email)
-            outcome = _person_only(session, user, previous_token)
         else:
-            limiter.success(ip, email)
-            outcome = _sign_in_machine(session, user, machine_name, team_slug, api_url,
-                                       previous_token=previous_token, replace=replace, person_session=want_person)
+            limiter.success(attempt)
+            if person_only:
+                outcome = _person_only(session, user, previous_token)
+            else:
+                outcome = _sign_in_machine(session, user, machine_name, team_slug, api_url,
+                                           previous_token=previous_token, replace=replace, person_session=want_person)
+            if not isinstance(outcome, ApiError):  # §18.1 item 2: this app or CLI is now a known device
+                outcome[1]["known_device"] = web_auth.issue_known_device(settings, user)
     if isinstance(outcome, ApiError):
         raise outcome
     return outcome
