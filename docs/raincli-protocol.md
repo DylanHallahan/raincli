@@ -1423,3 +1423,53 @@ Found on a real v0.5.0 machine: a Codex CLI session running, but zero directory 
 **A7. Indexes.** Use partial indexes on the existing endpoint list indexes (`WHERE archived_at IS NULL`), or add the archive filter to them, so the main and archived lists stay index-served. Keep `(team_id, archived_at)` only if a team-wide query uses it.
 
 **A8. Guidance for agents.** `SKILL.md` and the inbox guidance tell agents to archive or unarchive a conversation only when their user asks. The Archived view shows "Archived by <endpoint>".
+
+## 18. Hardening (v0.5.3, binding)
+
+### 18.1 Server
+1. **Sign-in throttling is atomic.**
+   - `LoginLimiter.attempt(ip, email)` checks every limit and records a provisional failure in one locked step. A correct password calls `success()`, which removes that provisional failure.
+   - It is used by `/api/v1/app/login`, the website `/login` and the password change.
+   - Nginx gets an exact `location = /api/v1/app/login`, using the sign-in rate zone (`raincli_login`), as a deployment config change.
+   - **Test:** concurrent wrong-password requests are admitted no further than the configured limits.
+2. **Known devices.**
+   - A successful sign-in issues a signed known-device token bound to the user: an HMAC cookie on the website, with the app's install hash on app sign-ins. It lasts **30 days** and is revoked by a password change.
+   - A request carrying a valid known-device token for that user is exempt from the per-email ceiling. It still counts against the per-pair and per-IP limits.
+   - Unknown devices are unchanged.
+3. **Conversations are scoped by team.**
+   - The default conversation for an endpoint pair is unique per **team** (`team_id`, `a_key`, `b_key`).
+   - Migration **0008** moves any message whose team differs from its conversation's team into that team's default conversation for the same pair, creating it if needed. Nothing is deleted, and a new conversation starts unarchived.
+   - Every conversation message read also requires `message.team_id = conversation.team_id`.
+4. **Concurrent long-polls are capped:**
+   - 2 per credential or person session;
+   - 10 per user;
+   - `429 too_many_polls` beyond that.
+   
+   The slots are released when the poll ends. Nginx gets a smaller connection limit for the two inbox locations.
+5. **Limits:**
+   - the machine cap (§15.9) also applies to the website's "Add a machine";
+   - `known_agents` holds at most 500 rows per machine, dropping the oldest;
+   - handoff codes are deleted once used or expired;
+   - attachments are capped at **50 MiB per credential per day** and **5 GiB per team**, both configurable, with `413 quota_exceeded`.
+6. **Agent names may not start with `-`** (presence, send targets and directory).
+7. **Owner shown:** the CLI `agents` output and the C17 From line show the machine's owner by display name, `machine <handle> (owner <display name>)`. That is the only change to the C17 text.
+
+### 18.2 Client
+1. **Minimum safe version.**
+   - Each release carries `MIN_SAFE_VERSION` (`raincli_agent/security.py`), which v0.5.3 sets to `0.5.3`.
+   - Pushed targets and automatic rollbacks below it are refused (`below_min_safe`), whatever the server sends, in addition to the existing floors.
+   - Only a local `raincli runtime update --rollback --allow-insecure` goes below it, with a warning. The app has no such option.
+2. **The app's local pages:**
+   - the page server binds before it reads its port;
+   - every local URL carries a per-run random path secret, and the js_api nonce is issued only to pages under that secret.
+3. **Links leaving the app:** only `https:` and `mailto:` are handed to the operating system. Everything else is dropped and logged, including pywebview's own new-window path.
+4. **Validation:**
+   - agent names starting with `-` are refused, and Herdr arguments are kept positional;
+   - server-supplied message ids must be canonical UUIDs before any local path use;
+   - name and handle patterns match the whole string (`fullmatch`);
+   - Herdr error text stays in the local log, and the server receives only a fixed reason code.
+
+### 18.3 Tests
+- Each item above has a regression test.
+- Server items run against real PostgreSQL.
+- The app items have Windows e2e coverage.
