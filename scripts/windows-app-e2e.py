@@ -751,12 +751,12 @@ def part_d(app, server, installers, password, observer, menu, work):
         shot(page, "d5-thread")
         page.click(".rc-msg a:has-text('Reply')")
         page.fill("#body", "A reply from the app window")
-        page.click("button[type=submit]")
+        page.click(".rc-compose button[type=submit]")  # the thread header also has Archive
         page.wait_for_url("**notice=sent**", timeout=60000)
         page.click(".rc-new")
         page.fill("#to", OBSERVER)
         page.fill("#body", "A new message from the app window")
-        page.click("button[type=submit]")
+        page.click(".rc-compose button[type=submit]")
         page.wait_for_url("**notice=sent**", timeout=60000)
         wait_for("the observer to receive the reply and the new message",
                  lambda: {"A reply from the app window", "A new message from the app window"}
