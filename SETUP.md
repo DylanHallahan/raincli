@@ -304,7 +304,7 @@ raincli agents                                                         # each ag
 
 - **Delivery** follows each agent's reachability: `instant` (a named Herdr agent, prompted when idle), `next-turn` (a Claude Code or Codex session with RainCLI hooks, handed over at its next turn; Codex runs the hooks only after you trust them once in its `/hooks` view), or `listed` (only listed, so it can't receive). A name two live agents share is ambiguous and refused. A refused message is never quietly sent to the machine instead: the sender is told the machine handle to use.
 - **A message held** for an agent that is busy, offline or not ready waits on this machine; after 14 days offline it is rejected (`expired_offline`). A handover shows how long it waited.
-- **Who may reach your named agents** (`raincli trust`): in `team` mode (the default) any member of your team; in `list` mode only the senders you trust, and others wait until you approve them. You and your own other machines are always trusted (the server marks those messages).
+- **Who may reach your named agents** (`raincli trust`): in `team` mode (the default) any member of your team; in `list` mode only the senders you trust, and others wait until you approve them. You and your own other machines are always trusted (the server marks those messages). **On a machine with sensitive work, use `list` mode** (`raincli trust --mode list`), so a teammate's message reaches its agents only once you trust or approve the sender.
 
 ```bash
 raincli trust                                  # show the mode and the lists
@@ -377,8 +377,12 @@ raincli runtime update --manual           # opt out on this machine; kept across
 raincli runtime update --automatic        # opt back in
 raincli runtime update --check            # check the latest stable release; changes nothing (the default without a flag)
 raincli runtime update --install          # install the latest stable release now
-raincli runtime update --rollback         # switch back to the previous release; sets manual
+raincli runtime update --rollback         # switch back to the previous release; sets manual (see below)
 ```
+
+**Keep automatic updates on.** Each release names a minimum safe version, the oldest release with all current security fixes (v0.5.3 for this release). The client never installs a pushed version below it, and a manual `--rollback` below it is refused. A rollback that undoes a failed update still goes back to the version it replaced. The floor never goes down on a machine that has run a newer release. Going below it on purpose takes `raincli runtime update --rollback --allow-insecure`, which prints a warning; the Windows app has no such option.
+
+**Signing in from a known device.** After a sign-in, this computer keeps a known-device token beside its credential (DPAPI-protected on Windows, mode 0600 elsewhere). Later sign-ins send it, so your own sign-ins from this computer keep working when your account's sign-in limits apply. It is kept when you sign out. `raincli app forget-device` forgets it, and reinstalling the app does too.
 
 **Upgrading a v0.2.0 managed install.** v0.2.0 recorded `automatic: false` whenever nobody chose, so it counts as "not chosen". On the first run of v0.3.0 or later, the runtime turns automatic updates on and prints a **one-time notice** (in its log or `journalctl --user -u raincli-runtime.service`). From then on your choice is recorded, and only `runtime update --manual` (or `--rollback`) turns automatic updates off. Run `raincli runtime update --manual` if you want to stay manual.
 
