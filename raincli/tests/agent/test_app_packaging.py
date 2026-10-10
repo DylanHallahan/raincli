@@ -217,3 +217,17 @@ def test_bundle_check_requires_the_icons(tmp_path):
     embedded[str(exes[1])] = frames[:-1]  # raincli.exe without the 256 px frame
     assert check() == ["RainCLI-1.0.0/raincli.exe does not carry app.ico"]
     assert vb.TRAY_STATES == __import__("raincli_agent.app.status", fromlist=["x"]).ICON_STATES
+
+
+def test_bundle_check_requires_the_local_pages(tmp_path):
+    vb = load_verify_bundle()
+    folder = tmp_path / "RainCLI-1.0.0"
+    local = folder / "_internal" / "raincli_agent" / "app" / "local"
+    local.mkdir(parents=True)
+    source = REPO / "raincli" / "raincli_agent" / "app" / "local"
+    assert set(vb.LOCAL_FILES) == {p.name for p in source.iterdir() if p.suffix in (".html", ".css", ".js")}
+    for name in vb.LOCAL_FILES:
+        (local / name).write_bytes(b"x")
+    assert vb.check_local_pages(tmp_path, folder) == []
+    (local / "localtime.js").unlink()
+    assert vb.check_local_pages(tmp_path, folder) == ["RainCLI-1.0.0/_internal/raincli_agent/app/local/localtime.js is missing"]

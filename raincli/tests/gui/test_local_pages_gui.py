@@ -82,8 +82,8 @@ def artifacts(tmp_path) -> Path:
     return path
 
 
-def open_page(browser, origin, page_name, replies, *, scheme="light", nonce=True, query=""):
-    context = browser.new_context(color_scheme=scheme, viewport={"width": 1180, "height": 780})
+def open_page(browser, origin, page_name, replies, *, scheme="light", nonce=True, query="", **options):
+    context = browser.new_context(color_scheme=scheme, viewport={"width": 1180, "height": 780}, **options)
     page = context.new_page()
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))

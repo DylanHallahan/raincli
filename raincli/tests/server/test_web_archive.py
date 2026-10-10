@@ -138,3 +138,19 @@ def test_machines_page_says_named_agents_can_be_messaged(app, world):
         assert stale not in page
     assert "any named agent marked Instant" in re.sub(r"<[^>]+>", "", page) and "Next turn" in page
     assert "shown for visibility only and can't be messaged" in page
+
+
+def test_every_layout_loads_localtime_without_inline_script(app, session, world, alice_app):  # noqa: F811
+    """§17.1: local time comes from static/localtime.js on the website and in app mode; the CSP is unchanged."""
+    cid = thread(session, world)
+    browser = signed_in(app)
+    for client, path in ((browser, "/app/inbox"), (browser, f"/app/conversations/{cid}"),
+                         (alice_app["webview"], "/app/inbox"), (alice_app["webview"], f"/app/conversations/{cid}")):
+        r = client.get(path)
+        src = re.search(r'<script src="([^"]*localtime\.js[^"]*)" defer></script>', r.text)
+        assert src and "<script>" not in r.text and "onclick" not in r.text, path
+        assert r.headers["content-security-policy"] == ("default-src 'self'; base-uri 'none'; form-action 'self'; "
+                                                         "frame-ancestors 'none'; object-src 'none'")
+        assert '<time datetime="' in r.text and " UTC</time>" in r.text  # the no-JS fallback
+    js = browser.get(src.group(1))
+    assert js.status_code == 200 and "javascript" in js.headers["content-type"] and "Intl.DateTimeFormat" in js.text

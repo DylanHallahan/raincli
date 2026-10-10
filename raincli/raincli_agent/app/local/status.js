@@ -12,6 +12,11 @@
         rc.text("updates", label(s.updates, "—"));
         rc.text("routing", s.routing === "inbox-only" ? "inbox only" : label(s.routing, "—"));
         rc.text("pause", s.paused ? "Resume" : "Pause");
+        var report = document.getElementById("last-report");
+        if (report && report.getAttribute("datetime") !== (s.last_report || null)) {
+          if (s.last_report) { report.textContent = s.last_report; report.setAttribute("datetime", s.last_report); }
+          else { report.removeAttribute("datetime"); report.removeAttribute("title"); report.textContent = "—"; }
+        }
         var list = document.getElementById("agents");
         if (list) {
           list.textContent = "";

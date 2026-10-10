@@ -11,7 +11,8 @@ executable's archive and checks:
   ``PIL``, ``webview``) and never ``tkinter``; the CLI freezes ``raincli_agent.cli``, the stub freezes
   ``raincli_agent.app.stub``, and the PATH shim freezes no client code at all;
 - the app icon (``app.ico``) is embedded in RainCLI-app.exe, raincli.exe and the RainCLI.exe stub, and the
-  four tray icons are bundled with the app;
+  four tray icons are bundled with the app, as are the local pages and every file they load (``localtime.js``
+  among them);
 - the GUI test boundary (§16.11, §16.12 C16): no ``raincli_agent`` module, entry script or bundled
   ``raincli_agent`` file (the local pages) contains a WebView2 debugging switch or its variable.
   Third-party modules are covered by the test asserting ``debug=False`` and no debugging settings.
@@ -27,6 +28,9 @@ import types
 
 HERE = Path(__file__).resolve().parent
 TRAY_STATES = ("ready", "offline", "updating", "error")  # raincli_agent.app.status.ICON_STATES
+# The local pages and the files they load (raincli_agent/app/local); localtime.js is the server's copy (§17.3 A6).
+LOCAL_FILES = ("sign-in.html", "this-computer.html", "settings.html", "offline.html", "local.css", "tokens.css",
+               "local.js", "localtime.js", "status.js", "sign-in.js", "this-computer.js", "settings.js", "offline.js")
 
 FORBIDDEN_NAMES = ("TEST_RELEASE_BASE", "TEST_CERT_SHA256", "_build_test")
 FORBIDDEN_MODULES = ("raincli_server", "pytest", "PyInstaller", "fastapi", "sqlalchemy", "uvicorn")
@@ -168,6 +172,12 @@ def check_icons(dist, folder, exes, ico=HERE / "app.ico", frames_of=exe_icon_fra
     return problems
 
 
+def check_local_pages(dist, folder):
+    """Every local page and the scripts and styles it loads are bundled with the app."""
+    local = folder / "_internal" / "raincli_agent" / "app" / "local"
+    return [f"{(local / name).relative_to(dist)} is missing" for name in LOCAL_FILES if not (local / name).is_file()]
+
+
 def verify(dist, version):
     dist = Path(dist)
     folder = dist / f"RainCLI-{version}"
@@ -190,6 +200,7 @@ def verify(dist, version):
         if exe.parent.name == "bin" and any(m.startswith("raincli_agent") for m in modules):
             problems.append("bin/raincli.exe must not bundle the client; it only forwards to the current version")
     problems += check_icons(dist, folder, [folder / "RainCLI-app.exe", folder / "raincli.exe", dist / "stub" / "RainCLI.exe"])
+    problems += check_local_pages(dist, folder)
     return problems
 
 

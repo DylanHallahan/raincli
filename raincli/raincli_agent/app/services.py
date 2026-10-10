@@ -8,6 +8,7 @@ client's (``raincli_agent.person``; §16.3, §16.10, §16.14 S3, §16.15).
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import __version__
@@ -277,6 +278,9 @@ class Services:
         out = {"connection": "paused" if self.host.paused else model.icon_state(raw), "version": __version__,
                "updates": " · ".join(x for x in (mode, update) if x) or None, "paused": self.host.paused,
                "machine": self.machine_handle(), "team": None, "routing": None, "agents": []}
+        updated = raw.get("updated_at") if isinstance(raw, dict) else None
+        if isinstance(updated, (int, float)) and not isinstance(updated, bool):  # shown in local time (§17.1)
+            out["last_report"] = datetime.fromtimestamp(updated, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         if self.signed_in():
             try:
                 client = self._client(timeout=8)

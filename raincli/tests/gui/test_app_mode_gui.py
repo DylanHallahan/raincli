@@ -107,9 +107,10 @@ def app_user_agent(browser):
         probe.close()
 
 
-def open_app(browser, base, person, scheme="light"):
+def open_app(browser, base, person, scheme="light", **options):
     """A fresh 'webview' profile, signed in through the handoff exactly as the app does."""
-    context = browser.new_context(color_scheme=scheme, accept_downloads=True, user_agent=app_user_agent(browser))
+    context = browser.new_context(color_scheme=scheme, accept_downloads=True, user_agent=app_user_agent(browser),
+                                  **options)
     page = context.new_page()
     page.goto(api(base, "/api/v1/app/handoff", {"app_install_hash": INSTALL_HASH}, person)["url"])
     assert page.url.endswith("/app/inbox"), page.url
@@ -136,7 +137,7 @@ def test_layout_rail_list_thread_compose_in_light_and_dark(people, browser, arti
     for scheme in ("light", "dark"):
         context, page = open_app(browser, base, people["alice"]["person_session"], scheme)
         rail = page.locator("nav.rc-nav a")
-        assert [t.strip() for t in rail.all_inner_texts()] == ["Inbox", "Agents", "This computer", "Settings"]
+        assert [t.strip() for t in rail.all_inner_texts()] == ["Inbox", "Agents", "Archived", "This computer", "Settings"]
         assert page.locator(".site-footer").count() == 0 and page.locator(".site-header").count() == 0
         page.click(".rc-conv")
         assert page.locator(".rc-thread .rc-msg .md strong").inner_text() == "Alice"
@@ -294,10 +295,10 @@ def test_labels_focus_order_and_token_contrast(people, browser):
         assert unlabeled == []
         page.keyboard.press("Tab")
         order = []
-        for _ in range(4):
+        for _ in range(5):
             order.append(page.evaluate("document.activeElement.textContent.trim()"))
             page.keyboard.press("Tab")
-        assert order == ["Inbox", "Agents", "This computer", "Settings"]
+        assert order == ["Inbox", "Agents", "Archived", "This computer", "Settings"]
         tokens = page.evaluate("""() => { const s = getComputedStyle(document.documentElement);
             const probe = (v) => { const el = document.createElement('span'); el.style.color = s.getPropertyValue(v);
               document.body.appendChild(el); const c = getComputedStyle(el).color; el.remove(); return c; };
