@@ -1,0 +1,30 @@
+{% extends "base_app.html" %}
+{% from "_state.html" import time %}
+{% block title %}Archived · {{ product_name }}{% endblock %}
+{% block body_class %} no-list{% endblock %}
+{% block main %}
+<header class="rc-main-head"><div><h2>Archived</h2><p>Hidden from the inbox for both sides. Nothing is deleted, and a new message brings a conversation back.</p></div></header>
+<div class="rc-scroll">
+  <div class="rc-dir">
+    {% if not conversations %}
+    <p class="rc-empty">Nothing archived.</p>
+    {% else %}
+    <ul class="rc-archived">
+      {% for row in conversations %}
+      <li class="rc-card rc-archived-row">
+        <a class="rc-conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}#latest">
+          <span class="rc-conv-top"><span class="rc-conv-name">{{ row.peer.display }}</span>{% if row.unacked %}<span class="rc-count" title="Not yet read">{{ row.unacked }}</span>{% endif %}<span class="rc-conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span></span>
+          <span class="rc-conv-preview">Archived{% if row.archived_by %} by {{ row.archived_by }}{% endif %} · {{ row.team.name }}</span>
+        </a>
+        <form method="post" action="{{ url('/app/conversations/' ~ row.conversation.id ~ '/unarchive') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf }}">
+          <input type="hidden" name="back" value="archived">
+          <button class="rc-btn rc-btn-quiet" type="submit">Unarchive</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

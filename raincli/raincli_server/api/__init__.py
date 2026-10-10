@@ -368,10 +368,46 @@ def build_api(parent: FastAPI) -> FastAPI:
         return await run(request, "messages:ack", work, counted=False)
 
     @api.get("/conversations")
-    async def conversations(request: Request, limit: int = Query(50, ge=1, le=MAX_SEQ)):
+    async def conversations(request: Request, limit: int = Query(50, ge=1, le=MAX_SEQ),
+                            archived: str | None = Query(None, max_length=16)):
         def work(session, auth: AgentAuth):
-            return {"conversations": messaging.list_conversations(session, auth.agent, limit=limit)}
+            # §17.3 A4: a machine credential that names no filter (v0.5.1 and older) sees everything.
+            return {"conversations": messaging.list_conversations(session, auth.agent, limit=limit,
+                                                                  archived=archived or "include")}
         return await run(request, "messages:read", work)
+
+    async def archive_body(request: Request, scope: str):
+        """Nothing, or ``{"archived_through_seq": N}`` (§17.3 A1); authenticated before the body is read."""
+        await run(request, scope, lambda session, auth: None)
+        raw = await request.body()
+        if not raw.strip():
+            return None
+        try:
+            data = json.loads(raw)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            raise ApiError(400, "invalid", "request body must be valid JSON") from None
+        if not isinstance(data, dict) or set(data) - {"archived_through_seq"}:
+            raise ApiError(400, "invalid", 'the body may hold only "archived_through_seq"')
+        return data.get("archived_through_seq")
+
+    # §17.2: one shared archive state; either endpoint may archive or unarchive; idempotent.
+    @api.post("/conversations/{conversation_id}/archive")
+    async def archive_conversation(request: Request, conversation_id: str):
+        through = await archive_body(request, "messages:send")
+
+        def work(session, auth: AgentAuth):
+            conv = messaging.archive_as_machine(session, auth.agent, conversation_id, True, through)
+            return {"conversation": messaging.conversation_json(
+                session, conv, "a" if conv.agent_a_id == auth.agent.id else "b")}
+        return await run(request, "messages:send", work, counted=False)
+
+    @api.post("/conversations/{conversation_id}/unarchive")
+    async def unarchive_conversation(request: Request, conversation_id: str):
+        def work(session, auth: AgentAuth):
+            conv = messaging.archive_as_machine(session, auth.agent, conversation_id, False)
+            return {"conversation": messaging.conversation_json(
+                session, conv, "a" if conv.agent_a_id == auth.agent.id else "b")}
+        return await run(request, "messages:send", work)
 
     @api.get("/conversations/{conversation_id}/messages")
     async def conversation_messages(

@@ -150,3 +150,18 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
   font-size: var(--rc-fs-sm); font-weight: 600; text-decoration: none; box-shadow: var(--rc-shadow-sm); }
 :where(.app-mode) a.rc-new-messages:hover { background: var(--rc-accent-hover); color: var(--rc-on-accent); }
 .rc-new-messages[hidden], .new-messages[hidden] { display: none; }
+
+/* §17.2 archive */
+.rc-archive { display: flex; align-items: center; gap: var(--rc-s-2); }
+.rc-archive form { margin: 0; }
+.rc-archive .archived-marker { font-size: var(--rc-fs-xs); color: var(--rc-muted); font-weight: 600; }
+.rc-archived { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--rc-s-2); }
+.rc-archived-row { display: flex; align-items: center; gap: var(--rc-s-3); }
+.rc-archived-row .rc-conv { flex: 1; min-width: 0; }
+.rc-archived-row form { margin: 0; }
+
+/* Reachability badges, as on the website (reach_badge) */
+.rc-agents .badge { display: inline-flex; align-items: center; height: 20px; padding: 0 var(--rc-s-2); border-radius: var(--rc-radius-pill); font-size: var(--rc-fs-xs); font-weight: 600; white-space: nowrap; flex: none; }
+.rc-agents .reach-instant { background: var(--rc-info-bg); color: var(--rc-info); }
+.rc-agents .reach-next-turn { background: var(--rc-warn-bg); color: var(--rc-warn); }
+.rc-agents .reach-listed { background: var(--rc-surface-2); color: var(--rc-muted); }

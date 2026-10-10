@@ -13,6 +13,7 @@
     <h2>{{ view.peer.display }}</h2>
     <p>{{ view.peer.label }} · {{ view.team.name }}{% if not view.peer.active %} · no longer active{% endif %}</p>
   </div>
+  <div class="rc-archive">{% with btn_class="rc-btn rc-btn-quiet" %}{% include "_archive_controls.html" %}{% endwith %}</div>
   <span class="rc-pill">{{ 'Teammate' if kind == 'person' else 'Agent' if kind == 'agent' else 'Machine inbox' }}</span>
 </header>
 <div class="rc-scroll" data-thread-scroll>

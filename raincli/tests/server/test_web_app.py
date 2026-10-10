@@ -991,7 +991,8 @@ def test_hashed_static_urls_return_immutable(client):
     html = client.get("/").text
     urls = re.findall(r'(?:href|src)="(/static/[^"?]+\?v=[0-9a-f]{12})"', html)
     assert {u.split("?")[0] for u in urls} == {"/static/app.css", "/static/app.js", "/static/mark.svg",
-                                               "/static/favicon.ico", "/static/tokens.css"}
+                                               "/static/favicon.ico", "/static/tokens.css",
+                                               "/static/localtime.js"}
     for url in urls:
         r = client.get(url)
         assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=31536000, immutable"

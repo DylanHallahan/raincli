@@ -43,3 +43,18 @@ def test_pages_reach_the_app_only_through_the_nonce_bridge():
         if name != "local.js":
             assert "pywebview.api" not in js, name  # every call goes through rc.call, which adds the nonce
     assert "[window.__rcNonce].concat(args)" in scripts["local.js"]
+
+
+SERVER_LOCALTIME = SERVER_TOKENS.parent / "localtime.js"
+
+
+def test_local_localtime_is_the_server_copy():
+    # §17.3 A6: the website and the app's local pages format times with the same file.
+    assert (LOCAL_DIR / "localtime.js").read_bytes() == SERVER_LOCALTIME.read_bytes()
+
+
+def test_every_page_loads_localtime():
+    for page in LOCAL_PAGES:
+        html = (LOCAL_DIR / f"{page}.html").read_text("utf-8")
+        assert '<script src="localtime.js" defer></script>' in html, page
+    assert '<time id="last-report">' in (LOCAL_DIR / "this-computer.html").read_text("utf-8")
