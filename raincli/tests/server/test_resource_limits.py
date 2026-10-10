@@ -106,7 +106,7 @@ def test_two_sessions_and_machines_of_one_user_share_the_daily_quota(client, wor
         send_files(session, second, "bob-agent", 200, q)  # 600 KiB > 500 KiB, from another machine of hers
     session.rollback()
     assert refused.value.status == 413 and refused.value.code == "quota_exceeded"
-    assert refused.value.extra["quota"] == "user_daily" and refused.value.extra["resets_at"].endswith("T00:00:00Z")
+    assert refused.value.details["quota"] == "user_daily" and refused.value.details["resets_at"].endswith("T00:00:00Z")
     # Bob is not affected, and a message without attachments is never refused.
     send_files(session, machine(session, world, "bob"), "alice-agent", 200, q)
     messaging.send_message(session, alice, id=str(uuid.uuid4()), to="bob-agent", body="text only",
@@ -147,8 +147,8 @@ def test_one_user_cannot_block_the_team_beyond_the_rolling_window(client, world,
     with pytest.raises(messaging.MessagingError) as refused:
         send_files(session, bob, "alice-agent", 100, q)
     session.rollback()
-    assert refused.value.extra["quota"] == "team_30_days"
-    frees = refused.value.extra["resets_at"]
+    assert refused.value.details["quota"] == "team_30_days"
+    frees = refused.value.details["resets_at"]
     assert frees == (first.created_at + quotas.TEAM_WINDOW).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Once the oldest upload is 30 days old the team has room again.
     session.execute(update(Attachment).where(Attachment.message_id == first.id)
@@ -162,8 +162,10 @@ def test_the_api_answers_413_naming_the_quota(client, world, session):
     session.execute(update(User).where(User.id == world["users"]["alice"].id).values(attachment_quota_bytes=10))
     session.commit()
     r = send(client, world["tokens"]["alice"], "bob-agent", "file", attachments=[att("a.md", b"hello world")])
-    assert r.status_code == 413 and r.json()["error"]["code"] == "quota_exceeded"
-    assert r.json()["quota"] == "user_daily" and "resets" in r.json()["error"]["message"]
+    error = r.json()["error"]
+    assert r.status_code == 413 and set(r.json()) == {"error"}  # the error envelope, the details inside it
+    assert error["code"] == "quota_exceeded" and error["quota"] == "user_daily" and "resets" in error["message"]
+    assert error["resets_at"].endswith("T00:00:00Z")
     assert send(client, world["tokens"]["alice"], "bob-agent", "no file").status_code == 201
 
 

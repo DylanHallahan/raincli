@@ -124,7 +124,14 @@ def test_0008_splits_mixed_conversations_per_team_and_downgrades(scratch_db):
     assert "credential_epoch" not in {c["name"] for c in inspect(db).get_columns("users")}
     assert "moved_from_conversation_id" not in {c["name"] for c in inspect(db).get_columns("messages")}
     assert not [fk for fk in inspect(db).get_foreign_keys("messages") if fk["name"] == "fk_messages_conversation_team"]
-    command.upgrade(cfg, "head")  # and up again
+    command.upgrade(cfg, "head")  # and up again: team B's thread is the pair's team-B default once more
+    with db.connect() as conn:
+        default_b = conn.execute(text(
+            "SELECT id FROM conversations WHERE team_id = :t AND a_key = :a AND b_key = :b AND is_default"),
+            {"t": team_b, "a": old["a_key"], "b": old["b_key"]}).scalars().all()
+        assert default_b == [target]  # so the next team-B send lands in it, not in a new thread
+        assert conn.execute(text("SELECT count(*) FROM conversations WHERE a_key = :a AND b_key = :b"),
+                            {"a": old["a_key"], "b": old["b_key"]}).scalar() == 2
 
 
 def _conv_of_0007(conn, message_id):

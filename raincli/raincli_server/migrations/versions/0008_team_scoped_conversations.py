@@ -17,7 +17,8 @@ Run with the service stopped; Alembic runs it in one transaction.
   overrides of the configured attachment quotas; NULL means the configured default.
 
 The downgrade leaves every message where it is, keeps only the oldest default conversation of each pair as
-the default, and restores the pair-only index.
+the default, and restores the pair-only index. Upgrading again gives each team's thread for a pair its
+default mark back.
 """
 import uuid
 
@@ -47,6 +48,15 @@ def upgrade():
 
     # The default pair becomes per team before any team's own default thread is created below.
     op.drop_index("uq_conversations_default_pair", table_name="conversations")
+    # After a downgrade and a new upgrade, a team's thread for a pair may have lost its default mark: the
+    # oldest conversation of each (team, pair) without a default gets it back, so the thread is not split.
+    op.execute("""
+        UPDATE conversations c SET is_default = true
+        WHERE NOT c.is_default
+          AND NOT EXISTS (SELECT 1 FROM conversations d WHERE d.is_default AND d.team_id = c.team_id
+                          AND d.a_key = c.a_key AND d.b_key = c.b_key)
+          AND c.id = (SELECT o.id FROM conversations o WHERE o.team_id = c.team_id AND o.a_key = c.a_key
+                      AND o.b_key = c.b_key ORDER BY o.created_at, o.id LIMIT 1)""")
     op.create_index("uq_conversations_default_pair", "conversations", ["team_id", "a_key", "b_key"], unique=True,
                     postgresql_where=sa.text("is_default"))
     op.create_unique_constraint("uq_conversations_id_team", "conversations", ["id", "team_id"])

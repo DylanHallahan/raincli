@@ -1,8 +1,10 @@
 """How a machine's owner is shown (protocol §18.1 item 7).
 
 The value is always the server's own record of the owner: their display name. Within a team, a display name
-that looks like another member's (equal after NFKC, case folding, removing accents and folding common
-look-alike letters) is followed by the email's local part, so two owners never read the same.
+that looks like another member's (equal after removing invisible characters, NFKC, case folding, removing
+accents and folding common look-alike letters) is followed by the email's local part. The shown strings are
+then checked again, the same way, until no two members' read alike, so a name chosen to look like another
+member's disambiguated name is distinguished too.
 """
 
 from __future__ import annotations
@@ -22,11 +24,17 @@ _LOOKALIKES = str.maketrans({
     "у": "y", "х": "x", "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "ɡ": "g", "ӏ": "l", "һ": "h",
     "α": "a", "β": "b", "ε": "e", "η": "n", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p", "τ": "t",
     "υ": "u", "χ": "x", "ω": "w", "0": "o", "1": "l", "|": "l", "ı": "i", "ℓ": "l",
+    "ԛ": "q", "ԝ": "w", "ѵ": "v", "ү": "y", "ɑ": "a", "ο": "o",
+    # Armenian
+    "օ": "o", "ս": "u", "ց": "g", "հ": "h", "ո": "n", "ռ": "n", "ք": "p", "զ": "q", "ւ": "l", "Տ": "s",
+    "Օ": "o", "Ս": "u",
 })
 
 
 def skeleton(name: str) -> str:
-    """A form under which names that read alike compare equal."""
+    """A form under which names that read alike compare equal. Format characters (zero-width, joiners, bidi
+    controls) are dropped first: new names may not contain them, but older rows might."""
+    name = "".join(ch for ch in name if unicodedata.category(ch) != "Cf")
     folded = unicodedata.normalize("NFKC", name).casefold()
     folded = "".join(ch for ch in unicodedata.normalize("NFD", folded) if unicodedata.category(ch) != "Mn")
     folded = folded.translate(_LOOKALIKES).replace("i", "l")  # i and l are hard to tell apart in many fonts
@@ -38,16 +46,24 @@ def displays(session: Session, team_id: uuid.UUID, extra: list[User] = ()) -> di
     users = {u.id: u for u in session.scalars(
         select(User).join(Membership, Membership.user_id == User.id).where(Membership.team_id == team_id))}
     users.update({u.id: u for u in extra if u is not None})
-    by_skeleton: dict[str, set[uuid.UUID]] = {}
-    for user in users.values():
-        by_skeleton.setdefault(skeleton(user.display_name), set()).add(user.id)
-    out = {}
-    for user in users.values():
-        name = user.display_name
-        if len(by_skeleton[skeleton(name)]) > 1:
-            name = f"{name} ({user.email.split('@', 1)[0]})"
-        out[user.id] = name
+    out = {uid: user.display_name for uid, user in users.items()}
+    # Each round adds a distinguishing suffix to every name that still reads like another's: the email's local
+    # part, then the whole email, then part of the account id, which is unique.
+    for suffix in (lambda u: u.email.split("@", 1)[0], lambda u: u.email, lambda u: u.id.hex[:12]):
+        clashing = _clashes(out)
+        if not clashing:
+            break
+        for uid in clashing:
+            out[uid] = f"{out[uid]} ({suffix(users[uid])})"
     return out
+
+
+def _clashes(shown: dict[uuid.UUID, str]) -> set[uuid.UUID]:
+    """The users whose shown name reads like (or is) another user's."""
+    by_skeleton: dict[str, set[uuid.UUID]] = {}
+    for uid, name in shown.items():
+        by_skeleton.setdefault(skeleton(name), set()).add(uid)
+    return {uid for group in by_skeleton.values() if len(group) > 1 for uid in group}
 
 
 def display(session: Session, team_id: uuid.UUID, user: User) -> str:
