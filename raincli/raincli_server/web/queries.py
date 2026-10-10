@@ -557,13 +557,13 @@ _FRIENDLY = {
 def send_as_person(
     db: Session, user: User, team: Team, *, id: uuid.UUID, to: object, body: str,  # noqa: A002
     conversation_id: uuid.UUID | None, in_reply_to: uuid.UUID | None, max_pending: int,
-    attachments: list[tuple[str, bytes]] | None = None,
+    attachments: list[tuple[str, bytes]] | None = None, quotas=None,
 ) -> tuple[Message, bool]:
     """Send as the person (§16.9) through ``messaging.send_as_person``. Raises SendError."""
     try:
         return messaging.send_as_person(
             db, user, team.id, id=id, to=to, body=body, conversation_id=conversation_id,
-            in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments or None,
+            in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments or None, quotas=quotas,
         )
     except messaging.MessagingError as exc:
         if exc.code == "not_deliverable":

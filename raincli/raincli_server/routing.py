@@ -134,13 +134,15 @@ def resolve(session: Session, team_id: uuid.UUID, ref: EndpointRef, *, lock: boo
 def live_entries(session: Session, agent_id: uuid.UUID, name: str) -> list[MachineAgent]:
     cutoff = identity.now() - timedelta(seconds=LIVE_SECONDS)
     return list(session.scalars(select(MachineAgent).where(
-        MachineAgent.agent_id == agent_id, MachineAgent.name == name, MachineAgent.seen_at > cutoff)))
+        MachineAgent.agent_id == agent_id, MachineAgent.name == name, MachineAgent.seen_at > cutoff,
+        ~MachineAgent.name.startswith("-"))))
 
 
 def known_agent(session: Session, agent_id: uuid.UUID, name: str, days: int = KNOWN_DAYS) -> KnownAgent | None:
     cutoff = identity.now() - timedelta(days=days)
     return session.scalar(select(KnownAgent).where(
-        KnownAgent.agent_id == agent_id, KnownAgent.name == name, KnownAgent.last_seen_at > cutoff))
+        KnownAgent.agent_id == agent_id, KnownAgent.name == name, KnownAgent.last_seen_at > cutoff,
+        ~KnownAgent.name.startswith("-")))
 
 
 def deliverable(entry: MachineAgent) -> bool:

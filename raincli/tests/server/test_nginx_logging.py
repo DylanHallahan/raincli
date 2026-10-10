@@ -68,3 +68,26 @@ def test_every_server_and_location_logs_with_a_raincli_format_or_not_at_all():
         assert parts == ["off"] or (len(parts) == 2 and parts[1] in ("raincli_main", "raincli_noquery")), value
     for server in re.split(r"\nserver \{", site)[1:]:
         assert re.search(r"^    access_log ", server, re.M), "each server block sets its own access_log"
+
+
+def _location(name):
+    match = re.search(r"location " + re.escape(name) + r" \{(.*?)\n    \}", SITE, re.S)
+    assert match, name
+    return _strip_comments(match.group(1))
+
+
+def test_app_sign_in_has_its_own_login_rate_zone():
+    """§18.1: an exact location for the app sign-in, in a zone separate from the website's sign-in."""
+    assert re.search(r"limit_req_zone \$binary_remote_addr zone=raincli_app_login:10m rate=10r/m;", HTTP)
+    block = _location("= /api/v1/app/login")
+    assert "limit_req zone=raincli_app_login burst=5 nodelay;" in block and "proxy_pass http://raincli_app;" in block
+    assert "zone=raincli_login " in _location("= /login")
+
+
+def test_inbox_long_polls_have_their_own_connection_limit_answering_429():
+    assert re.search(r"limit_conn_zone \$binary_remote_addr zone=raincli_poll_conn:10m;", HTTP)
+    general = int(re.search(r"limit_conn raincli_conn (\d+);", SITE).group(1))
+    for name in ("= /api/v1/inbox", "= /api/v1/person/inbox"):
+        block = _location(name)
+        limit = int(re.search(r"limit_conn raincli_poll_conn (\d+);", block).group(1))
+        assert limit >= general and "limit_conn_status 429;" in block, name

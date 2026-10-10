@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from sqlalchemy import select
 
-from raincli_server import identity, messaging, security
+from raincli_server import identity, messaging, quotas, security
 from raincli_server.config import Settings
 from raincli_server.models import Agent, HandoffCode, Message, PersonSession, Team, User
 from raincli_server.web import auth, queries
@@ -639,9 +639,10 @@ def send_message(
             db, viewer.user, team_obj, id=mid, to=queries.endpoint_from_text(to), body=body,
             conversation_id=conv_for_send, in_reply_to=parent_id,
             max_pending=_settings(request).max_pending, attachments=attachments,
+            quotas=quotas.Quotas.from_settings(_settings(request)),
         )
     except queries.SendError as exc:
-        status = 429 if exc.code == "inbox_full" else 409 if exc.code == "id_conflict" else 400
+        status = {"inbox_full": 429, "id_conflict": 409, "quota_exceeded": 413}.get(exc.code, 400)
         return fail(status, exc.message)
     db.commit()
     notice = "sent" if created else "duplicate"

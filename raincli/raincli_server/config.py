@@ -22,6 +22,9 @@ class Settings:
     # Branding (protocol §16.9): one product name and one logo (a file in web/static).
     product_name: str = "RainCLI"
     product_logo: str = "mark.svg"
+    # Attachment quotas (protocol §18.1 item 5): bytes per user per UTC day, and per team over 30 days.
+    attachment_user_daily_bytes: int = 50 * 1024 * 1024
+    attachment_team_30d_bytes: int = 5 * 1024 * 1024 * 1024
 
     def __repr__(self) -> str:  # never show secrets or DB passwords
         return f"Settings(public_url={self.public_url!r}, root_path={self.root_path!r})"
@@ -50,7 +53,18 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         rate_limit_per_min=int(env.get("RAINCLI_RATE_LIMIT_PER_MIN", "120")),
         product_name=_product_name(env.get("RAINCLI_PRODUCT_NAME", "RainCLI")),
         product_logo=_product_logo(env.get("RAINCLI_PRODUCT_LOGO", "mark.svg")),
+        attachment_user_daily_bytes=_bytes(env, "RAINCLI_ATTACHMENT_USER_DAILY_BYTES", 50 * 1024 * 1024),
+        attachment_team_30d_bytes=_bytes(env, "RAINCLI_ATTACHMENT_TEAM_30D_BYTES", 5 * 1024 * 1024 * 1024),
     )
+
+
+def _bytes(env: dict[str, str], name: str, default: int) -> int:
+    value = env.get(name, "").strip()
+    if not value:
+        return default
+    if not value.isdigit() or int(value) < 1:
+        raise ConfigError(f"{name} must be a whole number of bytes")
+    return int(value)
 
 
 def _product_name(value: str) -> str:

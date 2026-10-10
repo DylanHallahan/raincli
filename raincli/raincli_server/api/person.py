@@ -7,9 +7,7 @@ Every request re-checks the user, the session's lifetime and, per action, team m
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 import uuid
 from datetime import timedelta
 from typing import Callable
@@ -20,6 +18,8 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 
 from raincli_server import identity, messaging, security
+from raincli_server import quotas
+from raincli_server.api import polls
 from raincli_server.db import session_scope
 from raincli_server.identity import PersonAuth
 from raincli_server.models import HandoffCode, Team
@@ -110,21 +110,15 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
                            include_acked: bool = Query(False)):
         wait = min(wait, MAX_WAIT_SECONDS)
         limit = min(limit, messaging.INBOX_LIMIT_MAX)
-        deadline = time.monotonic() + wait
-        first = True
-        while True:
-            def poll(count: bool = first):
-                with session_scope(sessionmaker()) as session:
-                    auth = authenticate(session, request, "person:read", count=count)
-                    msgs, cursor = messaging.person_inbox(session, auth.user, after=after, limit=limit,
-                                                          include_acked=include_acked)
-                    return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}
-            result = await run_in_threadpool(poll)
-            first = False
-            remaining = deadline - time.monotonic()
-            if result["messages"] or remaining <= 0 or await request.is_disconnected():
-                return result
-            await asyncio.sleep(min(POLL_INTERVAL, remaining))
+
+        def poll(count: bool):
+            with session_scope(sessionmaker()) as session:
+                auth = authenticate(session, request, "person:read", count=count)
+                msgs, cursor = messaging.person_inbox(session, auth.user, after=after, limit=limit,
+                                                      include_acked=include_acked)
+                keys = (("person", auth.person_session.id), ("user", auth.user.id))
+                return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}, keys
+        return await polls.long_poll(request, api.state.poll_slots, wait, POLL_INTERVAL, poll)
 
     @api.post("/person/messages/{message_id}/ack")
     async def person_ack(request: Request, message_id: str):
@@ -211,7 +205,8 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
             msg, created = messaging.send_as_person(
                 session, auth.user, team.id, id=req.id, to=req.to, body=req.body,
                 conversation_id=req.conversation_id, in_reply_to=req.in_reply_to,
-                max_pending=settings.max_pending, attachments=req.attachments, kind=req.kind)
+                max_pending=settings.max_pending, attachments=req.attachments,
+                quotas=quotas.Quotas.from_settings(settings), kind=req.kind)
             return created, {"message": m(session, msg), "created": created}
         created, body = await run(request, "person:send", work, counted=False)
         return JSONResponse(body, status_code=201 if created else 200)
@@ -253,6 +248,7 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
             raise ApiError(400, "invalid", "app_install_hash must be 64 lowercase hex characters")
 
         def work(session, auth: PersonAuth):
+            identity.purge_handoff_codes(session)  # used and expired codes never accumulate (§18.1 item 5)
             code = security.new_token(security.HANDOFF_CODE_PREFIX)
             expires = identity.now() + HANDOFF_TTL
             session.add(HandoffCode(id=uuid.uuid4(), code_hash=security.hash_token(code),

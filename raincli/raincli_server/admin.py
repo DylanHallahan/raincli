@@ -87,6 +87,37 @@ def _agent(session: Session, team: Team, handle: str) -> Agent:
     return agent
 
 
+def _quota(session: Session, args, env, stdout) -> None:
+    """``quota``: usage against the limit; ``--set``/``--default`` change the override (§18.1 item 5)."""
+    from datetime import datetime, timezone
+
+    from raincli_server import quotas
+    from raincli_server.config import load_settings
+
+    try:
+        configured = quotas.Quotas.from_settings(load_settings(env))
+    except Exception:  # noqa: BLE001 - the CLI may run without the full server environment
+        configured = quotas.Quotas()
+    subject = _user(session, args.user) if args.user else _team(session, args.team)
+    if args.set is not None:
+        if args.set < 1:
+            raise AdminError("--set needs a positive number of bytes")
+        subject.attachment_quota_bytes = args.set
+    elif args.default:
+        subject.attachment_quota_bytes = None
+    session.flush()
+    now = datetime.now(timezone.utc)
+    if args.user:
+        used, limit, what = quotas.user_usage(session, subject.id, now), quotas.user_limit(subject, configured), \
+            "today (UTC)"
+    else:
+        used, limit, what = quotas.team_usage(session, subject.id, now), quotas.team_limit(subject, configured), \
+            "in the last 30 days"
+    source = "set for this " + ("user" if args.user else "team") if subject.attachment_quota_bytes is not None \
+        else "configured default"
+    print(f"{args.user or args.team}: {used} of {limit} bytes of attachments {what} ({source})", file=stdout)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="raincli-admin", description="RainCLI operator CLI")
     sub = p.add_subparsers(dest="command", required=True)
@@ -114,6 +145,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     c = sub.add_parser("enable-user", help="re-enable a disabled user (revoked agents stay revoked)")
     c.add_argument("--email", required=True)
+
+    c = sub.add_parser("quota", help="show a user's or team's attachment usage and quota; --set raises it")
+    who = c.add_mutually_exclusive_group(required=True)
+    who.add_argument("--user", metavar="EMAIL", help="the per-user daily quota")
+    who.add_argument("--team", metavar="SLUG", help="the per-team 30-day quota")
+    how = c.add_mutually_exclusive_group()
+    how.add_argument("--set", type=int, metavar="BYTES", help="this user's or team's quota from now on")
+    how.add_argument("--default", action="store_true", help="go back to the configured quota")
 
     c = sub.add_parser("invite", help="create an invitation and print its URL")
     c.add_argument("--team", required=True, metavar="SLUG")
@@ -202,6 +241,8 @@ def _dispatch(args, session: Session, env, stdin, stdout, stderr, prompt) -> Non
         identity.set_user_active(session, _user(session, args.email), active)
         print(f"{args.email} is {'enabled' if active else 'disabled; web sessions and agents revoked'}",
               file=stdout)
+    elif cmd == "quota":
+        _quota(session, args, env, stdout)
     elif cmd == "invite":
         _, token = identity.create_invitation(
             session, _team(session, args.team), _user(session, args.by), args.email)

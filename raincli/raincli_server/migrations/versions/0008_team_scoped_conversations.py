@@ -12,6 +12,7 @@ Run with the service stopped; Alembic runs it in one transaction.
   message is at or below that one's ``archived_through_seq``; otherwise it starts unarchived. Nothing is
   deleted;
 - users.credential_epoch: bumped whenever the user's credentials change, ending recognised devices;
+- directory rows (known_agents, machine_agents) of names starting with "-" are dropped;
 - users.attachment_quota_bytes and teams.attachment_quota_bytes: per-user (daily) and per-team (30-day)
   overrides of the configured attachment quotas; NULL means the configured default.
 
@@ -81,6 +82,9 @@ def upgrade():
 
     op.create_foreign_key("fk_messages_conversation_team", "messages", "conversations",
                           ["conversation_id", "team_id"], ["id", "team_id"])
+    # Agent names may not start with "-": directory rows of such names are dropped (machines re-report).
+    op.execute("DELETE FROM known_agents WHERE ltrim(name) LIKE '-%'")
+    op.execute("DELETE FROM machine_agents WHERE ltrim(name) LIKE '-%'")
 
 
 def downgrade():

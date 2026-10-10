@@ -8,7 +8,6 @@ before the mount.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
@@ -28,6 +27,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message as ASGIMessage, Receive, Scope, Send
 
 from raincli_server import identity, messaging, presence, security
+from raincli_server import quotas
+from raincli_server.api import polls
 from raincli_server.db import session_scope
 from raincli_server.identity import AgentAuth
 from raincli_server.messaging import MessagingError
@@ -170,6 +171,7 @@ def build_api(parent: FastAPI) -> FastAPI:
     settings = parent.state.settings
     api = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     api.state.rate_limiter = RateLimiter(settings.rate_limit_per_min)
+    api.state.poll_slots = polls.PollSlots()  # §18.1 item 4: concurrent long-polls per credential and user
     # The very LoginLimiter the website uses: a lockout on either applies to both (protocol §15.8 H1).
     api.state.login_limiter = parent.state.web_login_limiter
     api.add_middleware(BodySizeLimit, limit=MAX_BODY_BYTES, send_limit=MAX_SEND_BODY_BYTES,
@@ -292,6 +294,7 @@ def build_api(parent: FastAPI) -> FastAPI:
                 session, auth.agent, id=req.id, to=req.to, body=req.body,
                 conversation_id=req.conversation_id, in_reply_to=req.in_reply_to,
                 max_pending=settings.max_pending, attachments=req.attachments,
+                quotas=quotas.Quotas.from_settings(settings),
                 from_agent=req.from_agent, kind=req.kind,
             )
             return created, {"message": m(session, msg), "created": created}
@@ -309,23 +312,17 @@ def build_api(parent: FastAPI) -> FastAPI:
     ):
         wait = min(wait, MAX_WAIT_SECONDS)
         limit = min(limit, messaging.INBOX_LIMIT_MAX)
-        deadline = time.monotonic() + wait
-        first = True
-        while True:
-            def poll(count: bool = first):
-                # Re-authenticate on every poll so revocation ends a long-poll immediately.
-                with session_scope(sessionmaker()) as session:
-                    auth = authenticate(session, request, "messages:read", count=count)
-                    msgs, cursor = messaging.inbox(
-                        session, auth.agent, after=after, limit=limit, include_acked=include_acked,
-                        routing_capable=bool(routing))
-                    return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}
-            result = await run_in_threadpool(poll)
-            first = False
-            remaining = deadline - time.monotonic()
-            if result["messages"] or remaining <= 0 or await request.is_disconnected():
-                return result
-            await asyncio.sleep(min(POLL_INTERVAL, remaining))
+
+        def poll(count: bool):
+            # Re-authenticate on every poll so revocation ends a long-poll immediately.
+            with session_scope(sessionmaker()) as session:
+                auth = authenticate(session, request, "messages:read", count=count)
+                msgs, cursor = messaging.inbox(
+                    session, auth.agent, after=after, limit=limit, include_acked=include_acked,
+                    routing_capable=bool(routing))
+                keys = (("credential", auth.credential.id), ("user", auth.agent.owner_user_id))
+                return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}, keys
+        return await polls.long_poll(request, api.state.poll_slots, wait, POLL_INTERVAL, poll)
 
     @api.put("/routing")
     async def set_routing(request: Request):

@@ -139,6 +139,33 @@ Existing handles keep working unchanged, and each becomes a machine once its run
 
 The server itself never logs the User-Agent (uvicorn access logging stays off). After the reload, confirm that `grep -c 'RainCLIApp/[^[]' /var/log/nginx/raincli.access.log` stays at 0 once an app has opened its window.
 
+### Upgrading to the v0.5.3 server (migration `0008`)
+
+The server half ships first, ahead of the v0.5.3 client release. Older clients keep working: they ignore the
+new reply fields.
+
+1. **Stop the service before installing.** Migration `0008` changes the conversation indexes that the running
+   release uses, so it must run with the service stopped: `sudo systemctl stop raincli`, then run `install.sh` as
+   above. It backs up, migrates in one transaction, and starts the new release. The migration files any message
+   whose team differs from its conversation's into that team's own conversation; nothing is deleted. A downgrade
+   (`raincli_server.migrate downgrade 0007`, again with the service stopped) leaves messages where they are.
+2. **Reinstall both Nginx files** as in step 5 of the first deployment, keeping the host's `ssl_certificate`
+   lines, then run `sudo nginx -t && sudo systemctl reload nginx`. The new files:
+   - add `location = /api/v1/app/login` in its own zone, `raincli_app_login` (10 requests a minute, burst 5),
+     so the app and CLI sign-in and the website sign-in each have a per-IP budget. If the host already has an
+     exact app sign-in location using `raincli_login`, the new file replaces it;
+   - count inbox long-polls (`/api/v1/inbox`, `/api/v1/person/inbox`) in their own connection zone,
+     `raincli_poll_conn`, at 40 per IP, the same as the general limit, and answer `429` past it. The app limits
+     concurrent polls per credential and per user and answers an extra poll at once, so this is a backstop.
+3. **Single worker.** The long-poll limits are counted in the process; `raincli.service` runs `--workers 1`.
+   Keep it that way, or move the counters to shared state first.
+4. **New settings (optional).** Attachment quotas default to 50 MiB per user per UTC day and 5 GiB per team
+   over a rolling 30 days. Set `RAINCLI_ATTACHMENT_USER_DAILY_BYTES` or `RAINCLI_ATTACHMENT_TEAM_30D_BYTES` in the
+   secrets file to change them for everyone, or use `rc_admin quota --user EMAIL` or `rc_admin quota --team SLUG`
+   (with `--set BYTES` or `--default`) to show usage or change one user's or team's quota.
+5. **Verify** as in step 6, then check that a wrong-password burst against `/api/v1/app/login` is answered `429`
+   after the burst, and that the website sign-in still works from the same address.
+
 ### Client versions (admin CLI)
 
 The operator chooses which client version each team's managed installs run. The server stores and replies with **a version only**; clients install it only from stable releases of the canonical GitHub repository, so the server can't choose where code comes from. Releases are unsigned (see [SETUP.md](../SETUP.md#updates)).
