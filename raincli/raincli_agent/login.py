@@ -472,7 +472,8 @@ def _login_error(exc, machine_name=None):
 def request_person_only(api_url, email, password, machine_token, *, device_config=None):
     """``POST /api/v1/app/login`` with ``person_only`` (§16.3): a person session for the
     owner of the machine whose current credential is ``machine_token``. It rotates
-    nothing. Returns ``(session as a Secret, known-device token or None)``."""
+    nothing. Returns the session as a ``Secret``; with ``device_config`` it sends this computer's
+    known-device token and keeps the one the reply carries."""
     if not isinstance(password, Secret):
         raise TypeError("password must be a Secret")
     body = {"email": email, "password": password.reveal(), "previous_token": machine_token.reveal(),

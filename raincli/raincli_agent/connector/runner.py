@@ -66,7 +66,14 @@ def frame_record(record, identity, guidance="", agent_config=None, held_seconds=
                         record.get("attachments_local") or (), guidance, agent_config,
                         machine=identity.get("handle", ""), target=record.get("target"), person=person,
                         from_agent=message.get("from_agent"), held_seconds=held_seconds,
-                        owner=origin.get("owner") if isinstance(origin, dict) and not person else None)
+                        owner=_from_owner(message, person))
+
+
+def _from_owner(message, person):
+    """How the server shows the sending machine's owner (top-level ``from_owner``, §18.1 item 7):
+    a string, and never for a person sender."""
+    owner = message.get("from_owner")
+    return owner if isinstance(owner, str) and owner and not person else None
 
 
 EMAIL_SENDER_RE = re.compile(r"^@[^@\s/\\]{1,64}@[^@\s/\\]{1,190}$")

@@ -268,11 +268,12 @@ class FakeState:
         to_handle = self.agents[m["recipient"]]["handle"]
         to_endpoint = {"machine": to_handle, **({"agent": m["agent"]} if m.get("agent") else {})}
         from_endpoint = ({"person": person["email"], "display_name": person["display_name"]} if person
-                         else {"machine": sender, **({"owner": self.owner_names[m["sender"]]}
-                                                     if m["sender"] in self.owner_names else {})})
+                         else {"machine": sender})
         return {"id": m["id"], "conversation_id": m["conversation_id"], "in_reply_to": m["in_reply_to"],
                 "from": sender, "to": to_handle, "from_endpoint": from_endpoint, "to_endpoint": to_endpoint,
                 "from_agent": m.get("from_agent"), "kind": m.get("kind", "message"), "hold_reason": None,
+                # As messaging.message_json: the sending machine's owner at the top level, null for a person.
+                "from_owner": None if person else self.owner_names.get(m["sender"]),
                 "from_same_owner": self.same_owner(m),
                 "body": m["body"], "created_at": m["created_at"], "seq": m["seq"],
                 "acked_at": m["acked_at"], "delivery_state": m["delivery_state"],
