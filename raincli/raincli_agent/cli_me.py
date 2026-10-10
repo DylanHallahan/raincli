@@ -136,6 +136,9 @@ def cmd_me_inbox(args):
                     return EXIT_OK if received else EXIT_TIMEOUT
                 wait = max(0, min(25, int(remaining + 0.999)))
             page, cursor = api.inbox(after=after, wait=wait, include_acked=args.all)
+            if not page and api.poll_backoff:  # §18.1 item 4: an empty answer with Retry-After
+                time.sleep(api.poll_backoff if deadline is None else
+                           max(0.0, min(api.poll_backoff, deadline - time.monotonic())))
             fresh = [m for m in page if m["id"] not in seen]
             seen.update(m["id"] for m in fresh)
             if fresh:
@@ -344,6 +347,13 @@ def cmd_routing(args):
     return EXIT_OK
 
 
+def cmd_app_forget_device(args):
+    """The next sign-in from this computer counts as a new device (§18.1 item 2)."""
+    out("forgot this device" if person.forget_known_device(_agent_config(args))
+        else "this computer had no saved device")
+    return EXIT_OK
+
+
 def cmd_app_rotate(args):
     """For the app installer (§16.14 S3): a fresh ``app_install_token``. Prints no token."""
     person.rotate_app_install_token(_agent_config(args))
@@ -436,6 +446,9 @@ def register(sub, parser_class):
     rotate = app_sub.add_parser("rotate-install-token",
                                 help="give this install a new app token (the installer runs it; prints no token)")
     rotate.set_defaults(func=cmd_app_rotate)
+    forget = app_sub.add_parser("forget-device",
+                                help="forget this computer as a known device (its next sign-in counts as new)")
+    forget.set_defaults(func=cmd_app_forget_device)
 
 
 def _checked_trust(args):

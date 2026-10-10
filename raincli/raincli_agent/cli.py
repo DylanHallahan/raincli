@@ -247,7 +247,8 @@ def cmd_agents(args):
             client_info = (f"  raincli {escape_line(str(machine.get('client_version') or '?'))}"
                            f" {escape_line(str(machine.get('update_mode') or ''))}"
                            f" {escape_line(state)}{escape_line(error)}")
-        out(f"{escape_line(a['handle'])}  {escape_line(a.get('display_name') or '')}{flag}{status}{client_info}")
+        owner = f" (owner {escape_line(str(a['owner']))[:80]})" if a.get("owner") else ""  # §18.1 item 7
+        out(f"{escape_line(a['handle'])}{owner}  {escape_line(a.get('display_name') or '')}{flag}{status}{client_info}")
         sessions = sorted(a.get("agents") or [], key=lambda s: (s.get("role") != "inbox", str(s.get("name"))))
         for s in sessions:
             role = "inbox" if s.get("role") == "inbox" else "     "
@@ -469,7 +470,7 @@ def cmd_fetch(args):
     if args.dir:  # the user's choice is trusted as the base; files go straight into it
         directory = att.prepare_dir(args.dir)
     else:  # cwd is the base; raincli-attachments/<mid>/ are ours and must not be symlinks
-        directory = att.prepare_dir(os.getcwd(), "raincli-attachments", message["id"])
+        directory = att.prepare_dir(os.getcwd(), "raincli-attachments", message["id"])  # checked: the id asked for
     status = EXIT_OK
     for meta in items:
         name = meta["filename"]
@@ -510,6 +511,9 @@ def cmd_watch(args):
                     return EXIT_OK if received else EXIT_TIMEOUT
                 wait = max(0, min(MAX_WAIT, math.ceil(remaining)))
             page, cursor = api.inbox(after=after, wait=wait)
+            if not page and api.poll_backoff:  # §18.1 item 4: an empty answer with Retry-After
+                time.sleep(api.poll_backoff if deadline is None else
+                           max(0.0, min(api.poll_backoff, deadline - time.monotonic())))
             fresh = [m for m in page if m["id"] not in seen]
             for m in fresh:
                 seen.add(m["id"])
@@ -733,7 +737,11 @@ def cmd_runtime_update(args):
     from .login import runtime_config_path, runtime_mode
     mode = "manual" if args.manual or args.automatic == "off" else "automatic" if args.automatic else None
     app = winapp.app_root() if not args.root else None
+    if args.allow_insecure and not args.rollback:
+        raise UsageError("--allow-insecure only applies to --rollback")
     if app is not None:
+        if args.allow_insecure:
+            raise UsageError("the RainCLI app never rolls back below the minimum safe version")
         if args.rollback or mode is not None:
             out_json(winapp.configure(app, mode=mode, rollback=args.rollback))
             return EXIT_OK
@@ -749,7 +757,10 @@ def cmd_runtime_update(args):
         from .runtime.startup import installed_config
         from .runtime import floors
         candidates = [args.config, runtime_config_path(default_config_path()), installed_config()]
-        result = updates.configure(args.root, mode=mode, rollback=args.rollback, floor=floors.floor_for(candidates))
+        result = updates.configure(args.root, mode=mode, rollback=args.rollback, floor=floors.floor_for(candidates),
+                                   allow_insecure=args.allow_insecure)
+        if result.get("warning"):
+            print(f"raincli: {result['warning']}", file=sys.stderr)
     elif args.install:
         result = updates.install(args.root)
     else:
@@ -869,9 +880,12 @@ def print_hooks_hint(runtime_config):
     """§16.19 3: after sign-in, name each installed agent that isn't connected, with the command
     that connects it. Hooks are never installed without the user's command. Best effort."""
     from .runtime import hooks_install
+    # Bounded: a Codex that is slow to start (an npx install downloading on first run) is skipped,
+    # so a sign-in never waits on it; `raincli hooks install` keeps the long probe.
+    quick = lambda: hooks_install.codex_support(timeout=hooks_install.HINT_TIMEOUT)  # noqa: E731
     for kind in ("claude", "codex"):
         try:
-            state = hooks_install.status(kind, runtime_config)
+            state = hooks_install.status(kind, runtime_config, probe=quick)
         except Exception:  # noqa: BLE001 - a hint never fails a sign-in
             continue
         if state != "not_connected":
@@ -1094,6 +1108,9 @@ def build_parser():
     operation.add_argument("--manual", action="store_true",
                            help="opt out of pushed updates on this machine (persisted); "
                                 "--check and --install still work")
+    update.add_argument("--allow-insecure", action="store_true",
+                        help="with --rollback: allow a previous version older than the minimum safe version "
+                             "(not recommended; the RainCLI app has no such option)")
     update.set_defaults(func=cmd_runtime_update)
 
     startup = runtime_sub.add_parser(

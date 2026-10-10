@@ -315,6 +315,9 @@ def isolate_home():
     Windows runner is disposable and keeps its profile (the scan and Codex stages need it)."""
     if os.name != "nt":
         home = Path(tempfile.mkdtemp(prefix="raincli-smoke-home-"))
+        import atexit
+        import shutil
+        atexit.register(shutil.rmtree, home, True)  # pip caches land here: never left behind
         os.environ["HOME"] = str(home)
         os.environ.pop("CODEX_HOME", None)
 

@@ -39,7 +39,7 @@ def _write(path, data):
 
 def sender(value):
     """A machine handle or a person (``alice@example.com`` or ``@alice@example.com``)."""
-    if not isinstance(value, str) or not (HANDLE_RE.match(value) or EMAIL_RE.match(value)):
+    if not isinstance(value, str) or not (HANDLE_RE.fullmatch(value) or EMAIL_RE.fullmatch(value)):
         raise UsageError("a sender is a machine handle or @email")
     return sender_key(value)
 

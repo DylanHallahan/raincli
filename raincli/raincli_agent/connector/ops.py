@@ -36,13 +36,13 @@ def reject(queue, message_id):
     with queue.lock():
         record = queue.get(message_id)
         _require(record, q.pending_states(record), "reject")
-        q.Queue.transition(record, q.REJECTED, detail="declined by recipient operator")
+        q.Queue.transition(record, q.REJECTED, detail="declined by recipient operator", code="declined")
         queue.save(record)
         return record
 
 
 def trust(queue, handle):
-    if not HANDLE_RE.match(handle or ""):
+    if not HANDLE_RE.fullmatch(handle or ""):
         raise q.QueueError(f"not a valid agent handle: {handle[:40]!r}")
     with queue.lock():
         return queue.add_trusted(handle)

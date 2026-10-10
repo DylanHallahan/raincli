@@ -327,6 +327,7 @@ def run_on_pty(argv, env, inputs, timeout=30):
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="pty and /proc")
+@pytest.mark.agent_shim_ok  # the sign-in hint probes "codex" in the subprocess: the test's shim answers
 def test_password_on_a_pty_never_reaches_argv_env_logs_or_output(fake_api, home, tmp_path):
     """The real CLI on a pty: no echo, team choice asked on the terminal, and the
     password is absent from the process's argv and environment, its output, the

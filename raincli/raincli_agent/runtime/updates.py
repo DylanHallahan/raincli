@@ -294,7 +294,7 @@ def lock_root(root, blocking=True):
     return lock
 
 
-def configure(root=None, mode=None, rollback=False, floor=None):
+def configure(root=None, mode=None, rollback=False, floor=None, allow_insecure=False):
     """Set the update mode (``automatic``/``manual``, persisted and chosen) or roll back.
 
     An explicit rollback sets ``manual``, so a pushed target does not immediately
@@ -306,6 +306,7 @@ def configure(root=None, mode=None, rollback=False, floor=None):
         if not current:
             raise ConfigError("install a managed release first")
         keys = mode_keys(current, root)
+        insecure = False
         if rollback:
             previous = current.get("previous")
             if not previous or not Path(previous.get("python", "")).is_file():
@@ -313,6 +314,12 @@ def configure(root=None, mode=None, rollback=False, floor=None):
             if floor is not None and version_key(previous["tag"]) < floor:
                 raise ConfigError("rollback below v%d.%d.%d is refused: that version cannot run this machine's "
                                   "runtime (machine mode, or messages to named agents)" % floor)
+            from .. import security
+            insecure = security.below_min_safe(version_key(previous["tag"]), root)
+            if insecure and not allow_insecure:  # §18.2 item 1
+                raise ConfigError(f"{security.BELOW_MIN_SAFE}: rollback below v{security.MIN_SAFE_VERSION} is "
+                                  "refused; older versions lack security fixes. Only a deliberate local "
+                                  "rollback can go below it: raincli runtime update --rollback --allow-insecure")
             current = {**previous, "previous": {k: current[k] for k in ("tag", "commit", "python")}}
             mode = "manual"
         if mode is not None:
@@ -324,7 +331,10 @@ def configure(root=None, mode=None, rollback=False, floor=None):
             # adoption; otherwise the current launcher stays (review 2, O8).
             adopt_launcher(root, current["python"])
         write_pointer(root, current)
-        return {"tag": current["tag"], "update_mode": current["update_mode"]}
+        result = {"tag": current["tag"], "update_mode": current["update_mode"]}
+        if rollback and insecure:
+            result["warning"] = security.INSECURE_WARNING
+        return result
     finally:
         lock.release_run_lock()
 

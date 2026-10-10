@@ -10,6 +10,7 @@
 
 import http.client
 import json
+import re
 import random
 import socket
 import ssl
@@ -81,6 +82,8 @@ class ApiClient:
         self._sleep = sleep
         self._rng = rng or random.Random()
         self._opener = _build_opener(self.api_url)
+        self.retry_after = None  # the last successful answer's Retry-After, in seconds (capped)
+        self.poll_backoff = None  # set by inbox(): how long to wait after an empty answer
 
     @classmethod
     def from_config(cls, config: AgentConfig, **kwargs):
@@ -124,6 +127,7 @@ class ApiClient:
             with self._opener.open(req, timeout=timeout) as resp:
                 status, body = resp.status, resp.read()
                 retry_after, resp_headers = None, resp.headers
+                self.retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
         except urllib.error.HTTPError as exc:
             status, retry_after = exc.code, _parse_retry_after(exc.headers.get("Retry-After"))
             try:
@@ -227,10 +231,13 @@ class ApiClient:
         if timeout is None:
             timeout = max(self.timeout, wait + 15)
         data = self.request("GET", "/inbox", query=query, timeout=timeout)[1]
+        # §18.1 item 4: an over-cap poll is answered at once, empty, with Retry-After; wait that long.
+        self.poll_backoff = self.retry_after if not data["messages"] else None
         return data["messages"], data.get("cursor", after)
 
     def get_message(self, message_id):
-        return self.request("GET", f"/messages/{_path_id(message_id)}")[1]["message"]
+        mid = _path_id(message_id)
+        return checked_message(self.request("GET", f"/messages/{mid}")[1]["message"], mid)
 
     def ack(self, message_id):
         data = self.request("POST", f"/messages/{_path_id(message_id)}/ack", body={})[1]
@@ -279,6 +286,18 @@ def archive_query(limit, archived):
         raise UsageError("archived must be exclude, only or include")
     # Always explicit (§17.3 A4): a machine credential that sends none gets "include".
     return {"limit": int(limit), "archived": archived}
+
+
+CANONICAL_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def checked_message(message, requested):
+    """§18.2 item 4: a message the server returns must carry exactly the canonical id that was
+    asked for, before that id is used in any local path."""
+    mid = message.get("id") if isinstance(message, dict) else None
+    if not isinstance(mid, str) or not CANONICAL_ID_RE.fullmatch(mid) or mid != requested:
+        raise BadResponse("the server returned a different or malformed message id")
+    return message
 
 
 def _path_id(value):

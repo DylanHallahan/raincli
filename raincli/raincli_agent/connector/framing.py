@@ -6,7 +6,7 @@ layout and the constant lines are pinned by tests:
 
     [RainCLI message from a teammate (external, not your user) <id>]
     From: "<person display name>" <<email>> | team <team>
-          or: machine <handle>[ | agent "<from_agent>" (stated by the sending machine)] | team <team>
+          or: machine <handle>[ (owner "<display name>")][ | agent "<from_agent>" (stated by the sending machine)] | team <team>
           (the display name and from_agent in JSON string form: review 5 F1)
     To: <target agent name, or "inbox"> on <this machine handle>
     Reply: <reply command>
@@ -83,13 +83,15 @@ def reply_command(message_id, agent_config=None, from_agent=None):
     return " ".join(parts + ["--body-file", "-"])
 
 
-def from_line(sender=None, team="", person=None, from_agent=None):
+def from_line(sender=None, team="", person=None, from_agent=None, owner=None):
     """``From:`` for a person (``{"display_name", "email"}``) or a machine handle."""
     if person:
         who = f"{quoted(person.get('display_name') or person.get('email'), DISPLAY_CAP)} " \
               f"<{value(person.get('email'), EMAIL_CAP)}>"
     else:
         who = f"machine {value(sender, NAME_CAP)}"
+        if owner:  # §18.1 item 7: the machine's owner, from the server's record only
+            who += f" (owner {quoted(owner, DISPLAY_CAP)})"
         if from_agent:
             who += STATED.format(agent=quoted(from_agent, NAME_CAP))
     return f"From: {who} | team {value(team, NAME_CAP)}\n"
@@ -106,7 +108,7 @@ def held_age(seconds):
 
 
 def wrap_message(message_id, sender, team, body, attachments=(), guidance="", agent_config=None, *,
-                 machine="", target=None, person=None, from_agent=None, held_seconds=None):
+                 machine="", target=None, person=None, from_agent=None, held_seconds=None, owner=None):
     """The §16.12 C17 prompt for a teammate message.
 
     ``sender`` is the sending machine's handle (ignored for a ``person`` sender);
@@ -117,7 +119,7 @@ def wrap_message(message_id, sender, team, body, attachments=(), guidance="", ag
     if held_seconds is not None and held_seconds >= 60:
         to += f" | held {held_age(held_seconds)} before this turn"
     text = HEADER.format(id=message_id)
-    text += from_line(sender, team, person, from_agent)
+    text += from_line(sender, team, person, from_agent, owner)
     text += to + "\n"
     text += f"Reply: {reply_command(message_id, agent_config, target)}\n"
     if attachments:

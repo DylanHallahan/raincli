@@ -149,8 +149,8 @@ def test_log_rotation_and_open_are_best_effort(tmp_path, monkeypatch):
     worker.log_path.write_bytes(b"x" * (service.LOG_LIMIT + 1))
     monkeypatch.setattr(service.os, "replace", failing(service.os.replace, 10 ** 6))
     real_open = service.os.open
-    monkeypatch.setattr(service.os, "open", lambda path, *a: (_ for _ in ()).throw(PermissionError(13, "in use"))
-                        if str(path) == str(worker.log_path) else real_open(path, *a))
+    monkeypatch.setattr(service.os, "open", lambda path, *a, **kw: (_ for _ in ()).throw(PermissionError(13, "in use"))
+                        if str(path) == str(worker.log_path) else real_open(path, *a, **kw))
     monkeypatch.setattr(service.subprocess, "Popen", FakeProcess)
     assert worker._spawn().pid  # started, output discarded this time
 

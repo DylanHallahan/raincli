@@ -309,6 +309,7 @@ def test_app_install_detection(app, tmp_path):
 
 # -- pushed updates through the app path ----------------------------------------------------------
 
+@pytest.mark.usefixtures("legacy_versions")
 def test_pushed_target_installs_through_the_app_path(app, monkeypatch):
     monkeypatch.setattr(pushed_mod, "__version__", "0.4.0")
     installed = []
@@ -322,6 +323,7 @@ def test_pushed_target_installs_through_the_app_path(app, monkeypatch):
     assert updates.read_update_state(app)["target"]["version"] == "v0.4.1"
 
 
+@pytest.mark.usefixtures("legacy_versions")
 def test_app_refuses_targets_below_v040_and_downgrades(app, monkeypatch):
     monkeypatch.setattr(pushed_mod, "__version__", "0.4.1")
     driver = pushed_mod.PushedUpdates(app_root=app, python=app / "versions" / "0.4.0" / "raincli.exe",
@@ -332,6 +334,7 @@ def test_app_refuses_targets_below_v040_and_downgrades(app, monkeypatch):
     assert driver.data["error"] == "downgrade_not_allowed"
 
 
+@pytest.mark.usefixtures("legacy_versions")
 def test_manual_mode_and_explicit_rollback(app):
     assert winapp.configure(app, mode="manual")["update_mode"] == "manual"
     with pytest.raises(ConfigError, match="no previous"):
@@ -406,6 +409,7 @@ def test_stub_promotes_a_version_that_beats_within_probation(app):
     assert winapp.read_install(app) == {"current": "0.4.1", "previous": "0.4.0", "probation": None}
 
 
+@pytest.mark.usefixtures("legacy_versions")
 def test_stub_rolls_back_a_version_without_heartbeat(app):
     add_version(app, "0.4.1")
     winapp.write_install(app, "0.4.1", "0.4.0", probation="0.4.1")

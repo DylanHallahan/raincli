@@ -44,7 +44,7 @@ def test_trusted_sender_delivered_with_exact_wrapper(fake_api, connector_env):
         f"[end of RainCLI message {msg['id']}]")
     server_msg = fake_api.state.messages[msg["id"]]
     assert server_msg["acked_at"] is not None and server_msg["delivery_state"] == "submitted"
-    assert events_for(fake_api, msg["id"]) == [("submitted", "handed to herdr agent bob-claude")]
+    assert events_for(fake_api, msg["id"]) == [("submitted", "delivered")]
     # nothing is re-reported or re-submitted on later iterations
     conn.run_once()
     conn.run_once()
@@ -92,7 +92,7 @@ def test_reject_and_trust(fake_api, connector_env):
     conn.run_once()
     ops.reject(conn.queue, first["id"])
     conn.run_once()
-    assert events_for(fake_api, first["id"])[-1] == ("rejected", "declined by recipient operator")
+    assert events_for(fake_api, first["id"])[-1] == ("rejected", "declined")
     assert connector_env.herdr.prompts == []
 
     ops.trust(conn.queue, "mallory")
@@ -121,7 +121,7 @@ def test_busy_blocked_offline_holds_then_delivery(fake_api, connector_env):
     assert len(herdr.prompts) == 1
     assert events_for(fake_api, msg["id"]) == [
         ("held", "busy"), ("held", "blocked"), ("held", "offline"),
-        ("submitted", "handed to herdr agent bob-claude")]
+        ("submitted", "delivered")]
 
 
 def test_herdr_error_on_get_is_offline(fake_api, connector_env):
@@ -185,7 +185,7 @@ def test_crash_while_submitting_becomes_uncertain_and_is_never_resubmitted(fake_
     assert rec["state"] == "submission_uncertain"
     assert len(herdr.prompts) == 1  # never automatically resubmitted
     assert events_for(fake_api, msg["id"]) == [
-        ("submission_uncertain", "connector restarted during submission; not resubmitted")]
+        ("submission_uncertain", "submission_uncertain")]
 
     ops.resubmit(restarted.queue, msg["id"])
     restarted.run_once()
@@ -202,7 +202,7 @@ def test_timeout_is_uncertain_and_dismissable(fake_api, connector_env):
     conn.run_once()
     conn.run_once()
     assert len(connector_env.herdr.prompts) == 1
-    assert events_for(fake_api, msg["id"]) == [("submission_uncertain", "herdr prompt timed out")]
+    assert events_for(fake_api, msg["id"]) == [("submission_uncertain", "herdr_timeout")]
     ops.dismiss(conn.queue, msg["id"])
     conn.run_once()
     assert record(connector_env, msg["id"])["state"] == "dismissed"

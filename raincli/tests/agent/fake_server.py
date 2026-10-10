@@ -126,6 +126,10 @@ class FakeState:
         self.login_bodies = []  # every /app/login body received (tests check what was sent)
         self.inbox_queries = []  # (handle, routing=1?) for every inbox poll
         self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id} (§16.3)
+        self.known_devices = {}  # known-device token -> email (§18.1 item 2)
+        self.owner_names = {}  # agent id -> its owner's display name, as the server shows it (§18.1 item 7)
+        self.over_cap_retry_after = None  # set: every inbox poll is answered at once, empty, with Retry-After
+        self.over_cap_polls = 0
         self.person_inbox = {}  # email -> [message JSON] for the notification feed tests
         self.routing = {}  # agent id -> "all" | "inbox-only" (§16.5)
         self.archive_calls = []  # (handle, conversation id, archived?, archived_through_seq sent)
@@ -152,7 +156,7 @@ class FakeState:
         """15.1 as amended by 15.8: generic errors, team choice, name rules, rotation with proof."""
         if not isinstance(body, dict) or set(body) - {"email", "password", "machine_name", "team",
                                                       "previous_token", "replace", "person_session",
-                                                      "person_only"}:
+                                                      "person_only", "known_device"}:
             raise ApiFail(400, "invalid")
         user = self.users.get(body.get("email"))
         if self.login_failures.get(body.get("email"), 0) >= 5:
@@ -168,7 +172,8 @@ class FakeState:
                 raise ApiFail(409, "machine_credential_invalid")
             if self.owners.get(machine) != body["email"]:
                 raise ApiFail(409, "not_machine_owner")
-            return 200, {"person_session": self.new_person_session(body["email"], machine)}
+            return 200, {"person_session": self.new_person_session(body["email"], machine),
+                         "known_device": self.new_known_device(body["email"])}
         teams = user["teams"]
         team = body.get("team")
         if team is None:
@@ -207,7 +212,13 @@ class FakeState:
                  "team": {"slug": team, "name": self.teams[team]}, "rotated": rotated}
         if body.get("person_session") is True:
             reply["person_session"] = self.new_person_session(body["email"], machine)
+        reply["known_device"] = self.new_known_device(body["email"])  # every success (§18.1 item 2)
         return status, reply
+
+    def new_known_device(self, email):
+        token = "rkd1_" + secrets.token_hex(16) + "." + secrets.token_urlsafe(16)
+        self.known_devices[token] = email
+        return token
 
     def new_person_session(self, email, machine):
         token = "rps_" + secrets.token_urlsafe(32)
@@ -254,7 +265,8 @@ class FakeState:
         to_handle = self.agents[m["recipient"]]["handle"]
         to_endpoint = {"machine": to_handle, **({"agent": m["agent"]} if m.get("agent") else {})}
         from_endpoint = ({"person": person["email"], "display_name": person["display_name"]} if person
-                         else {"machine": sender})
+                         else {"machine": sender, **({"owner": self.owner_names[m["sender"]]}
+                                                     if m["sender"] in self.owner_names else {})})
         return {"id": m["id"], "conversation_id": m["conversation_id"], "in_reply_to": m["in_reply_to"],
                 "from": sender, "to": to_handle, "from_endpoint": from_endpoint, "to_endpoint": to_endpoint,
                 "from_agent": m.get("from_agent"), "kind": m.get("kind", "message"), "hold_reason": None,
@@ -414,6 +426,10 @@ class FakeState:
                              "Cache-Control": "no-store"}
 
     def inbox(self, caller, query):
+        if self.over_cap_retry_after is not None:  # §18.1 item 4: answered at once, empty
+            self.over_cap_polls += 1
+            after = int(query.get("after", ["0"])[0])
+            return 200, {"messages": [], "cursor": after}, {"Retry-After": str(self.over_cap_retry_after)}
         after = int(query.get("after", ["0"])[0])
         limit = min(int(query.get("limit", ["100"])[0]), 500)
         wait = min(float(query.get("wait", ["0"])[0]), 25)
@@ -587,13 +603,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
-            status, payload = result
+            status, payload = result[0], result[1]
+            extra_headers = result[2] if len(result) > 2 else None
         except ApiFail as exc:
             status, payload = exc.status, {"error": {"code": exc.code, "message": exc.message,
                                                      **getattr(exc, "extra", {})}}
             headers = exc.headers
         else:
-            headers = None
+            headers = extra_headers
         if action == "drop_after":  # committed, but the response is lost
             return self._drop()
         self._send(status, payload, headers)
@@ -653,6 +670,7 @@ class _Handler(BaseHTTPRequestHandler):
                                                    "update_state": c["update_state"], "error": c.get("error"),
                                                    "seen_at": "now"}
                 return 200, {"agents": [{"handle": a["handle"], "display_name": a["display_name"],
+                                         **({"owner": st.owner_names[a["id"]]} if a["id"] in st.owner_names else {}),
                                          "active": a["active"], "machine": machine(a["handle"]),
                                          "agents": [{k: v for k, v in e.items() if k != "key"}
                                                     for e in st.directory.get(a["handle"], [])]}

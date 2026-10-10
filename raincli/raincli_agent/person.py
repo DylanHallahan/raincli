@@ -36,6 +36,8 @@ from .fsutil import atomic_write_json, ensure_private_dir, read_private_file, re
 
 PERSON_FILE = "person.json"
 INSTALL_FILE = "app-install.json"
+KNOWN_DEVICE_FILE = "known-device.json"
+KNOWN_DEVICE_RE = re.compile(r"rkd1_[A-Za-z0-9._-]{16,195}")
 NOTIFY_DIR = "notifications"
 PERSON_TOKEN_RE = re.compile(r"^rps_[A-Za-z0-9_-]{43}$")
 INSTALL_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
@@ -145,8 +147,11 @@ def add_session(agent_config, email, password, *, api_url=None):
     (``person_only`` with the machine credential as ``previous_token``; no rotation)."""
     from . import login
     config = load_config(agent_config or default_config_path())
-    token = login.request_person_only(api_url or config.api_url, email, password, config.token)
+    token, device = login.request_person_only(api_url or config.api_url, email, password, config.token,
+                                              known_device=load_known_device(agent_config or config.path))
     save_session(agent_config or config.path, token)
+    if device:
+        save_known_device(agent_config or config.path, device)
     login.record_owner(agent_config or config.path, email)
     return {"config": str(person_path(agent_config or config.path))}
 
@@ -163,6 +168,32 @@ def owner_email(agent_config=None):
         raise ConfigError("the machine's owner is not known here: sign in again, or add a person session "
                           "with raincli login --person")
     return PersonClient.for_config(agent_config, max_attempts=1).me()["user"]["email"].lower()
+
+
+# -- the known-device token (§18.1 item 2) --------------------------------------------------------
+
+def known_device_path(agent_config=None):
+    return _dir(agent_config) / KNOWN_DEVICE_FILE
+
+
+def save_known_device(agent_config, token):
+    """Keep the server's known-device token beside ``person.json``, protected the same way. It is
+    kept across sign-out, and cleared by a reinstall of the app or ``forget_known_device``."""
+    if isinstance(token, str) and KNOWN_DEVICE_RE.fullmatch(token):
+        _write_secret(known_device_path(agent_config), "known_device", token)
+
+
+def load_known_device(agent_config=None):
+    """The stored token, or None. A damaged or foreign file never blocks a sign-in."""
+    try:
+        return _read_secret(known_device_path(agent_config), "known_device", KNOWN_DEVICE_RE, "known-device file")
+    except ConfigError:
+        return None
+
+
+def forget_known_device(agent_config=None):
+    """"Forget this device": the next sign-in counts as a new device."""
+    return _remove(known_device_path(agent_config))
 
 
 # -- the app install token (§16.14 S3) ------------------------------------------------------------
@@ -195,7 +226,10 @@ def app_install_token(agent_config=None):
         under = json.loads(read_private_file(str(path), "app install file")).get("created_under")
         return value, under
     value, under = read()
-    if value is None or under != _installed_under():
+    installed = _installed_under()
+    if value is not None and under and installed and under[1] != installed[1]:
+        forget_known_device(agent_config)  # a reinstall (a new install_stamp) forgets the device; an update doesn't
+    if value is None or under != installed:
         rotate_app_install_token(agent_config)
         value, _ = read()
     return value
@@ -219,6 +253,7 @@ class PersonClient:
 
     def __init__(self, api):
         self.api = api
+        self.poll_backoff = None
 
     @classmethod
     def for_config(cls, agent_config=None, **kwargs):
@@ -239,11 +274,13 @@ class PersonClient:
                  "include_acked": "true" if include_acked else "false"}
         data = self.api.request("GET", "/person/inbox", query=query,
                                 timeout=max(self.api.timeout, wait + 15))[1]
+        self.poll_backoff = self.api.retry_after if not data["messages"] else None  # §18.1 item 4
         return data["messages"], data.get("cursor", after)
 
     def message(self, message_id):
-        from .api import _path_id
-        return self.api.request("GET", f"/person/messages/{_path_id(message_id)}")[1]["message"]
+        from .api import _path_id, checked_message
+        mid = _path_id(message_id)
+        return checked_message(self.api.request("GET", f"/person/messages/{mid}")[1]["message"], mid)
 
     def ack(self, message_id):
         from .api import _path_id
@@ -422,6 +459,7 @@ class NotificationFeed:
         self.now = now
         self.log = log or (lambda text: None)
         self.failures = 0
+        self.backoff = None
 
     def session_id(self):
         token = load_session(self.agent_config)
@@ -434,7 +472,9 @@ class NotificationFeed:
             return None
         queue = _queue(self.agent_config)
         cursor = queue["cursor"] if queue["session"] == session else 0
-        messages, new_cursor = self.client_factory().inbox(after=cursor, wait=wait)
+        client = self.client_factory()
+        messages, new_cursor = client.inbox(after=cursor, wait=wait)
+        self.backoff = getattr(client, "poll_backoff", None)
         return append_notifications(self.agent_config, messages, new_cursor, session, self.now())
 
     def run(self):
@@ -444,6 +484,8 @@ class NotificationFeed:
                 self.failures = 0
                 if added is None:
                     self.sleep(FEED_BACKOFF[1] // 10)
+                elif self.backoff:
+                    self.sleep(self.backoff)  # an empty answer with Retry-After (§18.1 item 4)
             except (ApiError, ConfigError, OSError) as exc:
                 self.failures += 1
                 self.log(f"notification feed: {type(exc).__name__}"

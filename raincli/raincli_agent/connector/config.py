@@ -117,7 +117,7 @@ def _string(data, key):
 
 def _handles(data, key):
     value = data.get(key, [])
-    if not isinstance(value, list) or not all(isinstance(h, str) and HANDLE_RE.match(h) for h in value):
+    if not isinstance(value, list) or not all(isinstance(h, str) and HANDLE_RE.fullmatch(h) for h in value):
         raise ConfigError(f"connector config: {key} must be a list of agent handles")
     return tuple(value)
 
@@ -137,7 +137,7 @@ def _senders(data, key, what="connector config"):
     """Machine handles and person emails (``alice@example.com`` or ``@alice@example.com``)."""
     value = data.get(key, [])
     if not isinstance(value, list) or not all(
-            isinstance(h, str) and (HANDLE_RE.match(h) or EMAIL_RE.match(h)) for h in value):
+            isinstance(h, str) and (HANDLE_RE.fullmatch(h) or EMAIL_RE.fullmatch(h)) for h in value):
         raise ConfigError(f"{what}: {key} must be a list of machine handles and @emails")
     return tuple(sender_key(h) for h in value)
 
@@ -164,7 +164,7 @@ def machine_connector(path, data):
     if trust_mode not in TRUST_MODES:
         raise ConfigError('runtime config: trust_mode must be "team" or "list"')
     owner = data.get("owner_email", "")
-    if owner and (not isinstance(owner, str) or not EMAIL_RE.match(owner)):
+    if owner and (not isinstance(owner, str) or not EMAIL_RE.fullmatch(owner)):
         raise ConfigError("runtime config: owner_email must be an email")
     return ConnectorConfig(
         agent_config=os.path.join(base, os.path.expanduser(machine_config)),
@@ -238,7 +238,7 @@ def _escalation(data, inbox):
     if unknown:
         raise ConfigError(f"connector config: unknown escalation keys {', '.join(unknown)}")
     name = esc.get("herdr_agent")
-    if not isinstance(name, str) or not HERDR_NAME_RE.match(name):
+    if not isinstance(name, str) or not HERDR_NAME_RE.fullmatch(name):
         raise ConfigError("connector config: escalation.herdr_agent must be a Herdr agent name "
                           "(^[a-z][a-z0-9_-]{0,31}$), not a pane id")
     if inbox["herdr_agent"] and name == inbox["herdr_agent"]:
@@ -297,7 +297,7 @@ def load_connector_config(path):
         if data.get("expect_pane_id") or data.get("expect_cwd"):
             raise ConfigError("connector config: expect_pane_id and expect_cwd apply to herdr_agent only")
         herdr_agent = ""
-    elif not isinstance(herdr_agent, str) or not HERDR_NAME_RE.match(herdr_agent):
+    elif not isinstance(herdr_agent, str) or not HERDR_NAME_RE.fullmatch(herdr_agent):
         raise ConfigError("connector config: herdr_agent must be a Herdr agent name "
                           "(^[a-z][a-z0-9_-]{0,31}$), not a pane id")
     trusted = _senders(data, "trusted_senders")

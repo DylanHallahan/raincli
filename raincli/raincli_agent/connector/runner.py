@@ -65,7 +65,8 @@ def frame_record(record, identity, guidance="", agent_config=None, held_seconds=
     return wrap_message(record["id"], record["sender"], team, message["body"],
                         record.get("attachments_local") or (), guidance, agent_config,
                         machine=identity.get("handle", ""), target=record.get("target"), person=person,
-                        from_agent=message.get("from_agent"), held_seconds=held_seconds)
+                        from_agent=message.get("from_agent"), held_seconds=held_seconds,
+                        owner=origin.get("owner") if isinstance(origin, dict) and not person else None)
 
 
 EMAIL_SENDER_RE = re.compile(r"^@[^@\s/\\]{1,64}@[^@\s/\\]{1,190}$")
@@ -79,7 +80,9 @@ def message_target(message):
     if not isinstance(to, dict) or to.get("agent") is None:
         return None
     name = to["agent"]
-    if (not isinstance(name, str) or not 1 <= len(name) <= 64
+    # A name starting with "-" is refused (§18.2 item 4): Herdr 0.9.3 has no "--" separator, so
+    # the name check is what keeps a target positional.
+    if (not isinstance(name, str) or not 1 <= len(name) <= 64 or name.startswith("-")
             or sessions.normalize_name(name, "") != name):
         return False
     return name
@@ -89,10 +92,10 @@ def message_problem(message):
     """Why a server message can't be queued, or None. Checked before any path use."""
     if not isinstance(message, dict):
         return "not an object"
-    try:
-        q.normalize_id(message.get("id"))
-    except q.QueueError:
-        return "bad id"
+    from ..api import CANONICAL_ID_RE
+    mid = message.get("id")
+    if not isinstance(mid, str) or not CANONICAL_ID_RE.fullmatch(mid):
+        return "bad id"  # §18.2 item 4: exactly the canonical lowercase form, before any path use
     sender = message.get("from")
     origin = message.get("from_endpoint")
     if isinstance(origin, dict) and "person" in origin:
@@ -100,7 +103,7 @@ def message_problem(message):
         if not (isinstance(sender, str) and EMAIL_SENDER_RE.fullmatch(sender)
                 and sender[1:].lower() == str(origin.get("person", "")).lower()):
             return "bad sender"
-    elif not isinstance(sender, str) or not HANDLE_RE.match(sender):
+    elif not isinstance(sender, str) or not HANDLE_RE.fullmatch(sender):
         return "bad sender"  # section 12.3: the handle grammar, never e.g. "-evil"
     if message_target(message) is False:
         return "bad target"
@@ -114,13 +117,26 @@ def message_problem(message):
     return None
 
 
+REPORT_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+DEFAULT_CODES = {q.SUBMITTED: "delivered", q.UNCERTAIN: "submission_uncertain", q.REJECTED: "rejected"}
+
+
+def report_code(record):
+    """The fixed reason code the server is told for a record (§18.2 item 4). Local detail text,
+    which can hold names, paths or Herdr's own error text, never leaves this machine."""
+    code = record.get("code")
+    if isinstance(code, str) and REPORT_CODE_RE.fullmatch(code):
+        return code
+    return DEFAULT_CODES.get(record["state"], "")
+
+
 def reportable(record):
     """The (state, detail) the server should show for this record, or None."""
     state = record["state"]
     if state == q.HELD:
         return (q.HELD, record["hold_reason"])
     if state in (q.SUBMITTED, q.UNCERTAIN, q.REJECTED):
-        return (state, record.get("detail") or "")
+        return (state, report_code(record))
     if state == q.HANDED_OVER or state == q.AGENT_HANDED_OVER:
         return (q.HELD, "next_turn")  # waiting for the hook session's next turn (14.4)
     if state == q.AGENT_HELD:
@@ -237,6 +253,7 @@ class Connector:
         after = self.queue.cursor()
         while True:
             messages, cursor = self.api.inbox(after=after, wait=wait, limit=100, routing=True)
+            self.poll_backoff = getattr(self.api, "poll_backoff", None)  # §18.1 item 4
             self._record_routing_capable()
             for message in messages:
                 problem = message_problem(message)
@@ -485,9 +502,9 @@ class Connector:
         state = sessions.handover_state(self.sessions_state, key, mid)
         if state == "submitted":
             label = record.get("target") or self.config.target_label
-            q.Queue.transition(record, q.SUBMITTED, detail=f"emitted to {label} (next turn)")
+            q.Queue.transition(record, q.SUBMITTED, detail=f"emitted to {label} (next turn)", code="next_turn_emitted")
         elif state == "missing":
-            q.Queue.transition(record, q.UNCERTAIN, detail="the handover file is missing; not re-emitted")
+            q.Queue.transition(record, q.UNCERTAIN, detail="the handover file is missing; not re-emitted", code="handover_missing")
         elif state == "claimed":
             seen = record.get("claim_seen_at")
             if seen is None:
@@ -496,7 +513,8 @@ class Connector:
                 return False
             if self._clock() - seen < sessions.CLAIM_GRACE:
                 return False
-            q.Queue.transition(record, q.UNCERTAIN, detail="claimed by the hook without a receipt; not re-emitted")
+            q.Queue.transition(record, q.UNCERTAIN, detail="claimed by the hook without a receipt; not re-emitted",
+                               code="claimed_without_receipt")
         else:  # pending
             if record.pop("claim_seen_at", None) is not None:
                 # Put back by a hook: a later claim starts a fresh grace (review 2, O7).
@@ -531,7 +549,8 @@ class Connector:
             record["handover_retry_at"] = self._clock() + 30
             self._hold(record, "offline", f"cannot hand over to the session: {type(exc).__name__}")
         else:
-            q.Queue.transition(record, q.UNCERTAIN, detail=f"handover failed after writing: {type(exc).__name__}")
+            q.Queue.transition(record, q.UNCERTAIN, detail=f"handover failed after writing: {type(exc).__name__}",
+                               code="handover_failed")
             self.queue.save(record)
         self.log(f"message {mid} is {record['state']} (handover failed: {type(exc).__name__})")
 
@@ -633,7 +652,7 @@ class Connector:
                     continue
                 if (record.get("hold_reason") == "offline" and record.get("offline_since") is not None
                         and self._clock() - record["offline_since"] >= EXPIRE_OFFLINE):
-                    q.Queue.transition(record, q.REJECTED, detail="expired_offline")
+                    q.Queue.transition(record, q.REJECTED, detail="expired_offline", code="expired_offline")
                     self.queue.save(record)
                     self.log(f"message {record['id']} to {record['target']} expired after 14 days offline")
                     continue
@@ -772,15 +791,16 @@ class Connector:
     @staticmethod
     def _finish(record, outcome, target_name, hold_state):
         if outcome is None:
-            q.Queue.transition(record, q.SUBMITTED, detail=f"handed to herdr agent {target_name}")
+            q.Queue.transition(record, q.SUBMITTED, detail=f"handed to herdr agent {target_name}", code="delivered")
         elif isinstance(outcome, HerdrRejected):
             # Herdr refused before sending any input: safe to keep holding.
             q.Queue.transition(record, hold_state, reason=outcome.reason)
             record["hold_detail"] = str(outcome)[:300]
         elif isinstance(outcome, HerdrTimeout):
-            q.Queue.transition(record, q.UNCERTAIN, detail="herdr prompt timed out")
+            q.Queue.transition(record, q.UNCERTAIN, detail="herdr prompt timed out", code="herdr_timeout")
         else:  # any other failure leaves delivery unknown
-            q.Queue.transition(record, q.UNCERTAIN, detail=f"herdr prompt failed: {outcome}"[:500])
+            q.Queue.transition(record, q.UNCERTAIN, detail=escape_line(f"herdr prompt failed: {outcome}")[:500],
+                               code="herdr_failed")  # the text stays local
 
     def process_escalations(self):
         """Deliver pending escalations to the main session (section 10).
@@ -1001,5 +1021,8 @@ class Connector:
                 self.log(f"iteration failed ({exc}); retrying in {delay:.1f}s")
                 self._pause(delay, stop_requested)
                 continue
-            if pending_wait == 0:
+            backoff = getattr(self, "poll_backoff", None)
+            if backoff:
+                self._pause(backoff, stop_requested)  # an empty answer with Retry-After: never poll at once
+            elif pending_wait == 0:
                 self._pause(self.config.recheck_interval, stop_requested)

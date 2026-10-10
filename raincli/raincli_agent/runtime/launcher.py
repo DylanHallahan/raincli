@@ -236,6 +236,22 @@ def rollback_floor(config):
     return MACHINE_FLOOR if "machine_config" in data else None
 
 
+# §18.2 item 1: the same value as raincli_agent/security.py (this launcher imports nothing from the
+# client; a test keeps the two equal). Rolling back to the version a failed update replaced is
+# always allowed, and recorded as rolled_back_below_min_safe when that version is below it.
+MIN_SAFE = (0, 5, 3)
+
+
+def min_safe(root):
+    """This launcher's floor, raised by the recorded ratchet (min-safe.json in the root)."""
+    try:
+        data = json.loads(read_text(Path(root) / "min-safe.json"))
+        recorded = tuple(int(p) for p in str(data["min_safe"]).split("."))
+    except (OSError, ValueError, KeyError, TypeError):
+        recorded = MIN_SAFE
+    return max(MIN_SAFE, recorded)
+
+
 def tag_key(tag):
     try:
         return tuple(int(part) for part in str(tag).removeprefix("v").split("."))
@@ -276,7 +292,8 @@ def roll_back(root, pointer, timeout=300, floor=None):
         helper = previous["python"]
         try:
             write_json(root / "current.json", restored, helper)
-            write_json(root / "update-state.json", {**state, "state": "rolled_back", "error": "first_start_failed",
+            error = "rolled_back_below_min_safe" if tag_key(previous["tag"]) < min_safe(root) else "first_start_failed"
+            write_json(root / "update-state.json", {**state, "state": "rolled_back", "error": error,
                                                     "blocked": target}, helper)
         except OSError as exc:
             print(f"raincli launcher: rollback not written: {exc}", file=sys.stderr, flush=True)

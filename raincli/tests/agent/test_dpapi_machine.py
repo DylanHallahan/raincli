@@ -147,6 +147,7 @@ def test_machine_mode_publishes_ready_client_and_directory_without_inbox(tmp_pat
     assert driver.machine_mode is True
 
 
+@pytest.mark.usefixtures("legacy_versions")
 def test_machine_mode_refuses_targets_below_v040(tmp_path):
     driver = pushed_mod.PushedUpdates(root=tmp_path, python=tmp_path / "py")
     driver.managed = lambda: True
