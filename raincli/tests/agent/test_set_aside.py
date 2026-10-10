@@ -172,7 +172,7 @@ def test_set_aside_moves_the_whole_old_setup_including_its_state(account, home):
         assert backup.stat().st_mode & 0o777 == 0o700
     moved = {Path(m["from"]).name for m in result["moved"]}
     assert moved == {"agent.json", "runtime.json", "runtime-state", "person.json", "app-install.json",
-                     "notifications"}
+                     "known-device.json", "notifications"}
     for name in moved:
         assert not (cfg(home) / name).exists() and (backup / name).exists()
     for name in ("machine-salt", "routing-capable.json", "status.json"):

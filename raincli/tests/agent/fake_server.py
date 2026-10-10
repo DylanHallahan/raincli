@@ -124,6 +124,7 @@ class FakeState:
         self.delivered = set()  # agent ids with delivery history (they rotate only with previous_token)
         self.login_failures = {}  # email -> failures
         self.login_bodies = []  # every /app/login body received (tests check what was sent)
+        self.devices_issued = 0
         self.inbox_queries = []  # (handle, routing=1?) for every inbox poll
         self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id} (§16.3)
         self.person_inbox = {}  # email -> [message JSON] for the notification feed tests
@@ -152,7 +153,7 @@ class FakeState:
         """15.1 as amended by 15.8: generic errors, team choice, name rules, rotation with proof."""
         if not isinstance(body, dict) or set(body) - {"email", "password", "machine_name", "team",
                                                       "previous_token", "replace", "person_session",
-                                                      "person_only"}:
+                                                      "person_only", "known_device"}:
             raise ApiFail(400, "invalid")
         user = self.users.get(body.get("email"))
         if self.login_failures.get(body.get("email"), 0) >= 5:
@@ -612,7 +613,11 @@ class _Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     raise ApiFail(400, "invalid") from None
                 st.login_bodies.append(body)
-                return st.app_login(body)
+                status, reply = st.app_login(body)
+                st.devices_issued += 1  # §18.1 item 2: every successful sign-in returns a recognised-device token
+                reply["known_device"] = (f"rkd1_{st.devices_issued:032x}.{'d' * 32}.1700000000.0."
+                                         + format(st.devices_issued, "064x"))
+                return status, reply
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Bearer rps_") and (route.startswith("/person/") or route == "/app/handoff"):
             with st.lock:

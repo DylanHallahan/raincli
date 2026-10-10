@@ -378,8 +378,25 @@ def _teams(payload):
     return out
 
 
+def _with_device(body, device_config):
+    """Add this install's recognised-device token (§18.1 item 2) to a sign-in body; returns it or None."""
+    if device_config is None:
+        return None
+    from .person import load_known_device
+    token = load_known_device(device_config)
+    if token:
+        body["known_device"] = token
+    return token
+
+
+def _keep_device(device_config, reply):
+    if device_config is not None and isinstance(reply, dict):
+        from .person import save_known_device
+        save_known_device(device_config, reply.get("known_device"))
+
+
 def request_login(api_url, email, password, machine_name, team=None, *, previous_token=None, replace=False,
-                  person_session=False):
+                  person_session=False, device_config=None):
     """``POST /api/v1/app/login``. Returns the validated reply; raises a ``LoginError``
     for the codes a user acts on (15.1), or the transport's ``ApiError``."""
     if not isinstance(password, Secret):
@@ -394,7 +411,9 @@ def request_login(api_url, email, password, machine_name, team=None, *, previous
         body["replace"] = True
     if person_session:
         body["person_session"] = True  # §16.12 C15: only when asked
-    secrets = [password.reveal()] + ([previous_token.reveal()] if previous_token is not None else [])
+    device = _with_device(body, device_config)
+    secrets = [password.reveal()] + ([previous_token.reveal()] if previous_token is not None else []) + \
+        ([device] if device else [])
     try:
         status, reply = _post(api_url, "/app/login", body, secrets=secrets)
     except ApiError as exc:
@@ -413,6 +432,7 @@ def request_login(api_url, email, password, machine_name, team=None, *, previous
         reply_url = validate_api_url(reply["api_url"]) if reply.get("api_url") else None
     except (ConfigError, KeyError, AttributeError):
         raise ApiError("the server's sign-in reply is malformed", code="bad_response", status=status) from None
+    _keep_device(device_config, reply)
     person = None
     if person_session:
         from .person import validate_session
@@ -449,7 +469,7 @@ def _login_error(exc, machine_name=None):
         raise InvalidRequest(f"the server refused the sign-in request: {exc}") from None
 
 
-def request_person_only(api_url, email, password, machine_token):
+def request_person_only(api_url, email, password, machine_token, *, device_config=None):
     """``POST /api/v1/app/login`` with ``person_only`` (§16.3): a person session for the
     owner of the machine whose current credential is ``machine_token``. It rotates
     nothing. Returns the session as a ``Secret``."""
@@ -457,8 +477,10 @@ def request_person_only(api_url, email, password, machine_token):
         raise TypeError("password must be a Secret")
     body = {"email": email, "password": password.reveal(), "previous_token": machine_token.reveal(),
             "person_only": True}
+    device = _with_device(body, device_config)
     try:
-        status, reply = _post(api_url, "/app/login", body, secrets=[password.reveal(), machine_token.reveal()])
+        status, reply = _post(api_url, "/app/login", body,
+                              secrets=[password.reveal(), machine_token.reveal()] + ([device] if device else []))
     except ApiError as exc:
         from .setaside import stale_message
         if exc.code == "machine_credential_invalid":
@@ -472,6 +494,7 @@ def request_person_only(api_url, email, password, machine_token):
         raise
     finally:
         body.clear()
+    _keep_device(device_config, reply)
     from .person import validate_session
     try:
         return validate_session(reply.get("person_session"))
@@ -562,7 +585,7 @@ def login(email, password, *, plan=None, machine_name=None, team=None, replace=F
                                    "signing in again may only rotate that same machine")
     previous = plan["previous_token"] if machine_name == plan["handle"] else None
     reply = request_login(api_url, email, password, machine_name, team, previous_token=previous, replace=replace,
-                          person_session=person_session)
+                          person_session=person_session, device_config=plan["config"])
     if not plan["write_runtime"] and reply["handle"] != plan["handle"]:
         raise ConnectorMachine("the server did not rotate this machine; the connector credential was left unchanged")
     config_path, runtime_path = plan["config"], plan["runtime_config"]

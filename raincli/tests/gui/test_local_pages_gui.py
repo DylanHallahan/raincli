@@ -197,6 +197,20 @@ def test_settings_saves_one_change_at_a_time(browser, local_origin, artifacts):
     context.close()
 
 
+def test_settings_forgets_this_device_only_on_click(browser, local_origin):
+    replies = {"settings": SETTINGS, "status": STATUS,
+               "forget_device": {"ok": True, "message": "This device is forgotten."}}
+    context, page, errors = open_page(browser, local_origin, "settings", replies)
+    page.wait_for_selector("#trusted li")
+    assert not [c for c in calls(page) if c[0] == "forget_device"]
+    page.click("#forget-device")
+    page.wait_for_function("window.__calls.some(c => c[0] === 'forget_device')")
+    assert [c for c in calls(page) if c[0] == "forget_device"] == [["forget_device", "nonce-1"]]
+    assert "forgotten" in page.inner_text("#message")
+    context.close()
+    assert not errors
+
+
 def test_offline_retry(browser, local_origin, artifacts):
     replies = {"retry": {"ok": False, "message": "Still can't reach the service."}}
     for scheme in ("light", "dark"):
