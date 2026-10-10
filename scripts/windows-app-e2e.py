@@ -38,7 +38,9 @@ D. The app window (protocol §16.10, §16.14, §16.15; design §10 GUI coverage)
    listens on a port, carries a debugging switch or writes DevToolsActivePort; an install without "stub"
    has its shortcut pointed at --background. Then `RainCLI.exe --open` with that variable set for this
    launch only: Playwright connects over CDP and drives the window's local sign-in (a person session),
-   the handoff to the inbox, reading, replying and sending, This computer and Settings, the offline
+   the handoff to the inbox, reading, replying and sending, local times in the thread, archiving the
+   conversation (out of both sides' inboxes, under Archived) and unarchiving it, This computer and Settings
+   with the last report in local time, the offline
    page and Retry (the server stopped and started), and sign-out (the machine revoked, the profile
    marked for reset). A full install afterwards restores the no-argument shortcut. Screenshots go to
    build/e2e-artifacts. Skipped with --real (the published v0.4 installers have no window).
@@ -81,6 +83,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import socket
@@ -761,18 +764,59 @@ def part_d(app, server, installers, password, observer, menu, work):
         shot(page, "d5-sent")
         say("PASS: D5. the window read the observer's message, replied and sent a new one; both reached it")
 
+        # D5b. v0.5.2 (§17.1, §17.2): times in the window are local, never the server's UTC text; Archive moves
+        # the conversation out of the inbox for both sides and under Archived; Unarchive brings it back.
+        match = re.search(r"/app/conversations/([0-9a-f-]{36})", url_of(page))
+        check(match, f"D5 did not end on the conversation: {url_of(page)}")
+        conversation = match.group(1)
+        stamp = page.locator(".rc-thread time[datetime]").first
+        page.wait_for_selector(".rc-thread time[data-local]", state="attached", timeout=30000)
+        label, title = stamp.inner_text(), stamp.get_attribute("title") or ""
+        check(label and not label.endswith(" UTC") and title, f"localtime.js did not format the thread: {label!r}")
+        page.click(".rc-archive button:has-text('Archive')")
+        page.wait_for_url("**/app/inbox?notice=archived", timeout=60000)
+        check(page.locator(f".rc-conv[href*='{conversation}']").count() == 0, "the archived conversation is in the inbox")
+
+        def observer_list(archived):
+            rows = api(server, observer, f"/api/v1/conversations?archived={archived}")["conversations"]
+            return {row["id"]: row for row in rows}
+        seen = observer_list("only").get(conversation)
+        check(seen and seen["archived"] and "person" in (seen.get("archived_by") or {}),
+              f"the observer does not see it archived by the person: {seen}")
+        check(conversation not in observer_list("exclude"), "the observer's main list still has the archived conversation")
+        page.click("nav.rc-nav a:has-text('Archived')")
+        page.wait_for_url("**/app/archived", timeout=60000)
+        row = page.locator(".rc-archived-row", has_text="Archived by you")
+        check(row.count() == 1 and conversation in (row.locator("a").first.get_attribute("href") or ""),
+              "the conversation is not under Archived")
+        shot(page, "d5b-archived")
+        row.locator("button:has-text('Unarchive')").click()
+        page.wait_for_url("**/app/archived?notice=unarchived", timeout=60000)
+        check(page.locator(".rc-archived-row").count() == 0, "Unarchive left it under Archived")
+        page.click("nav.rc-nav a:has-text('Inbox')")
+        page.wait_for_selector(f".rc-conv[href*='{conversation}']", timeout=60000)
+        check(not observer_list("include")[conversation]["archived"], "the observer still sees it archived")
+        say(f"PASS: D5b. the thread shows local times ({label!r}, title {title!r}); Archive moved the conversation "
+            "out of both sides' inboxes and under Archived (archived by you); Unarchive brought it back")
+
         # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
         # hosted navigation and loads its own page, so the click must not wait for that navigation.
         page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
         page = window.page("this-computer.html", timeout=60)  # re-attached after the swap
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
+        report = page.locator("time#last-report")
+        if report.get_attribute("datetime"):  # the runtime has reported: shown by localtime.js, not as UTC
+            check(report.get_attribute("data-local") == "1" and not report.inner_text().endswith("UTC"),
+                  f"This computer's last report is not in local time: {report.inner_text()!r}")
+        last_report = report.inner_text()
         shot(page, "d6-this-computer")
         page.click("nav.rc-nav button[data-open=settings]", no_wait_after=True)  # the app navigates, not the click
         page = window.page("settings.html", timeout=60)  # re-attached after the swap
         page.wait_for_selector("#routing-all:checked", timeout=60000)
         shot(page, "d6-settings")
-        say("PASS: D6. This computer shows the machine; Settings shows the routing policy")
+        say(f"PASS: D6. This computer shows the machine (last report {last_report!r}); Settings shows the routing "
+            "policy")
 
         # D7. Offline and Retry.
         server.stop()
