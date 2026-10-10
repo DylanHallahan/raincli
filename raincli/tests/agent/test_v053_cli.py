@@ -216,3 +216,86 @@ def test_only_fixed_codes_reach_the_server(fake_api, connector_env):
     assert events == [("submission_uncertain", "herdr_failed")]
     assert report_code({"state": q.SUBMITTED, "code": "bad code with spaces"}) == "delivered"
     assert report_code({"state": q.REJECTED}) == "rejected"
+
+
+# -- §18.1 item 2, the client's known-device token ------------------------------------------------------
+
+PASSWORD = "correct horse battery staple 7f3a"
+EMAIL = "alice@example.test"
+
+
+@pytest.fixture
+def account(fake_api, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    fake_api.state.add_user(EMAIL, PASSWORD)
+    return fake_api
+
+
+def sign_in(account, tmp_path, **kw):
+    from raincli_agent import login
+    from raincli_agent.config import Secret
+    kw.setdefault("machine_name", "work-pc")
+    return login.login(EMAIL, Secret(PASSWORD), api_url=account.url, config_path=str(tmp_path / "cfg" / "agent.json"),
+                       person_session=True, **kw)
+
+
+def test_the_known_device_is_kept_sent_and_survives_sign_out(account, tmp_path, monkeypatch):
+    import os
+    from raincli_agent import login, person
+    from raincli_agent.config import Secret
+    from raincli_agent.runtime import startup
+    monkeypatch.setattr(startup, "remove_for", lambda config: "not_enabled")
+    agent = str(tmp_path / "cfg" / "agent.json")
+    sign_in(account, tmp_path)
+    first = person.load_known_device(agent)
+    assert first in account.state.known_devices and "known_device" not in account.state.login_bodies[0]
+    if os.name != "nt":
+        assert person.known_device_path(agent).stat().st_mode & 0o777 == 0o600
+    person.add_session(agent, EMAIL, Secret(PASSWORD))  # person_only sends it too
+    assert account.state.login_bodies[-1]["known_device"] == first
+    second = person.load_known_device(agent)
+    person.sign_out(agent)
+    login.logout(agent)  # signing out keeps the device
+    assert person.load_known_device(agent) == second
+    sign_in(account, tmp_path, machine_name="work-pc-2")  # the old machine was revoked
+    assert account.state.login_bodies[-1]["known_device"] == second
+
+
+def test_forgetting_and_reinstalling_clear_the_device_but_an_update_does_not(account, tmp_path, monkeypatch):
+    from raincli_agent import person
+    agent = str(tmp_path / "cfg" / "agent.json")
+    sign_in(account, tmp_path)
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "install.json").write_text(json.dumps({"current": "0.5.3", "previous": None, "probation": None,
+                                                   "install_stamp": "20261010T120000Z-aa"}))
+    monkeypatch.setattr(winapp, "app_root", lambda *a, **k: root)
+    person.app_install_token(agent)
+    person.rotate_app_install_token(agent)  # created under this install
+    winapp.write_install(root, "0.5.4", "0.5.3")  # a pushed update keeps the install_stamp
+    person.app_install_token(agent)
+    assert person.load_known_device(agent) is not None
+    data = json.loads((root / "install.json").read_text())
+    data["install_stamp"] = "20261011T090000Z-bb"  # a reinstall
+    (root / "install.json").write_text(json.dumps(data))
+    person.app_install_token(agent)
+    assert person.load_known_device(agent) is None
+    person.save_known_device(agent, "rkd1_" + "a" * 32 + ".signature-part")
+    assert person.load_known_device(agent) is not None
+    assert cli.main(["--config", agent, "app", "forget-device"]) == 0
+    assert person.load_known_device(agent) is None
+
+
+def test_the_known_device_never_appears_in_errors(account, tmp_path, monkeypatch):
+    from raincli_agent import login, person
+    from raincli_agent.config import Secret
+    agent = str(tmp_path / "cfg" / "agent.json")
+    sign_in(account, tmp_path)
+    token = person.load_known_device(agent)
+    account.state.fail("POST", r"/app/login", (400, "invalid", {}), times=1)
+    with pytest.raises(login.InvalidRequest) as err:
+        sign_in(account, tmp_path, force=True)
+    assert token not in str(err.value)
+    damaged = person.known_device_path(agent)
+    damaged.write_text("{broken")
+    assert person.load_known_device(agent) is None  # never blocks a sign-in

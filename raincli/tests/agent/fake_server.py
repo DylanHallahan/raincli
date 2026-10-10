@@ -126,6 +126,7 @@ class FakeState:
         self.login_bodies = []  # every /app/login body received (tests check what was sent)
         self.inbox_queries = []  # (handle, routing=1?) for every inbox poll
         self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id} (§16.3)
+        self.known_devices = {}  # known-device token -> email (§18.1 item 2)
         self.person_inbox = {}  # email -> [message JSON] for the notification feed tests
         self.routing = {}  # agent id -> "all" | "inbox-only" (§16.5)
         self.archive_calls = []  # (handle, conversation id, archived?, archived_through_seq sent)
@@ -152,7 +153,7 @@ class FakeState:
         """15.1 as amended by 15.8: generic errors, team choice, name rules, rotation with proof."""
         if not isinstance(body, dict) or set(body) - {"email", "password", "machine_name", "team",
                                                       "previous_token", "replace", "person_session",
-                                                      "person_only"}:
+                                                      "person_only", "known_device"}:
             raise ApiFail(400, "invalid")
         user = self.users.get(body.get("email"))
         if self.login_failures.get(body.get("email"), 0) >= 5:
@@ -168,7 +169,8 @@ class FakeState:
                 raise ApiFail(409, "machine_credential_invalid")
             if self.owners.get(machine) != body["email"]:
                 raise ApiFail(409, "not_machine_owner")
-            return 200, {"person_session": self.new_person_session(body["email"], machine)}
+            return 200, {"person_session": self.new_person_session(body["email"], machine),
+                         "known_device": self.new_known_device(body["email"])}
         teams = user["teams"]
         team = body.get("team")
         if team is None:
@@ -207,7 +209,13 @@ class FakeState:
                  "team": {"slug": team, "name": self.teams[team]}, "rotated": rotated}
         if body.get("person_session") is True:
             reply["person_session"] = self.new_person_session(body["email"], machine)
+        reply["known_device"] = self.new_known_device(body["email"])  # every success (§18.1 item 2)
         return status, reply
+
+    def new_known_device(self, email):
+        token = "rkd1_" + secrets.token_hex(16) + "." + secrets.token_urlsafe(16)
+        self.known_devices[token] = email
+        return token
 
     def new_person_session(self, email, machine):
         token = "rps_" + secrets.token_urlsafe(32)

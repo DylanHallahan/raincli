@@ -180,7 +180,10 @@ def test_set_aside_moves_the_whole_old_setup_including_its_state(account, home):
     assert (backup / "runtime-state" / "queue").is_dir() and (backup / "runtime-state" / "sessions").is_dir()
     # Nothing deleted: every old file is in the backup (plus the result record).
     after = files(backup)
-    assert set(before) <= set(after) and set(after) - set(before) == {"set-aside.json"}
+    # The known-device token stays: it identifies this computer, not the old machine (§18.1 item 2).
+    assert (cfg(home) / "known-device.json").is_file()
+    moved_files = set(before) - {"known-device.json"}
+    assert moved_files <= set(after) and set(after) - moved_files == {"set-aside.json"}
     assert json.loads((backup / "set-aside.json").read_text())["moved"] == result["moved"]
     assert "rca_" not in json.dumps(result) and "rps_" not in json.dumps(result)
 

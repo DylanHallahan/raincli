@@ -379,7 +379,7 @@ def _teams(payload):
 
 
 def request_login(api_url, email, password, machine_name, team=None, *, previous_token=None, replace=False,
-                  person_session=False):
+                  person_session=False, known_device=None):
     """``POST /api/v1/app/login``. Returns the validated reply; raises a ``LoginError``
     for the codes a user acts on (15.1), or the transport's ``ApiError``."""
     if not isinstance(password, Secret):
@@ -394,7 +394,10 @@ def request_login(api_url, email, password, machine_name, team=None, *, previous
         body["replace"] = True
     if person_session:
         body["person_session"] = True  # §16.12 C15: only when asked
+    if known_device:
+        body["known_device"] = known_device  # this device signed in before (§18.1 item 2)
     secrets = [password.reveal()] + ([previous_token.reveal()] if previous_token is not None else [])
+    secrets += [known_device] if known_device else []
     try:
         status, reply = _post(api_url, "/app/login", body, secrets=secrets)
     except ApiError as exc:
@@ -422,7 +425,15 @@ def request_login(api_url, email, password, machine_name, team=None, *, previous
             raise ApiError("the server's sign-in reply is malformed", code="bad_response", status=status) from None
     return {"token": token, "handle": handle, "rotated": bool(reply.get("rotated")),
             "team": {"slug": team_info["slug"], "name": str(team_info.get("name") or team_info["slug"])},
-            "api_url": reply_url, "status": status, "person_session": person}
+            "api_url": reply_url, "status": status, "person_session": person,
+            "known_device": _known_device(reply)}
+
+
+def _known_device(reply):
+    """The server's known-device token from a successful sign-in, or None."""
+    from .person import KNOWN_DEVICE_RE
+    value = reply.get("known_device") if isinstance(reply, dict) else None
+    return value if isinstance(value, str) and KNOWN_DEVICE_RE.fullmatch(value) else None
 
 
 def _login_error(exc, machine_name=None):
@@ -449,16 +460,19 @@ def _login_error(exc, machine_name=None):
         raise InvalidRequest(f"the server refused the sign-in request: {exc}") from None
 
 
-def request_person_only(api_url, email, password, machine_token):
+def request_person_only(api_url, email, password, machine_token, known_device=None):
     """``POST /api/v1/app/login`` with ``person_only`` (§16.3): a person session for the
     owner of the machine whose current credential is ``machine_token``. It rotates
-    nothing. Returns the session as a ``Secret``."""
+    nothing. Returns ``(session as a Secret, known-device token or None)``."""
     if not isinstance(password, Secret):
         raise TypeError("password must be a Secret")
     body = {"email": email, "password": password.reveal(), "previous_token": machine_token.reveal(),
             "person_only": True}
+    if known_device:
+        body["known_device"] = known_device
     try:
-        status, reply = _post(api_url, "/app/login", body, secrets=[password.reveal(), machine_token.reveal()])
+        status, reply = _post(api_url, "/app/login", body, secrets=[password.reveal(), machine_token.reveal()]
+                              + ([known_device] if known_device else []))
     except ApiError as exc:
         from .setaside import stale_message
         if exc.code == "machine_credential_invalid":
@@ -474,7 +488,7 @@ def request_person_only(api_url, email, password, machine_token):
         body.clear()
     from .person import validate_session
     try:
-        return validate_session(reply.get("person_session"))
+        return validate_session(reply.get("person_session")), _known_device(reply)
     except ConfigError:
         raise ApiError("the server's sign-in reply is malformed", code="bad_response", status=status) from None
 
@@ -561,7 +575,9 @@ def login(email, password, *, plan=None, machine_name=None, team=None, replace=F
             raise ConnectorMachine(f"this machine's connector delivery uses the handle {plan['handle']}; "
                                    "signing in again may only rotate that same machine")
     previous = plan["previous_token"] if machine_name == plan["handle"] else None
+    from . import person as person_mod
     reply = request_login(api_url, email, password, machine_name, team, previous_token=previous, replace=replace,
+                          known_device=person_mod.load_known_device(plan["config"]),
                           person_session=person_session)
     if not plan["write_runtime"] and reply["handle"] != plan["handle"]:
         raise ConnectorMachine("the server did not rotate this machine; the connector credential was left unchanged")
@@ -575,6 +591,8 @@ def login(email, password, *, plan=None, machine_name=None, team=None, replace=F
     # A new machine credential ends this machine's person sessions on the server (§16.12 C6);
     # either way the install token is rotated (§16.14 S3: sign-in again).
     from . import person
+    if reply["known_device"]:
+        person.save_known_device(config_path, reply["known_device"])
     if reply["person_session"] is not None:
         person.save_session(config_path, reply["person_session"])
     else:
