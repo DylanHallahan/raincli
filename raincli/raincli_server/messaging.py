@@ -29,7 +29,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, object_session
 
@@ -251,16 +251,19 @@ def _endpoint_columns(side: str, ep: Endpoint) -> dict:
 
 def _default_conversation(session: Session, team_id: uuid.UUID, x: Endpoint, y: Endpoint) -> Conversation:
     a, b = sorted((x, y), key=lambda ep: ep.key)
+    where = (Conversation.a_key == a.key, Conversation.b_key == b.key, Conversation.is_default.is_(True))
+    # A plain read first: an existing conversation is found without waiting on any row lock (an archive in
+    # progress holds one; §17.3 A1: the send path never contends with it). Insert only the first time.
+    existing = session.scalar(select(Conversation).where(*where))
+    if existing is not None:
+        return existing
     session.execute(
         pg_insert(Conversation)
         .values(id=uuid.uuid4(), team_id=team_id, is_default=True, **_endpoint_columns("a", a),
                 **_endpoint_columns("b", b))
         .on_conflict_do_nothing(index_elements=["a_key", "b_key"], index_where=Conversation.is_default)
     )
-    return session.scalar(
-        select(Conversation).where(
-            Conversation.a_key == a.key, Conversation.b_key == b.key, Conversation.is_default.is_(True))
-    )
+    return session.scalar(select(Conversation).where(*where))
 
 
 def _payload(sender: Endpoint, recipient: Endpoint, body: str, in_reply_to, conversation_id, kind: str,
@@ -654,9 +657,11 @@ def conversation_endpoint(session: Session, conv: Conversation, side: str) -> En
     return Endpoint("agent", agent=agent, name=name) if name else Endpoint("machine", agent=agent)
 
 
-def _conversation_rows(session: Session, where, mine, unacked_where, limit: int) -> list[dict]:
-    """``[{id, peer, peer_endpoint, last_seq, last_at, unacked}]`` newest first. ``mine(conv)`` returns
-    the viewer's side (``"a"`` or ``"b"``)."""
+def _conversation_rows(session: Session, where, mine, unacked_where, limit: int,
+                       archived: str = "include") -> list[dict]:
+    """``[{id, peer, peer_endpoint, last_seq, last_at, unacked, archived, archived_at, archived_through_seq,
+    archived_by}]`` newest first. ``mine(conv)`` returns the viewer's side (``"a"`` or ``"b"``). ``archived``
+    filters by the effective archive state (§17.3 A1)."""
     stats = (
         select(Message.conversation_id.label("cid"), func.max(Message.seq).label("last_seq"),
                func.max(Message.created_at).label("last_at"),
@@ -665,33 +670,165 @@ def _conversation_rows(session: Session, where, mine, unacked_where, limit: int)
     )
     rows = session.execute(
         select(Conversation, stats.c.last_seq, stats.c.last_at, stats.c.unacked)
-        .join(stats, stats.c.cid == Conversation.id).where(where)
+        .join(stats, stats.c.cid == Conversation.id).where(where, archive_filter(archived, stats.c.last_seq))
         .order_by(stats.c.last_seq.desc()).limit(_clamp(limit, 1, CONVERSATIONS_LIMIT_MAX))
     )
     out = []
     for conv, last_seq, last_at, unacked in rows:
         peer = conversation_endpoint(session, conv, "b" if mine(conv) == "a" else "a")
         out.append({"id": str(conv.id), "peer": peer.label(), "peer_endpoint": peer.json(), "last_seq": last_seq,
-                    "last_at": iso(last_at), "unacked": unacked})
+                    "last_at": iso(last_at), "unacked": unacked, **archive_json(session, conv, last_seq)})
     return out
 
 
-def list_conversations(session: Session, agent: Agent, *, limit: int = 50) -> list[dict]:
-    """Conversations the machine is in (as a machine or as one of its agents), newest first."""
+def list_conversations(session: Session, agent: Agent, *, limit: int = 50, archived: str = "include") -> list[dict]:
+    """Conversations the machine is in (as a machine or as one of its agents), newest first. A machine
+    credential sending no ``archived`` gets ``include`` (§17.3 A4), so older clients never lose one."""
     return _conversation_rows(
         session, or_(Conversation.agent_a_id == agent.id, Conversation.agent_b_id == agent.id),
         lambda conv: "a" if conv.agent_a_id == agent.id else "b",
-        Message.recipient_agent_id == agent.id, limit)
+        Message.recipient_agent_id == agent.id, limit, archived)
 
 
-def list_person_conversations(session: Session, user: User, *, limit: int = 50) -> list[dict]:
+def list_person_conversations(session: Session, user: User, *, limit: int = 50,
+                              archived: str = "exclude") -> list[dict]:
     """The person's conversations: those with the person as an endpoint, in teams they belong to (§16.4)."""
     teams = select(Membership.team_id).where(Membership.user_id == user.id)
     return _conversation_rows(
         session, and_(or_(Conversation.a_user_id == user.id, Conversation.b_user_id == user.id),
                       Conversation.team_id.in_(teams)),
         lambda conv: "a" if conv.a_user_id == user.id else "b",
-        Message.recipient_user_id == user.id, limit)
+        Message.recipient_user_id == user.id, limit, archived)
+
+
+# Archived conversations (§17.2) ----------------------------------------------------
+
+ARCHIVED_FILTERS = ("exclude", "include", "only")
+
+
+def archive_filter(archived: str, last_seq):
+    """``exclude`` (the main list), ``include`` or ``only`` (the Archived view), by the effective state:
+    archived while ``archived_at`` is set and no message has a seq above ``archived_through_seq``."""
+    if archived not in ARCHIVED_FILTERS:
+        raise _invalid('archived must be "exclude", "include" or "only"')
+    is_archived = and_(Conversation.archived_at.is_not(None), last_seq <= Conversation.archived_through_seq)
+    if archived == "exclude":
+        return ~is_archived
+    if archived == "only":
+        return is_archived
+    return true()
+
+
+def _max_seq(session: Session, conv: Conversation) -> int:
+    return session.scalar(select(func.coalesce(func.max(Message.seq), 0)).where(Message.conversation_id == conv.id))
+
+
+def is_archived(conv: Conversation, last_seq: int | None) -> bool:
+    return conv.archived_at is not None and (last_seq or 0) <= (conv.archived_through_seq or 0)
+
+
+def endpoint_for_key(session: Session, key: str | None) -> Endpoint | None:
+    """The endpoint behind a canonical key (``m:<id>``, ``a:<id>:<name>``, ``p:<id>``), or None."""
+    if not key:
+        return None
+    kind, _, rest = key.partition(":")
+    try:
+        if kind == "p":
+            user = session.get(User, uuid.UUID(rest))
+            return Endpoint("person", user=user) if user is not None else None
+        machine_id, _, name = rest.partition(":")
+        agent = session.get(Agent, uuid.UUID(machine_id))
+    except ValueError:
+        return None
+    if agent is None:
+        return None
+    return Endpoint("agent", agent=agent, name=name) if kind == "a" and name else Endpoint("machine", agent=agent)
+
+
+def archive_json(session: Session, conv: Conversation, last_seq: int | None = None) -> dict:
+    """The effective archive state for conversation JSON (§17.3 A1, A5): ``archived``, and while archived
+    ``archived_at``, ``archived_through_seq`` and ``archived_by`` (the endpoint, shown like
+    ``from_endpoint``); all null once a newer message arrived or after unarchiving."""
+    if last_seq is None:
+        last_seq = _max_seq(session, conv)
+    if not is_archived(conv, last_seq):
+        return {"archived": False, "archived_at": None, "archived_through_seq": None, "archived_by": None}
+    by = endpoint_for_key(session, conv.archived_by_key)
+    return {"archived": True, "archived_at": iso(conv.archived_at), "archived_through_seq": conv.archived_through_seq,
+            "archived_by": by.json() if by is not None else None}
+
+
+def _locked_conversation(session: Session, conversation_id: uuid.UUID | str) -> Conversation | None:
+    cid = parse_uuid(conversation_id, "conversation id", not_found=True)
+    # FOR NO KEY UPDATE: archive and unarchive serialize with each other, but never with a send, whose
+    # foreign-key check takes only a KEY SHARE lock on this row (§17.3 A1: no contention on the send path).
+    return session.scalars(select(Conversation).where(Conversation.id == cid).with_for_update(key_share=True)
+                           .execution_options(populate_existing=True)).first()
+
+
+def _through_seq(value) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise _invalid("archived_through_seq must be a non-negative integer")
+    return value
+
+
+def _set_archived(session: Session, conv: Conversation, actor_key: str, archived: bool,
+                  through_seq: int | None = None) -> Conversation:
+    """§17.3 A1. Archive: record the newest seq the archiver saw (``through_seq``, capped at the current
+    newest message; the newest when not given). Idempotent: an effectively archived conversation is
+    returned unchanged. Unarchive clears all three fields."""
+    through_seq = _through_seq(through_seq)  # a bad value is refused even when nothing would change
+    newest = _max_seq(session, conv)
+    if archived:
+        if is_archived(conv, newest):
+            return conv
+        through = newest if through_seq is None else min(through_seq, newest)
+        conv.archived_at, conv.archived_by_key, conv.archived_through_seq = (
+            datetime.now(timezone.utc), actor_key, through)
+    else:
+        conv.archived_at = conv.archived_by_key = conv.archived_through_seq = None
+    session.flush()
+    return conv
+
+
+def archive_as_machine(session: Session, agent: Agent, conversation_id: uuid.UUID | str,
+                       archived: bool, through_seq: int | None = None) -> Conversation:
+    """A machine credential whose machine is an endpoint (also through an agent endpoint on it). Anything
+    else is ``404``, with no hint that the conversation exists."""
+    conv = _locked_conversation(session, conversation_id)
+    if conv is None or conv.team_id != agent.team_id or agent.id not in (conv.agent_a_id, conv.agent_b_id):
+        raise MessagingError(404, "not_found", "conversation not found")
+    return _set_archived(session, conv, conv.a_key if conv.agent_a_id == agent.id else conv.b_key, archived,
+                         through_seq)
+
+
+def can_archive_as_person(session: Session, user: User, conv: Conversation) -> bool:
+    """A member of the conversation's team who is an endpoint, or who owns a machine endpoint."""
+    if session.get(Membership, (conv.team_id, user.id)) is None:
+        return False
+    if user.id in (conv.a_user_id, conv.b_user_id):
+        return True
+    owned = owned_machine_ids(session, user, conv.team_id)
+    return bool({conv.agent_a_id, conv.agent_b_id} & owned)
+
+
+def archive_as_person(session: Session, user: User, conversation_id: uuid.UUID | str,
+                      archived: bool, through_seq: int | None = None) -> Conversation:
+    conv = _locked_conversation(session, conversation_id)
+    if conv is None or not can_archive_as_person(session, user, conv):
+        raise MessagingError(404, "not_found", "conversation not found")
+    return _set_archived(session, conv, f"p:{user.id}", archived, through_seq)
+
+
+def conversation_json(session: Session, conv: Conversation, viewer_side: str | None = None) -> dict:
+    """A conversation's identity and archive state (§17.2)."""
+    out = {"id": str(conv.id), "team_id": str(conv.team_id), **archive_json(session, conv)}
+    if viewer_side in ("a", "b"):
+        peer = conversation_endpoint(session, conv, "b" if viewer_side == "a" else "a")
+        out.update(peer=peer.label(), peer_endpoint=peer.json())
+    return out
 
 
 def get_conversation(session: Session, agent: Agent, conversation_id: uuid.UUID | str) -> Conversation:

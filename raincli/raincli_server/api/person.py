@@ -140,10 +140,45 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
         return await run(request, "person:read", work)
 
     @api.get("/person/conversations")
-    async def person_conversations(request: Request, limit: int = Query(50, ge=1, le=2**63 - 1)):
+    async def person_conversations(request: Request, limit: int = Query(50, ge=1, le=2**63 - 1),
+                                   archived: str | None = Query(None, max_length=16)):
         def work(session, auth: PersonAuth):
-            return {"conversations": messaging.list_person_conversations(session, auth.user, limit=limit)}
+            return {"conversations": messaging.list_person_conversations(session, auth.user, limit=limit,
+                                                                         archived=archived or "exclude")}
         return await run(request, "person:read", work)
+
+    def _side(conv, user):
+        return "a" if conv.a_user_id == user.id else "b" if conv.b_user_id == user.id else None
+
+    async def archive_body(request: Request):
+        """Nothing, or ``{"archived_through_seq": N}`` (§17.3 A1); authenticated before the body is read."""
+        await run(request, "person:send", lambda session, auth: None)
+        raw = await request.body()
+        if not raw.strip():
+            return None
+        try:
+            data = json.loads(raw)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            raise ApiError(400, "invalid", "request body must be valid JSON") from None
+        if not isinstance(data, dict) or set(data) - {"archived_through_seq"}:
+            raise ApiError(400, "invalid", 'the body may hold only "archived_through_seq"')
+        return data.get("archived_through_seq")
+
+    @api.post("/person/conversations/{conversation_id}/archive")
+    async def person_archive(request: Request, conversation_id: str):
+        through = await archive_body(request)
+
+        def work(session, auth: PersonAuth):
+            conv = messaging.archive_as_person(session, auth.user, conversation_id, True, through)
+            return {"conversation": messaging.conversation_json(session, conv, _side(conv, auth.user))}
+        return await run(request, "person:send", work, counted=False)
+
+    @api.post("/person/conversations/{conversation_id}/unarchive")
+    async def person_unarchive(request: Request, conversation_id: str):
+        def work(session, auth: PersonAuth):
+            conv = messaging.archive_as_person(session, auth.user, conversation_id, False)
+            return {"conversation": messaging.conversation_json(session, conv, _side(conv, auth.user))}
+        return await run(request, "person:send", work)
 
     @api.get("/person/conversations/{conversation_id}")
     async def person_conversation(request: Request, conversation_id: str,
@@ -153,7 +188,8 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
             conv = messaging.get_person_conversation(session, auth.user, conversation_id)
             peer = messaging.conversation_endpoint(session, conv, "b" if conv.a_user_id == auth.user.id else "a")
             msgs, cursor = messaging.person_conversation_messages(session, auth.user, conv.id, after=after, limit=limit)
-            return {"conversation": {"id": str(conv.id), "peer": peer.label(), "peer_endpoint": peer.json()},
+            return {"conversation": {"id": str(conv.id), "peer": peer.label(), "peer_endpoint": peer.json(),
+                                     **messaging.archive_json(session, conv)},
                     "messages": messaging.messages_json(session, msgs), "cursor": cursor}
         return await run(request, "person:read", work)
 

@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -276,8 +277,17 @@ class Conversation(Base):
     b_key: Mapped[str] = mapped_column(String(160), nullable=False)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = _created()
+    # §17.2, §17.3 A1: one shared archive state, a list state only. Archived while no message has a seq
+    # above archived_through_seq; the send path never writes these.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_by_key: Mapped[str | None] = mapped_column(String(160))
+    archived_through_seq: Mapped[int | None] = mapped_column(BigInteger)
     __table_args__ = (
         CheckConstraint("a_key < b_key", name="ck_conversations_order"),
+        CheckConstraint("(archived_at IS NULL) = (archived_by_key IS NULL) AND "
+                        "(archived_at IS NULL) = (archived_through_seq IS NULL)", name="ck_conversations_archived"),
+        *(Index(f"ix_conversations_{c}_active", c, postgresql_where=text("archived_at IS NULL"))
+          for c in ("agent_a_id", "agent_b_id", "a_user_id", "b_user_id")),
         CheckConstraint("(agent_a_id IS NULL) <> (a_user_id IS NULL)", name="ck_conversations_a_one"),
         CheckConstraint("(agent_b_id IS NULL) <> (b_user_id IS NULL)", name="ck_conversations_b_one"),
         CheckConstraint("a_agent_name IS NULL OR agent_a_id IS NOT NULL", name="ck_conversations_a_name"),
