@@ -31,7 +31,8 @@ def test_archive_on_the_website(people, browser, artifacts):
     assert row.count() == 1 and "new" not in row.inner_text()  # opened before archiving, so read
     page.screenshot(path=str(artifacts / "website-archived.png"))
     row.locator("a.conv").click()
-    assert page.locator(".archived-marker").inner_text() == "Archived by you"
+    marker = page.locator(".archived-marker")
+    assert marker.inner_text().startswith("Archived by you ") and marker.locator("time[data-local]").count() == 1
     page.click("button:has-text('Unarchive')")
     page.wait_for_url("**notice=unarchived**")
     assert page.locator(".archived-marker").count() == 0 and page.locator("button:has-text('Archive')").count() == 1

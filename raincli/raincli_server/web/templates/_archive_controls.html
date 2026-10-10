@@ -1,6 +1,7 @@
+{% from "_state.html" import time %}
 {# §17.2: Archive (no confirmation: Unarchive undoes it), or the Archived marker with Unarchive. #}
 {% if view.archived %}
-<span class="archived-marker">Archived{% if view.archived_by %} by {{ view.archived_by }}{% endif %}</span>
+<span class="archived-marker">Archived{% if view.archived_by %} by {{ view.archived_by }}{% endif %}{% if view.conversation.archived_at %} {{ time(view.conversation.archived_at) }}{% endif %}</span>
 <form class="inline-form" method="post" action="{{ url('/app/conversations/' ~ view.conversation.id ~ '/unarchive') }}">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
   <button class="{{ btn_class }}" type="submit">Unarchive</button>

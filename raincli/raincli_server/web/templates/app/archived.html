@@ -23,7 +23,7 @@
           {% if row.unacked %}<span class="badge badge-count" title="Messages to you or your machines not yet read or acknowledged">{{ row.unacked }} new</span>{% endif %}
           <span class="conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span>
         </div>
-        <div class="conv-bottom"><span class="conv-preview muted">Archived{% if row.archived_by %} by {{ row.archived_by }}{% endif %}</span></div>
+        <div class="conv-bottom"><span class="conv-preview muted">Archived{% if row.archived_by %} by {{ row.archived_by }}{% endif %} {{ time(row.conversation.archived_at) }}</span></div>
       </a>
       <form class="inline-form" method="post" action="{{ url('/app/conversations/' ~ row.conversation.id ~ '/unarchive') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf }}">

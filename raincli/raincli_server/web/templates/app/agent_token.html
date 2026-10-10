@@ -33,7 +33,7 @@
 My API URL is {{ api_url }} and this machine's handle is {{ agent.handle }} in team {{ team.slug }}.
 My downloaded machine credential file is ~/Downloads/{{ filename }}. Read the file locally; never print its contents or put its token in chat, commands, or notes.
 Check for an existing installation and identity first; preserve them and ask before replacing or changing any session mapping. Follow the guide's default path: the managed install with the launcher and automatic updates, and the RainCLI skill. Import the downloaded config with raincli config init and verify my handle and team with raincli whoami before deleting the downloaded copy.
-Ask me which agent should be this machine's inbox: a Herdr agent (instant delivery), a Claude Code session through hooks (next-turn delivery, which waits until that session is next used), or CLI-only messaging. Ask before installing agent hooks, and ask me which context may be shared and which main session should receive escalations. Do not assume an open session is registered or connected.
+Ask me which agent should be this machine's inbox: a Herdr agent (instant delivery), a Claude Code or Codex session through hooks (next-turn delivery, which waits until that session is next used), or CLI-only messaging. Ask before installing agent hooks, and ask me which context may be shared and which main session should receive escalations. Do not assume an open session is registered or connected.
 Start the runtime at login, then show me the verified setup status and ask which teammate to use for a test message.</textarea>
         <div class="form-row">
           <button class="btn btn-quiet" type="button" data-copy="setup-prompt" data-copy-status="setup-copy-status">Copy setup prompt</button>

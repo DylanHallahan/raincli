@@ -13,6 +13,7 @@ def test_status_carries_the_last_report_as_utc(monkeypatch, tmp_path):
     svc = Services(None, host, paths=lambda: (str(tmp_path / "agent.json"), str(tmp_path / "runtime.json")))
     monkeypatch.setattr(runtime_service, "status", lambda config: {"status": "ok", "updated_at": 1791633600.75})
     assert svc.status()["last_report"] == "2026-10-10T12:00:00Z"
-    for bad in (None, "soon", True):
+    for bad in (None, "soon", True, float("nan"), float("inf"), float("-inf"), -1, 10 ** 20, 253402300800):
         monkeypatch.setattr(runtime_service, "status", lambda config, bad=bad: {"updated_at": bad})
-        assert "last_report" not in svc.status()
+        status = svc.status()  # review L4: the rest of the status is still there
+        assert "last_report" not in status and status["version"] and status["connection"] and "agents" in status

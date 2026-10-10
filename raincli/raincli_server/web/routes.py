@@ -53,6 +53,7 @@ NOTICES = {
     "sent": "Message stored on the server.",
     "archived": "Conversation archived. It's under Archived, and a new message brings it back.",
     "unarchived": "Conversation moved back to your inbox.",
+    "newer": "A new message arrived, so this conversation stays in your inbox. Archive it again to hide it.",
     "duplicate": "That message was already stored; nothing was sent twice.",
     "revoked": "Agent revoked. Its credentials stopped working immediately.",
     "invite-revoked": "Invitation revoked. The link no longer works.",
@@ -512,7 +513,7 @@ def archived_conversations(request: Request, db: Session = Depends(get_db)):
 
 
 def _set_archived(request: Request, db: Session, conversation_id: str, csrf_token: str, archived: bool,
-                  through: str = "") -> auth.Viewer:
+                  through: str = "") -> bool:
     """Archive or unarchive as the person (§17.2): either endpoint, or the owner of a machine endpoint, the
     same rule as seeing the conversation here. In the app-mode allowlist (§17.3 A5), with CSRF."""
     viewer = app_viewer(request, db, csrf_token, app_mode_ok=True)
@@ -520,17 +521,20 @@ def _set_archived(request: Request, db: Session, conversation_id: str, csrf_toke
         raise not_found()
     seq = int(through) if through.isdigit() and len(through) < 19 else None
     try:
-        messaging.archive_as_person(db, viewer.user, conversation_id, archived, seq)
+        conv = messaging.archive_as_person(db, viewer.user, conversation_id, archived, seq)
     except messaging.MessagingError:
         raise not_found() from None
+    state = messaging.archive_json(db, conv)["archived"]
     db.commit()
-    return viewer
+    return state
 
 
 @router.post("/app/conversations/{conversation_id}/archive")
 def archive_conversation(request: Request, conversation_id: str, csrf_token: str = Form(""),
                          archived_through_seq: str = Form(""), db: Session = Depends(get_db)):
-    _set_archived(request, db, conversation_id, csrf_token, True, archived_through_seq)
+    if not _set_archived(request, db, conversation_id, csrf_token, True, archived_through_seq):
+        # A message newer than the page the person saw keeps it listed (§17.3 A1): say so, on the thread.
+        return redirect(request, f"/app/conversations/{conversation_id}?notice=newer#latest")
     return redirect(request, "/app/inbox?notice=archived")
 
 

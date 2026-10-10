@@ -1394,9 +1394,10 @@ Found on a real v0.5.0 machine: a Codex CLI session running, but zero directory 
 **A1. Archive state is position-based.**
 - **Recording an archive:** it stores `archived_through_seq` with `archived_at` and `archived_by_key`. That is the newest message `seq` the archiver had seen: the client sends it (the UI sends the newest `seq` it displayed), and the server caps it at the conversation's current maximum.
 - **What counts as archived:** a conversation is archived only while `archived_at IS NOT NULL` **and** no message in it has `seq > archived_through_seq`.
-- **No send-path write:** this replaces the same-transaction clear, so there is no race and no contention on the send path. A message stored at the same instant as an archive always leaves the conversation in the main list.
+- **No send-path write:** this replaces the same-transaction clear, so there is no race and the send path never writes the conversation. A message stored at the same instant as an archive always leaves the conversation in the main list.
+- **Locking:** archive takes `FOR UPDATE` on the conversation and sends hold `FOR KEY SHARE` on it from before the seq is allocated, so an archive's `max(seq)` never precedes an uncommitted lower seq. Sends share the lock and never wait on each other; a send waits only for an archive or unarchive in flight on the same conversation, and that archive waits only for sends already in flight.
 - **Unarchiving** clears all three fields.
-- **Test:** a send and an archive run concurrently, in both commit orders; the newer message must leave the conversation unarchived.
+- **Test:** a send and an archive run concurrently, in both commit orders; the newer message must leave the conversation unarchived. Two senders in opposite directions with an archive between them: the archive waits for the uncommitted lower seq.
 
 **A2. How the formatting is tested.**
 - Tests compare each formatted `<time>` with `new Intl.DateTimeFormat(locale, {timeZone, …})` computed in the same browser, and check the date and hour parts in the forced zone, never literal strings.

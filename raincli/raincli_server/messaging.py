@@ -18,6 +18,10 @@ Concurrency is enforced by PostgreSQL, not by the process:
 * The default conversation for a pair is an upsert against the partial unique
   index ``uq_conversations_default_pair``.
 * Ack is a conditional ``UPDATE ... WHERE acked_at IS NULL``.
+* A send takes ``FOR KEY SHARE`` on its conversation row before it allocates the
+  ``seq`` and holds it to commit; archive and unarchive take ``FOR UPDATE``. Sends
+  never wait on each other there, and an archive's ``max(seq)`` never precedes an
+  uncommitted lower ``seq`` (§17.3 A1).
 """
 
 from __future__ import annotations
@@ -470,6 +474,10 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
     if _pending_count(session, recipient) >= max_pending:
         raise MessagingError(429, "inbox_full", "the recipient has too many unacknowledged messages")
 
+    # §17.3 A1: KEY SHARE on the conversation before the seq is allocated (the insert below), held to commit.
+    # Sends share it; an archive's FOR UPDATE waits for them. Nothing on the send path writes this row.
+    session.execute(select(Conversation.id).where(Conversation.id == conversation.id)
+                    .with_for_update(read=True, key_share=True))
     values = dict(
         id=message_id, team_id=team_id, conversation_id=conversation.id, in_reply_to=reply_to, body=body,
         delivery_state="stored", kind=kind,
@@ -760,9 +768,10 @@ def archive_json(session: Session, conv: Conversation, last_seq: int | None = No
 
 def _locked_conversation(session: Session, conversation_id: uuid.UUID | str) -> Conversation | None:
     cid = parse_uuid(conversation_id, "conversation id", not_found=True)
-    # FOR NO KEY UPDATE: archive and unarchive serialize with each other, but never with a send, whose
-    # foreign-key check takes only a KEY SHARE lock on this row (§17.3 A1: no contention on the send path).
-    return session.scalars(select(Conversation).where(Conversation.id == cid).with_for_update(key_share=True)
+    # FOR UPDATE (§17.3 A1): a send holds KEY SHARE on this row from before it allocates its seq until it
+    # commits, so an archive waits for sends in flight and its max(seq) never precedes an uncommitted lower
+    # seq. Sends never write this row and never wait on each other here.
+    return session.scalars(select(Conversation).where(Conversation.id == cid).with_for_update()
                            .execution_options(populate_existing=True)).first()
 
 

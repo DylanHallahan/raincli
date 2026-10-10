@@ -5,6 +5,7 @@ from __future__ import annotations
 import html as htmllib
 import re
 import uuid
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -45,11 +46,12 @@ def test_archive_unarchive_on_the_website(app, session, world):
     inbox = browser.get("/app/inbox?notice=archived").text
     assert "Conversation archived" in inbox and "please archive me" not in inbox and "/app/archived" in inbox
     archived = htmllib.unescape(browser.get("/app/archived").text)
-    assert f"/app/conversations/{cid}" in archived and "Archived by you" in archived
+    assert f"/app/conversations/{cid}" in archived and "Archived by you <time datetime=" in archived  # I2: when
     assert "1 new" in archived  # §17.3 A3: the unread count stays
     # Opened directly, the thread says so and offers Unarchive (A8: who archived it).
     page = htmllib.unescape(browser.get(f"/app/conversations/{cid}").text)
-    assert 'class="archived-marker">Archived by you<' in page and ">Unarchive</button>" in page
+    assert re.search(r'class="archived-marker">Archived by you <time datetime="[^"]+">[^<]+ UTC</time></span>', page)
+    assert ">Unarchive</button>" in page
     r = browser.post(f"/app/conversations/{cid}/unarchive",
                      data={"csrf_token": csrf_of(page), "back": "archived"}, follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"].endswith("/app/archived?notice=unarchived")
@@ -90,9 +92,15 @@ def test_a_stale_archive_does_not_hide_a_newer_message(app, session, world):
     add_message(session, world["agents"]["bob"], world["agents"]["alice"], body="arrived meanwhile")
     r = browser.post(f"/app/conversations/{cid}/archive",
                      data={"csrf_token": csrf_of(page), "archived_through_seq": through}, follow_redirects=False)
-    assert r.status_code == 303
+    # L2: no "archived" notice; back to the thread, which says why and still offers Archive.
+    assert r.status_code == 303 and r.headers["location"].endswith(f"/app/conversations/{cid}?notice=newer#latest")
+    page = htmllib.unescape(browser.get(f"/app/conversations/{cid}?notice=newer").text)
+    assert ("A new message arrived, so this conversation stays in your inbox. Archive it again to hide it."
+            in page) and ">Archive</button>" in page and "archived-marker" not in page
     assert "arrived meanwhile" in browser.get("/app/inbox").text
     assert f"/app/conversations/{cid}" not in browser.get("/app/archived").text
+    # Archiving again, now through the newest message, works.
+    assert archive(browser, cid).headers["location"].endswith("/app/inbox?notice=archived")
 
 
 def test_archive_needs_csrf_and_visibility(app, session, world):
@@ -123,7 +131,7 @@ def test_archive_in_app_mode(alice_app, session):  # noqa: F811
     archived = webview.get("/app/archived")
     assert archived.status_code == 200 and "rc-nav" in archived.text and 'aria-current="page"' in archived.text
     text = htmllib.unescape(archived.text)
-    assert "Archived by you" in text and f"/app/conversations/{cid}" in text
+    assert "Archived by you <time datetime=" in text and f"/app/conversations/{cid}" in text
     r = webview.post(f"/app/conversations/{cid}/unarchive",
                      data={"csrf_token": csrf_of(archived.text), "back": "archived"}, follow_redirects=False)
     assert r.status_code == 303
@@ -154,3 +162,16 @@ def test_every_layout_loads_localtime_without_inline_script(app, session, world,
         assert '<time datetime="' in r.text and " UTC</time>" in r.text  # the no-JS fallback
     js = browser.get(src.group(1))
     assert js.status_code == 200 and "javascript" in js.headers["content-type"] and "Intl.DateTimeFormat" in js.text
+
+
+def test_next_turn_copy_names_claude_code_and_codex(app, client, world):
+    """v0.5.2 review L3: next-turn delivery is a Claude Code or Codex session through hooks, everywhere."""
+    browser = signed_in(app)
+    pages = {"/app/agents": browser.get("/app/agents").text, "/": client.get("/").text}
+    agents_page = re.sub(r"\s+", " ", htmllib.unescape(pages["/app/agents"]))
+    assert "<strong>Next turn</strong> (a Claude Code or Codex session through hooks, at its next turn)" in agents_page
+    assert "(Herdr, or a Claude Code or Codex session through hooks)" in pages["/"]
+    for html in pages.values():
+        assert "(a Claude Code session, at its next turn)" not in html and "(Herdr or a Claude Code session)" not in html
+    template = Path(__file__).resolve().parents[2] / "raincli_server" / "web" / "templates" / "app" / "agent_token.html"
+    assert "a Claude Code or Codex session through hooks (next-turn delivery" in template.read_text()

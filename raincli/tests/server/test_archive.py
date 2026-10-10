@@ -3,6 +3,7 @@ position-based state, the list filters, a newer message leaving the archive, and
 
 from __future__ import annotations
 
+import threading
 import uuid
 
 import pytest
@@ -220,35 +221,120 @@ def test_archiving_never_touches_inboxes_or_counts(client, world):
     assert listed(client, bob, "only")[cid]["unacked"] == 1
 
 
-@pytest.mark.parametrize("order", ["archive_commits_first", "send_commits_first"])
-def test_a_send_racing_an_archive_always_leaves_the_conversation_listed(client, world, app, order):
-    """A1: no send-path write; whichever transaction commits first, the newer message keeps it listed."""
+class Background:
+    """Run ``fn`` in its own thread; ``blocked()`` says it is still waiting (on a row lock) after a pause."""
+
+    def __init__(self, fn):
+        self.result, self.error = None, None
+        self.thread = threading.Thread(target=self._run, args=(fn,), daemon=True)
+        self.thread.start()
+
+    def _run(self, fn):
+        try:
+            self.result = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the test thread
+            self.error = exc
+
+    def blocked(self, pause=0.7):
+        self.thread.join(pause)
+        return self.thread.is_alive()
+
+    def join(self):
+        self.thread.join(10)
+        assert not self.thread.is_alive(), "still waiting after 10 s"
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def sessions(app, n):
+    out = [app.state.sessionmaker() for _ in range(n)]
+    for s in out:  # a wait we did not expect fails instead of hanging
+        s.execute(text("SET lock_timeout = '10s'"))
+    return out
+
+
+def raced_send(session, agent_id, to, body="raced"):
     from raincli_server import messaging
     from raincli_server.models import Agent
 
-    alice, bob = world["tokens"]["alice"], world["tokens"]["bob"]
-    cid, _ = conv_of(client, alice)
-    make = app.state.sessionmaker
-    s_archive, s_send = make(), make()
-    for s in (s_archive, s_send):  # a lock wait would mean the send path contends with archive: fail, don't hang
-        s.execute(text("SET lock_timeout = '5s'"))
+    msg, _ = messaging.send_message(session, session.get(Agent, agent_id), to=to, body=body, id=str(uuid.uuid4()),
+                                    max_pending=1000)
+    return msg
+
+
+def raced_archive(session, agent_id, cid, through=None):
+    from raincli_server import messaging
+    from raincli_server.models import Agent
+
+    return messaging.archive_as_machine(session, session.get(Agent, agent_id), cid, True, through)
+
+
+def test_an_archive_in_flight_makes_a_send_wait_then_the_send_unarchives(client, world, app):
+    """A1, archive commits first: the send waits for it, then its newer seq leaves the conversation listed."""
+    alice, bob = world["agents"]["alice"].id, world["agents"]["bob"].id
+    cid, _ = conv_of(client, world["tokens"]["alice"])
+    s_archive, s_send = sessions(app, 2)
     try:
-        bob_agent = s_archive.get(Agent, world["agents"]["bob"].id)
-        alice_agent = s_send.get(Agent, world["agents"]["alice"].id)
-        if order == "archive_commits_first":
-            messaging.archive_as_machine(s_archive, bob_agent, cid, True)
-            msg, _ = messaging.send_message(s_send, alice_agent, to="bob-agent", body="raced", id=str(uuid.uuid4()),
-                                              max_pending=1000)
-            s_archive.commit()
-            s_send.commit()
-        else:
-            msg, _ = messaging.send_message(s_send, alice_agent, to="bob-agent", body="raced", id=str(uuid.uuid4()),
-                                              max_pending=1000)
-            messaging.archive_as_machine(s_archive, bob_agent, cid, True)  # cannot see the uncommitted message
-            s_send.commit()
-            s_archive.commit()
+        raced_archive(s_archive, bob, cid)
+        send = Background(lambda: (raced_send(s_send, alice, "bob-agent"), s_send.commit())[0])
+        assert send.blocked()  # KEY SHARE waits for the archive's FOR UPDATE
+        s_archive.commit()
+        msg = send.join()
     finally:
         s_archive.close()
         s_send.close()
-    row = listed(client, bob)[cid]
+    row = listed(client, world["tokens"]["bob"])[cid]
     assert row["archived"] is False and row["last_seq"] == msg.seq
+
+
+def test_a_send_in_flight_makes_an_archive_wait_and_a_stale_position_keeps_it_listed(client, world, app):
+    """A1, send commits first: the archive waits for the send. Archived through what the archiver saw (before
+    the send), the conversation stays listed; archived through "the newest", it covers the committed message."""
+    alice, bob = world["agents"]["alice"].id, world["agents"]["bob"].id
+    cid, _ = conv_of(client, world["tokens"]["alice"])
+    seen = listed(client, world["tokens"]["bob"])[cid]["last_seq"]
+    for through in (seen, None):
+        s_send, s_archive = sessions(app, 2)
+        try:
+            msg = raced_send(s_send, alice, "bob-agent")
+            archived = Background(lambda: (raced_archive(s_archive, bob, cid, through), s_archive.commit()))
+            assert archived.blocked()  # FOR UPDATE waits for the send's KEY SHARE
+            s_send.commit()
+            archived.join()
+        finally:
+            s_send.close()
+            s_archive.close()
+        row = listed(client, world["tokens"]["bob"], "include")[cid]
+        if through is None:
+            assert row["archived"] is True and row["archived_through_seq"] == msg.seq == row["last_seq"]
+        else:
+            assert row["archived"] is False and row["last_seq"] == msg.seq
+            seen = msg.seq
+
+
+def test_opposite_direction_sends_never_let_an_archive_skip_a_lower_seq(client, world, app):
+    """L1: A->B takes the lower seq and stays uncommitted while B->A takes a higher one and commits. The
+    archive must wait for A->B, so its max(seq) covers only committed messages; the two sends never wait."""
+    alice, bob = world["agents"]["alice"].id, world["agents"]["bob"].id
+    cid, _ = conv_of(client, world["tokens"]["alice"])
+    s_low, s_high, s_archive = sessions(app, 3)
+    try:
+        low = raced_send(s_low, alice, "bob-agent", "lower seq, committed last")
+        high = Background(lambda: (raced_send(s_high, bob, "alice-agent", "higher seq"), s_high.commit())[0])
+        assert not high.blocked(pause=5)  # opposite-direction sends run concurrently
+        high = high.join()
+        assert low.seq < high.seq and low.conversation_id == high.conversation_id == uuid.UUID(cid)
+        archived = Background(lambda: (raced_archive(s_archive, bob, cid), s_archive.commit()))
+        assert archived.blocked()  # it would otherwise read max(seq) = high.seq past the uncommitted low.seq
+        s_low.commit()
+        archived.join()
+    finally:
+        for s in (s_low, s_high, s_archive):
+            s.close()
+    row = listed(client, world["tokens"]["bob"], "include")[cid]
+    assert row["archived"] is True and row["archived_through_seq"] == high.seq == row["last_seq"]
+    # Every message at or below the position was committed when the archive read it: none appears later.
+    ids = {m["id"] for m in client.get(f"/api/v1/conversations/{cid}/messages",
+                                       headers=auth(world["tokens"]["bob"])).json()["messages"]}
+    assert {str(low.id), str(high.id)} <= ids
