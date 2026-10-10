@@ -51,7 +51,8 @@ def create_user(session: Session, email: str, display_name: str, password: str) 
     if not security.valid_email(email):
         raise IdentityError("enter a valid email address")
     if not security.valid_person_name(display_name):
-        raise IdentityError("enter a display name (1-80 characters, without invisible or direction characters)")
+        raise IdentityError("enter a display name (1-80 characters, without ( ) @ or invisible or direction "
+                            "characters)")
     if not security.valid_password(password):
         raise IdentityError("password must be 12-256 characters")
     if find_user_by_email(session, email) is not None:

@@ -31,10 +31,18 @@ _LOOKALIKES = str.maketrans({
 })
 
 
-def skeleton(name: str) -> str:
+_TRAILING_GROUP = re.compile(r"\s*\([^()]*\)\s*$")
+
+
+def skeleton(name: str, *, whole: bool = False) -> str:
     """A form under which names that read alike compare equal. Format characters (zero-width, joiners, bidi
-    controls) are dropped first: new names may not contain them, but older rows might."""
+    controls) are dropped first, and trailing parenthesised groups are ignored unless ``whole``: new names may
+    contain neither, but older rows might, and such a group is what the shown name adds."""
     name = "".join(ch for ch in name if unicodedata.category(ch) != "Cf")
+    if not whole:
+        name = unicodedata.normalize("NFKC", name)
+        while _TRAILING_GROUP.search(name):
+            name = _TRAILING_GROUP.sub("", name)
     folded = unicodedata.normalize("NFKC", name).casefold()
     folded = "".join(ch for ch in unicodedata.normalize("NFD", folded) if unicodedata.category(ch) != "Mn")
     folded = folded.translate(_LOOKALIKES).replace("i", "l")  # i and l are hard to tell apart in many fonts
@@ -47,22 +55,24 @@ def displays(session: Session, team_id: uuid.UUID, extra: list[User] = ()) -> di
         select(User).join(Membership, Membership.user_id == User.id).where(Membership.team_id == team_id))}
     users.update({u.id: u for u in extra if u is not None})
     out = {uid: user.display_name for uid, user in users.items()}
-    # Each round adds a distinguishing suffix to every name that still reads like another's: the email's local
-    # part, then the whole email, then part of the account id, which is unique.
+    # Names that read alike, ignoring any trailing "(...)", get a distinguishing suffix; then, comparing the whole
+    # shown strings, each round adds another to those that still read alike: the email's local part, then the
+    # whole email, then part of the account id, which is unique.
+    clashing = _clashes(out, whole=False)
     for suffix in (lambda u: u.email.split("@", 1)[0], lambda u: u.email, lambda u: u.id.hex[:12]):
-        clashing = _clashes(out)
         if not clashing:
             break
         for uid in clashing:
             out[uid] = f"{out[uid]} ({suffix(users[uid])})"
+        clashing = _clashes(out, whole=True)
     return out
 
 
-def _clashes(shown: dict[uuid.UUID, str]) -> set[uuid.UUID]:
+def _clashes(shown: dict[uuid.UUID, str], *, whole: bool) -> set[uuid.UUID]:
     """The users whose shown name reads like (or is) another user's."""
     by_skeleton: dict[str, set[uuid.UUID]] = {}
     for uid, name in shown.items():
-        by_skeleton.setdefault(skeleton(name), set()).add(uid)
+        by_skeleton.setdefault(skeleton(name, whole=whole), set()).add(uid)
     return {uid for group in by_skeleton.values() if len(group) > 1 for uid in group}
 
 

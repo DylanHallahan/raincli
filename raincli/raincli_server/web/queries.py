@@ -58,6 +58,7 @@ class AgentRow:
     presence: AgentPresence | None = None
     # Live sessions the machine's runtime published (protocol §14.2): inbox first, never keys.
     sessions: list = field(default_factory=list)
+    owner_shown: str = ""  # §18.1 item 7: the owner as the team sees them (owners.displays)
 
     @property
     def runtime_status(self) -> str:
@@ -112,7 +113,21 @@ def _agent_rows(db: Session, where) -> list[AgentRow]:
     live = live_machine_agents(db, [r.agent.id for r in out if r.active])
     for r in out:
         r.sessions = live.get(r.agent.id, [])
+    _show_owners(db, out)
     return out
+
+
+def _show_owners(db: Session, rows) -> None:
+    """Set ``owner_shown`` on machine rows: the owner's display name, told apart within the team (§18.1)."""
+    from raincli_server import owners
+
+    shown: dict = {}
+    for r in rows:
+        if r.team.id not in shown:
+            shown[r.team.id] = owners.displays(db, r.team.id)
+        if r.owner.id not in shown[r.team.id]:  # an owner who has left the team
+            shown[r.team.id] = owners.displays(db, r.team.id, [r.owner])
+        r.owner_shown = shown[r.team.id][r.owner.id]
 
 
 def my_agents(db: Session, user: User, team_ids: list[uuid.UUID]) -> list[AgentRow]:
@@ -492,6 +507,7 @@ class PickerMachine:
     team: Team
     owner: User
     agents: list[PickerAgent]
+    owner_shown: str = ""
 
 
 def team_directory(db: Session, user: User, team_ids: list[uuid.UUID]
@@ -509,6 +525,7 @@ def team_directory(db: Session, user: User, team_ids: list[uuid.UUID]
     machines = [PickerMachine(agent, team, owner, [
         PickerAgent(m.name, m.type, m.status, m.role, m.reachability, m.ambiguous, m.source)
         for m in live.get(agent.id, [])]) for agent, team, owner in rows]
+    _show_owners(db, machines)
     people = list(db.execute(
         select(Team, User).join(Membership, Membership.team_id == Team.id).join(User, User.id == Membership.user_id)
         .where(Team.id.in_(team_ids), User.is_active.is_(True), User.id != user.id)
