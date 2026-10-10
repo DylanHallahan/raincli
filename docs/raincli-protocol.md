@@ -1388,3 +1388,37 @@ Found on a real v0.5.0 machine: a Codex CLI session running, but zero directory 
   - the migration upgrade and downgrade (the downgrade drops only the new columns).
   
   Plus Playwright for the UI and a Windows app e2e step: archive in the window, see it under Archived, unarchive.
+
+### 17.3 Amendments after the v0.5.2 contract review (binding; they override §17.1–17.2 where they conflict)
+
+**A1. Archive state is position-based.**
+- **Recording an archive:** it stores `archived_through_seq` with `archived_at` and `archived_by_key`. That is the newest message `seq` the archiver had seen: the client sends it (the UI sends the newest `seq` it displayed), and the server caps it at the conversation's current maximum.
+- **What counts as archived:** a conversation is archived only while `archived_at IS NOT NULL` **and** no message in it has `seq > archived_through_seq`.
+- **No send-path write:** this replaces the same-transaction clear, so there is no race and no contention on the send path. A message stored at the same instant as an archive always leaves the conversation in the main list.
+- **Unarchiving** clears all three fields.
+- **Test:** a send and an archive run concurrently, in both commit orders; the newer message must leave the conversation unarchived.
+
+**A2. How the formatting is tested.**
+- Tests compare each formatted `<time>` with `new Intl.DateTimeFormat(locale, {timeZone, …})` computed in the same browser, and check the date and hour parts in the forced zone, never literal strings.
+- They assert that no `<time>` element and no page chrome contains "UTC"; message bodies are excluded.
+- Relative labels are tested with Playwright's clock control.
+- CLI tests inject the zone through a `tzinfo` parameter instead of relying on `TZ`, which Windows ignores.
+
+**A3. Archiving affects only conversation lists.**
+- Unchanged by archiving: the inboxes (`/api/v1/inbox`, `/api/v1/person/inbox`, `raincli inbox`, `raincli me inbox`), unread or unacked counts, and the notification feed and toasts.
+- The Archived view shows each conversation's unread count.
+- Archiving a conversation that has unread messages is allowed.
+
+**A4. Older clients.** A request without an `archived` parameter defaults to `exclude` only for a person session, the website, or a v0.5.2+ client that sends the parameter explicitly. **A machine credential that sends no parameter gets `include`**, so v0.5.1 and older clients never lose sight of a conversation. The v0.5.2 CLI always sends the parameter.
+
+**A5. API details.**
+- The person archive and unarchive endpoints need `person:send`.
+- The website's archive and unarchive POST routes join the app-mode allowlist (§16.12 C2), with CSRF.
+- Both operations return `200` with the conversation JSON, including `archived_at`, `archived_through_seq` and `archived_by`.
+- A non-UUID or invisible id gets the same `404`.
+
+**A6. The app's own formatter.** The app's bundled local pages use a bundled copy of `localtime.js` that is **byte-identical** to the server's. A test enforces this, as for `tokens.css`, and the bundle check covers it. It is never loaded from another origin.
+
+**A7. Indexes.** Use partial indexes on the existing endpoint list indexes (`WHERE archived_at IS NULL`), or add the archive filter to them, so the main and archived lists stay index-served. Keep `(team_id, archived_at)` only if a team-wide query uses it.
+
+**A8. Guidance for agents.** `SKILL.md` and the inbox guidance tell agents to archive or unarchive a conversation only when their user asks. The Archived view shows "Archived by <endpoint>".
