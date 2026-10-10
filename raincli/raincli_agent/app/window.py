@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ from . import policy
 LOCAL_DIR = Path(__file__).resolve().parent / "local"
 TITLE = "RainCLI"
 LOAD_TIMEOUT = 20.0  # seconds before a hosted load counts as failed
+EXTERNAL_REPEAT = 2.0  # seconds within which the same outgoing link is handled once
 PROFILE_RESET_MARKER = "reset-profile"
 WEBVIEW2_CLIENT = r"Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 WEBVIEW2_DOWNLOAD = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"  # Microsoft's Evergreen bootstrapper
@@ -245,6 +247,8 @@ class AppWindow:
         self._ua_base = None
         self._core = None
         self.api = Api(self)
+        self._last_good = None  # the last allowed page this window showed
+        self._recent_external = collections.deque(maxlen=16)  # links already handed to the policy
 
     # -- set-up ---------------------------------------------------------------------------------------
 
@@ -343,6 +347,10 @@ class AppWindow:
     def open_external(self, url):
         """Hand a link to the operating system: only a validated, re-serialized ``https:`` or ``mailto:``
         URL (``policy.external_url``). Anything else is dropped and logged by scheme only."""
+        now = time.monotonic()
+        if any(seen == url and now - at < EXTERNAL_REPEAT for at, seen in self._recent_external):
+            return False  # the same link moments ago: a new-window request and pywebview's own navigation to it
+        self._recent_external.append((now, url))
         safe = policy.external_url(url)
         if safe is None:
             scheme = url.split(":", 1)[0][:20] if isinstance(url, str) and ":" in url else "?"
@@ -419,11 +427,19 @@ class AppWindow:
         if decision == "local":
             self.load(self.local_url(target))
             return
-        if decision != "allow":  # slipped past before_navigate: never leave it on screen
-            if decision == "external":
+        if decision != "allow":
+            # Never left on screen. Usually this is a navigation the window already cancelled (pywebview reports
+            # a load for it anyway, as after a dropped new-window link): it was handled once, so it is not handed
+            # out again, and the window goes back to the page it was on. A page that truly slipped through is
+            # handed to the policy once; with no good page to go back to, the offline page shows.
+            if decision == "external" and all(seen != url for _, seen in self._recent_external):
                 self.open_external(url)
-            self.show_offline()
+            if self._last_good:
+                self.load(self._last_good)
+            else:
+                self.show_offline()
             return
+        self._last_good = url
         if url and not self.navigation.is_local(url):
             path = policy.path_of(url)
             if path == "/login":  # the app-mode session ended: hand off again, then go where we were

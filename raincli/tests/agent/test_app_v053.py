@@ -239,3 +239,21 @@ def test_forget_device_needs_the_nonce_and_forgets(tmp_path):
     app.on_loaded()
     nonce = win.scripts[-1].split('"')[1]
     assert app.api.forget_device(nonce)["ok"] and forgotten == [1]
+
+
+def test_a_dropped_link_reported_as_loaded_returns_to_the_page_and_is_not_handed_out_twice(tmp_path):
+    """pywebview reports a load for a navigation the window cancelled (after a dropped new-window link): the
+    window goes back to the page it was on, not the offline page, and the link is not handed over again."""
+    logged = []
+    app, win, opened = make(tmp_path, log=logged.append)
+    inbox = app.service_url() + "/app/inbox"
+    win.url = inbox
+    app.on_loaded()
+    for url in ("custom-app://open", "https://example.org/x"):
+        app.new_window(url)  # the new-window request, dropped or handed over once
+        assert app.before_navigate(url) is True  # pywebview then also navigates the main window to it
+        win.url = url
+        app.on_loaded()  # ...and reports a load for it
+        assert win.loads[-1] == inbox and not win.loads[-1].endswith("offline.html")
+    assert opened == ["https://example.org/x"]  # once, though the request, the navigation and the load all saw it
+    assert sum("link dropped" in line for line in logged) == 1 and not any("offline" in line for line in logged)
