@@ -42,7 +42,8 @@ D. The app window (protocol §16.10, §16.14, §16.15; design §10 GUI coverage)
    launch only: Playwright connects over CDP and drives the window's local sign-in (a person session),
    the handoff to the inbox (the local pages served only under a per-run path secret, their port bound
    exclusively), reading, replying and sending, local times in the thread, archiving the
-   conversation (out of both sides' inboxes, under Archived) and unarchiving it, a custom-scheme new
+   conversation (out of both sides' inboxes, under Archived) and unarchiving it, the window resized to
+   its minimum (760x520, scaled for DPI) still showing the conversation list (v0.5.4 §19.7), a custom-scheme new
    window that opens nothing, This computer and Settings
    with the last report in local time, the offline
    page and Retry (the server stopped and started), and sign-out (the machine revoked, the profile
@@ -599,6 +600,62 @@ def click_dialog_ok(title, timeout=60):
     user32.SendMessageW(ok, 0x00F5, 0, 0)  # BM_CLICK
 
 
+def app_window(pids):
+    """The app's visible top-level WinForms window (its handle), owned by one of ``pids``."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        pid, cls, text = wintypes.DWORD(), ctypes.create_unicode_buffer(64), ctypes.create_unicode_buffer(256)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        user32.GetClassNameW(hwnd, cls, 64)
+        user32.GetWindowTextW(hwnd, text, 256)
+        if pid.value in pids and user32.IsWindowVisible(hwnd) and cls.value.startswith("WindowsForms") and text.value:
+            found.append(hwnd)
+        return True
+    user32.EnumWindows(each, 0)
+    return found[0] if found else None
+
+
+def window_rect(hwnd):
+    import ctypes
+    from ctypes import wintypes
+    rect = wintypes.RECT()
+    ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+
+
+def resize_window(hwnd, width, height):
+    """Ask for ``width`` x ``height`` physical pixels; WinForms clamps to the window's MinimumSize."""
+    import ctypes
+    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE: a maximised window ignores the size
+    ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, width, height, 0x0002 | 0x0004 | 0x0010)  # NOMOVE|NOZORDER|NOACTIVATE
+
+
+def window_scale(hwnd):
+    import ctypes
+    return ctypes.windll.user32.GetDpiForWindow(hwnd) / 96
+
+
+def list_fits(page):
+    """The §19.7 check: the conversation list shows, inside the window, with its times and counts inside it."""
+    return page.evaluate("""() => {
+        const list = document.querySelector('section.rc-list');
+        if (!list || getComputedStyle(list).display === 'none') return 'no list';
+        const box = list.getBoundingClientRect();
+        if (box.width < 200 || box.right > innerWidth) return `list ${box.left}-${box.right} of ${innerWidth}`;
+        for (const el of document.querySelectorAll('.rc-conv-time, .rc-count')) {
+            const b = el.getBoundingClientRect();
+            if (b.right > box.right + 0.5) return `cut off: ${el.className} at ${b.right} > ${box.right}`;
+        }
+        if (document.documentElement.scrollWidth > innerWidth) return 'horizontal scroll';
+        return '';
+    }""")
+
+
 class WindowCDP:
     """Playwright attached to the app window over CDP. Loading a local page after a hosted one swaps the
     window's main frame (another origin), which an existing Playwright connection may not follow: the
@@ -836,6 +893,49 @@ def part_d(app, server, installers, password, observer, menu, work):
         check(not observer_list("include")[conversation]["archived"], "the observer still sees it archived")
         say(f"PASS: D5b. the thread shows local times ({label!r}, title {title!r}); Archive moved the conversation "
             "out of both sides' inboxes and under Archived (archived by you); Unarchive brought it back")
+
+        # D5d. v0.5.4 (§19.7): at the window's minimum size (760x520 logical, scaled for DPI) the conversation
+        # list still shows, on the inbox and in a conversation. Light and dark at both sizes go to the artifacts.
+        hwnd = wait_for("the app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
+        scale = window_scale(hwnd)
+        original = window_rect(hwnd)
+        resize_window(hwnd, 300, 200)
+        min_size = (round(760 * scale), round(520 * scale))
+        wait_for("the window to clamp at its minimum size",
+                 lambda: abs(window_rect(hwnd)[2] - min_size[0]) <= 2 and abs(window_rect(hwnd)[3] - min_size[1]) <= 2,
+                 timeout=30, interval=0.5)
+        page.click("nav.rc-nav a:has-text('Inbox')")
+        page.wait_for_selector(f".rc-conv[href*='{conversation}']", timeout=60000)
+        wait_for("the page to see the small window", lambda: page.evaluate("innerWidth") < 760, timeout=30, interval=0.5)
+        small_width = page.evaluate("innerWidth")
+        problem = list_fits(page)
+        check(not problem, f"at the minimum window size the inbox list does not fit: {problem}")
+        for scheme in ("light", "dark"):
+            page.emulate_media(color_scheme=scheme)
+            shot(page, f"after-win-inbox-{scheme}-760x520")
+        page.click(f".rc-conv[href*='{conversation}']")
+        page.wait_for_selector(".rc-thread")
+        problem = list_fits(page)
+        check(not problem, f"at the minimum window size the conversation page list does not fit: {problem}")
+        for scheme in ("light", "dark"):
+            page.emulate_media(color_scheme=scheme)
+            shot(page, f"after-win-conversation-{scheme}-760x520")
+        resize_window(hwnd, round(1180 * scale), round(780 * scale))
+        wait_for("the page to see the default window", lambda: page.evaluate("innerWidth") > 1000, timeout=30, interval=0.5)
+        check(not list_fits(page), "at the default window size the list does not fit")
+        for scheme in ("light", "dark"):
+            page.emulate_media(color_scheme=scheme)
+            shot(page, f"after-win-conversation-{scheme}-1180x780")
+        page.click("nav.rc-nav a:has-text('Inbox')")
+        page.wait_for_selector(f".rc-conv[href*='{conversation}']", timeout=60000)
+        for scheme in ("light", "dark"):
+            page.emulate_media(color_scheme=scheme)
+            shot(page, f"after-win-inbox-{scheme}-1180x780")
+        page.emulate_media(color_scheme="null")  # back to the system theme
+        resize_window(hwnd, original[2], original[3])
+        say(f"PASS: D5d. at the minimum window size ({min_size[0]}x{min_size[1]} physical px at scale {scale:g}, "
+            f"page width {small_width} px) the conversation list shows on the inbox and in a conversation, "
+            "with times and counts inside it")
 
         # D5c. v0.5.3 (§18.2 item 3): a new-window link with another scheme opens nothing: no window, no program.
         before = [url for kind, url in window.targets() if kind == "page"]
