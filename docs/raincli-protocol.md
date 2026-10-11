@@ -1596,3 +1596,73 @@ This section covers app mode only, except item 19.6, which also applies to the w
 **F9. Warning dates are dates.** The sender warning shows a **date only**: "since Oct 3".
 
 **`/app/ack` is app-mode only,** like `/app/live`.
+
+## 20. App polish 2: recipient picker, send in place, launch (v0.5.5, binding)
+
+This section covers app mode only. The website's pages are unchanged until D4. Delivery, framing (C17) and what agents receive are unchanged.
+
+### 20.1 Recipient picker (New message)
+- **The endpoint:** `GET /app/recipients` (app-mode session, `person:read`) returns the viewer's recipients across their teams, freshly computed on each call. The picker fetches it when it opens. For each recipient it gives:
+  - `kind`: `person`, `agent` or `inbox`;
+  - a display `name` (*Priya*, *Jon · api-agent*, *Ryan · inbox*);
+  - the `team` name, shown only when the viewer belongs to several teams;
+  - for agents, `reachability` and presence (§19.3 mapping and the 2-minute offline rule; never Instant when offline);
+  - an opaque `id` that the send posts back, carrying the endpoint and team;
+  - hidden `match` terms (handles and emails), never displayed.
+- **What is listed:** teammates; their deliverable agents, including offline ones; each machine's inbox.
+- **What is not listed:** listed-only agents, ambiguous names, and named agents on `inbox-only` machines.
+- **Order:** people the viewer has messaged recently first, then everyone alphabetically by person, with each person's agents grouped under them.
+- **The page and the DOM** never show a handle, `@email` or `machine/agent` form.
+- **Controls:** an ARIA combobox with arrow keys, Enter and Esc. The pick shows as a removable chip. Each option is read out as, for example, "Jon · api-agent, instant, ready".
+- **Pre-fill:** `?to=` (a handle, `handle/agent` or `@email`, as before) is resolved on the server to the matching option and pre-picked.
+- **Warning:** the "not connected" warning (§19.6) shows under the picker as soon as an affected recipient is picked.
+- **Without JavaScript:** a `<select>` of the same display names, grouped by person.
+- **N1:** sending to a recipient who already has a conversation sends into that conversation, and the window then opens it.
+- **The middle area** shows only "Pick who to message, then write below."
+
+### 20.2 Send in place
+- **The endpoint:** `POST /app/send` (CSRF, app mode) takes the same fields as the existing send plus the client message id. It returns JSON:
+  - `{conversation_id, message_html, seq}` on success, where the fragment is rendered as in §19.1;
+  - `{error: {code, message}}` on failure.
+- **The client:**
+  - inserts the returned fragment at once (state `stored`) and clears the draft only on success;
+  - shows a failure as one inline line, keeping the draft;
+  - on retry, reuses the same message id, so the send is idempotent;
+  - leaves later states to the 5 s poll, which merges by id (§19.8 M1);
+  - sends attachments the same way.
+- **Banner:** app mode never shows the "Message stored on the server." banner.
+- **Without JavaScript,** the form posts and redirects with no banner.
+
+### 20.3 Launch and Inbox (P2)
+- **Opening the window on Inbox,** or clicking Inbox in the rail, shows the most recent non-archived conversation, selected, with the composer ready.
+- **With no conversations,** it shows the first-run state.
+- **A toast click** opens its own thread.
+- **Read rule:** §19.2 is unchanged. A window that starts hidden marks nothing read.
+
+### 20.4 Presentation
+- **Focus (R3):**
+  - no focus outline from a mouse click, live update, send or programmatic focus (`preventScroll`, `:focus-visible` only);
+  - keyboard focus shows a ring in `--rc-focus` that follows the element's radius.
+- **Trail toggle (R5):**
+  - the delivery trail is the toggle for the event history, as a button with `aria-expanded` and a chevron; the separate Details line is gone;
+  - without JavaScript it is a `<details>` whose summary is the trail.
+- **Header (R6):** one fixed height for every conversation kind, and for New message and Agents. The presence word and Archive are centred on one line.
+- **Short windows (R7):**
+  - below 600 px tall, Team starts collapsed unless the viewer chose otherwise;
+  - an overflowing list shows a token-based fade at its bottom.
+- **Small details (R8):**
+  - the "To:" label stays top-aligned while the composer grows;
+  - list previews start with "You:" only for the viewer's own messages, and machine-inbox previews keep the sender's name;
+  - initials come from the person's display name, two letters (Jon → JO, Priya Shah → PS), with agents and inboxes using their owner's;
+  - the Team section is pinned at the bottom in both states;
+  - empty-state step 1 shows done ("Connected: *machine*") when one of the viewer's machines connected within 24 h.
+- **P1:** in app mode, "via *agent* (stated by the machine)" is hidden only when the stated name exactly equals the conversation endpoint's agent name. The website and C17 are unchanged.
+- **Tokens:** only `--rc-*` tokens, AA contrast in both themes, and §19 (v0.5.4) still holds.
+
+### 20.5 Boundary with the website work (Phase B)
+- **v0.5.5 changes only:**
+  - `templates/app_mode/`;
+  - `static/app-mode.css`, `static/app.js` and `static/live.js`;
+  - the app window's local pages (`raincli_agent/app/`);
+  - the new endpoints.
+- **It does not change** `static/tokens.css`, the public templates or the shared base templates. A token v0.5.5 needs is added in `app-mode.css` (scoped to app mode) and moved into `tokens.css` only by the website work.
