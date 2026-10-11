@@ -1,10 +1,12 @@
 {# §19.5 Team: teammates' deliverable agents (web/team.py). A <details>, so it opens and closes without
-   JavaScript; app.js remembers the state per viewer. Presence is the §19.3 word, never a per-message claim. #}
+   JavaScript; app.js remembers the state per viewer. Presence is the §19.8 L3 word, never a per-message claim;
+   an unknown session shows no word and no dot. #}
 {% set team_agents = team_agents|default([]) %}
 {% if team_agents %}
 {% set words = {
   'ready': ('Ready', 'rc-ok', 'Ready: its machine reported this session idle in the last two minutes.'),
   'busy': ('Busy', 'rc-busy', 'Busy: the session was working at its last report.'),
+  'blocked': ('Busy', 'rc-busy', 'Busy: the session was waiting for its user at its last report.'),
   'offline': ('Offline', '', "Offline: no report from this session in the last two minutes."),
 } %}
 <details class="rc-team" data-team="{{ viewer.user.id }}" open>
@@ -13,7 +15,7 @@
     {% for a in team_agents %}{% set w = words.get(a.status, words['offline']) %}
     <li><a class="rc-team-agent" href="{{ url('/app/compose') }}?to={{ a.to|urlencode }}" title="New message to {{ a.person }} · {{ a.agent }} ({{ a.to }})">
       <span class="rc-team-name">{{ a.person }} · {{ a.agent }}</span>
-      <span class="rc-dot {{ w[1] }}" role="img" aria-label="{{ w[0] }}" title="{{ w[2] }}" data-presence="{{ a.status }}"></span>
+      {% if a.status != 'unknown' %}<span class="rc-dot {{ w[1] }}" role="img" aria-label="{{ w[0] }}" title="{{ w[2] }}" data-presence="{{ a.status }}"></span>{% endif %}
     </a></li>
     {% endfor %}
   </ul>
