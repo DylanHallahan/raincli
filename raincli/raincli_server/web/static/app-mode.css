@@ -328,15 +328,15 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .app-mode .rc-main-head > .rc-archive { height: var(--rc-app-head-row); align-self: start; }
 @media (max-width: 1000px) { .app-mode .rc-main-head { padding: 0 var(--rc-s-3); } }
 
-/* R7: an overflowing conversation list fades at its bottom edge (app.js sets rc-more while there is more). */
+/* R7 (frozen for v0.5.5, with app-mode.js's R7 switch): an overflowing conversation list fades at its bottom edge.
 .rc-convs.rc-more::after { content: ""; position: sticky; bottom: 0; height: var(--rc-app-fade-h);
   margin-top: calc(-1 * var(--rc-app-fade-h)); background: linear-gradient(to bottom, transparent, var(--rc-bg));
-  pointer-events: none; }
+  pointer-events: none; } */
 
 /* R8: "To:" stays on the first line, top-aligned with the text, while the composer grows. */
 .rc-box-row1 .rc-to { align-self: flex-start; line-height: calc(var(--rc-fs-base) * var(--rc-lh)); padding-top: var(--rc-s-1); }
-/* R8: the Team section is pinned at the bottom of the column with or without conversations. */
-.rc-list > .rc-empty { flex: 1; }
+/* R8's Team-pinned empty state is frozen for v0.5.5 (the Team section sits as in v0.5.4):
+.rc-list > .rc-empty { flex: 1; } */
 /* R8: first-run step 1 done: a check mark and muted text. */
 .rc-step-done strong, .rc-step-done .rc-step-text { color: var(--rc-muted); }
 .rc-step-done .rc-step-n { border-color: var(--rc-ok); color: var(--rc-ok); }

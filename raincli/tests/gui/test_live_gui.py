@@ -97,8 +97,7 @@ def test_meta_line_names_and_reply_on_hover_and_focus(agent_thread, browser):
     theirs = page.locator(f"#m-{reply['id']}")
     who = theirs.locator(".rc-who").inner_text()
     assert who.startswith("Bob · reviewer · ") and " to " not in who  # name · local time; no "to" here
-    # §20.4 P1: the stated name equals this conversation's agent name, so the "via" line is hidden.
-    assert "via " not in who
+    assert "via reviewer (stated by the machine)" in who  # P1 is frozen for v0.5.5: "via" shows as in v0.5.4
     link = theirs.locator(".rc-reply")
     assert float(link.evaluate("e => getComputedStyle(e).opacity")) == 0
     theirs.hover()

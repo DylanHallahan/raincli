@@ -208,6 +208,7 @@ def test_headers_have_one_height_and_presence_and_archive_share_a_line(team, bro
 
 # R7: short windows (criteria 22-23) --------------------------------------------------------------------------
 
+@pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
 def test_team_starts_collapsed_below_600_tall_unless_the_viewer_chose(team, browser):
     key = "rc-team-open:" + str(team["users"]["Maya"].id)
     context, page = open_app(browser, team, team["maya"], **size(760, 520))
@@ -224,6 +225,7 @@ def test_team_starts_collapsed_below_600_tall_unless_the_viewer_chose(team, brow
     context.close()
 
 
+@pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
 def test_an_overflowing_list_fades_at_the_bottom_with_no_custom_scrollbar(team, browser):
     from raincli_server import identity
 
@@ -284,6 +286,7 @@ def test_previews_say_you_only_for_your_own_and_keep_a_machine_inboxs_sender(tea
     context.close()
 
 
+@pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
 def test_the_team_section_is_pinned_at_the_bottom_with_or_without_conversations(team, browser):
     def team_gap(page):
         return page.evaluate("""() => { const t = document.querySelector('details.rc-team').getBoundingClientRect(),
@@ -316,3 +319,22 @@ def test_no_inline_styles_and_the_new_parts_pass_aa(team, browser):
         context.close()
     css = (STATIC / "app-mode.css").read_text("utf-8") + (STATIC / "app-mode.js").read_text("utf-8")
     assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(|https?://", css)
+
+
+# The frozen items are off: v0.5.4's behaviour holds (P1, R7, the Team tooltip) -------------------------------
+
+def test_v0_5_4_behaviour_holds_for_the_frozen_items(team, browser):
+    """P1, R7 and the Team work are frozen for v0.5.5: "via" shows even when it equals the conversation's agent, the
+    Team section stays open in a short window with no list fade, and the Team tooltip names the handle."""
+    ask = person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "Can you check?")
+    api(team["base"], "/api/v1/messages", {"id": str(uuid.uuid4()), "to": {"person": "maya@example.test"},
+                                          "from_agent": "api-agent", "body": "Done.", "in_reply_to": ask["id"]},
+        team["machines"]["jon-laptop"][1])
+    context, page = open_app(browser, team, team["maya"], path=conv_path(ask), **size(760, 520))
+    assert "via api-agent (stated by the machine)" in page.locator(".rc-thread").inner_text()
+    assert page.locator("details.rc-team").evaluate("d => d.open") is True  # no R7 collapse below 600 px tall
+    assert "rc-more" not in (page.locator(".rc-convs").get_attribute("class") or "")
+    tip = page.locator(".rc-team-agent", has_text="Jon · api-agent").get_attribute("title")
+    assert tip == "New message to Jon · api-agent (jon-laptop/api-agent)"
+    context.close()
+

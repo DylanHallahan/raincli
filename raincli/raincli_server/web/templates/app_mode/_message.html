@@ -8,8 +8,7 @@
   <div class="rc-msg-body">
     <div class="rc-who">
       <span><strong>{{ line.sender_name }}</strong> · {{ time(m.created_at) }}</span>
-      {# §20.4 P1: hidden only when the stated name equals the conversation endpoint's agent name. #}
-      {% if line.via %}<span class="rc-via">via {{ line.via }} (stated by the machine)</span>{% endif %}
+      {% if m.sender_agent_name %}<span class="rc-via">via {{ m.sender_agent_name }} (stated by the machine)</span>{% endif %}{# P1 (§20.4) is frozen for v0.5.5: "via" shows as in v0.5.4; dormant: line.via (present.shown_via). #}
       {% if machine_inbox %}<span>to {{ line.recipient_name }}</span>{% endif %}
       {% if can_send %}<a class="rc-reply" href="{{ url('/app/conversations/' ~ conv_id) }}?reply_to={{ m.id }}#body">Reply<span class="sr-only"> to this message</span></a>{% endif %}
     </div>

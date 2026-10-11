@@ -68,6 +68,7 @@ def _legacy(session, like, stated, body):
     session.commit()
 
 
+@pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
 def test_via_is_hidden_only_when_it_equals_the_sender_sides_agent(client, world, alice_app, session):  # noqa: F811
     bob_reports(client, world)
     ask = person_send(client, alice_app["person"], BOB_AGENT, "please review")
@@ -87,6 +88,7 @@ def _first_from_bob(session, ask):
     return {"id": str(m.id)}
 
 
+@pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
 def test_via_shows_when_the_sender_side_is_a_machine_inbox(client, world, alice_app, session):  # noqa: F811
     plain = agent_send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "from the machine")
     _legacy(session, plain, "reviewer", "stated on an inbox conversation")

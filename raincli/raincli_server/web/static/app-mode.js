@@ -5,6 +5,9 @@
   "use strict";
   var body = document.body;
   var TEAM_KEY = "rc-team-open:";  // app.js's key for the Team section's open state, per viewer
+  // R7 (short windows: Team collapsed below 600 px tall, the list fade) is frozen for v0.5.5. Its code stays dormant
+  // behind this switch; true restores it (with the .rc-convs.rc-more rule in app-mode.css).
+  var R7 = false;
 
   // §20.6 M1 (P2): Inbox opens the latest conversation, the first in the list (ordered by last seq, archived ones
   // excluded), when the list is visible: above the app-mode breakpoint. Below it, Inbox shows the list. A toast
@@ -89,17 +92,21 @@
       if (summary) summary.setAttribute("aria-expanded", target.open ? "true" : "false");
     }
   }, true);
-  document.addEventListener("rc-list-updated", function () {  // live.js swapped the list
-    shortWindowTeam();
-    listFade();
-  });
-  window.addEventListener("resize", listFade);
+  if (R7) {
+    document.addEventListener("rc-list-updated", function () {  // live.js swapped the list
+      shortWindowTeam();
+      listFade();
+    });
+    window.addEventListener("resize", listFade);
+  }
 
   if (openLatest()) return;
   trailToggles(document);
   watchThread();
-  shortWindowTeam();
-  listFade();
+  if (R7) {
+    shortWindowTeam();
+    listFade();
+  }
   // Focus may arrive after this script runs (early in a navigation, or a window shown later): try again then.
   composerReady();
   window.addEventListener("load", composerReady);
