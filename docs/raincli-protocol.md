@@ -1528,3 +1528,56 @@ This section covers app mode only, except item 19.6, which also applies to the w
 - **Motion:** new messages and state changes animate over 150–300 ms, and not at all under `prefers-reduced-motion`.
 - **Minimum width:** the app-mode breakpoint sits below the window's minimum width (760 px), so the conversation list always shows in the app. Below the breakpoint, Inbox shows the list.
 - **Tokens:** only `--rc-*` tokens, with AA contrast in light and dark.
+
+### 19.8 Amendments after the v0.5.4 contract review (binding; they override §19.1–19.7 where they conflict)
+**M1. The live cursors are hints.**
+- Each reply also includes:
+  - messages in the conversation created in the last **30 s**;
+  - the **current** state of each of the viewer's own messages in view (the loaded ones, at most 200) that is not in a final state (`replied` or `rejected`).
+- The client merges by message id and applies states idempotently, so a message or state that commits late shows on the next poll.
+- **Test:** two concurrent sends that commit out of `seq` order both appear without a reload, and a state committed after a poll's `now` appears on the next poll.
+
+**M2. `/app/ack` acknowledges only messages to the viewer as a person.**
+- It acknowledges only messages whose `recipient_user_id` is the viewer, in a team they are still a member of.
+- It never acknowledges a message addressed to a machine or an agent, including the viewer's own machines, whose connectors acknowledge them.
+- Other ids are ignored silently, the call is idempotent, and it is limited to 100 ids.
+- **Test:** an id addressed to the viewer's own machine stays unacknowledged.
+
+**M3. The visibility rule.** A message counts as seen when its visible height is at least **min(50% of the message, 50% of the viewport)** while the window has focus. Long messages are therefore counted when they fill half the viewport.
+
+**L1. The details that complete the criteria:**
+- **Scroll (criterion 12):** when the reader is within about 80 px of the bottom, new messages scroll into view; otherwise the existing "New messages ↓" control appears (§16.19 item 4), without a reload.
+- **Trail colours:**
+  - reached steps use `--rc-ok`, and later steps are muted;
+  - held and uncertain use `--rc-warn`;
+  - rejected uses `--rc-danger`.
+- **Screen readers** hear one phrase, for example "Delivery: received, not yet submitted".
+- **Composer:** the placeholder reads "Message… Markdown and .md files supported", and the separate hint line is removed.
+- **Header:** the Agent, Teammate and Machine inbox kind pill is removed.
+- **Styles and origins:** no inline styles and no external origins (the existing app-mode rules).
+
+**L2. `list_rev`.**
+- **What it is:** an opaque digest the server computes over the inputs of the viewer's list:
+  - for each listed conversation, its id, last `seq`, unread count and archive state;
+  - the Team section's presence values, in minute buckets;
+  - the warnings shown.
+- **How it is used:** when the client's `list_rev` matches, `list` is omitted.
+
+**L3. The presence mapping.**
+- `idle` → **Ready**.
+- `working` → **Busy** ("The session was working at its last report").
+- `blocked` → **Busy** ("The session was waiting for its user at its last report").
+- `unknown` → no presence word; the chip follows the offline rule.
+- **Offline** applies when the agent's entry is older than **120 s**, the presence TTL.
+
+**L4. Sender warning details.**
+- **Precedence:** one warning at a time: never connected, then not connected (a), then not picking up (b).
+- **Scope:** only recipients in the viewer's current team. The owner's Inbox notice covers only their own machines.
+- **What it reveals:** no counts or message contents, only the handle and a date.
+
+**L5. `/app/live` details.**
+- **Headers:** `application/json` and `Cache-Control: no-store`.
+- **Invisible conversations:** a conversation the viewer can't see gets the same `404` as the page.
+- **Fragments** come only from the server's own templates. The JSON never carries raw message bodies outside those fragments.
+
+**L6. Testability.** The 2-minute offline rule and the 24-hour warning take an injectable clock in the server tests. GUI tests use Playwright's clock control.
