@@ -11,6 +11,7 @@
     </div>
     <div class="actions archive-actions">{% with btn_class="btn btn-quiet btn-small" %}{% include "_archive_controls.html" %}{% endwith %}</div>
   </div>
+  {% with warning=view.warning %}{% include "_sender_warning.html" %}{% endwith %}
   {% if view.truncated %}<p class="flash">Showing the most recent {{ view.messages|length }} messages.</p>{% endif %}
 
   <ol class="thread" data-thread>

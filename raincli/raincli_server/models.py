@@ -347,7 +347,8 @@ class Message(Base):
         CheckConstraint("kind IN ('message','escalation')", name="ck_messages_kind"),
         CheckConstraint("char_length(body) BETWEEN 1 AND 16000", name="ck_messages_body_len"),
         Index("ix_messages_recipient_seq", "recipient_agent_id", "seq"),
-        Index("ix_messages_recipient_pending", "recipient_agent_id", postgresql_where="acked_at IS NULL"),
+        # §19.6: also the oldest unacknowledged message to a machine, in one index lookup.
+        Index("ix_messages_recipient_pending", "recipient_agent_id", "seq", postgresql_where="acked_at IS NULL"),
         Index("ix_messages_recipient_user_seq", "recipient_user_id", "seq"),
         Index("ix_messages_sender_user", "sender_user_id"),
         Index("ix_messages_conversation_seq", "conversation_id", "seq"),

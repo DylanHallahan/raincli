@@ -11,9 +11,10 @@
   <link rel="stylesheet" href="{{ static('app-mode.css') }}">
   <script src="{{ static('app.js') }}" defer></script>
   <script src="{{ static('localtime.js') }}" defer></script>
+  <script src="{{ static('live.js') }}" defer></script>
 </head>
 {# App-mode layout (protocol §16.10): a rail, the conversation list, the thread and compose. No marketing chrome. #}
-<body class="app-mode{% block body_class %}{% endblock %}">
+<body class="app-mode{% block body_class %}{% endblock %}" data-live-url="{{ url('/app/live') }}" data-ack-url="{{ url('/app/ack') }}" data-csrf="{{ csrf }}">
   <nav class="rc-nav" aria-label="{{ product_name }}">
     <img class="rc-logo" src="{{ static(product_logo) }}" alt="{{ product_name }}">
     <a href="{{ url('/app/inbox') }}" {% if path in ('/app', '/app/inbox', '/app/compose') or path.startswith('/app/conversations') %}aria-current="page"{% endif %}>

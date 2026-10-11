@@ -55,6 +55,49 @@
     if (out) out.textContent = Array.prototype.map.call(input.files, function (f) { return f.name; }).join(", ");
   });
 
+  // The composer (§19.7): the textarea grows from 1 to 8 lines (CSS caps it) and Ctrl+Enter sends; Enter adds
+  // a new line. Without JavaScript the form still sends with its button.
+  function grow(area) {
+    area.style.height = "auto";
+    area.style.height = area.scrollHeight + "px";
+  }
+  document.querySelectorAll("textarea[data-grow]").forEach(function (area) {
+    grow(area);
+    area.addEventListener("input", function () { grow(area); });
+    area.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && area.form) {
+        event.preventDefault();
+        if (area.form.reportValidity()) {
+          if (area.form.requestSubmit) { area.form.requestSubmit(); } else { area.form.submit(); }
+        }
+      }
+    });
+  });
+
+  // The sender warning on the compose page (§19.6): once a machine or agent is chosen, say whether it is
+  // connecting and picking up. Display only.
+  document.querySelectorAll("input[data-recipient][data-warning-url]").forEach(function (input) {
+    var slot = input.form && input.form.querySelector("[data-recipient-warning]");
+    if (!slot || !window.fetch || !window.DOMParser) return;
+    var last = input.value, pending = null;
+    function check() {
+      var value = input.value.trim();
+      if (value === last) return;
+      last = value;
+      fetch(input.getAttribute("data-warning-url") + "?to=" + encodeURIComponent(value),
+            {credentials: "same-origin", cache: "no-store"})
+        .then(function (r) { return r.ok ? r.text() : ""; })
+        .then(function (html) {
+          if (input.value.trim() !== value) return;  // typed on since
+          var doc = new DOMParser().parseFromString("<!doctype html><body>" + html, "text/html");
+          while (slot.firstChild) slot.removeChild(slot.firstChild);
+          Array.prototype.forEach.call(doc.body.childNodes, function (n) { slot.appendChild(document.importNode(n, true)); });
+        }, function () { /* quietly: the warning is a convenience */ });
+    }
+    input.addEventListener("change", check);
+    input.addEventListener("input", function () { clearTimeout(pending); pending = setTimeout(check, 400); });
+  });
+
   // Conversations open at the newest message (protocol §16.19 item 4). An #m-<id> anchor wins. On a reload
   // the reader stays at the newest message only if they were within 80 px of it; otherwise their place is
   // kept and "New messages" appears when the thread grew. Without JavaScript, links use #latest.

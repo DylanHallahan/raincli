@@ -1,45 +1,28 @@
 {% extends "base_app.html" %}
-{% from "_state.html" import time %}
-{% macro initials(name) -%}
-{%- set parts = (name or '?').replace('-', ' ').replace('_', ' ').replace('@', ' ').replace('/', ' ').split() -%}
-{{- ((parts[0][:1] if parts else '?') ~ (parts[1][:1] if parts|length > 1 else ''))|upper -}}
-{%- endmacro %}
-{% block title %}{{ view.peer.display }} · {{ product_name }}{% endblock %}
+{% block title %}{{ view.name }} · {{ product_name }}{% endblock %}
 {% block list %}{% with current_id=view.conversation.id %}{% include "app_mode/_conv_list.html" %}{% endwith %}{% endblock %}
 {% block main %}
 {% set kind = view.peer.endpoint.kind %}
+{# live.js (§19.1) polls GET /app/live with these, and imports what changed. #}
+<div class="rc-live" data-live data-conversation="{{ view.conversation.id }}" data-after="{{ view.newest_seq }}"
+     data-states-since="{{ live_now }}" data-csrf="{{ csrf }}" hidden></div>
 <header class="rc-main-head">
   <div>
-    <h2>{{ view.peer.display }}</h2>
-    <p>{{ view.peer.label }} · {{ view.team.name }}{% if not view.peer.active %} · no longer active{% endif %}</p>
+    <h2>{{ view.name }}</h2>
+    <p>{{ view.address }} · {{ view.team.name }}{% if not view.peer.active %} · no longer active{% endif %}</p>
   </div>
+  <div class="rc-head-status" data-live-header>{% with presence=view.presence %}{% include "app_mode/_head_status.html" %}{% endwith %}</div>
   <div class="rc-archive">{% with btn_class="rc-btn rc-btn-quiet" %}{% include "_archive_controls.html" %}{% endwith %}</div>
-  <span class="rc-pill">{{ 'Teammate' if kind == 'person' else 'Agent' if kind == 'agent' else 'Machine inbox' }}</span>
 </header>
+<div class="rc-warning-slot" data-live-warning>{% with warning=view.warning %}{% include "_sender_warning.html" %}{% endwith %}</div>
 <div class="rc-scroll" data-thread-scroll>
   {% if view.truncated %}<p class="rc-flash">Showing the most recent {{ view.lines|length }} messages.</p>{% endif %}
   <ol class="rc-thread" data-thread>
-    {% for line in view.lines %}{% set m = line.message %}{% set st = line.shown_state %}
-    <li class="rc-msg{{ ' rc-out' if line.outgoing else '' }}" id="m-{{ m.id }}">
-      <span class="rc-avatar" aria-hidden="true">{{ initials(line.sender.display) }}</span>
-      <div class="rc-msg-body">
-        <div class="rc-who">
-          <span><strong>{{ line.sender.display }}</strong> · {{ time(m.created_at) }}</span>
-          {% if m.sender_agent_name %}<span>via {{ m.sender_agent_name }} (stated by the machine)</span>{% endif %}
-          <span>to {{ line.recipient.display }}</span>
-          {% if view.can_send %}<a href="{{ url('/app/conversations/' ~ view.conversation.id) }}?reply_to={{ m.id }}#body">Reply</a>{% endif %}
-        </div>
-        {% if m.kind == 'escalation' %}<p class="rc-needs"><strong>Escalation</strong> · this needs you.</p>{% endif %}
-        <div class="rc-msg-content"><div class="md">{{ m.body|markdown }}</div></div>
-        {% set atts = view.attachments.get(m.id, []) %}
-        {% if atts %}<ul class="rc-attachments" aria-label="Attachments">{% for a in atts %}<li><a class="rc-file" href="{{ url('/app/messages/' ~ m.id ~ '/attachments/' ~ a.id) }}" download="{{ a.filename }}"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>{{ a.filename }} <span>{{ a.size|filesize }} · {{ a.sha256[:8] }}</span></a></li>{% endfor %}</ul>{% endif %}
-        <p class="rc-state{{ ' rc-held' if st == 'held' else ' rc-rejected' if st == 'rejected' else ' rc-ok' if st in ('received', 'submitted', 'replied') else '' }}">{{ st }}{% if line.hold_reason %}: {{ line.hold_reason|replace('_', ' ') }}{% endif %}</p>
-      </div>
-    </li>
-    {% endfor %}
+    {% for line in view.lines %}{% with atts=view.attachments.get(line.message.id, []), conv_id=view.conversation.id,
+       can_send=view.can_send, machine_inbox=(kind == 'machine') %}{% include "app_mode/_message.html" %}{% endwith %}{% endfor %}
   </ol>
   <span id="latest" class="rc-thread-end"></span>
   <a class="rc-new-messages" href="#latest" data-new-messages hidden>New messages ↓</a>
 </div>
-{% if view.can_send %}{% include "app_mode/_composer.html" %}{% else %}<p class="rc-compose rc-help">You can't reply here: {{ view.peer.display }} is no longer active.</p>{% endif %}
+{% if view.can_send %}{% include "app_mode/_composer.html" %}{% else %}<p class="rc-compose rc-help">You can't reply here: {{ view.name }} is no longer active.</p>{% endif %}
 {% endblock %}

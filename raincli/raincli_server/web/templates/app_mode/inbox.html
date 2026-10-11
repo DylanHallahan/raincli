@@ -2,6 +2,7 @@
 {% block title %}Inbox · {{ product_name }}{% endblock %}
 {% block list %}{% with current_id=None %}{% include "app_mode/_conv_list.html" %}{% endwith %}{% endblock %}
 {% block main %}
+{% include "_owner_warnings.html" %}
 <div class="rc-scroll">
   <div class="rc-center">
     <h2>{% if conversations %}Select a conversation{% else %}No conversations yet{% endif %}</h2>

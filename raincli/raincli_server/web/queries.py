@@ -252,6 +252,7 @@ class ConversationRow:
     unacked: int = 0
     archived: bool = False  # §17.2: the effective state (§17.3 A1)
     archived_by: str = ""  # "Archived by <endpoint>" (§17.3 A8)
+    name: str = ""  # §19.4: owner · agent, owner · inbox, or the person (worked out on the server)
 
 
 @dataclass
@@ -261,6 +262,9 @@ class MessageLine:
     recipient: Side
     outgoing: bool
     hold_reason: str | None = None
+    sender_name: str = ""  # §19.4, §19.7: the meta line's name
+    recipient_name: str = ""
+    trail: object = None  # thread.Trail, only for the viewer's own messages (§19.7)
 
     @property
     def shown_state(self) -> str:
@@ -280,6 +284,10 @@ class ConversationView:
     archived: bool = False
     archived_by: str = ""
     newest_seq: int = 0  # the archive form sends it as archived_through_seq (§17.3 A1)
+    name: str = ""  # §19.4: owner · agent, owner · inbox, or the person
+    address: str = ""  # the header's second line: handle/agent, handle or the person's email
+    presence: object = None  # thread.HeaderPresence for an agent peer (§19.3), else None
+    warning: object = None  # thread.Warning for a machine or agent peer (§19.6), else None
 
     @property
     def messages(self) -> list[Message]:
@@ -362,6 +370,9 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
     last_seqs = [st[0] for st in stats.values() if st[0] is not None]
     lasts = {m.conversation_id: m for m in db.scalars(select(Message).where(Message.seq.in_(last_seqs)))} \
         if last_seqs else {}
+    from raincli_server.web import thread
+
+    names = thread.Names(db)
     rows = []
     for conv, team in convs:
         me, peer = _sides(db, conv, user, owned)
@@ -375,13 +386,14 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
             sender = "You"
         rows.append(ConversationRow(conversation=conv, team=team, me=me, peer=peer, last=last,
                                     last_sender=sender, count=count, unacked=unacked, archived=is_archived,
-                                    archived_by=_archived_by(db, conv, user, owned) if is_archived else ""))
+                                    archived_by=_archived_by(db, conv, user, owned) if is_archived else "",
+                                    name=names.endpoint(peer.endpoint)))
     rows.sort(key=lambda r: (r.last.seq if r.last else 0), reverse=True)
     return rows
 
 
-def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object
-                     ) -> ConversationView | None:
+def conversation_head(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object):
+    """``(conversation, team, me, peer, owned)`` when the viewer may see it, else None. No messages are read."""
     cid = parse_uuid(conversation_id)
     if cid is None or not team_ids:
         return None
@@ -394,20 +406,16 @@ def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], convers
         return None
     conv, team = row
     me, peer = _sides(db, conv, user, owned)
-    newest = list(db.scalars(
-        select(Message).where(Message.conversation_id == conv.id, Message.team_id == conv.team_id)
-        .order_by(Message.seq.desc()).limit(CONVERSATION_PAGE + 1).execution_options(populate_existing=True)
-    ))
-    truncated = len(newest) > CONVERSATION_PAGE
-    messages = list(reversed(newest[:CONVERSATION_PAGE]))
-    lines = []
-    for m in messages:
-        sender = Side(messaging.sender_endpoint(db, m), False)
-        sender.mine = (m.sender_user_id == user.id) or (m.sender_agent_id in owned)
-        recipient = Side(messaging.recipient_endpoint(db, m), False)
-        recipient.mine = (m.recipient_user_id == user.id) or (m.recipient_agent_id in owned)
-        lines.append(MessageLine(m, sender, recipient, outgoing=sender.mine and not recipient.mine,
-                                 hold_reason=messaging.hold_reason(db, m)))
+    return conv, team, me, peer, owned
+
+
+def message_lines(db: Session, user: User, owned: dict, messages: list[Message], names=None
+                  ) -> tuple[list[MessageLine], dict[uuid.UUID, list[DeliveryEvent]]]:
+    """Lines for ``messages`` (oldest first), with sender names and the viewer's delivery trails, and their
+    events in one query."""
+    from raincli_server.web import thread
+
+    names = names or thread.Names(db)
     events: dict[uuid.UUID, list[DeliveryEvent]] = {}
     if messages:
         for ev in db.scalars(
@@ -415,12 +423,45 @@ def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], convers
             .order_by(DeliveryEvent.id)
         ):
             events.setdefault(ev.message_id, []).append(ev)
+    lines = []
+    for m in messages:
+        sender_ep, recipient_ep = messaging.sender_endpoint(db, m), messaging.recipient_endpoint(db, m)
+        sender = Side(sender_ep, (m.sender_user_id == user.id) or (m.sender_agent_id in owned))
+        recipient = Side(recipient_ep, (m.recipient_user_id == user.id) or (m.recipient_agent_id in owned))
+        outgoing = sender.mine and not recipient.mine
+        hold = messaging.hold_reason(db, m)
+        lines.append(MessageLine(
+            m, sender, recipient, outgoing=outgoing, hold_reason=hold,
+            sender_name=names.sender(sender_ep), recipient_name=names.endpoint(recipient_ep),
+            trail=thread.trail_for(m, recipient_ep, events.get(m.id, []), hold) if outgoing else None))
+    return lines, events
+
+
+def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object
+                     ) -> ConversationView | None:
+    from raincli_server.web import thread
+
+    head = conversation_head(db, user, team_ids, conversation_id)
+    if head is None:
+        return None
+    conv, team, me, peer, owned = head
+    newest = list(db.scalars(
+        select(Message).where(Message.conversation_id == conv.id, Message.team_id == conv.team_id)
+        .order_by(Message.seq.desc()).limit(CONVERSATION_PAGE + 1).execution_options(populate_existing=True)
+    ))
+    truncated = len(newest) > CONVERSATION_PAGE
+    messages = list(reversed(newest[:CONVERSATION_PAGE]))
+    names = thread.Names(db)
+    lines, events = message_lines(db, user, owned, messages, names)
     newest_seq = newest[0].seq if newest else 0
     is_archived = messaging.is_archived(conv, newest_seq)
     return ConversationView(conversation=conv, team=team, me=me, peer=peer, lines=lines, events=events,
                             attachments=attachment_meta(db, [m.id for m in messages]), truncated=truncated,
                             archived=is_archived, newest_seq=newest_seq,
-                            archived_by=_archived_by(db, conv, user, owned) if is_archived else "")
+                            archived_by=_archived_by(db, conv, user, owned) if is_archived else "",
+                            name=names.endpoint(peer.endpoint), address=thread.address(peer.endpoint),
+                            presence=thread.header_presence(db, peer.endpoint),
+                            warning=thread.endpoint_warning(db, peer.endpoint))
 
 
 def ack_viewed(db: Session, user: User, view: ConversationView) -> int:
