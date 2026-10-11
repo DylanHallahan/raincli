@@ -5,7 +5,7 @@
     <h1 id="conv-list-title">Inbox</h1>
     <a class="rc-new" href="{{ url('/app/compose') }}"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New message</a>
   </div>
-  {% with owner_warnings=list_owner_warnings|default([]) %}{% include "_owner_warnings.html" %}{% endwith %}
+  {% with owner_warnings=list_owner_warnings|default([]) %}{% include "app_mode/_owner_warnings.html" %}{% endwith %}
   {% if conversations %}
   {# Day headings (Today, Yesterday, Earlier) are added by app.js in local time; without JavaScript there are none. #}
   <ul class="rc-convs" data-day-groups>
