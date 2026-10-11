@@ -937,3 +937,21 @@ def test_without_a_native_control_showing_still_works(tmp_path):
     app.show()
     assert win.shown == 1 and app.visible is True
 
+
+def test_the_controller_itself_is_set_when_it_exists(tmp_path, monkeypatch):
+    """§20.7: the hidden start happens before the controller exists, so the control's own Visible would not reach
+    it; once WebView2 is up the controller's IsVisible is set directly."""
+    app, win, _ = make(tmp_path)
+    control = FakeControl()
+    controller = types.SimpleNamespace(IsVisible=True)
+    win.native = types.SimpleNamespace(browser=types.SimpleNamespace(webview=control))
+    monkeypatch.setattr(type(app), "_controller", staticmethod(lambda c: controller))
+    app._core_ready(types.SimpleNamespace(Settings=types.SimpleNamespace(UserAgent="UA"),
+                                          WebResourceRequested=Events(), AddWebResourceRequestedFilter=lambda *a: None,
+                                          RemoveWebResourceRequestedFilter=lambda *a: None), context_all="all")
+    assert controller.IsVisible is False  # hidden start: the page is hidden
+    app.show()
+    assert controller.IsVisible is True and control.focused == 1
+    app.on_closing()
+    assert controller.IsVisible is False
+
