@@ -91,10 +91,12 @@ def test_config_page_points_to_the_simpler_paths(client, world):
 
 def test_home_page_states_the_v05_trust_defaults(client):
     """Machine mode and inbox connectors default to trust_mode "team"; direct-delivery connector configs
-    to "list" (connector/config.py). The home page says so in one sentence."""
-    page = text(client.get("/").text)
-    assert ("Teammates\u2019 messages go straight through by default; a connector that delivers straight into a "
-            "working session asks first about senders you haven\u2019t trusted.") in page
+    to "list" (connector/config.py). The Phase B homepage states the team default and how to switch."""
+    page = " ".join(re.sub(r"<[^>]+>", "", text(client.get("/").text)).split())
+    assert ("Only people on your team. Their messages go straight to the agent they picked, marked as coming "
+            "from a teammate.") in page
+    assert ("If you'd rather approve each sender first, turn on approval mode in Settings or with "
+            "raincli trust --mode list.") in page
     assert "by default asks before passing on messages" not in page
     from raincli_agent.connector.config import ConnectorConfig
     assert ConnectorConfig().trust_mode == "list"  # a direct-delivery connector ("mode": "direct") asks first
@@ -112,8 +114,12 @@ def test_the_logo_and_favicons_are_the_new_mark(client):
         html = client.get(path).text
         assert re.search(r'<link rel="icon" href="/static/favicon\.ico\?v=[0-9a-f]{12}" sizes="any">', html)
         assert re.search(r'<link rel="icon" href="/static/mark\.svg\?v=[0-9a-f]{12}" type="image/svg\+xml">', html)
-        logo = re.search(r'<svg class="logo" viewBox="8 10 48 45"[^>]*>(.*?)</svg>', html, re.S)
-        assert logo and 'fill="currentColor"' in logo.group(1) and "#" not in logo.group(1)  # coloured by CSS
+        if path == "/":  # website Phase B: the approved mark inline, in its own colours (the same as mark.svg)
+            logo = re.search(r'<svg class="mark" viewBox="0 0 64 64"[^>]*>(.*?)</svg>', html, re.S)
+            assert logo and logo.group(1) in mark
+        else:
+            logo = re.search(r'<svg class="logo" viewBox="8 10 48 45"[^>]*>(.*?)</svg>', html, re.S)
+            assert logo and 'fill="currentColor"' in logo.group(1) and "#" not in logo.group(1)  # coloured by CSS
         assert "logo-bg" not in html  # the old rain-cloud mark is gone
     ico = client.get("/static/favicon.ico")
     assert ico.status_code == 200 and ico.content[:4] == b"\x00\x00\x01\x00"
