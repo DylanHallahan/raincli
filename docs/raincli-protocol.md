@@ -1666,3 +1666,87 @@ This section covers app mode only. The website's pages are unchanged until D4. D
   - the app window's local pages (`raincli_agent/app/`);
   - the new endpoints.
 - **It does not change** `static/tokens.css`, the public templates or the shared base templates. A token v0.5.5 needs is added in `app-mode.css` (scoped to app mode) and moved into `tokens.css` only by the website work.
+
+### 20.6 Amendments after the v0.5.5 contract review (binding; they override §20.1–20.5 where they conflict)
+**M1. P2 and the owner notice.**
+- **The owner's "not connected" notice (§19.6)** shows in app mode at the top of the conversation list, so it is visible whichever page is open. Inbox keeps it too.
+- **P2 runs in the client:** on Inbox, when the conversation list is visible (above the app-mode breakpoint), the app-mode script opens the latest conversation with `location.replace`. It never runs below the breakpoint, where Inbox shows the list.
+- **"Latest"** is the non-archived conversation with the highest last `seq`, the same order as the list.
+- **A toast URL** always wins.
+
+**M2. The message id lifecycle.**
+- **New ids:** the client makes a new id (`crypto.randomUUID()`) for each new draft and after each success, and keeps it across retries of that draft.
+- **After an unknown outcome** (a network error or 5xx), the draft keeps that id until it succeeds. A `409 id_conflict` returns the stored message's fragment, and the client shows "Your earlier version was already sent", with that message inserted.
+- **After a definite rejection** (a 4xx other than 409 or 429), the next attempt may use a new id.
+- **Replays:** a replay (`created == false`) returns `200 {conversation_id, message_html, seq, duplicate: true}`.
+- **The rate limit:** replays of an existing id are answered before it is checked.
+- **Tests:** a second message in the same window; a retry after a dropped response; an edited retry; a replay inside the rate limit.
+
+**M3. One listing rule.**
+- **The rule:** an agent is listed exactly when `routing.check_agent_route` would accept it now. One shared function, computed in bulk, feeds `/app/recipients`, the no-JavaScript `<select>`, the Team section and the empty-state pre-fill. `web/team.py` uses it.
+- **Tests:**
+  - an ambiguous live name with a `known_agents` row is not listed;
+  - an agent on an `inbox-only` machine is not listed, but its inbox is;
+  - an offline known agent is listed as Offline;
+  - every listed option sends successfully.
+
+**M4. Scripts.**
+- **New app-mode behaviour** goes in a new app-mode-only script, `static/app-mode.js`, loaded only by `base_app.html` (alongside `live.js`).
+- **The shared `app.js`:** its global submit handler skips events that are `defaultPrevented` and forms marked `data-send-in-place`.
+- **Phase B's `demo.js`** reuses no `app.js` hooks.
+- **Test:** two in-place sends in a row, and a retry after a failure.
+
+**L1. The recipient id.**
+- **Format:** `p.<team>.<user>`, `i.<team>.<machine>` or `a.<team>.<machine>.<agent name>` (UUIDs).
+- **On send** it is re-resolved and checked again (membership, active person, machine not revoked, `check_agent_route`). It is never trusted.
+- **The no-JavaScript `<select>`** uses the same values.
+- **Pre-fill:** a `?to=` that doesn't match a listed option leaves the picker empty, without revealing anything.
+
+**L2. Match terms and the tooltip.**
+- **Match terms** (handles and emails) exist only in the JSON and in script memory, never in DOM attributes or text.
+- **The recipient JSON** is `Cache-Control: no-store` and covers current teams and active members only.
+- **The Team section's tooltip** drops the handle ("New message to Jon · api-agent"); its links may keep `?to=`.
+
+**L3. Presence freshness.** The picker refetches on every open, and while open at most every 30 s. The reply carries `now`, so presence ages to Offline after 120 s on the client.
+
+**L4. Send and poll.**
+- **One merge path:** the send fragment goes through the same merge-by-id as the poll. It is skipped if `#m-<id>` already exists, inserted in `seq` order, and animated once.
+- **Scrolling:** the viewer's own new message always scrolls into view.
+- **An immediate poll** follows, so the list's preview and order move at once.
+- **N1:** opens the conversation's URL with `location.replace`.
+
+**L5. Errors.**
+- **The shape:** every failure `/app/send` produces is JSON `{error: {code, message}}`, with its HTTP status. A 429 carries `retry_after`.
+- **The client** shows any non-2xx or non-JSON reply as "Couldn't send. Check your connection and try again.", or the server's friendly message when there is one.
+
+**L6. A hidden start.**
+- **The test:** the Windows e2e starts the app hidden. It asserts that `document.hasFocus()` is false and nothing is acknowledged after 10 s (ideally no polling either). It then asserts that showing and focusing the window acknowledges the messages on screen.
+- **A toast URL** wins over P2.
+
+**L7. P1, exactly.**
+- **The comparison:** `message.sender_agent_name` is compared, byte for byte, with the agent name of the sender's side of the conversation.
+- **When it shows:** whenever the names differ, or that side has no agent name (a machine inbox).
+
+**L8. Wording.**
+- **The page:**
+  - the picker sits directly under the header and the composer is pinned at the bottom;
+  - the old To field, its help text and the Team select are removed.
+- **Matching and listing:**
+  - typing matches person, agent and team names, then the hidden terms;
+  - no match shows "Nobody on your team matches '…'";
+  - the viewer's own machines and agents are listed under "You", and the viewer is never listed as a person;
+  - a person in two of the viewer's teams appears once per team, with the team label;
+  - "recent" means up to 5 people by their last message's `seq`, not repeated below.
+- **The composer:**
+  - chosen file names stay shown until the send succeeds;
+  - the text keeps its top padding.
+- **The list:** no custom scrollbar.
+- **Initials:**
+  - you get your own;
+  - a one-character name repeats its character;
+  - a name with no letters shows "?".
+
+**L9. Shared files.**
+- **Shared partials** (`_state.html`, `_archive_controls.html`, `_sender_warning.html`, `_owner_warnings.html`) may be changed by v0.5.5 only if the website's output stays byte-identical. Otherwise they are copied into `app_mode/`.
+- **`base_app.html`** belongs to v0.5.5.
+- **`routes.py`** is edited by both v0.5.5 and Phase B, and is merged deliberately.
