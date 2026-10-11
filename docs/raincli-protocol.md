@@ -1581,3 +1581,18 @@ This section covers app mode only, except item 19.6, which also applies to the w
 - **Fragments** come only from the server's own templates. The JSON never carries raw message bodies outside those fragments.
 
 **L6. Testability.** The 2-minute offline rule and the 24-hour warning take an injectable clock in the server tests. GUI tests use Playwright's clock control.
+
+### 19.9 Amendments after the v0.5.4 build review (binding)
+**F1. Late final states.** Each `/app/live` reply also includes the viewer's own messages in view whose state changed in the **last 30 s**, final states included. So a reply or rejection that commits after a poll's `now` still updates the trail.
+
+**F2. Step times are local.** Every step time is shown in local time (§17.1), including in the trail tooltips.
+
+**F3. Focus and scroll survive.** Live updates keep keyboard focus and the scroll position of every scrollable list.
+
+**F4. Unchanged parts stay put.** Only parts that actually changed are replaced. The `role="status"` warning is never re-announced when it hasn't changed.
+
+**F7. Qualifiers reach assistive technology.** Claim-limiting qualifiers ("at its last report") are available to assistive technology, not only in tooltips.
+
+**F9. Warning dates are dates.** The sender warning shows a **date only**: "since Oct 3".
+
+**`/app/ack` is app-mode only,** like `/app/live`.
