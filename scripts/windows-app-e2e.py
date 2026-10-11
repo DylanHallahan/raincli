@@ -972,8 +972,9 @@ def part_d(app, server, installers, password, observer, menu, work):
                                                    "in_reply_to": mine["id"]})
         wait_for("the answer in the open window", lambda: page.locator(f"#m-{answer}").count() == 1,
                  timeout=60, interval=1)
-        wait_for("the trail at replied", lambda: page.locator(f'[data-trail="{mine["id"]}"]').get_attribute(
-            "data-state") == "replied", timeout=60, interval=1)
+        trail = page.locator(f'[data-trail="{mine["id"]}"]')
+        wait_for("the trail at replied", lambda: trail.count() == 1 and trail.get_attribute(
+            "data-state", timeout=2000) == "replied", timeout=60, interval=1)
         check(page.evaluate("() => window.__rcNoReload") == "kept", "the window reloaded to show the update")
         shot(page, "d5e-live-replied")
         say("PASS: D5e. a message from the observer machine appeared in the open window without a reload, and the "

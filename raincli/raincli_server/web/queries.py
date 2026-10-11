@@ -446,7 +446,9 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
         sender_ep, recipient_ep = messaging.sender_endpoint(db, m), messaging.recipient_endpoint(db, m)
         sender = Side(sender_ep, (m.sender_user_id == user.id) or (m.sender_agent_id in owned))
         recipient = Side(recipient_ep, (m.recipient_user_id == user.id) or (m.recipient_agent_id in owned))
-        outgoing = sender.mine and not recipient.mine
+        # The viewer's own message: one they sent as a person (to anyone, their own machines included), or one a
+        # machine of theirs sent to someone else. A machine of theirs writing to them is incoming.
+        outgoing = m.sender_user_id == user.id or (sender.mine and not recipient.mine)
         hold = hold_of(m)
         lines.append(MessageLine(
             m, sender, recipient, outgoing=outgoing, hold_reason=hold,

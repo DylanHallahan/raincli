@@ -453,3 +453,14 @@ def test_a_poll_costs_the_same_however_many_of_your_messages_are_in_flight(clien
         assert len(out["states"]) >= n
         counts.append(len(seen))
     assert counts[1] <= counts[0] + 2, counts
+
+
+def test_a_message_you_send_to_your_own_machine_is_yours(client, world, alice_app):  # noqa: F811
+    """Your own message, whoever receives it: a trail and the accent avatar; your machine writing to you is not."""
+    mine = person_send(client, alice_app["person"], {"machine": "alice-agent"}, "to my own machine")
+    back = agent_send(client, world["tokens"]["alice"], {"person": "alice@example.test"}, "from my machine",
+                      conversation_id=mine["conversation_id"])
+    page = alice_app["webview"].get(f"/app/conversations/{mine['conversation_id']}").text
+    assert f'data-trail="{mine["id"]}"' in page and f'data-trail="{back["id"]}"' not in page
+    assert re.search(rf'class="rc-msg rc-out" id="m-{mine["id"]}"', page)
+    assert re.search(rf'class="rc-msg" id="m-{back["id"]}"', page)
