@@ -817,6 +817,10 @@ def cdp_evaluate(port, url_fragment, expression, timeout=30):
             if message.get("id") == 1:
                 return message["result"]["result"].get("value")
     finally:
+        with contextlib.suppress(OSError):  # a clean close (a masked, empty close frame), so the session ends
+            sock.sendall(bytes([0x88, 0x80]) + os.urandom(4))
+            sock.settimeout(2)
+            sock.recv(64)
         sock.close()
 
 
@@ -1212,6 +1216,7 @@ def part_d(app, server, installers, password, observer, menu, work):
                      .splitlines() if "page visibility" in line][-3:]
             raise Failure(f"{exc}; after show: page hasFocus={after[0]}, visibilityState={after[1]}; "
                           f"window visible={app_window(app_pids(app.root)) is not None}; app log: {lines}") from None
+        wait_for("the DevTools endpoint after show", lambda: devtools_answer(f"127.0.0.1:{port}"), timeout=60, interval=1)
         window = WindowCDP(pw, port)  # attach only now, for the checks and captures below
         page = window.page(f"/app/conversations/{conversation}", timeout=60)
         check(conversation in url_of(page), f"launch did not open the latest conversation: {url_of(page)}")
