@@ -663,6 +663,107 @@ def focus_window(hwnd):
     user32.SetForegroundWindow(hwnd)
 
 
+# Display scaling (brief v0.5.5 shot 13): a real per-monitor scale on the runner, set live the way Settings > Display
+# does (DisplayConfigSetDeviceInfo, relative steps from the recommended scale), at 1920x1080 so 150% is allowed.
+_DPI_STEPS = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500]
+
+
+def _display_api():
+    import ctypes
+    from ctypes import wintypes
+
+    class DEVMODEW(ctypes.Structure):
+        _fields_ = [("dmDeviceName", wintypes.WCHAR * 32), ("dmSpecVersion", wintypes.WORD),
+                    ("dmDriverVersion", wintypes.WORD), ("dmSize", wintypes.WORD), ("dmDriverExtra", wintypes.WORD),
+                    ("dmFields", wintypes.DWORD), ("dmPositionX", ctypes.c_long), ("dmPositionY", ctypes.c_long),
+                    ("dmDisplayOrientation", wintypes.DWORD), ("dmDisplayFixedOutput", wintypes.DWORD),
+                    ("dmColor", ctypes.c_short), ("dmDuplex", ctypes.c_short), ("dmYResolution", ctypes.c_short),
+                    ("dmTTOption", ctypes.c_short), ("dmCollate", ctypes.c_short), ("dmFormName", wintypes.WCHAR * 32),
+                    ("dmLogPixels", wintypes.WORD), ("dmBitsPerPel", wintypes.DWORD), ("dmPelsWidth", wintypes.DWORD),
+                    ("dmPelsHeight", wintypes.DWORD), ("dmDisplayFlags", wintypes.DWORD),
+                    ("dmDisplayFrequency", wintypes.DWORD), ("dmICMMethod", wintypes.DWORD),
+                    ("dmICMIntent", wintypes.DWORD), ("dmMediaType", wintypes.DWORD), ("dmDitherType", wintypes.DWORD),
+                    ("dmReserved1", wintypes.DWORD), ("dmReserved2", wintypes.DWORD),
+                    ("dmPanningWidth", wintypes.DWORD), ("dmPanningHeight", wintypes.DWORD)]
+
+    class LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", ctypes.c_long)]
+
+    class HEADER(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_int), ("size", ctypes.c_uint32), ("adapterId", LUID), ("id", ctypes.c_uint32)]
+
+    class GET_SCALE(ctypes.Structure):
+        _fields_ = [("header", HEADER), ("minRel", ctypes.c_int32), ("curRel", ctypes.c_int32), ("maxRel", ctypes.c_int32)]
+
+    class SET_SCALE(ctypes.Structure):
+        _fields_ = [("header", HEADER), ("rel", ctypes.c_int32)]
+
+    class PATH_SOURCE(ctypes.Structure):
+        _fields_ = [("adapterId", LUID), ("id", ctypes.c_uint32), ("modeInfoIdx", ctypes.c_uint32),
+                    ("statusFlags", ctypes.c_uint32)]
+
+    class PATH_TARGET(ctypes.Structure):
+        _fields_ = [("adapterId", LUID), ("id", ctypes.c_uint32), ("modeInfoIdx", ctypes.c_uint32),
+                    ("outputTechnology", ctypes.c_uint32), ("rotation", ctypes.c_uint32), ("scaling", ctypes.c_uint32),
+                    ("refreshNum", ctypes.c_uint32), ("refreshDen", ctypes.c_uint32),
+                    ("scanLineOrdering", ctypes.c_uint32), ("targetAvailable", ctypes.c_int32),
+                    ("statusFlags", ctypes.c_uint32)]
+
+    class PATH(ctypes.Structure):
+        _fields_ = [("sourceInfo", PATH_SOURCE), ("targetInfo", PATH_TARGET), ("flags", ctypes.c_uint32)]
+
+    return ctypes, DEVMODEW, GET_SCALE, SET_SCALE, PATH
+
+
+def display_state():
+    """``(width, height, scale percent)`` of the primary display now."""
+    ctypes, DEVMODEW, GET_SCALE, _, PATH = _display_api()
+    user32 = ctypes.windll.user32
+    dm = DEVMODEW()
+    dm.dmSize = ctypes.sizeof(DEVMODEW)
+    user32.EnumDisplaySettingsW(None, -1, ctypes.byref(dm))
+    source = _display_source(ctypes, PATH)
+    get = GET_SCALE()
+    get.header.type, get.header.size, get.header.adapterId, get.header.id = -3, ctypes.sizeof(GET_SCALE), source.adapterId, source.id
+    user32.DisplayConfigGetDeviceInfo(ctypes.byref(get))
+    return dm.dmPelsWidth, dm.dmPelsHeight, _DPI_STEPS[get.curRel - get.minRel]
+
+
+def _display_source(ctypes, PATH):
+    user32 = ctypes.windll.user32
+    n_paths, n_modes = ctypes.c_uint32(), ctypes.c_uint32()
+    user32.GetDisplayConfigBufferSizes(2, ctypes.byref(n_paths), ctypes.byref(n_modes))
+    paths = (PATH * n_paths.value)()
+    modes = (ctypes.c_byte * (64 * max(1, n_modes.value)))()
+    check(user32.QueryDisplayConfig(2, ctypes.byref(n_paths), paths, ctypes.byref(n_modes), modes, None) == 0,
+          "QueryDisplayConfig failed")
+    return paths[0].sourceInfo
+
+
+def set_display(width, height, percent):
+    """Set the primary display's mode and its real scale (percent), live; returns the scale reached."""
+    ctypes, DEVMODEW, GET_SCALE, SET_SCALE, PATH = _display_api()
+    user32 = ctypes.windll.user32
+    dm = DEVMODEW()
+    dm.dmSize = ctypes.sizeof(DEVMODEW)
+    user32.EnumDisplaySettingsW(None, -1, ctypes.byref(dm))
+    if (dm.dmPelsWidth, dm.dmPelsHeight) != (width, height):
+        dm.dmPelsWidth, dm.dmPelsHeight, dm.dmFields = width, height, 0x80000 | 0x100000
+        check(user32.ChangeDisplaySettingsExW(None, ctypes.byref(dm), None, 0, None) == 0,
+              f"the display would not change to {width}x{height}")
+    source = _display_source(ctypes, PATH)
+    get = GET_SCALE()
+    get.header.type, get.header.size, get.header.adapterId, get.header.id = -3, ctypes.sizeof(GET_SCALE), source.adapterId, source.id
+    user32.DisplayConfigGetDeviceInfo(ctypes.byref(get))
+    rel = _DPI_STEPS.index(percent) + get.minRel  # steps are relative to the recommended scale (minRel = -its index)
+    check(get.minRel <= rel <= get.maxRel, f"{percent}% is not allowed at {width}x{height}")
+    put = SET_SCALE()
+    put.header.type, put.header.size, put.header.adapterId, put.header.id = -4, ctypes.sizeof(SET_SCALE), source.adapterId, source.id
+    put.rel = rel
+    check(user32.DisplayConfigSetDeviceInfo(ctypes.byref(put)) == 0, f"the display scale would not change to {percent}%")
+    return display_state()[2]
+
+
 def list_fits(page):
     """The §19.7 check: the conversation list shows, inside the window, with its times and counts inside it."""
     return page.evaluate("""() => {
@@ -1023,11 +1124,15 @@ def part_d(app, server, installers, password, observer, menu, work):
         page = window.page("/app/conversations/", timeout=180)  # Inbox moved on to the latest conversation
         polls = []
         page.on("request", lambda request: polls.append(request.url) if "/app/live" in request.url else None)
+        shown = app_window(app_pids(app.root)) is not None  # a visible top-level window of the app?
         focus, visibility = page.evaluate("[document.hasFocus(), document.visibilityState]")
-        check(focus is False, f"the hidden window has focus ({visibility})")
         time.sleep(10)
         state = api(server, observer, f"/api/v1/messages/{unseen}")["message"]["delivery_state"]
+        say(f"D5h evidence: native window visible={shown}; page hasFocus={focus}, visibilityState={visibility}; "
+            f"after 10 s the message is {state}; /app/live polls while hidden: {len(polls)}")
+        check(not shown, "--background showed the window")
         check(state == "stored", f"the hidden window acknowledged a message: {state}")
+        check(focus is False, f"the hidden window's page has focus ({visibility})")
         if visibility == "hidden":
             check(not polls, f"the hidden window polled: {len(polls)} requests")
         hidden_polls = len(polls)
@@ -1046,6 +1151,48 @@ def part_d(app, server, installers, password, observer, menu, work):
         page.emulate_media(color_scheme="null")
         say(f"PASS: D5h. started hidden ({visibility}, no focus): nothing read after 10 s and {hidden_polls} polls; "
             "shown and focused, the window was on the latest conversation, selected, and read the message")
+
+        # D5i. v0.5.5 (brief shot 13): one pass at a REAL 150% display scale (1920x1080, the per-monitor scale set
+        # live as Settings does). The app is restarted so its window is created at 150%: pywebview scales the window
+        # and its minimum; the page sees devicePixelRatio 1.5 at the same CSS sizes. Launch opens the latest
+        # conversation, the list fits at the default and the minimum size. Then 100% and the old mode come back.
+        window.close()
+        app.quit()
+        before = display_state()
+        reached = set_display(1920, 1080, 150)
+        check(reached == 150, f"the display scale is {reached}%, not 150%")
+        try:
+            window = WindowCDP(pw, open_window_cdp(app))
+            page = window.page(INBOX, timeout=180)
+            page.wait_for_url(f"**/app/conversations/{conversation}*", timeout=60000)
+            hwnd = wait_for("the app window at 150%", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
+            check(abs(window_scale(hwnd) - 1.5) < 0.01, f"the window's scale is {window_scale(hwnd)}")
+            check(page.evaluate("devicePixelRatio") == 1.5, "the page is not at devicePixelRatio 1.5")
+            problem = list_fits(page)
+            check(not problem, f"at 150% the list does not fit: {problem}")
+            for scheme in ("light", "dark"):
+                themed_shot(page, scheme, f"after-win-13-opened-latest-{scheme}-1180x780-150pct")
+            resize_window(hwnd, 300, 200)
+            wait_for("the 150% window to clamp at its minimum size",
+                     lambda: abs(window_rect(hwnd)[2] - 1140) <= 2 and abs(window_rect(hwnd)[3] - 780) <= 2,
+                     timeout=30, interval=0.5)
+            wait_for("the page to see the small window", lambda: page.evaluate("innerWidth") < 760, timeout=30, interval=0.5)
+            problem = list_fits(page)
+            check(not problem, f"at 150% and the minimum size the list does not fit: {problem}")
+            small = page.evaluate("[innerWidth, innerHeight]")
+            for scheme in ("light", "dark"):
+                themed_shot(page, scheme, f"after-win-13-minimum-{scheme}-760x520-150pct")
+            page.emulate_media(color_scheme="null")
+        finally:
+            with contextlib.suppress(Exception):
+                window.close()
+            app.quit(required=False)
+            set_display(before[0], before[1], before[2])
+        window = WindowCDP(pw, open_window_cdp(app))
+        page = window.page(INBOX, timeout=180)
+        say(f"PASS: D5i. at a real 150% display scale (1920x1080, window scale 1.5, devicePixelRatio 1.5) launch "
+            f"opened the latest conversation and the list fits, at the default size and the minimum ({small[0]}x{small[1]} "
+            f"CSS px); the display is back at {before[0]}x{before[1]}, {before[2]}%")
 
         # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
         # hosted navigation and loads its own page, so the click must not wait for that navigation.
