@@ -30,7 +30,8 @@ def test_initials_from_the_display_name(name, letters):
 
 @pytest.mark.parametrize("value, ok", [
     ("/app/conversations/0b9f6e0e-6a51-4c8e-9b0e-0e7f3c2a1d4f", True),
-    ("/app/conversations/0B9F6E0E-6A51-4C8E-9B0E-0E7F3C2A1D4F", False), ("/app/inbox", False), ("/app/agents", False),
+    ("/app/conversations/0B9F6E0E-6A51-4C8E-9B0E-0E7F3C2A1D4F", False), ("/app/inbox", False), ("/app/agents", True),
+    ("/app/archived", True), ("/app/compose", True), ("/app/compose?to=x", False), ("/app/account", False),
     ("https://evil.example/app/conversations/0b9f6e0e-6a51-4c8e-9b0e-0e7f3c2a1d4f", False),
     ("//evil.example/x", False), ("/app/conversations/x", False),
     ("/app/conversations/0b9f6e0e-6a51-4c8e-9b0e-0e7f3c2a1d4f/../../login", False),

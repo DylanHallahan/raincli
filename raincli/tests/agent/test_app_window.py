@@ -328,6 +328,24 @@ def test_home_hands_off_then_follows_the_pending_path(tmp_path):
     assert win.loads[-1] == SERVICE + "/app/agents" and app.pending_path is None
 
 
+def test_a_handoff_goes_straight_to_a_thread_or_page(tmp_path):
+    """§20.3: a toast's thread (and Agents, Archived, New message) is the handoff's ``next``, so Inbox's
+    latest-conversation step never runs first; the window's pending path is the fallback for an older server."""
+    thread = "0b9f6e0e-6a51-4c8e-9b0e-0e7f3c2a1d4f"
+    app, win, _ = make(tmp_path)
+    app.open_hosted(thread_id=thread)
+    assert win.loads[-1] == f"{SERVICE}/app/handoff?code=c1&next=/app/conversations/{thread}"
+    win.url = f"{SERVICE}/app/conversations/{thread}"  # the server went straight there
+    app.on_loaded()
+    assert app.pending_path is None and win.loads[-1].endswith("next=/app/conversations/" + thread)
+    app.handed_off = False
+    app.open_hosted(thread_id="not-a-uuid")  # not a thread the server would accept: no next, the old fallback
+    assert win.loads[-1] == f"{SERVICE}/app/handoff?code=c2" and app.pending_path == "/app/conversations/not-a-uuid"
+    app.handed_off = False
+    app.open_hosted("/app/inbox")
+    assert win.loads[-1] == f"{SERVICE}/app/handoff?code=c3"
+
+
 def test_an_ended_app_session_hands_off_again(tmp_path):
     app, win, _ = make(tmp_path)
     app.home()
