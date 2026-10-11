@@ -976,12 +976,15 @@ def part_d(app, server, installers, password, observer, menu, work):
         page.click(".rc-msg a:has-text('Reply')")
         page.fill("#body", "A reply from the app window")
         page.click(".rc-compose button[type=submit]")  # the thread header also has Archive
-        page.wait_for_url("**notice=sent**", timeout=60000)
+        # v0.5.5 R2 (§20.2): a send in a conversation stays in place; the message appears without a navigation.
+        page.wait_for_selector(".rc-thread .rc-msg:has-text('A reply from the app window')", timeout=60000)
         page.click(".rc-new")
         page.fill("#to", OBSERVER)
         page.fill("#body", "A new message from the app window")
         page.click(".rc-compose button[type=submit]")
-        page.wait_for_url("**notice=sent**", timeout=60000)
+        # New message still posts the form; app mode redirects to the conversation, with no banner (§20.2).
+        page.wait_for_url("**/app/conversations/**", timeout=60000)
+        page.wait_for_selector(".rc-thread .rc-msg:has-text('A new message from the app window')", timeout=60000)
         wait_for("the observer to receive the reply and the new message",
                  lambda: {"A reply from the app window", "A new message from the app window"}
                  <= set(inbox_bodies(server, observer)), timeout=120)
@@ -1087,7 +1090,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         page.wait_for_selector(".rc-compose textarea#body", timeout=60000)
         page.fill("#body", "Live from the window")
         page.click(".rc-compose button[type=submit]")
-        page.wait_for_url("**notice=sent**", timeout=60000)
+        page.wait_for_selector(".rc-thread .rc-msg:has-text('Live from the window')", timeout=60000)  # in place (§20.2)
         mine = wait_for("the window's message in the observer's inbox", lambda: next(
             (m for m in api(server, observer, "/api/v1/inbox?routing=1&wait=0&limit=100")["messages"]
              if m["body"] == "Live from the window"),
