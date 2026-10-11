@@ -423,13 +423,31 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
             .order_by(DeliveryEvent.id)
         ):
             events.setdefault(ev.message_id, []).append(ev)
+    from raincli_server import routing
+
+    derived: dict = {}
+
+    def hold_of(m: Message) -> str | None:
+        """messaging.hold_reason without a query per message (§19.1): the derived hold is the same for every
+        stored message to one recipient, and a held message's reason is its latest held event, loaded above."""
+        if m.delivery_state == "stored" and m.acked_at is None:
+            key = (m.recipient_agent_id, m.recipient_agent_name, m.sender_user_id is not None)
+            if key not in derived:
+                agent = db.get(Agent, m.recipient_agent_id) if m.recipient_agent_id else None
+                derived[key] = routing.derived_hold(db, agent, m.recipient_agent_name, m.sender_user_id is not None)
+            return derived[key]
+        if m.delivery_state == "held":
+            held = [ev for ev in events.get(m.id, []) if ev.state == "held"]
+            return held[-1].detail if held else None
+        return None
+
     lines = []
     for m in messages:
         sender_ep, recipient_ep = messaging.sender_endpoint(db, m), messaging.recipient_endpoint(db, m)
         sender = Side(sender_ep, (m.sender_user_id == user.id) or (m.sender_agent_id in owned))
         recipient = Side(recipient_ep, (m.recipient_user_id == user.id) or (m.recipient_agent_id in owned))
         outgoing = sender.mine and not recipient.mine
-        hold = messaging.hold_reason(db, m)
+        hold = hold_of(m)
         lines.append(MessageLine(
             m, sender, recipient, outgoing=outgoing, hold_reason=hold,
             sender_name=names.sender(sender_ep), recipient_name=names.endpoint(recipient_ep),

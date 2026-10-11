@@ -426,3 +426,30 @@ def test_live_headers_and_the_list_digest_follow_team_presence(client, world, al
     bob_reports(client, world, status="working")
     changed = live(webview, list_rev=rev)
     assert changed["list"] is not None and changed["list_rev"] != rev
+
+
+def test_a_poll_costs_the_same_however_many_of_your_messages_are_in_flight(client, world, alice_app, app, session):  # noqa: F811
+    """§19.1 with §19.8 M1: the states of the viewer's non-final messages come without a query per message."""
+    from raincli_server.models import User
+
+    webview = alice_app["webview"]
+    counts = []
+    for n in (3, 30):
+        alice = session.get(User, world["users"]["alice"].id)
+        sent = [messaging.send_as_person(session, alice, world["teams"]["acme"].id, id=str(uuid.uuid4()),
+                                         to={"machine": "bob-agent"}, body=f"in flight {i}", max_pending=10_000)[0]
+                for i in range(n)]
+        session.commit()
+        cid = str(sent[0].conversation_id)
+        seen = []
+
+        def count(conn, cursor, statement, *args):
+            seen.append(statement)
+        event.listen(app.state.engine, "before_cursor_execute", count)
+        try:
+            out = live(webview, conversation=cid, after=sent[-1].seq, states_since=identity.now().isoformat())
+        finally:
+            event.remove(app.state.engine, "before_cursor_execute", count)
+        assert len(out["states"]) >= n
+        counts.append(len(seen))
+    assert counts[1] <= counts[0] + 2, counts
