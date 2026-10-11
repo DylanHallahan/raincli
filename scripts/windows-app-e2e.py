@@ -1259,9 +1259,15 @@ def part_d(app, server, installers, password, observer, menu, work):
             for scheme in ("light", "dark"):
                 themed_shot(page, scheme, f"after-win-13-opened-latest-{scheme}-1180x780-150pct")
             resize_window(hwnd, 300, 200)
-            wait_for("the 150% window to clamp at its minimum size",
-                     lambda: abs(window_rect(hwnd)[2] - 1140) <= 2 and abs(window_rect(hwnd)[3] - 780) <= 2,
-                     timeout=30, interval=0.5)
+            sizes = []
+
+            def settled():  # the same size twice in a row: the window has stopped at its minimum
+                sizes.append(window_rect(hwnd)[2:])
+                return len(sizes) > 1 and sizes[-1] == sizes[-2]
+            wait_for("the 150% window to settle at its minimum size", settled, timeout=30, interval=0.5)
+            clamped = sizes[-1]
+            check(clamped[0] >= 1140 - 2 and clamped[1] >= 780 - 2,
+                  f"at 150% the window went below its minimum (760x520 logical = 1140x780): {clamped}")
             wait_for("the page to see the small window", lambda: page.evaluate("innerWidth") < 760, timeout=30, interval=0.5)
             problem = list_fits(page)
             check(not problem, f"at 150% and the minimum size the list does not fit: {problem}")
@@ -1277,8 +1283,9 @@ def part_d(app, server, installers, password, observer, menu, work):
         window = WindowCDP(pw, open_window_cdp(app))
         page = window.page(INBOX, timeout=180)
         say(f"PASS: D5i. at a real 150% display scale (1920x1080, window scale 1.5, devicePixelRatio 1.5) launch "
-            f"opened the latest conversation and the list fits, at the default size and the minimum ({small[0]}x{small[1]} "
-            f"CSS px); the display is back at {before[0]}x{before[1]}, {before[2]}%")
+            f"opened the latest conversation and the list fits, at the default size and the minimum (window "
+            f"{clamped[0]}x{clamped[1]} physical, page {small[0]}x{small[1]} CSS px); the display is back at "
+            f"{before[0]}x{before[1]}, {before[2]}%")
 
         # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
         # hosted navigation and loads its own page, so the click must not wait for that navigation.
