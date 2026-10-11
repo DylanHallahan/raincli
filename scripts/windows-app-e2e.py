@@ -898,7 +898,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         # list still shows, on the inbox and in a conversation. Light and dark at both sizes go to the artifacts.
         hwnd = wait_for("the app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
         scale = window_scale(hwnd)
-        original = window_rect(hwnd)
+        restore = window_rect(hwnd)
         resize_window(hwnd, 300, 200)
         min_size = (round(760 * scale), round(520 * scale))
         wait_for("the window to clamp at its minimum size",
@@ -932,7 +932,7 @@ def part_d(app, server, installers, password, observer, menu, work):
             page.emulate_media(color_scheme=scheme)
             shot(page, f"after-win-inbox-{scheme}-1180x780")
         page.emulate_media(color_scheme="null")  # back to the system theme
-        resize_window(hwnd, original[2], original[3])
+        resize_window(hwnd, restore[2], restore[3])
         say(f"PASS: D5d. at the minimum window size ({min_size[0]}x{min_size[1]} physical px at scale {scale:g}, "
             f"page width {small_width} px) the conversation list shows on the inbox and in a conversation, "
             "with times and counts inside it")
