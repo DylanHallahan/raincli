@@ -117,6 +117,19 @@ def person_send(team, token, to, body):
     return api(team["base"], "/api/v1/person/send", {"id": str(uuid.uuid4()), "to": to, "body": body}, token)["message"]
 
 
+def settle_url(page, quiet=0.3, timeout=10):
+    """Wait until the page has stopped navigating (the same URL, loaded, for ``quiet`` seconds)."""
+    deadline, last, since = time.monotonic() + timeout, None, time.monotonic()
+    while time.monotonic() < deadline:
+        url = page.url
+        if url != last:
+            last, since = url, time.monotonic()
+        elif time.monotonic() - since >= quiet:
+            page.wait_for_load_state("load")
+            return
+        time.sleep(0.05)
+
+
 def open_app(browser, team, person, path="/app/inbox", **options):
     probe = browser.new_page()
     agent = probe.evaluate("navigator.userAgent") + " RainCLIApp/" + APP_TOKEN
@@ -126,6 +139,7 @@ def open_app(browser, team, person, path="/app/inbox", **options):
     errors = []
     page.on("pageerror", lambda exc: errors.append(str(exc)))
     page.goto(api(team["base"], "/api/v1/app/handoff", {"app_install_hash": INSTALL_HASH}, person)["url"])
+    settle_url(page)  # v0.5.5 §20.6 M1: Inbox may move on to the latest conversation by itself
     if path != "/app/inbox":
         page.goto(team["base"] + path)
     page.errors = errors

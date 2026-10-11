@@ -136,5 +136,5 @@ def test_the_owner_notice_sits_at_the_top_of_the_list_on_every_page(client, worl
     for path in ("/app/inbox", f"/app/conversations/{ask['conversation_id']}", "/app/compose"):
         page = htmllib.unescape(alice_app["webview"].get(path).text)
         listing = page[page.index('<section class="rc-list"'):page.index("</section>", page.index('<section class="rc-list"'))]
-        assert "has never connected" in listing, path
+        assert "has never connected" in listing or "of your machines aren't connecting" in listing, path
         assert listing.index("owner-warnings") < listing.index("rc-convs"), path

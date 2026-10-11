@@ -165,13 +165,16 @@ def test_the_trail_toggles_its_history_by_click_and_keyboard(team, browser):
     assert summary.get_attribute("role") == "button" and summary.get_attribute("aria-expanded") == "false"
     assert not history.is_visible() and "Details" not in page.locator(".rc-thread").inner_text()
     assert summary.locator(".rc-chevron").count() == 1
-    summary.click()
-    assert summary.get_attribute("aria-expanded") == "true" and history.is_visible()
+    sel = f'[data-trail="{mine["id"]}"] summary'
+    summary.click()  # the toggle event is asynchronous: wait for the attribute
+    page.wait_for_selector(f'{sel}[aria-expanded="true"]')
+    assert history.is_visible()
     summary.focus()
     page.keyboard.press("Enter")
-    page.wait_for_function(f"""() => document.querySelector('[data-trail="{mine["id"]}"] summary').getAttribute('aria-expanded') === 'false'""")
+    page.wait_for_selector(f'{sel}[aria-expanded="false"]')
+    assert not history.is_visible()
     page.keyboard.press(" ")
-    page.wait_for_function(f"""() => document.querySelector('[data-trail="{mine["id"]}"] summary').getAttribute('aria-expanded') === 'true'""")
+    page.wait_for_selector(f'{sel}[aria-expanded="true"]')
     assert history.is_visible()
     context.close()
     context, page = open_app(browser, team, team["maya"], path=conv_path(mine), java_script_enabled=False, **size(1180, 780))

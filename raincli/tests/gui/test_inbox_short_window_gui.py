@@ -47,17 +47,17 @@ def test_a_short_window_keeps_three_conversation_rows_and_the_footer(team, brows
             context.close()
 
 
-def test_several_stale_machines_are_one_notice_and_select_a_conversation_stays_visible(team, browser):
+def test_several_stale_machines_are_one_notice_and_the_list_keeps_three_rows(team, browser):
     five_conversations(team)
     stale_machines(team, 8)
     for scheme in ("light", "dark"):
         context, page = open_app(browser, team, team["maya"], color_scheme=scheme, device_scale_factor=1.5, **size(787, 520))
-        notices = page.locator(".owner-warnings .sender-warning")
+        # v0.5.5 (§20.6 M1): Inbox opens the latest conversation, and the notice sits at the top of the list.
+        notices = page.locator(".rc-list .owner-warnings .sender-warning")
         assert notices.count() == 1
         text = notices.inner_text()
         assert text.startswith("8 of your machines aren't connecting: maya-old-pc-0") and "See them in Agents" in text
         assert notices.locator("a").get_attribute("href").endswith("/app/agents")
-        assert page.evaluate(SELECT_VISIBLE)
         assert page.evaluate(ROWS) >= 3
         context.close()
 
@@ -66,6 +66,6 @@ def test_one_stale_machine_keeps_todays_wording(team, browser):
     stale_machines(team, 1)
     five_conversations(team)
     context, page = open_app(browser, team, team["maya"], **size(1180, 780))
-    notices = page.locator(".owner-warnings .sender-warning")
+    notices = page.locator(".rc-list .owner-warnings .sender-warning")
     assert notices.count() == 1 and notices.inner_text() == "maya-old-pc-0 has never connected."
     context.close()
