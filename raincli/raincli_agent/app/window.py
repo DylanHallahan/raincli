@@ -602,16 +602,26 @@ class AppWindow:
     def _page_visible(self, visible, focus=False):
         """§20.7: the page sees what the user sees. A hidden WinForms window leaves its WebView2 telling the page it
         is visible and focused, so a hidden start (at logon, to the tray) or a window closed to the tray would read
-        the messages on screen (§19.2). The WebView2 control follows the window instead: invisible while it is
-        hidden (CoreWebView2Controller.IsVisible false: the page is hidden and unfocused), visible, with focus, once
-        shown. Runs on the UI thread; a no-op without the native control (tests, other platforms)."""
+        the messages on screen (§19.2). WebView2's controller follows the window instead: ``IsVisible`` false while
+        the window is hidden (the page is hidden and unfocused), true, with focus, once shown.
+
+        The controller is set directly: the WinForms control passes its own ``Visible`` on only when it changes,
+        and pywebview's hidden start (shown at opacity 0, then hidden) happens before the controller exists, which
+        leaves it at its default, visible (Windows e2e D5h). Runs on the UI thread; a no-op without the native
+        control (tests, other platforms)."""
         try:
             control = self.window.native.browser.webview
         except AttributeError:
             return False
 
         def apply():
-            control.Visible = bool(visible)
+            controller = self._controller(control)
+            if controller is not None:
+                controller.IsVisible = bool(visible)
+            else:
+                control.Visible = bool(visible)
+            self._log(f"page visibility: {'visible' if visible else 'hidden'} "
+                      f"({'controller' if controller is not None else 'control only'})")
             if visible and focus:
                 control.Focus()
         if getattr(control, "InvokeRequired", False):
@@ -620,6 +630,19 @@ class AppWindow:
         else:
             apply()
         return True
+
+    @staticmethod
+    def _controller(control):
+        """The WinForms WebView2 control's CoreWebView2Controller (its internal field), or None before it exists."""
+        try:
+            from System.Reflection import BindingFlags
+        except ImportError:  # not on Windows
+            return None
+        flags = BindingFlags.NonPublic | BindingFlags.Instance
+        field = control.GetType().GetField("_coreWebView2Controller", flags)
+        if field is None:  # another build of the control: any field of that type
+            field = next((f for f in control.GetType().GetFields(flags) if f.FieldType.Name == "CoreWebView2Controller"), None)
+        return field.GetValue(control) if field is not None else None
 
     def destroy(self):
         self.quitting = True
