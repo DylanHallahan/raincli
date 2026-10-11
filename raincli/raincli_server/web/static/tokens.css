@@ -60,6 +60,7 @@
   /* Layout */
   --rc-nav-width: 64px;
   --rc-rail-width: 280px;
+  --rc-rail-width-narrow: 240px;
   --rc-thread-max: 760px;
 
   color-scheme: light;

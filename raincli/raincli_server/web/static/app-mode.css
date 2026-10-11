@@ -37,7 +37,7 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-new { display: flex; align-items: center; gap: var(--rc-s-2); padding: 9px var(--rc-s-3); border-radius: var(--rc-radius);
   border: 1px solid var(--rc-border); background: var(--rc-surface); color: var(--rc-text); font-weight: 600; text-decoration: none; }
 .rc-new:hover { background: var(--rc-surface-2); color: var(--rc-text); }
-.rc-list ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; display: grid; gap: 2px; align-content: start; }
+.rc-list ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; align-content: start; }
 .rc-conv { display: block; padding: var(--rc-s-2) var(--rc-s-3); border-radius: var(--rc-radius-sm); color: var(--rc-text); text-decoration: none; }
 .rc-conv:hover { background: var(--rc-surface); color: var(--rc-text); }
 .rc-conv[aria-current="page"] { background: var(--rc-surface-2); }
@@ -50,6 +50,42 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
   font-size: var(--rc-fs-xs); overflow-wrap: anywhere; }
 .rc-whoami strong { color: var(--rc-text); font-weight: 600; }
 .rc-main > .rc-whoami { border-top: 0; border-bottom: 1px solid var(--rc-border); padding: var(--rc-s-2) var(--rc-s-5); }
+/* §19.5 day groups (added by app.js) */
+.rc-list .rc-day { padding: var(--rc-s-2) var(--rc-s-3) 2px; }
+.rc-list .rc-day:first-child { padding-top: 0; }
+.rc-day-h { margin: 0; font-size: var(--rc-fs-xs); font-weight: 600; color: var(--rc-muted); text-transform: none; letter-spacing: 0; }
+
+/* §19.5 Team section */
+.rc-team { border-top: 1px solid var(--rc-border); padding-top: var(--rc-s-2); flex: none; }
+.rc-team summary { display: flex; align-items: center; gap: var(--rc-s-2); padding: var(--rc-s-1) var(--rc-s-3); border-radius: var(--rc-radius-sm);
+  cursor: pointer; color: var(--rc-muted); font-size: var(--rc-fs-xs); font-weight: 600; list-style: none; }
+.rc-team summary::-webkit-details-marker { display: none; }
+.rc-team summary::before { content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform var(--rc-dur) var(--rc-ease); }
+.rc-team[open] summary::before { transform: rotate(45deg); }
+.rc-team summary:hover { background: var(--rc-surface); color: var(--rc-text); }
+.rc-team-title { flex: 1; }
+.rc-team-count { font-weight: 400; }
+.rc-list .rc-team-list { flex: none; max-height: 30vh; overflow-y: auto; margin-top: 2px; }
+.rc-team-agent { display: flex; align-items: center; gap: var(--rc-s-2); padding: 6px var(--rc-s-3); border-radius: var(--rc-radius-sm);
+  color: var(--rc-text); text-decoration: none; font-size: var(--rc-fs-sm); }
+:where(.app-mode) a.rc-team-agent:hover { background: var(--rc-surface); color: var(--rc-text); }
+.rc-team-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-dot.rc-busy { background: var(--rc-warn); }
+@media (prefers-reduced-motion: reduce) { .rc-team summary::before { transition: none; } }
+
+/* §19.5 first run */
+.rc-first { max-width: 520px; margin: var(--rc-s-8) auto; display: grid; gap: var(--rc-s-3); }
+.rc-first h2 { margin: 0; font-size: var(--rc-fs-lg); }
+.rc-steps { list-style: none; margin: var(--rc-s-2) 0 0; padding: 0; display: grid; gap: var(--rc-s-2); }
+.rc-step { display: flex; gap: var(--rc-s-3); align-items: flex-start; padding: var(--rc-s-3) var(--rc-s-4); border: 1px solid var(--rc-border);
+  border-radius: var(--rc-radius-lg); background: var(--rc-surface); color: var(--rc-text); text-decoration: none; }
+:where(.app-mode) a.rc-step:hover { background: var(--rc-surface-2); color: var(--rc-text); }
+.rc-step strong { display: block; font-weight: 600; }
+.rc-step-text { display: block; color: var(--rc-muted); font-size: var(--rc-fs-sm); }
+.rc-step-n { flex: none; width: 24px; height: 24px; border-radius: var(--rc-radius-pill); display: grid; place-items: center;
+  border: 1px solid var(--rc-border-strong); background: var(--rc-bg); color: var(--rc-text); font-size: var(--rc-fs-xs); font-weight: 600; }
+
 .rc-empty { padding: var(--rc-s-6) var(--rc-s-3); color: var(--rc-muted); text-align: center; }
 
 /* Main pane: header, thread, composer */
@@ -138,9 +174,17 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-msg .md blockquote { border-left: 2px solid var(--rc-border-strong); padding-left: var(--rc-s-3); color: var(--rc-text-2); }
 .rc-msg .md { overflow-wrap: anywhere; }
 
-@media (max-width: 760px) {
+/* §19.7 minimum width: the app window's minimum is 760×520 (logical px; pywebview scales it for DPI), so the
+   breakpoint sits well below it and the list always shows in the app. Under 1000 px the list narrows. Below the
+   breakpoint (browser use only) conversation and compose pages drop the list, and Inbox shows the list. */
+@media (max-width: 1000px) {
+  body.app-mode { grid-template-columns: var(--rc-nav-width) var(--rc-rail-width-narrow) minmax(0, 1fr); }
+}
+@media (max-width: 639.98px) {
   body.app-mode, body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr); }
   body.app-mode .rc-list { display: none; }
+  body.app-mode.rc-inbox:not(.rc-first-run) .rc-list { display: flex; }
+  body.app-mode.rc-inbox:not(.rc-first-run) .rc-main { display: none; }
   .rc-to { display: none; }
 }
 

@@ -25,7 +25,7 @@ from sqlalchemy import select
 from raincli_server import identity, messaging, quotas, security
 from raincli_server.config import Settings
 from raincli_server.models import Agent, HandoffCode, Message, PersonSession, Team, User
-from raincli_server.web import auth, queries
+from raincli_server.web import auth, queries, team
 from raincli_server.web.middleware import WebSecurityMiddleware
 
 HERE = Path(__file__).parent
@@ -478,6 +478,11 @@ def invite_accept(
 
 # App: inbox and conversations -----------------------------------------------------------
 
+def _list_extras(db: Session, viewer: auth.Viewer) -> dict:
+    """What every app-mode render of _conv_list.html needs besides the rows (§19.5)."""
+    return {"team_agents": team.team_agents(db, viewer)}
+
+
 def _directory(db: Session, viewer: auth.Viewer) -> dict:
     machines, people = queries.team_directory(db, viewer.user, _team_ids(viewer))
     return {"machines": machines, "people": people, "teams": viewer.teams}
@@ -490,7 +495,8 @@ def inbox(request: Request, db: Session = Depends(get_db)):
     team_ids = _team_ids(viewer)
     rows = queries.list_conversations(db, viewer.user, team_ids)
     template = "app_mode/inbox.html" if viewer.app_mode else "app/inbox.html"
-    return render(request, template, viewer=viewer, conversations=rows,
+    extras = _list_extras(db, viewer) if viewer.app_mode else {}
+    return render(request, template, viewer=viewer, conversations=rows, **extras,
                   machines_owned=bool(queries.my_agents(db, viewer.user, team_ids)),
                   pending=queries.pending_for_user(db, viewer.user, team_ids))
 
@@ -573,7 +579,8 @@ def _conversation_page(
                   conversation_id=view.conversation.id, message_id=str(uuid.uuid4()), form={}, **ctx)
     if viewer.app_mode:
         return render(request, "app_mode/conversation.html",
-                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)), **common)
+                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)), **common,
+                      **_list_extras(db, viewer))
     return render(request, "app/conversation.html", **common)
 
 
@@ -588,7 +595,8 @@ def _compose_page(request, db, viewer, *, form, status: int = 200, error: str | 
                message_id=str(uuid.uuid4()), conversation_id=None, **_directory(db, viewer))
     if viewer.app_mode:
         return render(request, "app_mode/compose.html",
-                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)), **ctx)
+                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)), **ctx,
+                      **_list_extras(db, viewer))
     return render(request, "app/compose.html", **ctx)
 
 

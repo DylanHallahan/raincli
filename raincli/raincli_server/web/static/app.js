@@ -55,6 +55,61 @@
     if (out) out.textContent = Array.prototype.map.call(input.files, function (f) { return f.name; }).join(", ");
   });
 
+  // App mode (protocol §19.5): day headings in the conversation list, in this computer's local time, and the
+  // Team section's open or closed state, remembered per viewer. Both run again after live.js swaps the list
+  // ("rc-list-updated"). Without JavaScript there are no headings and the Team section starts open.
+  var DAY = new Intl.DateTimeFormat("en-CA", {year: "numeric", month: "2-digit", day: "2-digit"});
+  function dayGroups(root) {
+    var list = root.querySelector("[data-day-groups]");
+    if (!list) return;
+    Array.prototype.forEach.call(list.querySelectorAll(":scope > .rc-day"), function (li) { li.remove(); });
+    var now = new Date();
+    var today = DAY.format(now);
+    var yesterday = DAY.format(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12));
+    var last = null;
+    Array.prototype.forEach.call(list.querySelectorAll(":scope > .rc-conv-item"), function (item) {
+      var time = item.querySelector(".rc-conv-time time[datetime]");
+      var when = time ? new Date(time.getAttribute("datetime")) : null;
+      if (!when || isNaN(when.getTime())) return;
+      var local = DAY.format(when);
+      var label = local === today ? "Today" : local === yesterday ? "Yesterday" : "Earlier";
+      if (label === last) return;
+      last = label;
+      var head = document.createElement("li");
+      head.className = "rc-day";
+      head.setAttribute("role", "presentation");
+      var h = document.createElement("h2");
+      h.className = "rc-day-h";
+      h.textContent = label;
+      head.appendChild(h);
+      list.insertBefore(head, item);
+    });
+  }
+  function teamKey(details) { return "rc-team-open:" + details.getAttribute("data-team"); }
+  function teamState(root) {
+    Array.prototype.forEach.call(root.querySelectorAll("details[data-team]"), function (details) {
+      var saved = null;
+      try { saved = localStorage.getItem(teamKey(details)); } catch (e) { saved = null; }
+      if (saved === "0") details.open = false;
+      else if (saved === "1") details.open = true;
+      details.addEventListener("toggle", function () {
+        try { localStorage.setItem(teamKey(details), details.open ? "1" : "0"); } catch (e) { /* convenience only */ }
+      });
+    });
+  }
+  function enhanceList() {
+    var root = document.querySelector(".rc-list");
+    if (!root) return;
+    dayGroups(root);
+    teamState(root);
+  }
+  enhanceList();
+  document.addEventListener("rc-list-updated", enhanceList);
+  window.setInterval(function () {  // the headings move on at midnight
+    var root = document.querySelector(".rc-list");
+    if (root) dayGroups(root);
+  }, 60000);
+
   // Conversations open at the newest message (protocol §16.19 item 4). An #m-<id> anchor wins. On a reload
   // the reader stays at the newest message only if they were within 80 px of it; otherwise their place is
   // kept and "New messages" appears when the thread grew. Without JavaScript, links use #latest.
