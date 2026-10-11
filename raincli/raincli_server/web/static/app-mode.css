@@ -283,7 +283,8 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
    small screen, maximized) the conversation list kept shrinking while the Team section and the footer kept their
    size. Now the list keeps about three rows; the Team section may shrink and its list scrolls. The footer stays. */
 .rc-list .rc-convs { min-height: 204px; }
-.rc-team { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* overflow: clip with a margin, not hidden: the Team summary's keyboard focus ring (2 px + 2 px offset) stays whole. */
+.rc-team { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: clip; overflow-clip-margin: 4px; }
 .rc-team > summary { flex: none; }
 .rc-list .rc-team-list { flex: 0 1 auto; min-height: 0; }
 /* The owner notice: one combined line for several machines; the block is capped and scrolls as a backstop. */
