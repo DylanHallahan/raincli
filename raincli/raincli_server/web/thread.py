@@ -160,7 +160,7 @@ def trail_for(message: Message, recipient: messaging.Endpoint, events: list[Deli
 @dataclass
 class HeaderPresence:
     chip: str | None  # "Instant" or "Next turn", only for a live agent
-    word: str  # Ready, Busy or Offline
+    word: str | None  # Ready, Busy or Offline; None for a live agent whose status is unknown (§19.8 L3)
     tooltip: str
 
 
@@ -174,15 +174,22 @@ def header_presence(db: Session, peer: messaging.Endpoint, now: datetime | None 
     row = db.get(AgentPresence, machine.id)
     if machine.revoked_at is not None or row is None or now - row.seen_at >= OFFLINE_AFTER:
         return HeaderPresence(None, "Offline", "Its machine hasn't reported in the last 2 minutes.")
-    entries = [e for e in presence.live_machine_agents(db, [machine.id]).get(machine.id, []) if e.name == peer.name]
+    entries = [e for e in presence.live_machine_agents(db, [machine.id]).get(machine.id, [])
+               if e.name == peer.name and now - e.seen_at < OFFLINE_AFTER]
     entry = next((e for e in entries if not e.ambiguous), None)
     if entry is None:
         return HeaderPresence(None, "Offline", "Its machine doesn't list this agent at the moment.")
     chip = {"instant": "Instant", "next-turn": "Next turn"}.get(entry.reachability or "")
+    # §19.8 L3: idle is Ready; working and blocked are Busy, each with its own tooltip; unknown has no word (the
+    # chip still follows the offline rule); offline, or an entry older than the 120 s TTL, is Offline.
     if entry.status == "idle":
         return HeaderPresence(chip, "Ready", "The session was idle at its last report.")
-    if entry.status in ("working", "blocked"):
+    if entry.status == "working":
         return HeaderPresence(chip, "Busy", "The session was working at its last report.")
+    if entry.status == "blocked":
+        return HeaderPresence(chip, "Busy", "The session was waiting for its user at its last report.")
+    if entry.status == "unknown":
+        return HeaderPresence(chip, None, "")
     return HeaderPresence(None, "Offline", "The session wasn't running at its last report.")
 
 
@@ -214,16 +221,19 @@ def machine_warning(db: Session, machine: Agent, now: datetime | None = None) ->
     return None
 
 
-def endpoint_warning(db: Session, ep: messaging.Endpoint | None) -> Warning | None:
-    """A machine or agent recipient only, never a person."""
+def endpoint_warning(db: Session, ep: messaging.Endpoint | None, now: datetime | None = None) -> Warning | None:
+    """A machine or agent recipient only, never a person. One warning at a time, in the order never connected,
+    not connected, not picking up (§19.8 L4)."""
     if ep is None or ep.kind == "person":
         return None
-    return machine_warning(db, ep.agent)
+    return machine_warning(db, ep.agent, now)
 
 
-def recipient_warning(db: Session, team_ids: list[uuid.UUID], text: str) -> Warning | None:
-    """The warning for a recipient typed on the compose page (``handle`` or ``handle/agent``), in whichever of
-    the viewer's teams has it. A person (``@email``) or anything unknown has none."""
+def recipient_warning(db: Session, team_ids: list[uuid.UUID], text: str, now: datetime | None = None
+                      ) -> Warning | None:
+    """The warning for a recipient typed on the compose page (``handle`` or ``handle/agent``), in the viewer's
+    current team (§19.8 L4: pass that one team when the page names it). A person (``@email``) or anything unknown
+    has none. It reveals only the handle and a date."""
     from raincli_server import routing
     from raincli_server.messaging_errors import MessagingError
     from raincli_server.web.queries import endpoint_from_text
@@ -237,16 +247,16 @@ def recipient_warning(db: Session, team_ids: list[uuid.UUID], text: str) -> Warn
         return None
     for team_id in team_ids:
         try:
-            return endpoint_warning(db, routing.resolve(db, team_id, ref))
+            return endpoint_warning(db, routing.resolve(db, team_id, ref), now)
         except MessagingError:
             continue
     return None
 
 
-def owner_warnings(db: Session, user: User, team_ids: list[uuid.UUID]) -> list[Warning]:
+def owner_warnings(db: Session, user: User, team_ids: list[uuid.UUID], now: datetime | None = None) -> list[Warning]:
     """The same notices for the machines the viewer owns, for their Inbox (§19.6)."""
     if not team_ids:
         return []
     machines = db.scalars(select(Agent).where(Agent.owner_user_id == user.id, Agent.team_id.in_(team_ids),
                                               Agent.revoked_at.is_(None)).order_by(Agent.handle))
-    return [w for w in (machine_warning(db, m) for m in machines) if w is not None]
+    return [w for w in (machine_warning(db, m, now) for m in machines) if w is not None]

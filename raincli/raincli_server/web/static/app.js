@@ -110,15 +110,9 @@
     if (root) dayGroups(root);
   }, 60000);
 
-  // The composer (§19.7): the textarea grows from 1 to 8 lines (CSS caps it) and Ctrl+Enter sends; Enter adds
-  // a new line. Without JavaScript the form still sends with its button.
-  function grow(area) {
-    area.style.height = "auto";
-    area.style.height = area.scrollHeight + "px";
-  }
+  // The composer (§19.7): the textarea grows from 1 to 8 lines in CSS (field-sizing, no inline styles) and
+  // Ctrl+Enter sends; Enter adds a new line. Without JavaScript the form still sends with its button.
   document.querySelectorAll("textarea[data-grow]").forEach(function (area) {
-    grow(area);
-    area.addEventListener("input", function () { grow(area); });
     area.addEventListener("keydown", function (event) {
       if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && area.form) {
         event.preventDefault();
@@ -139,7 +133,9 @@
       var value = input.value.trim();
       if (value === last) return;
       last = value;
-      fetch(input.getAttribute("data-warning-url") + "?to=" + encodeURIComponent(value),
+      var team = input.form.querySelector('select[name="team"]');
+      fetch(input.getAttribute("data-warning-url") + "?to=" + encodeURIComponent(value) +
+            (team ? "&team=" + encodeURIComponent(team.value) : ""),
             {credentials: "same-origin", cache: "no-store"})
         .then(function (r) { return r.ok ? r.text() : ""; })
         .then(function (html) {
@@ -150,6 +146,8 @@
         }, function () { /* quietly: the warning is a convenience */ });
     }
     input.addEventListener("change", check);
+    var teamSelect = input.form.querySelector('select[name="team"]');
+    if (teamSelect) teamSelect.addEventListener("change", function () { last = null; check(); });
     input.addEventListener("input", function () { clearTimeout(pending); pending = setTimeout(check, 400); });
   });
 

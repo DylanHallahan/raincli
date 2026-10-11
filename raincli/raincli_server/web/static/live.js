@@ -5,8 +5,9 @@
 // Fragments come only from this same-origin endpoint, rendered by the server's own templates and Markdown
 // renderer. They are parsed with DOMParser (an inert document: nothing runs) and imported node by node.
 //
-// Read state (§19.2): a message to you is acknowledged only when the window has focus and at least half of the
-// message has been on screen (POST /app/ack). Loading by poll never acknowledges anything.
+// Read state (§19.2, §19.8 M3): a message to you is acknowledged only when the window has focus and its visible
+// height is at least min(half the message, half the viewport) (POST /app/ack). Loading by poll never acks.
+// The cursors are hints (§19.8 M1): each reply may repeat recent messages and current states; both merge by id.
 (function () {
   "use strict";
   var body = document.body;
@@ -54,13 +55,18 @@
     var added = null;
     items.forEach(function (item) {
       if (item.seq > after) after = item.seq;
-      if (document.getElementById("m-" + item.id)) return;
+      if (document.getElementById("m-" + item.id)) return;  // merged by id (§19.8 M1)
       var li = firstElement(item.html);
       if (!li) return;
       li.classList.add("rc-arrived");
-      thread.appendChild(li);
+      // In seq order: a message that committed late, with a lower seq, goes in its place, not at the end.
+      var next = null;
+      for (var el = thread.lastElementChild; el; el = el.previousElementSibling) {
+        if (Number(el.getAttribute("data-seq")) > item.seq) { next = el; } else { break; }
+      }
+      thread.insertBefore(li, next);
       watch(li);
-      added = li;
+      if (!next) added = li;
     });
     if (!added) return;
     if (follow) {
@@ -75,6 +81,9 @@
       var old = document.querySelector('[data-trail="' + item.id + '"]');
       var fresh = firstElement(item.html);
       if (!old || !fresh) return;
+      // Idempotent (§19.8 M1): the same state comes on every poll until it is final; only a change is applied.
+      if (old.getAttribute("data-state") === fresh.getAttribute("data-state") &&
+          old.querySelector(".rc-trail-steps").textContent === fresh.querySelector(".rc-trail-steps").textContent) return;
       var open = old.querySelector("details[open]");
       if (open) { var d = fresh.querySelector("details"); if (d) d.open = true; }
       fresh.classList.add("rc-changed");
@@ -88,10 +97,14 @@
     observer = new IntersectionObserver(function (entries) {
       entries.forEach(function (entry) {
         var id = entry.target.id.slice(2);
-        if (entry.isIntersecting && entry.intersectionRatio >= 0.5) { visible[id] = entry.target; } else { delete visible[id]; }
+        // §19.8 M3: seen when its visible height is at least min(half the message, half the viewport), so a long
+        // message counts once it fills half the view.
+        var view = entry.rootBounds ? entry.rootBounds.height : window.innerHeight;
+        var need = Math.min(entry.boundingClientRect.height * 0.5, view * 0.5);
+        if (entry.isIntersecting && entry.intersectionRect.height >= need - 0.5) { visible[id] = entry.target; } else { delete visible[id]; }
       });
       markSeen();
-    }, {root: scroller || null, threshold: [0, 0.5, 1]});
+    }, {root: scroller || null, threshold: Array.from({length: 21}, function (_, i) { return i / 20; })});
   }
   function watch(li) {
     if (observer && li.hasAttribute("data-unread")) observer.observe(li);

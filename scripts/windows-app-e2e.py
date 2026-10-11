@@ -962,7 +962,8 @@ def part_d(app, server, installers, password, observer, menu, work):
         page.click(".rc-compose button[type=submit]")
         page.wait_for_url("**notice=sent**", timeout=60000)
         mine = wait_for("the window's message in the observer's inbox", lambda: next(
-            (m for m in api(server, observer, "/api/v1/inbox")["messages"] if m["body"] == "Live from the window"),
+            (m for m in api(server, observer, "/api/v1/inbox?routing=1&wait=0&limit=100")["messages"]
+             if m["body"] == "Live from the window"),
             None), timeout=120)
         page.evaluate("() => { window.__rcNoReload = 'kept'; }")  # gone if the page reloads
         api(server, observer, f"/api/v1/messages/{mine['id']}/ack", {}, method="POST")

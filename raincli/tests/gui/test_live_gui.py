@@ -356,7 +356,8 @@ def test_new_colour_pairs_pass_aa_in_light_and_dark(agent_thread, browser):
                        ("--rc-warn", "--rc-warn-bg"), ("--rc-accent", "--rc-accent-soft"), ("--rc-muted", "--rc-bg"),
                        ("--rc-ok", "--rc-out-bg")):
             assert _contrast(rgb[fg], rgb[bg]) >= 4.5, (scheme, fg, bg, _contrast(rgb[fg], rgb[bg]))
-        assert page.locator("[style]:not(textarea)").count() == 0  # no inline styles in what the server sent
+        page.fill("#body", "one\ntwo\nthree")
+        assert page.locator("[style]").count() == 0  # no inline styles, even once the composer grows (§19.8 L1)
         context.close()
 
 
@@ -375,3 +376,47 @@ def test_the_thread_fits_the_minimum_window(agent_thread, browser, artifacts):
         assert fits["out"] == [] and fits["send"], (scheme, fits)
         page.screenshot(path=str(artifacts / f"live-thread-760x520-{scheme}.png"))
         context.close()
+
+
+
+def test_the_composer_grows_to_eight_lines_and_ctrl_enter_sends(agent_thread, browser):
+    p = agent_thread
+    context, page = open_thread(browser, p, p["cid"])
+    box = page.locator("#body")
+    one = box.bounding_box()["height"]
+    box.fill("\n".join(f"line {i}" for i in range(6)))
+    six = box.bounding_box()["height"]
+    box.fill("\n".join(f"line {i}" for i in range(20)))
+    capped = box.bounding_box()["height"]
+    line = float(page.evaluate("() => parseFloat(getComputedStyle(document.querySelector('#body')).lineHeight)"))
+    assert one < 2 * line and six > 5 * line and capped <= 8 * line + 16, (one, six, capped, line)
+    assert page.get_attribute("#body", "placeholder") == "Message… Markdown and .md files supported"
+    assert page.locator(".rc-hint").count() == 0
+    box.fill("Sent with Ctrl+Enter")
+    box.press("Enter")
+    assert "\n" in page.input_value("#body")  # Enter adds a new line
+    box.press("Control+Enter")
+    page.wait_for_url("**notice=sent**")
+    assert "Sent with Ctrl+Enter" in page.inner_text(".rc-thread")
+    context.close()
+
+
+def test_a_long_message_counts_as_seen_once_it_fills_half_the_view(agent_thread, browser, session):
+    """§19.8 M3: seen at min(half the message, half the viewport) of visible height, while focused."""
+    from raincli_server.models import Message
+
+    p = agent_thread
+    long_body = "\n\n".join(f"paragraph {i}" for i in range(120))
+    reply = machine_send(p["base"], p["bob"]["token"], {"person": "alice@example.test"}, long_body, p["cid"])
+    machine_send(p["base"], p["bob"]["token"], {"person": "alice@example.test"}, "after it", p["cid"])
+    context, page = open_app(browser, p["base"], p["alice"]["person_session"], viewport={"width": 1180, "height": 700})
+    page.goto(p["base"] + f"/app/conversations/{p['cid']}")
+    page.wait_for_selector(f"#m-{reply['id']}")
+    tall, view = page.evaluate(f"""() => [document.getElementById('m-{reply['id']}').getBoundingClientRect().height,
+        document.querySelector('.rc-scroll').getBoundingClientRect().height]""")
+    assert tall > 2 * view  # never half on screen
+    page.evaluate(f"() => document.getElementById('m-{reply['id']}').scrollIntoView({{block: 'start'}})")
+    page.wait_for_function(f"() => !document.querySelector('#m-{reply['id']}').hasAttribute('data-unread')")
+    session.expire_all()
+    assert session.get(Message, uuid.UUID(reply["id"])).acked_at is not None
+    context.close()

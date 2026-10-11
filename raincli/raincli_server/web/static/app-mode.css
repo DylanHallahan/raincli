@@ -178,7 +178,7 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 /* The one-row composer (§19.7): To, a textarea from 1 to 8 lines, the clip and Send. */
 .rc-box.rc-box-row1 { display: flex; align-items: flex-end; gap: var(--rc-s-2); }
 .rc-box-row1 .rc-to { align-self: center; }
-.rc-box-row1 textarea { flex: 1; min-width: 0; min-height: 0; height: auto; resize: none; overflow-y: auto;
+.rc-box-row1 textarea { flex: 1; min-width: 0; min-height: 0; height: auto; resize: none; overflow-y: auto; field-sizing: content;
   max-height: calc(8 * var(--rc-lh) * 1em + 2 * var(--rc-s-1)); line-height: var(--rc-lh); align-self: center; }
 .rc-compose .rc-files { margin: 0; color: var(--rc-muted); font-size: var(--rc-fs-xs); min-height: 0; }
 .rc-compose .rc-files:empty { display: none; }

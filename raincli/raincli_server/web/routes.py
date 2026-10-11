@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import quote
@@ -20,7 +20,7 @@ from raincli_server.markdown import render as render_markdown
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 
 from raincli_server import identity, messaging, quotas, security
 from raincli_server.config import Settings
@@ -543,13 +543,32 @@ def _parse_since(value: str):
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
-def _live_list(request: Request, db: Session, viewer: auth.Viewer, current_id) -> tuple[str, str]:
-    """The rendered conversation list (the same template as the page) and its revision: a hash of the HTML,
-    so any change to names, unread counts, order or presence shows as a new revision."""
+def _live_list(request: Request, db: Session, viewer: auth.Viewer, current_id, client_rev: str
+               ) -> tuple[str | None, str]:
+    """The conversation list's revision (§19.8 L2), and its HTML (the page's own template) only when the client's
+    revision differs. The revision is a digest of the list's inputs: each conversation's id, last seq, unread count
+    and archive state, the Team section's presence words (minute-stable), and the owner's warnings."""
+    from raincli_server.web import thread
+
     rows = queries.list_conversations(db, viewer.user, _team_ids(viewer))
-    html = fragment(request, "app_mode/_conv_list.html", viewer, conversations=rows, current_id=current_id,
-                    **_list_extras(db, viewer))
-    return html, hashlib.sha256(html.encode()).hexdigest()[:16]
+    extras = _list_extras(db, viewer)
+    warnings = thread.owner_warnings(db, viewer.user, _team_ids(viewer))
+    digest = json.dumps([
+        [[str(r.conversation.id), r.last.seq if r.last else 0, r.unacked, r.archived, r.name] for r in rows],
+        [[a.get("to"), a.get("status")] for a in extras.get("team_agents", [])],
+        [[w.handle, w.kind, w.since.isoformat() if w.since else None] for w in warnings],
+        str(current_id or ""),
+    ], separators=(",", ":"))
+    rev = hashlib.sha256(digest.encode()).hexdigest()[:16]
+    if rev == client_rev:
+        return None, rev
+    html = fragment(request, "app_mode/_conv_list.html", viewer, conversations=rows, current_id=current_id, **extras)
+    return html, rev
+
+
+LIVE_RECENT = timedelta(seconds=30)  # §19.8 M1: messages created this recently come again, whatever the cursor
+LIVE_IN_VIEW = 200  # the newest messages whose current state is sent while not final
+FINAL_STATES = ("replied", "rejected")
 
 
 def _list_extras(db: Session, viewer: auth.Viewer) -> dict:
@@ -581,18 +600,23 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
         conv, team, me, peer, owned = head
         current_id = conv.id
         after = max(0, min(after, 2**63 - 1))
+        in_conv = (Message.conversation_id == conv.id, Message.team_id == conv.team_id)
+        # §19.8 M1: the cursors are hints. Messages after the cursor, and any created in the last 30 s (one that
+        # committed late with a lower seq); the client merges by id.
         fresh = list(db.scalars(
-            select(Message).where(Message.conversation_id == conv.id, Message.team_id == conv.team_id,
-                                  Message.seq > after)
+            select(Message).where(*in_conv, or_(Message.seq > after, Message.created_at > now - LIVE_RECENT))
             .order_by(Message.seq).limit(LIVE_PAGE).execution_options(populate_existing=True)))
+        # The current state of the viewer's own messages in view that aren't final, plus any that changed since the
+        # last poll; applied idempotently by the client.
+        mine = or_(Message.sender_user_id == viewer.user.id, Message.sender_agent_id.in_(list(owned) or [None]))
+        newest = select(Message.id).where(*in_conv).order_by(Message.seq.desc()).limit(LIVE_IN_VIEW).scalar_subquery()
         since = _parse_since(states_since)
-        changed = []
-        if since is not None:
-            mine = or_(Message.sender_user_id == viewer.user.id, Message.sender_agent_id.in_(list(owned) or [None]))
-            changed = list(db.scalars(
-                select(Message).where(Message.conversation_id == conv.id, Message.team_id == conv.team_id,
-                                      Message.seq <= after, Message.delivery_updated_at > since, mine)
-                .order_by(Message.seq).limit(ACK_MAX).execution_options(populate_existing=True)))
+        current = and_(Message.id.in_(newest), Message.delivery_state.not_in(FINAL_STATES))
+        changed_cond = or_(current, Message.delivery_updated_at > since) if since is not None else current
+        # Recent messages are included too: the client already has them, and applies the state to the one it has.
+        changed = list(db.scalars(
+            select(Message).where(*in_conv, mine, changed_cond).order_by(Message.seq).limit(LIVE_IN_VIEW)
+            .execution_options(populate_existing=True)))
         names = thread.Names(db)
         lines, _ = queries.message_lines(db, viewer.user, owned, fresh + changed, names)
         atts = queries.attachment_meta(db, [m.id for m in fresh]) if fresh else {}
@@ -614,11 +638,11 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
         if warning is not None:
             out["warning"] = {"kind": warning.kind,
                               "html": fragment(request, "_sender_warning.html", viewer, warning=warning)}
-    html, rev = _live_list(request, db, viewer, current_id)
+    html, rev = _live_list(request, db, viewer, current_id, list_rev)
     out["list_rev"] = rev
-    if rev != list_rev:
+    if html is not None:
         out["list"] = {"html": html}
-    return JSONResponse(out, headers={"Cache-Control": "no-store"})
+    return JSONResponse(out, headers={"Cache-Control": "no-store"})  # application/json (§19.8 L5)
 
 
 @router.post("/app/ack")
@@ -652,12 +676,14 @@ async def live_ack(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/app/recipient-warning", response_class=HTMLResponse)
-def recipient_warning(request: Request, to: str = "", db: Session = Depends(get_db)):
-    """§19.6: the sender warning for a recipient chosen on the compose page (app mode and website), as HTML."""
+def recipient_warning(request: Request, to: str = "", team: str = "", db: Session = Depends(get_db)):
+    """§19.6: the sender warning for a recipient chosen on the compose page (app mode and website), as HTML. Only
+    a recipient in the viewer's current team: the one the page chose, when it names one (§19.8 L4)."""
     from raincli_server.web import thread
 
     viewer = app_viewer(request, db, app_mode_ok=True)
-    warning = thread.recipient_warning(db, _team_ids(viewer), to)
+    chosen = [t.id for t, _ in viewer.teams if t.slug == team] if team else _team_ids(viewer)
+    warning = thread.recipient_warning(db, chosen, to)
     return HTMLResponse(fragment(request, "_sender_warning.html", viewer, warning=warning),
                         headers={"Cache-Control": "no-store"})
 
@@ -754,7 +780,9 @@ def _compose_page(request, db, viewer, *, form, status: int = 200, error: str | 
 
     ctx = dict(viewer=viewer, status=status, error=error, form=form, draft=form.get("body", ""),
                message_id=str(uuid.uuid4()), conversation_id=None, **_directory(db, viewer),
-               to_warning=thread.recipient_warning(db, _team_ids(viewer), form.get("to", "")))
+               to_warning=thread.recipient_warning(
+                   db, [t.id for t, _ in viewer.teams if t.slug == form.get("team")] if form.get("team")
+                   else _team_ids(viewer), form.get("to", "")))
     if viewer.app_mode:
         return render(request, "app_mode/compose.html",
                       conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)),
