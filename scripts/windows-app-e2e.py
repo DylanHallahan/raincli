@@ -641,6 +641,15 @@ def window_scale(hwnd):
     return ctypes.windll.user32.GetDpiForWindow(hwnd) / 96
 
 
+def themed_shot(page, scheme, name):
+    """A capture in ``scheme``. The nav and list fade colours over --rc-dur (150 ms), so a shot taken right after
+    the switch catches the old and new tokens mid-transition (review F11); wait for every animation to finish."""
+    page.emulate_media(color_scheme=scheme)
+    wait_for(f"the {scheme} theme to settle", lambda: page.evaluate("document.getAnimations().length") == 0,
+             timeout=10, interval=0.1)
+    shot(page, name)
+
+
 def list_fits(page):
     """The §19.7 check: the conversation list shows, inside the window, with its times and counts inside it."""
     return page.evaluate("""() => {
@@ -912,26 +921,22 @@ def part_d(app, server, installers, password, observer, menu, work):
         problem = list_fits(page)
         check(not problem, f"at the minimum window size the inbox list does not fit: {problem}")
         for scheme in ("light", "dark"):
-            page.emulate_media(color_scheme=scheme)
-            shot(page, f"after-win-inbox-{scheme}-760x520")
+            themed_shot(page, scheme, f"after-win-inbox-{scheme}-760x520")
         page.click(f".rc-conv[href*='{conversation}']")
         page.wait_for_selector(".rc-thread")
         problem = list_fits(page)
         check(not problem, f"at the minimum window size the conversation page list does not fit: {problem}")
         for scheme in ("light", "dark"):
-            page.emulate_media(color_scheme=scheme)
-            shot(page, f"after-win-conversation-{scheme}-760x520")
+            themed_shot(page, scheme, f"after-win-conversation-{scheme}-760x520")
         resize_window(hwnd, round(1180 * scale), round(780 * scale))
         wait_for("the page to see the default window", lambda: page.evaluate("innerWidth") > 1000, timeout=30, interval=0.5)
         check(not list_fits(page), "at the default window size the list does not fit")
         for scheme in ("light", "dark"):
-            page.emulate_media(color_scheme=scheme)
-            shot(page, f"after-win-conversation-{scheme}-1180x780")
+            themed_shot(page, scheme, f"after-win-conversation-{scheme}-1180x780")
         page.click("nav.rc-nav a:has-text('Inbox')")
         page.wait_for_selector(f".rc-conv[href*='{conversation}']", timeout=60000)
         for scheme in ("light", "dark"):
-            page.emulate_media(color_scheme=scheme)
-            shot(page, f"after-win-inbox-{scheme}-1180x780")
+            themed_shot(page, scheme, f"after-win-inbox-{scheme}-1180x780")
         page.emulate_media(color_scheme="null")  # back to the system theme
         resize_window(hwnd, restore[2], restore[3])
         say(f"PASS: D5d. at the minimum window size ({min_size[0]}x{min_size[1]} physical px at scale {scale:g}, "
