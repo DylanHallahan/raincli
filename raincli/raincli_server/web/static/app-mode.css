@@ -182,6 +182,9 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
   max-height: calc(8 * var(--rc-lh) * 1em + 2 * var(--rc-s-1)); line-height: var(--rc-lh); align-self: center; }
 .rc-compose .rc-files { margin: 0; color: var(--rc-muted); font-size: var(--rc-fs-xs); min-height: 0; }
 .rc-compose .rc-files:empty { display: none; }
+/* Send in place (§20.2): one inline line above the box; an error keeps the draft. */
+.rc-compose .rc-send-status { margin: 0 0 var(--rc-s-2); font-size: var(--rc-fs-sm); color: var(--rc-text-2); }
+.rc-compose .rc-send-status.rc-send-error { color: var(--rc-danger); }
 .rc-box textarea:focus { outline: none; }
 .rc-box input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .rc-box .rc-files { flex: 1; min-width: 0; color: var(--rc-muted); font-size: var(--rc-fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

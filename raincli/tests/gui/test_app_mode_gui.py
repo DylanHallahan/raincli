@@ -180,9 +180,9 @@ def test_send_reply_and_attachments(people, browser, tmp_path, artifacts):
     bob.click(".rc-conv")
     bob.click(".rc-msg a:has-text('Reply')")
     bob.fill("#body", "Thanks, looks good")
-    bob.click("button:has-text('Send')")
-    bob.wait_for_url(re.compile(r"notice=sent"))
-    assert "Thanks, looks good" in bob.locator(".rc-thread").inner_text()
+    bob.click("button:has-text('Send')")  # a reply sends in place (§20.2), then the form is a plain send again
+    bob.wait_for_function("() => document.querySelector('.rc-thread').innerText.includes('Thanks, looks good')")
+    assert "reply_to" not in bob.url and bob.locator("input[name=in_reply_to]").count() == 0
 
     alice.reload()
     assert "Thanks, looks good" in alice.locator(".rc-thread").inner_text()
