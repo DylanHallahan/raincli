@@ -333,3 +333,20 @@ def test_the_list_uses_no_accent_avatars(team, browser):
                           " const c = getComputedStyle(p).color; p.remove(); return c; }")
     assert probe not in backgrounds
     context.close()
+
+
+# Criterion 8, list side: the server's conversation names, also in the preview ---------------------------------
+
+def test_the_list_names_agent_conversations_owner_and_agent(team, browser):
+    ask = person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "Can you check?")
+    api(team["base"], "/api/v1/messages", {"id": str(uuid.uuid4()), "to": {"person": "maya@example.test"},
+                                          "from_agent": "api-agent", "body": "Two failures.", "in_reply_to": ask["id"]},
+        team["machines"]["jon-laptop"][1])
+    person_send(team, team["maya"], {"machine": "priya-desktop", "agent": "web-agent"}, "Retry cap?")
+    context, page = open_app(browser, team, team["maya"], **size(1180, 780))
+    names = [t.strip() for t in page.locator(".rc-conv-name").all_inner_texts()]
+    previews = [t.strip() for t in page.locator(".rc-conv-preview").all_inner_texts()]
+    assert names == ["Priya · web-agent", "Jon · api-agent"]
+    assert previews[0].endswith("You: Retry cap?") and previews[1].endswith("Jon · api-agent: Two failures.")
+    context.close()
+
