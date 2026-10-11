@@ -335,6 +335,9 @@ class AppWindow:
         self._ua_base = str(core.Settings.UserAgent)
         self._ensure_filter()
         core.WebResourceRequested += lambda sender, args: self._native_request(args.Request)
+        with contextlib.suppress(AttributeError):  # diagnostics: a WebView2 process that dies or restarts
+            core.ProcessFailed += lambda sender, args: self._log(
+                f"webview2 process failed: {getattr(args, 'ProcessFailedKind', '?')}")
 
     def _new_windows(self, core):
         """§18.2 item 3: WebView2 never opens a window of its own; each request goes through the policy."""

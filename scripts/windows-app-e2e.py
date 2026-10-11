@@ -1202,6 +1202,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         check(not shown, "--background showed the window")
         check(state == "stored", f"the hidden window acknowledged a message: {state}")
         check(focus is False and visibility == "hidden", f"the hidden window's page: hasFocus={focus}, {visibility}")
+        before_show = sorted(pid for pid, _ in webview_processes(app.root))
         app.stub("--open")  # the running app's show request
         hwnd = wait_for("the shown app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
         focus_window(hwnd)
@@ -1216,9 +1217,17 @@ def part_d(app, server, installers, password, observer, menu, work):
                      .splitlines() if "page visibility" in line][-3:]
             raise Failure(f"{exc}; after show: page hasFocus={after[0]}, visibilityState={after[1]}; "
                           f"window visible={app_window(app_pids(app.root)) is not None}; app log: {lines}") from None
-        wait_for("the DevTools endpoint after show", lambda: devtools_answer(f"127.0.0.1:{port}"), timeout=60, interval=1)
-        window = WindowCDP(pw, port)  # attach only now, for the checks and captures below
-        page = window.page(f"/app/conversations/{conversation}", timeout=60)
+        after_show = sorted(pid for pid, _ in webview_processes(app.root))
+        failed = [line.strip() for line in (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace")
+                  .splitlines() if "webview2 process failed" in line]
+        say(f"D5h: shown and focused, the window read the message; WebView2 processes {before_show} -> {after_show}; "
+            f"DevTools answers: {devtools_answer(f'127.0.0.1:{port}')}; process failures logged: {failed}")
+        # The relaunch below is a real launch (--open) that must open the latest conversation; a fresh CDP port
+        # for the captures, independent of the hidden start's DevTools session.
+        app.quit()
+        window = WindowCDP(pw, open_window_cdp(app))
+        page = window.page(INBOX, timeout=180)
+        page.wait_for_url(f"**/app/conversations/{conversation}*", timeout=60000)
         check(conversation in url_of(page), f"launch did not open the latest conversation: {url_of(page)}")
         current = page.locator(".rc-conv[aria-current=page]")
         check(current.count() == 1 and conversation in (current.get_attribute("href") or ""),
