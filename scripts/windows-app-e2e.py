@@ -2300,6 +2300,11 @@ def diagnose(work):
 def main(argv=None):
     global OLD, NEW
     take_github_token()  # first: nothing this script launches may inherit the job token
+    if sys.platform == "win32":
+        # Physical px in window measurements (D5d, D5i): a DPI-unaware process gets logical (virtualized) window
+        # coordinates, so at 150% the app's 1140x780 window would read as 760x520.
+        import ctypes
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--installers",
