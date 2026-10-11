@@ -885,8 +885,90 @@ def send_message(
         status = {"inbox_full": 429, "id_conflict": 409, "quota_exceeded": 413}.get(exc.code, 400)
         return fail(status, exc.message)
     db.commit()
+    if viewer.app_mode:  # §20.2: app mode never shows the "Message stored on the server." banner
+        return redirect(request, f"/app/conversations/{msg.conversation_id}#m-{msg.id}")
     notice = "sent" if created else "duplicate"
     return redirect(request, f"/app/conversations/{msg.conversation_id}?notice={notice}#m-{msg.id}")
+
+
+SEND_STATUS = {"inbox_full": 429, "id_conflict": 409, "quota_exceeded": 413}
+
+
+def _send_error(status: int, code: str, message: str, retry_after: int | None = None) -> JSONResponse:
+    """§20.6 L5: every failure /app/send produces is {error: {code, message}} with its HTTP status."""
+    error: dict = {"code": code, "message": message}
+    if retry_after is not None:
+        error["retry_after"] = retry_after
+    return JSONResponse({"error": error}, status_code=status, headers={"Cache-Control": "no-store"})
+
+
+def _sent_message(request: Request, db: Session, viewer: auth.Viewer, msg: Message, **extra) -> JSONResponse:
+    """The message as the thread shows it (§19.1, the same template as /app/live), for the client's merge by id."""
+    from raincli_server.web import thread
+
+    conv, team, me, peer, owned = queries.conversation_head(db, viewer.user, _team_ids(viewer), str(msg.conversation_id))
+    lines, _ = queries.message_lines(db, viewer.user, owned, [msg], thread.Names(db))
+    html = fragment(request, "app_mode/_message.html", viewer, line=lines[0],
+                    atts=queries.attachment_meta(db, [msg.id]).get(msg.id, []), conv_id=conv.id,
+                    can_send=queries.ConversationView(conv, team, me, peer).can_send,
+                    machine_inbox=peer.endpoint.kind == "machine")
+    return JSONResponse({"conversation_id": str(msg.conversation_id), "id": str(msg.id), "seq": msg.seq,
+                         "message_html": html, **extra}, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/app/send")
+def send_in_place(
+    request: Request, csrf_token: str = Form(""), conversation_id: str = Form(""), message_id: str = Form(""),
+    body: str = Form(""), in_reply_to: str = Form(""), files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+):
+    """Send in place into an existing conversation (§20.2, §20.6 M2, L4, L5): the same fields as the form send
+    plus the client's message id, answered with JSON. A replay of a stored id is answered before the rate limit;
+    a different message under a stored id is a 409 that carries the stored message, when it is the viewer's."""
+    try:
+        viewer = app_viewer(request, db, csrf_token, app_mode_ok=True)
+    except WebError as exc:
+        return _send_error(exc.status, "forbidden", exc.message)
+    if not viewer.app_mode:
+        return _send_error(404, "not_found", "That page does not exist, or you do not have access to it.")
+    team_ids = _team_ids(viewer)
+    view = queries.get_conversation(db, viewer.user, team_ids, conversation_id)
+    if view is None:
+        return _send_error(404, "not_found", "That conversation does not exist, or you do not have access to it.")
+    mid = queries.parse_uuid(message_id)
+    if mid is None:
+        return _send_error(400, "invalid", "This message has no id. Reload the window and try again.")
+    parent_id = queries.parse_uuid(in_reply_to) if in_reply_to else None
+    parent = next((m for m in view.messages if m.id == parent_id), None) if parent_id else None
+    to = _reply_target(db, viewer, view, parent)
+    conv_for_send = view.conversation.id if view.me.endpoint.kind == "person" and parent is None and \
+        to == view.peer.label else None
+    stored = db.get(Message, mid)
+    if stored is None:  # §20.6 M2: a replay never counts against the limit
+        retry = request.app.state.web_send_limiter.check(("user", viewer.user.id))
+        if retry is not None:
+            return _send_error(429, "rate_limited", f"You're sending too fast. Wait {retry} seconds and try again.",
+                               retry_after=retry)
+    try:
+        msg, created = queries.send_as_person(
+            db, viewer.user, view.team, id=mid, to=queries.endpoint_from_text(to), body=body.replace("\r\n", "\n"),
+            conversation_id=conv_for_send, in_reply_to=parent_id, max_pending=_settings(request).max_pending,
+            attachments=_read_uploads(files), quotas=quotas.Quotas.from_settings(_settings(request)),
+        )
+    except queries.SendError as exc:
+        db.rollback()
+        status = SEND_STATUS.get(exc.code, 400)
+        if exc.code == "id_conflict":
+            mine = db.get(Message, mid)
+            if mine is not None and mine.sender_user_id == viewer.user.id and \
+                    queries.get_conversation(db, viewer.user, team_ids, str(mine.conversation_id)) is not None:
+                response = _sent_message(request, db, viewer, mine)
+                payload = json.loads(response.body)
+                return JSONResponse({"error": {"code": exc.code, "message": "Your earlier version was already sent."},
+                                     **payload}, status_code=409, headers={"Cache-Control": "no-store"})
+        return _send_error(status, exc.code, exc.message, retry_after=LIVE_INTERVAL if status == 429 else None)
+    db.commit()
+    return _sent_message(request, db, viewer, msg, duplicate=not created)
 
 
 def _choose_team(viewer: auth.Viewer, slug: str) -> Team | None:

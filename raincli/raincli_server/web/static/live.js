@@ -49,9 +49,9 @@
     var bottom = scroller ? scroller.getBoundingClientRect().bottom : window.innerHeight;
     return last.getBoundingClientRect().bottom - bottom <= 80;
   }
-  function addMessages(items) {
+  function addMessages(items, own) {
     if (!thread || !items.length) return;
-    var follow = nearBottom();
+    var follow = own || nearBottom();  // the viewer's own new message always scrolls into view (§20.6 L4)
     var added = null;
     items.forEach(function (item) {
       if (item.seq > after) after = item.seq;
@@ -223,6 +223,11 @@
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "visible") { poll(true); } else if (timer) { clearTimeout(timer); timer = null; }
   });
-  window.rcLive = {poll: function () { poll(true); }};  // for tests and a manual refresh
+  window.rcLive = {
+    poll: function () { poll(true); },  // for tests, a manual refresh and right after a send
+    // §20.6 L4: a message sent in place goes through the same merge by id as the poll (skipped when #m-<id> is
+    // already there, inserted in seq order, animated once), then an immediate poll moves the list.
+    merge: function (item) { addMessages([item], true); poll(true); }
+  };
   schedule(INTERVAL);
 }());

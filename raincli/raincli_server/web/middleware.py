@@ -13,7 +13,7 @@ HEALTH_PATH = "/api/v1/health"
 # HTML page, marked by this cookie so the purge never repeats (immutable static caching keeps working).
 CACHE_VERSION_COOKIE = "raincli_cv"
 CACHE_VERSION_MAX_AGE = 365 * 24 * 3600
-UPLOAD_PATH_RE = re.compile(r"^/app/conversations/[^/]+/send$")  # mirrors the Nginx location
+UPLOAD_PATH_RE = re.compile(r"^/app/(?:conversations/[^/]+/send|send)$")  # mirrors the Nginx locations
 
 _HEADERS = [
     (b"content-security-policy", CSP.encode()),
@@ -67,7 +67,7 @@ class WebSecurityMiddleware:
             except ValueError:
                 too_big = True
             if too_big:
-                return await _plain(send, 413, b"Request too large")
+                return await _too_large(send, path)
 
         received = 0
 
@@ -110,7 +110,7 @@ class WebSecurityMiddleware:
             await self.app(scope, limited_receive, send_with_headers)
         except _TooLarge:
             if not started:
-                await _plain(send_with_headers, 413, b"Request too large")
+                await _too_large(send_with_headers, path)
 
 
     def _cache_version_cookie(self) -> bytes:
@@ -141,6 +141,19 @@ def _with_default_no_store(send):
             message = {**message, "headers": headers}
         await send(message)
     return wrapped
+
+
+async def _too_large(send, path: str) -> None:
+    if path == "/app/send":  # §20.6 L5: every failure of the in-place send is JSON
+        body = b'{"error": {"code": "too_large", "message": "That message and its files are over 2 MiB."}}'
+        await send({
+            "type": "http.response.start", "status": 413,
+            "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]
+            + _HEADERS + [(b"cache-control", b"no-store")],
+        })
+        await send({"type": "http.response.body", "body": body})
+        return
+    await _plain(send, 413, b"Request too large")
 
 
 async def _plain(send, status: int, body: bytes) -> None:

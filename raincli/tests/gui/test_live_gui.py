@@ -397,9 +397,9 @@ def test_the_composer_grows_to_eight_lines_and_ctrl_enter_sends(agent_thread, br
     box.fill("Sent with Ctrl+Enter")
     box.press("Enter")
     assert "\n" in page.input_value("#body")  # Enter adds a new line
-    box.press("Control+Enter")
-    page.wait_for_url("**notice=sent**")
-    assert "Sent with Ctrl+Enter" in page.inner_text(".rc-thread")
+    box.press("Control+Enter")  # sent in place (§20.2): the message lands without a page load
+    page.wait_for_function("() => document.querySelector('.rc-thread').innerText.includes('Sent with Ctrl+Enter')")
+    assert page.input_value("#body") == "" and "notice=" not in page.url
     context.close()
 
 
