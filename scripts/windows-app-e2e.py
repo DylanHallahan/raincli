@@ -43,7 +43,8 @@ D. The app window (protocol §16.10, §16.14, §16.15; design §10 GUI coverage)
    the handoff to the inbox (the local pages served only under a per-run path secret, their port bound
    exclusively), reading, replying and sending, local times in the thread, archiving the
    conversation (out of both sides' inboxes, under Archived) and unarchiving it, a custom-scheme new
-   window that opens nothing, This computer and Settings
+   window that opens nothing, a live update of the open thread (an answer from another machine appears and the
+   trail moves to replied, with no reload), This computer and Settings
    with the last report in local time, the offline
    page and Retry (the server stopped and started), and sign-out (the machine revoked, the profile
    marked for reset). A full install afterwards restores the no-argument shortcut. Screenshots go to
@@ -852,6 +853,30 @@ def part_d(app, server, installers, password, observer, menu, work):
         check("link dropped (scheme 'rc-e2e-scheme')" in app_log, "the dropped link was not logged")
         say("PASS: D5c. target=_blank and window.open with a custom scheme opened no window and nothing else; "
             "the drop was logged by scheme only")
+
+        # D5d. v0.5.4 (§19.1, §19.7): the open thread updates on its own. The window sends a message; the observer
+        # machine acknowledges and answers it; without a reload the answer appears and the trail moves to replied.
+        page.goto(server.url + f"/app/conversations/{conversation}#latest")
+        page.wait_for_selector(".rc-compose textarea#body", timeout=60000)
+        page.fill("#body", "Live from the window")
+        page.click(".rc-compose button[type=submit]")
+        page.wait_for_url("**notice=sent**", timeout=60000)
+        mine = wait_for("the window's message in the observer's inbox", lambda: next(
+            (m for m in api(server, observer, "/api/v1/inbox")["messages"] if m["body"] == "Live from the window"),
+            None), timeout=120)
+        page.evaluate("() => { window.__rcNoReload = 'kept'; }")  # gone if the page reloads
+        api(server, observer, f"/api/v1/messages/{mine['id']}/ack", {}, method="POST")
+        answer = str(uuid.uuid4())
+        api(server, observer, "/api/v1/messages", {"id": answer, "to": {"person": EMAIL}, "body": "Live answer",
+                                                   "in_reply_to": mine["id"]})
+        wait_for("the answer in the open window", lambda: page.locator(f"#m-{answer}").count() == 1,
+                 timeout=60, interval=1)
+        wait_for("the trail at replied", lambda: page.locator(f'[data-trail="{mine["id"]}"]').get_attribute(
+            "data-state") == "replied", timeout=60, interval=1)
+        check(page.evaluate("() => window.__rcNoReload") == "kept", "the window reloaded to show the update")
+        shot(page, "d5d-live-replied")
+        say("PASS: D5d. a message from the observer machine appeared in the open window without a reload, and the "
+            "window's own message moved to replied")
 
         # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
         # hosted navigation and loads its own page, so the click must not wait for that navigation.
