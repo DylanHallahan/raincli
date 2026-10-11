@@ -64,12 +64,16 @@ jobs:
         if: inputs.real_from == ''
         env:
           PYTHONUTF8: '1'
+          # Only for the e2e's own api.github.com setup lookups (the unauthenticated limit is shared per runner IP);
+          # the script removes it from its environment first, so nothing it launches inherits it.
+          RAINCLI_E2E_GITHUB_TOKEN: ${{ github.token }}
         # The image's PostgreSQL (PGBIN) runs as a fresh initdb cluster on a random loopback port.
         run: python scripts/windows-app-e2e.py --installers dist/e2e
       - name: Install, sign in, update, downgrade, migrate and uninstall (published release assets)
         if: inputs.real_from != ''
         env:
           PYTHONUTF8: '1'
+          RAINCLI_E2E_GITHUB_TOKEN: ${{ github.token }}
           # Inputs reach the script as data, never as shell text; it validates the tags.
           REAL_FROM: ${{ inputs.real_from }}
           REAL_TO: ${{ inputs.real_to }}
