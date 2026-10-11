@@ -1170,9 +1170,12 @@ def part_d(app, server, installers, password, observer, menu, work):
         # observer writes; the app restarts hidden (--background, as at logon), so the hosted page loads unseen: no
         # focus, nothing acknowledged after 10 s (and, while hidden, no polling). Shown and focused, the window is on
         # that conversation, selected in the list, and only then reads the message.
-        unseen = send(server, observer, {"person": EMAIL}, "Read me only when you can see me")
+        # The app quits first: a message sent while the previous window is still open and focused would be read
+        # there (its poll), before the hidden start this step is about.
         window.close()
         app.quit()
+        unseen = send(server, observer, {"person": EMAIL}, "Read me only when you can see me")
+        launched = time.strftime("%H:%M:%S", time.gmtime())
         port = free_port()
         env = dict(os.environ, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f"--remote-debugging-port={port}")
         subprocess.Popen([str(app.root / "RainCLI.exe"), "--background"], env=env, close_fds=True,
@@ -1185,11 +1188,13 @@ def part_d(app, server, installers, password, observer, menu, work):
                                          "[document.hasFocus(), document.visibilityState]", timeout=180)
         shown = app_window(app_pids(app.root)) is not None
         time.sleep(10)
-        state = api(server, observer, f"/api/v1/messages/{unseen}")["message"]["delivery_state"]
+        seen = api(server, observer, f"/api/v1/messages/{unseen}")["message"]
+        state = seen["delivery_state"]
         log_lines = [line.strip() for line in (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace")
                      .splitlines() if "page visibility" in line][-3:]
         say(f"D5h evidence: native window visible={shown}; page hasFocus={focus}, visibilityState={visibility}; "
-            f"after 10 s the message is {state}; app log: {log_lines}")
+            f"after 10 s the message is {state} (acked_at {seen.get('acked_at')}; launched {launched} UTC); "
+            f"app log: {log_lines}")
         check(not shown, "--background showed the window")
         check(state == "stored", f"the hidden window acknowledged a message: {state}")
         check(focus is False and visibility == "hidden", f"the hidden window's page: hasFocus={focus}, {visibility}")
