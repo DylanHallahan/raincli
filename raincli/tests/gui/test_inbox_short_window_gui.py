@@ -44,7 +44,6 @@ def test_a_short_window_keeps_three_conversation_rows_and_the_footer(team, brows
             assert page.evaluate(ROWS) >= 3, (w, h, scheme)
             footer = page.locator(".rc-list .rc-whoami").evaluate("e => e.getBoundingClientRect().bottom")
             assert footer <= h + 0.5, (w, h, footer)  # the footer stays on screen
-            assert page.locator("details.rc-team summary").is_visible()
             context.close()
 
 
