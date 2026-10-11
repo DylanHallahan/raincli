@@ -120,9 +120,12 @@ def seed(live, session):
     presence(live, tokens["sam-server"], [entry("ops-agent", "d" * 32)])
     presence(live, tokens["ryan-like"], [])  # connected, but it never picks up its messages
     go_offline(session, machines["sam-server"][0])  # Sam's ops-agent: known, but not reported for 30 minutes
-    persons = {n: api(live, "/api/v1/app/login", {"email": f"{n.lower()}@example.test", "password": PASSWORD,
-                                                  "machine_name": f"{n.lower()}-app", "person_session": True}
-                      )["person_session"] for n in ("Maya", "Priya")}
+    persons = {}
+    for n in ("Maya", "Priya"):  # the app's sign-in adds a machine, which the app's runtime keeps connected
+        login = api(live, "/api/v1/app/login", {"email": f"{n.lower()}@example.test", "password": PASSWORD,
+                                                "machine_name": f"{n.lower()}-app", "person_session": True})
+        presence(live, login["token"], [])
+        persons[n] = login["person_session"]
     return {"base": live, "session": session, "tokens": tokens, "persons": persons,
             "machines": {h: a for h, (a, _) in machines.items()}, "people": people}
 
