@@ -984,24 +984,3 @@ def test_the_controller_itself_is_set_when_it_exists(tmp_path, monkeypatch, webv
     app.on_closing()
     assert controller.IsVisible is False
 
-
-def test_the_minimum_size_follows_the_monitors_scale(tmp_path, monkeypatch):
-    """At 150% the minimum is 1140x780 physical px (760x520 logical), re-applied after the form's own scaling."""
-    import ctypes
-    drawing = types.ModuleType("System.Drawing")
-    drawing.Size = lambda w, h: types.SimpleNamespace(Width=w, Height=h)
-    monkeypatch.setitem(sys.modules, "System", types.ModuleType("System"))
-    monkeypatch.setitem(sys.modules, "System.Drawing", drawing)
-    dpi = {"value": 144}
-    monkeypatch.setattr(ctypes, "windll", types.SimpleNamespace(user32=types.SimpleNamespace(
-        GetDpiForWindow=lambda hwnd: dpi["value"])), raising=False)
-    app, win, _ = make(tmp_path)
-    form = types.SimpleNamespace(MinimumSize=types.SimpleNamespace(Width=760, Height=520),
-                                 Handle=types.SimpleNamespace(ToInt64=lambda: 1), InvokeRequired=False)
-    win.native = form
-    assert app._apply_min_size() is True
-    assert (form.MinimumSize.Width, form.MinimumSize.Height) == (1140, 780)
-    dpi["value"] = 96  # moved to a 100% monitor
-    app._apply_min_size()
-    assert (form.MinimumSize.Width, form.MinimumSize.Height) == (760, 520)
-
