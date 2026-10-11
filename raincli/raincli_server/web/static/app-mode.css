@@ -278,3 +278,16 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 /* The header's Archive control sits at the end of the row, at its own size. */
 .rc-main-head > .rc-archive { flex: none; }
 .rc-archive .rc-btn { padding: var(--rc-s-1) var(--rc-s-3); font-size: var(--rc-fs-sm); }
+
+/* Short windows (the inbox bug, v0.5.4 hotfix). In a window shorter than the app's 520 px minimum (150% scaling on a
+   small screen, maximized) the conversation list kept shrinking while the Team section and the footer kept their
+   size. Now the list keeps about three rows, the Team section shrinks first (its list scrolls), and below 600 px
+   tall the Team list shows about two rows. The footer stays. */
+.rc-list .rc-convs { min-height: 204px; }
+.rc-team { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.rc-team > summary { flex: none; }
+.rc-list .rc-team-list { flex: 0 1 auto; min-height: 0; }
+@media (max-height: 600px) { .rc-list .rc-team-list { max-height: 68px; } }
+/* The owner notice: one combined line for several machines; the block is capped and scrolls as a backstop. */
+.owner-warnings { max-height: 30vh; overflow-y: auto; flex: none; }
+.app-mode .sender-warning a { color: inherit; text-decoration: underline; }

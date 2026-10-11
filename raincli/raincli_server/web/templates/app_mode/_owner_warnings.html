@@ -1,0 +1,7 @@
+{# §19.6, app mode: the machine owner's notice on their Inbox. One machine keeps the sender warning's own wording;
+   two or more are combined into one line that links to Agents, so a long list of machines never crowds the page.
+   The website keeps its one line per machine (the shared _owner_warnings.html). #}
+{% if owner_warnings %}<div class="owner-warnings" aria-label="Your machines">
+{%- if owner_warnings|length == 1 %}{% with warning=owner_warnings[0] %}{% include "_sender_warning.html" %}{% endwith %}
+{%- else %}<p class="sender-warning" role="status" data-sender-warning>{{ owner_warnings|length }} of your machines aren't connecting: {% for w in owner_warnings %}<strong>{{ w.handle }}</strong>{{ ', ' if not loop.last }}{% endfor %}. <a href="{{ url('/app/agents') }}">See them in Agents</a></p>
+{%- endif %}</div>{% endif %}
