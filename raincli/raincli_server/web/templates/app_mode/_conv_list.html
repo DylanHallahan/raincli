@@ -5,13 +5,16 @@
     <h1 id="conv-list-title">Inbox</h1>
     <a class="rc-new" href="{{ url('/app/compose') }}"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New message</a>
   </div>
+  {% with owner_warnings=list_owner_warnings|default([]) %}{% include "_owner_warnings.html" %}{% endwith %}
   {% if conversations %}
   {# Day headings (Today, Yesterday, Earlier) are added by app.js in local time; without JavaScript there are none. #}
   <ul class="rc-convs" data-day-groups>
     {% for row in conversations %}
     <li class="rc-conv-item"><a class="rc-conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}#latest" {% if current_id == row.conversation.id %}aria-current="page"{% endif %}>
       <span class="rc-conv-top"><span class="rc-conv-name">{{ row.name or row.peer.display }}</span>{% if row.unacked %}<span class="rc-count" title="Not yet read">{{ row.unacked }}<span class="sr-only"> unread</span></span>{% endif %}<span class="rc-conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span></span>
-      {% if row.last %}<span class="rc-conv-preview"><span class="sr-only">Last message from </span>{{ (row.name or row.last_sender) if row.last_sender == row.peer.display else row.last_sender }}: {{ row.last.body[:120] }}</span>{% endif %}
+      {# §20.4 R8: "You:" only for your own messages; a machine inbox (several possible senders) keeps the sender's
+         name; otherwise the text alone. #}
+      {% if row.last %}<span class="rc-conv-preview">{% if row.last_sender == 'You' or row.peer.endpoint.kind == 'machine' %}<span class="sr-only">Last message from </span>{{ 'You' if row.last_sender == 'You' else row.last_sender_name or row.last_sender }}: {% else %}<span class="sr-only">Last message: </span>{% endif %}{{ row.last.body[:120] }}</span>{% endif %}
     </a></li>
     {% endfor %}
   </ul>

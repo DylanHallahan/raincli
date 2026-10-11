@@ -261,7 +261,8 @@ def test_the_thread_shows_trails_only_under_your_messages(client, world, alice_a
     assert page.count('data-trail="') == 1 and f'data-trail="{mine["id"]}"' in page
     # Bob's machine has never reported as routing-capable, so the server shows the message held for that reason.
     assert "Delivery: held, the recipient's RainCLI needs an update" in htmllib.unescape(page)
-    assert "<summary>Details</summary>" in page
+    # §20.4 R5: the trail itself is the <details> summary; there is no separate Details line.
+    assert '<summary class="rc-trail-steps">' in page and "<summary>Details</summary>" not in page
 
 
 # The sender warning (§19.6) ------------------------------------------------------------------------------

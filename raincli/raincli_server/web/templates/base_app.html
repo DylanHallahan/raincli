@@ -12,6 +12,7 @@
   <script src="{{ static('app.js') }}" defer></script>
   <script src="{{ static('localtime.js') }}" defer></script>
   <script src="{{ static('live.js') }}" defer></script>
+  <script src="{{ static('app-mode.js') }}" defer></script>
 </head>
 {# App-mode layout (protocol §16.10): a rail, the conversation list, the thread and compose. No marketing chrome. #}
 <body class="app-mode{% block body_class %}{% endblock %}" data-live-url="{{ url('/app/live') }}" data-ack-url="{{ url('/app/ack') }}" data-csrf="{{ csrf }}">

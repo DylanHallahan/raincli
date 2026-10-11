@@ -384,7 +384,10 @@ def app_handoff(request: Request, code: str = "", db: Session = Depends(get_db))
     if existing is not None and existing != user.id:  # never replace another user's app session
         raise WebError(400, *_HANDOFF_ERROR)
     hc.used_at = identity.now()
-    response = redirect(request, "/app/inbox")
+    from raincli_server.web import present
+
+    # §20.3: a toast's thread may be named as ``next`` (exactly /app/conversations/<uuid>); anything else is Inbox.
+    response = redirect(request, present.handoff_next(request.query_params.get("next", "")) or "/app/inbox")
     auth.start_app_session(db, ps, user, response, _settings(request), hc.install_hash)
     response.headers["Referrer-Policy"] = "no-referrer"
     db.commit()
@@ -502,12 +505,22 @@ def inbox(request: Request, db: Session = Depends(get_db)):
     rows = queries.list_conversations(db, viewer.user, team_ids)
     from raincli_server.web import thread
 
-    template = "app_mode/inbox.html" if viewer.app_mode else "app/inbox.html"
-    extras = _list_extras(db, viewer) if viewer.app_mode else {}
-    return render(request, template, viewer=viewer, conversations=rows,
+    if viewer.app_mode:
+        return _app_inbox(request, db, viewer, team_ids, rows)
+    return render(request, "app/inbox.html", viewer=viewer, conversations=rows,
                   machines_owned=bool(queries.my_agents(db, viewer.user, team_ids)),
                   pending=queries.pending_for_user(db, viewer.user, team_ids),
-                  owner_warnings=thread.owner_warnings(db, viewer.user, team_ids), **extras)
+                  owner_warnings=thread.owner_warnings(db, viewer.user, team_ids))
+
+
+def _app_inbox(request: Request, db: Session, viewer: auth.Viewer, team_ids, rows) -> HTMLResponse:
+    """Inbox in app mode. §20.6 M1: app-mode.js opens the latest conversation from here when the list is visible
+    (P2 runs in the client); with no conversations, the first-run steps, step 1 done after a recent connection."""
+    from raincli_server.web import present, thread
+
+    return render(request, "app_mode/inbox.html", viewer=viewer, conversations=rows,
+                  owner_warnings=thread.owner_warnings(db, viewer.user, team_ids),
+                  connected=present.connected_machine(db, viewer.user, team_ids), **_list_extras(db, viewer))
 
 
 @router.get("/app/conversations/{conversation_id}", response_class=HTMLResponse)
@@ -580,7 +593,11 @@ FINAL_STATES = ("replied", "rejected")
 def _list_extras(db: Session, viewer: auth.Viewer) -> dict:
     """Extra context for the conversation list (the sidebar's Team section, §19.5), shared by the pages and
     GET /app/live."""
-    return {"team_agents": team_section.team_agents(db, viewer)}
+    from raincli_server.web import thread
+
+    # §20.6 M1: the owner's "not connected" notice also sits at the top of the list on every app-mode page.
+    return {"team_agents": team_section.team_agents(db, viewer),
+            "list_owner_warnings": thread.owner_warnings(db, viewer.user, _team_ids(viewer))}
 
 
 @router.get("/app/live")

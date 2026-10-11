@@ -14,7 +14,7 @@
   <summary><span class="rc-team-title">Team</span><span class="rc-team-count">{{ team_agents|length }}<span class="sr-only"> agents</span></span></summary>
   <ul class="rc-team-list">
     {% for a in team_agents %}{% set w = words.get(a.status, words['offline']) %}
-    <li><a class="rc-team-agent" href="{{ url('/app/compose') }}?to={{ a.to|urlencode }}" title="New message to {{ a.person }} · {{ a.agent }} ({{ a.to }})">
+    <li><a class="rc-team-agent" href="{{ url('/app/compose') }}?to={{ a.to|urlencode }}" title="New message to {{ a.person }} · {{ a.agent }}">
       <span class="rc-team-name">{{ a.person }} · {{ a.agent }}</span>
       {% if a.status != 'unknown' %}<span class="rc-dot {{ w[1] }}" role="img" aria-label="{{ w[3] }}" title="{{ w[2] }}" data-presence="{{ a.status }}"></span>{% endif %}
     </a></li>

@@ -5,6 +5,8 @@
   // Confirm destructive actions (revoke, rotate) before submitting.
   document.addEventListener("submit", function (event) {
     var form = event.target;
+    // §20.6 M4: an in-place send (app-mode.js) handles its own form, and a cancelled submit is not a submit.
+    if (event.defaultPrevented || (form.hasAttribute && form.hasAttribute("data-send-in-place"))) return;
     var message = form.getAttribute && form.getAttribute("data-confirm");
     if (message && !window.confirm(message)) {
       event.preventDefault();

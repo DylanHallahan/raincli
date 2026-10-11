@@ -1,20 +1,22 @@
 {# The delivery trail under the viewer's own message (§19.7): the recipient kind's steps, or held, uncertain or
    rejected in place of the remaining ones. Each step's tooltip has its local time; a screen reader hears one
-   phrase. The full history is behind Details. Rendered by the page and by GET /app/live. #}
+   phrase. The trail itself opens the full history (§20.4 R5). Rendered by the page and by GET /app/live. #}
 {% from "_state.html" import time %}
 {% set t = line.trail %}
 <div class="rc-trail{{ ' rc-trail-' ~ t.tone if t.tone else '' }}" data-trail="{{ line.message.id }}" data-state="{{ t.outcome or line.message.delivery_state }}">
-  <p class="rc-trail-steps"><span class="sr-only">{{ t.phrase }}</span><span aria-hidden="true">
+  {# §20.4 R5: the trail is the toggle for the event history. Without JavaScript a <details> whose summary is the
+     trail; app.js marks the summary as a button with aria-expanded. live.js keeps an open one open on a swap. #}
+  <details class="rc-trail-box">
+    <summary class="rc-trail-steps"><span class="sr-only">{{ t.phrase }}</span><span aria-hidden="true">
     {%- for s in t.steps -%}
     {%- if not loop.first %}<i>→</i>{% endif -%}
     <span class="rc-tstep{{ ' rc-treached' if s.reached else '' }}"{% if s.at %} data-step-time="{{ s.at|iso }}" data-step-label="{{ s.name|capitalize }}" title="{{ s.name|capitalize }} {{ s.at|ts }}"{% else %} title="Not yet {{ s.name }}"{% endif %}>{{ s.name }}</span>
     {%- endfor -%}
     {%- if t.outcome %}{% if t.steps %}<i>→</i>{% endif %}<span class="rc-tstep rc-outcome">{{ t.outcome }}: {{ t.reason }}</span>{% endif -%}
-  </span></p>
-  <details class="rc-details"><summary>Details</summary>
-    <ol>
+    </span><svg class="rc-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><span class="sr-only">, delivery history</span></summary>
+    <ol class="rc-history">
       <li>stored {{ time(line.message.created_at) }}</li>
-      {% if line.message.acked_at %}<li>received {{ time(line.message.acked_at) }}</li>{% endif %}
+      {% if line.message.acked_at and not t.events|selectattr('state', 'equalto', 'received')|list %}<li>received {{ time(line.message.acked_at) }}</li>{% endif %}
       {% for ev in t.events %}<li>{{ STATE_LABELS.get(ev.state, (ev.state,))[0]|lower }} {{ time(ev.created_at) }}{% if ev.detail %} · {{ ev.detail }}{% endif %}</li>{% endfor %}
     </ol>
   </details>
