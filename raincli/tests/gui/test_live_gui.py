@@ -420,3 +420,108 @@ def test_a_long_message_counts_as_seen_once_it_fills_half_the_view(agent_thread,
     session.expire_all()
     assert session.get(Message, uuid.UUID(reply["id"])).acked_at is not None
     context.close()
+
+
+# §19.9 ---------------------------------------------------------------------------------------------------
+
+def test_step_tooltips_are_local_also_when_inserted_live(agent_thread, browser):
+    """F2: under a forced zone the trail tooltips show the local time, compared with Intl in the same browser."""
+    p = agent_thread
+    context, page = open_thread(browser, p, p["cid"], timezone_id="Asia/Kolkata", locale="en-GB")
+    check = """() => [...document.querySelectorAll('[data-step-time]')].map(el => [el.getAttribute('title'),
+        el.getAttribute('data-step-label') + ' ' + new Intl.DateTimeFormat(undefined, {weekday: 'long', year: 'numeric',
+        month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'long'})
+        .format(new Date(el.getAttribute('data-step-time')))])"""
+    page.wait_for_function("() => document.querySelector('[data-step-time][data-local]')")
+    assert all(a == b and "UTC" not in a for a, b in page.evaluate(check))
+    ack(p["base"], p["bob"]["token"], p["first"]["id"])  # a trail swapped in by the poll
+    poll_now(page)
+    page.wait_for_function(f"""() => document.querySelectorAll('[data-trail="{p["first"]["id"]}"] [data-step-time][data-local]').length == 2""")
+    pairs = page.evaluate(check)
+    assert len(pairs) >= 2 and all(a == b and "India" in a for a, b in pairs), pairs
+    context.close()
+
+
+def test_the_list_swap_keeps_focus_and_scroll(agent_thread, browser):
+    """F3: a Team agent keeps keyboard focus, and the Team list its scroll, when presence changes the list."""
+    p = agent_thread
+    agents = [{**REVIEWER, "key": f"{i:032x}", "name": f"agent-{i:02d}"} for i in range(30)]
+    put_presence(p["base"], p["bob"]["token"], agents)
+    context, page = open_thread(browser, p, p["cid"], viewport={"width": 1180, "height": 600})
+    poll_now(page)
+    page.wait_for_function("() => document.querySelectorAll('.rc-team-agent').length >= 30")
+    team = page.locator(".rc-team-list")
+    assert team.evaluate("e => e.scrollHeight > e.clientHeight")
+    target = page.locator(".rc-team-agent").nth(12)
+    href = target.get_attribute("href")
+    target.focus()
+    team.evaluate("e => { e.scrollTop = 200; }")  # after focusing, which scrolls it into view
+    put_presence(p["base"], p["bob"]["token"], [{**a, "status": "working"} for a in agents])
+    poll_now(page)
+    page.wait_for_function("() => document.querySelector('.rc-team-list [data-presence=\"busy\"]')")
+    assert page.evaluate("() => document.activeElement.getAttribute('href')") == href
+    assert page.locator(".rc-team-list").evaluate("e => e.scrollTop") == 200
+    context.close()
+
+
+def test_an_unchanged_warning_is_not_replaced(agent_thread, browser, session):
+    """F4: the role=status warning stays the same node across polls when nothing changed."""
+    from raincli_server import identity
+    from raincli_server.models import Agent, AgentCredential
+
+    p = agent_thread
+    bob = session.query(Agent).filter_by(handle="bob-laptop").one()
+    session.execute(update(AgentCredential).where(AgentCredential.agent_id == bob.id)
+                    .values(last_used_at=identity.now() - timedelta(days=3)))
+    session.commit()
+    context, page = open_thread(browser, p, p["cid"])
+    page.wait_for_selector("[data-live-warning] .sender-warning")
+    page.evaluate("() => { document.querySelector('[data-live-warning] .sender-warning').__kept = true; }")
+    for _ in range(2):
+        poll_now(page)
+        page.wait_for_timeout(700)
+    assert page.evaluate("() => document.querySelector('[data-live-warning] .sender-warning').__kept === true")
+    assert "since" in page.inner_text("[data-live-warning]") and ":" not in page.inner_text("[data-live-warning] time")
+    context.close()
+
+
+def test_an_error_while_applying_never_stops_polling(agent_thread, browser):
+    """F5."""
+    p = agent_thread
+    context, page = open_app(browser, p["base"], p["alice"]["person_session"])
+    page.clock.install()
+    page.goto(p["base"] + f"/app/conversations/{p['cid']}")
+    page.evaluate("""() => { const real = DOMParser.prototype.parseFromString; let once = true;
+        DOMParser.prototype.parseFromString = function () { if (once) { once = false; throw new Error('boom'); }
+          return real.apply(this, arguments); }; }""")
+    polls = []
+    page.on("request", lambda r: polls.append(1) if "/app/live" in r.url else None)
+    machine_send(p["base"], p["bob"]["token"], {"person": "alice@example.test"}, "first poll breaks", p["cid"])
+    page.clock.run_for(5_500)
+    page.wait_for_timeout(500)
+    page.clock.run_for(5_500)
+    page.wait_for_timeout(500)
+    assert len(polls) >= 2
+    page.wait_for_selector(".rc-msg:has-text('first poll breaks')", timeout=3000)
+    context.close()
+
+
+def test_a_failed_ack_keeps_the_message_unread(agent_thread, browser, session):
+    """F8: a non-2xx ack leaves the message unread and observed, and a later ack succeeds."""
+    from raincli_server.models import Message
+
+    p = agent_thread
+    reply = machine_send(p["base"], p["bob"]["token"], {"person": "alice@example.test"}, "ack me", p["cid"])
+    context, page = open_app(browser, p["base"], p["alice"]["person_session"])
+    failing = {"on": True}
+    page.route("**/app/ack", lambda route: route.fulfill(status=403, body="") if failing["on"] else route.continue_())
+    page.goto(p["base"] + f"/app/conversations/{p['cid']}#latest")
+    page.wait_for_selector(f"#m-{reply['id']}")
+    page.wait_for_timeout(1500)
+    assert page.locator(f"#m-{reply['id']}").get_attribute("data-unread") is not None
+    failing["on"] = False
+    page.evaluate("() => window.dispatchEvent(new Event('focus'))")
+    page.wait_for_function(f"() => !document.querySelector('#m-{reply['id']}').hasAttribute('data-unread')")
+    session.expire_all()
+    assert session.get(Message, uuid.UUID(reply["id"])).acked_at is not None
+    context.close()

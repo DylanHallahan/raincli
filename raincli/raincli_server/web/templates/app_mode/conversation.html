@@ -9,12 +9,12 @@
 <header class="rc-main-head">
   <div>
     {# The name, then the chip; the presence word at the end of the row (§19.3). live.js swaps data-live-header. #}
-    <div class="rc-head-title"><h2>{{ view.name }}</h2><span class="rc-head-status" data-live-header>{% with presence=view.presence %}{% include "app_mode/_head_status.html" %}{% endwith %}</span></div>
+    <div class="rc-head-title"><h2>{{ view.name }}</h2><span class="rc-head-status" data-live-header data-live-sig="{{ header_sig }}">{% with presence=view.presence %}{% include "app_mode/_head_status.html" %}{% endwith %}</span></div>
     <p>{{ view.address }} · {{ view.team.name }}{% if not view.peer.active %} · no longer active{% endif %}</p>
   </div>
   <div class="rc-archive">{% with btn_class="rc-btn rc-btn-quiet" %}{% include "_archive_controls.html" %}{% endwith %}</div>
 </header>
-<div class="rc-warning-slot" data-live-warning>{% with warning=view.warning %}{% include "_sender_warning.html" %}{% endwith %}</div>
+<div class="rc-warning-slot" data-live-warning data-live-sig="{{ warning_sig }}">{% with warning=view.warning %}{% include "_sender_warning.html" %}{% endwith %}</div>
 <div class="rc-scroll" data-thread-scroll>
   {% if view.truncated %}<p class="rc-flash">Showing the most recent {{ view.lines|length }} messages.</p>{% endif %}
   <ol class="rc-thread" data-thread>

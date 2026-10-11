@@ -1,4 +1,5 @@
-// Local time (protocol §17.1): every <time datetime> in the viewer's own time zone and locale, through Intl.
+// Local time (protocol §17.1): every <time datetime> in the viewer's own time zone and locale, through Intl, and
+// every delivery step's tooltip ([data-step-time], §19.9 F2). <time data-format="date"> shows a date only (F9).
 // The visible label is relative while recent ("now", "5 minutes ago"), then the local time or date; the title
 // is the full local date and time with seconds and the zone. Times added later (a new message, a status
 // refresh) are formatted as they appear. Without JavaScript the server's UTC text stays as it is.
@@ -14,6 +15,9 @@
   var clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
   var day = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   var dated = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  var dayOnly = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+  var dayYear = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric" });
+  var dayFull = new Intl.DateTimeFormat(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
   var ymd = new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" });  // the local date, to compare
   var relative = Intl.RelativeTimeFormat ? new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }) : null;
 
@@ -27,9 +31,11 @@
   }
 
   function format(el, now) {
+    if (el.hasAttribute("data-step-time")) return stepTitle(el);
     var value = el.getAttribute("datetime");
     var when = value ? new Date(value) : null;
     if (!when || isNaN(when.getTime())) return;
+    if (el.getAttribute("data-format") === "date") return dateOnly(el, when, now || new Date());
     var text = label(when, now || new Date());
     if (el.textContent !== text) el.textContent = text;
     var title = full.format(when);
@@ -37,10 +43,29 @@
     el.setAttribute("data-local", "1");
   }
 
+  // A date only ("Oct 3"; with the year when it isn't this year), its title the full local date.
+  function dateOnly(el, when, now) {
+    var text = when.getFullYear() === now.getFullYear() ? dayOnly.format(when) : dayYear.format(when);
+    if (el.textContent !== text) el.textContent = text;
+    var title = dayFull.format(when);
+    if (el.getAttribute("title") !== title) el.setAttribute("title", title);
+    el.setAttribute("data-local", "1");
+  }
+
+  // A delivery step's tooltip: its label and the full local time ("Received Saturday, … 10:42:07 AM …").
+  function stepTitle(el) {
+    var when = new Date(el.getAttribute("data-step-time"));
+    if (isNaN(when.getTime())) return;
+    var title = (el.getAttribute("data-step-label") || "") + " " + full.format(when);
+    if (el.getAttribute("title") !== title.trim()) el.setAttribute("title", title.trim());
+    el.setAttribute("data-local", "1");
+  }
+
+  var SELECTOR = "time[datetime], [data-step-time]";
   function formatAll(root) {
     var now = new Date();
-    if (root.matches && root.matches("time[datetime]")) format(root, now);
-    var found = root.querySelectorAll ? root.querySelectorAll("time[datetime]") : [];
+    if (root.matches && root.matches(SELECTOR)) format(root, now);
+    var found = root.querySelectorAll ? root.querySelectorAll(SELECTOR) : [];
     for (var i = 0; i < found.length; i++) format(found[i], now);
   }
 
@@ -54,7 +79,8 @@
             if (change.addedNodes[i].nodeType === 1) formatAll(change.addedNodes[i]);
           }
         });
-      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["datetime"] });
+      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true,
+                                              attributeFilter: ["datetime", "data-step-time"] });
     }
     setInterval(function () { formatAll(document); }, 30000);  // relative labels move on
   }

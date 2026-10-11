@@ -181,7 +181,9 @@ def test_team_section_lists_presence_with_labels_tooltips_and_opens_new_message(
         assert [t.strip() for t in page.locator(".rc-team-name").all_inner_texts()] == [
             "Jon · api-agent", "Priya · web-agent", "Sam · ops-agent"]
         dots = page.locator(".rc-team .rc-dot")
-        assert [d.get_attribute("aria-label") for d in dots.all()] == ["Ready", "Busy", "Offline"]
+        # §19.9 F7: the word with its claim-limiting qualifier reaches assistive technology.
+        assert [d.get_attribute("aria-label") for d in dots.all()] == [
+            "Ready, at its last report", "Busy, at its last report", "Offline, no report in the last two minutes"]
         assert [d.get_attribute("role") for d in dots.all()] == ["img"] * 3
         titles = [d.get_attribute("title") for d in dots.all()]
         assert titles[0].startswith("Ready") and titles[1] == "Busy: the session was working at its last report."
@@ -364,7 +366,8 @@ def test_team_blocked_is_busy_with_its_own_tooltip_and_unknown_has_no_word(team,
         def item(name):
             return page.locator(".rc-team-agent", has_text=name)
         qa, web = item("Priya · qa-agent").locator(".rc-dot"), item("Priya · web-agent").locator(".rc-dot")
-        assert qa.get_attribute("aria-label") == web.get_attribute("aria-label") == "Busy"
+        assert qa.get_attribute("aria-label") == "Busy, waiting for its user at its last report"  # §19.9 F7
+        assert web.get_attribute("aria-label").startswith("Busy, ")
         assert qa.get_attribute("title") == "Busy: the session was waiting for its user at its last report."
         assert web.get_attribute("title") == "Busy: the session was working at its last report."
         spare = item("Priya · spare-agent")

@@ -117,7 +117,10 @@
     ids.forEach(function (id) { queued[id] = true; });
     fetch(ackUrl, {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"},
                    body: JSON.stringify({csrf_token: csrf, ids: ids})})
-      .then(function (r) { return r.ok ? r.json() : {acked: []}; })
+      .then(function (r) {
+        if (!r.ok) throw new Error("status " + r.status);  // §19.9 F8: not acked, so not read
+        return r.json();
+      })
       .then(function (reply) {
         ids.forEach(function (id) {
           var li = visible[id] || document.getElementById("m-" + id);
@@ -125,7 +128,9 @@
           delete visible[id];
         });
         if (reply.acked && reply.acked.length) poll(true);  // the list's unread count moves at once
-      }, function () { ids.forEach(function (id) { delete queued[id]; }); });
+      }, function () {
+        ids.forEach(function (id) { delete queued[id]; });  // still unread and still observed: tried again later
+      });
   }
   window.addEventListener("focus", markSeen);
 
@@ -149,31 +154,69 @@
       })
       .then(function (reply) {
         inFlight = false;
-        apply(reply);
-        schedule(Math.max(INTERVAL, (Number(reply.retry_after) || 0) * 1000));
+        try {
+          apply(reply);
+        } finally {  // §19.9 F5: an error while applying never stops the polling
+          schedule(Math.max(INTERVAL, (Number(reply.retry_after) || 0) * 1000));
+        }
       }, function () {
         inFlight = false;
         schedule(BACKOFF);  // quietly: no dialog, the page stays as it is
       });
   }
+  // §19.9 F4: a part is replaced only when its HTML changed, so a hovered tooltip stays and an unchanged
+  // role="status" warning is never announced again.
+  function replaceIfChanged(target, part) {
+    if (!target || !part) return;
+    if (part.sig && target.getAttribute("data-live-sig") === part.sig) return;
+    replaceChildren(target, part.html);
+    if (part.sig) target.setAttribute("data-live-sig", part.sig);
+  }
+
+  // §19.9 F3: the list swap keeps keyboard focus (matched by link, summary or data attribute) and the scroll
+  // position of every scrollable part of the list.
+  function focusKey(el, root) {
+    if (!el || !root.contains(el) || el === root) return null;
+    if (el.getAttribute("href")) return {sel: '[href="' + CSS.escape(el.getAttribute("href")) + '"]'};
+    if (el.tagName === "SUMMARY") {
+      var details = el.closest("details");
+      if (details && details.getAttribute("data-team")) return {sel: 'details[data-team="' + details.getAttribute("data-team") + '"] > summary'};
+      return {sel: "summary"};
+    }
+    return null;
+  }
+  function scrolls(root) {
+    var out = [];
+    Array.prototype.forEach.call(root.querySelectorAll("*"), function (el) {
+      if (el.scrollHeight > el.clientHeight && el.scrollTop) out.push({cls: el.className, top: el.scrollTop});
+    });
+    return out;
+  }
+  function swapList(html) {
+    var old = document.querySelector(".rc-list");
+    var fresh = firstElement(html);
+    if (!old || !fresh) return;
+    var focus = focusKey(document.activeElement, old);
+    var kept = scrolls(old);
+    old.parentNode.replaceChild(fresh, old);
+    document.dispatchEvent(new CustomEvent("rc-list-updated"));  // day groups and the Team state re-apply first
+    kept.forEach(function (k) {
+      var el = k.cls && fresh.getElementsByClassName(String(k.cls).split(" ")[0])[0];
+      if (el) el.scrollTop = k.top;
+    });
+    if (focus) {
+      var target = fresh.querySelector(focus.sel);
+      if (target) target.focus({preventScroll: true});
+    }
+  }
+
   function apply(reply) {
     if (reply.now) statesSince = reply.now;
     addMessages(reply.messages || []);
     updateStates(reply.states || []);
-    if (reply.header) replaceChildren(document.querySelector("[data-live-header]"), reply.header.html);
-    var slot = document.querySelector("[data-live-warning]");
-    if (slot) replaceChildren(slot, reply.warning ? reply.warning.html : "");
-    if (reply.list && reply.list.html) {
-      var old = document.querySelector(".rc-list");
-      var fresh = firstElement(reply.list.html);
-      if (old && fresh) {
-        var oldScroll = old.querySelector("ul"), top = oldScroll ? oldScroll.scrollTop : 0;
-        old.parentNode.replaceChild(fresh, old);
-        var newScroll = fresh.querySelector("ul");
-        if (newScroll) newScroll.scrollTop = top;
-        document.dispatchEvent(new CustomEvent("rc-list-updated"));
-      }
-    }
+    replaceIfChanged(document.querySelector("[data-live-header]"), reply.header);
+    if (conversation) replaceIfChanged(document.querySelector("[data-live-warning]"), reply.warning || {html: "", sig: "none"});
+    if (reply.list && reply.list.html) swapList(reply.list.html);
     if (reply.list_rev) listRev = reply.list_rev;
     markSeen();
   }

@@ -7,7 +7,7 @@
   <p class="rc-trail-steps"><span class="sr-only">{{ t.phrase }}</span><span aria-hidden="true">
     {%- for s in t.steps -%}
     {%- if not loop.first %}<i>→</i>{% endif -%}
-    <span class="rc-tstep{{ ' rc-treached' if s.reached else '' }}"{% if s.at %} data-step-time="{{ s.at|iso }}" title="{{ s.name|capitalize }} {{ s.at|ts }}"{% else %} title="Not yet {{ s.name }}"{% endif %}>{{ s.name }}</span>
+    <span class="rc-tstep{{ ' rc-treached' if s.reached else '' }}"{% if s.at %} data-step-time="{{ s.at|iso }}" data-step-label="{{ s.name|capitalize }}" title="{{ s.name|capitalize }} {{ s.at|ts }}"{% else %} title="Not yet {{ s.name }}"{% endif %}>{{ s.name }}</span>
     {%- endfor -%}
     {%- if t.outcome %}{% if t.steps %}<i>→</i>{% endif %}<span class="rc-tstep rc-outcome">{{ t.outcome }}: {{ t.reason }}</span>{% endif -%}
   </span></p>

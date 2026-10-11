@@ -368,8 +368,11 @@ def test_a_state_committed_before_the_polls_now_still_shows(client, world, alice
                        conversation_id=cid, in_reply_to=mine["id"])
     out = live(webview, conversation=cid, after=reply["seq"], states_since=out["now"])
     assert {s["id"]: s["state"] for s in out["states"]} == {mine["id"]: "replied"}
+    session.execute(update(Message).where(Message.id == uuid.UUID(mine["id"]))
+                    .values(delivery_updated_at=identity.now() - timedelta(seconds=60)))
+    session.commit()
     later = live(webview, conversation=cid, after=reply["seq"], states_since=out["now"])
-    assert later["states"] == []  # final: no longer sent
+    assert later["states"] == []  # final, and changed more than 30 s ago: no longer sent (§19.9 F1)
 
 
 def test_ack_never_acks_a_message_to_the_viewers_own_machine(client, world, alice_app, session):  # noqa: F811
@@ -464,3 +467,88 @@ def test_a_message_you_send_to_your_own_machine_is_yours(client, world, alice_ap
     assert f'data-trail="{mine["id"]}"' in page and f'data-trail="{back["id"]}"' not in page
     assert re.search(rf'class="rc-msg rc-out" id="m-{mine["id"]}"', page)
     assert re.search(rf'class="rc-msg" id="m-{back["id"]}"', page)
+
+
+# §19.9 ---------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("final", ["replied", "rejected"])
+def test_a_final_state_committed_after_a_poll_still_reaches_the_trail(client, world, alice_app, session, final):  # noqa: F811
+    """F1: delivery_updated_at is a transaction's start, so a final state can commit 'before' the poll's now."""
+    webview = alice_app["webview"]
+    mine = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "to bob")
+    cid = mine["conversation_id"]
+    assert client.post(f"/api/v1/messages/{mine['id']}/ack", headers=auth(world["tokens"]["bob"])).status_code == 200
+    now = live(webview, conversation=cid, after=mine["seq"])["now"]
+    if final == "replied":
+        last = agent_send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "answer",
+                          conversation_id=cid, in_reply_to=mine["id"])
+        after = last["seq"]
+    else:
+        r = client.post(f"/api/v1/messages/{mine['id']}/events", headers=auth(world["tokens"]["bob"]),
+                        json={"state": "rejected"})
+        assert r.status_code == 200, r.text
+        after = mine["seq"]
+    session.execute(update(Message).where(Message.id == uuid.UUID(mine["id"]))  # as if committed late
+                    .values(delivery_updated_at=identity.now() - timedelta(seconds=10)))
+    session.commit()
+    out = live(webview, conversation=cid, after=after, states_since=now)
+    assert {s["id"]: s["state"] for s in out["states"]} == {mine["id"]: final}
+
+
+def test_ack_is_app_mode_only(app, client, world):
+    with TestClient(app) as browser:
+        assert login(browser).status_code == 303
+        page = browser.get("/app/compose").text
+        csrf = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
+        assert browser.post("/app/ack", json={"csrf_token": csrf, "ids": []}).status_code == 404
+
+
+def test_qualifiers_reach_assistive_technology_and_warning_dates_are_dates(client, world, alice_app, session):  # noqa: F811
+    """F7 and F9."""
+    webview = alice_app["webview"]
+    cid = to_bob_agent(client, world, alice_app)["conversation_id"]
+    bob_reports(client, world, status="working")
+    header = live(webview, conversation=cid)["header"]["html"]
+    assert '<span class="sr-only">: the session was working at its last report.</span>' in header
+    credential_used(session, world["agents"]["bob"].id, identity.now() - timedelta(days=3))
+    warning = live(webview, conversation=cid)["warning"]["html"]
+    assert re.search(r'since <time datetime="[^"]+" data-format="date">\d{4}-\d\d-\d\d</time>\. Messages', warning)
+
+
+def test_live_queries_stay_on_the_conversation_index(client, world, alice_app, session, engine):  # noqa: F811
+    """F6: on a 20 000-message thread both /app/live queries use (conversation_id, seq), not a scan."""
+    from sqlalchemy import text
+
+    first = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "start")
+    cid = first["conversation_id"]
+    bob = world["agents"]["bob"].id
+    session.execute(text("""
+        INSERT INTO messages (id, team_id, conversation_id, sender_agent_id, recipient_user_id, body, delivery_state,
+                              created_at)
+        SELECT gen_random_uuid(), :team, :cid, :bob, :alice, 'bulk ' || g, 'stored', now() - interval '1 hour'
+        FROM generate_series(1, 20000) g"""), {"team": world["teams"]["acme"].id, "cid": cid, "bob": bob,
+                                               "alice": world["users"]["alice"].id})
+    session.commit()
+    session.execute(text("ANALYZE messages"))
+    seen = []
+    app_engine = alice_app["webview"].app.state.engine
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().startswith("SELECT") and "messages" in statement and "seq" in statement:
+            seen.append((statement, parameters))
+    event.listen(app_engine, "before_cursor_execute", capture)
+    try:
+        newest = session.scalar(text("SELECT max(seq) FROM messages WHERE conversation_id = :c"), {"c": cid})
+        out = live(alice_app["webview"], conversation=cid, after=newest, states_since=identity.now().isoformat())
+    finally:
+        event.remove(app_engine, "before_cursor_execute", capture)
+    assert out["messages"] == []
+    checked = 0
+    with engine.connect() as conn:
+        for statement, parameters in seen:
+            if "ORDER BY messages.seq" not in statement:
+                continue
+            plan = "\n".join(conn.exec_driver_sql("EXPLAIN " + statement, parameters).scalars())
+            assert "Seq Scan on messages" not in plan, plan
+            checked += 1
+    assert checked >= 2  # the message range and the states

@@ -20,7 +20,7 @@ from raincli_server.markdown import render as render_markdown
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import func, or_, select
 
 from raincli_server import identity, messaging, quotas, security
 from raincli_server.config import Settings
@@ -531,6 +531,12 @@ LIVE_PAGE = 50  # new messages per reply; the next poll fetches the rest
 ACK_MAX = 100
 
 
+def live_sig(html: str) -> str:
+    """A part's signature (§19.9 F4): the page and every reply carry it, so the client replaces a part (and a
+    role=status warning is announced) only when it really changed, whatever localtime.js did to its text."""
+    return hashlib.sha256(html.encode()).hexdigest()[:16]
+
+
 def _parse_since(value: str):
     from datetime import datetime, timezone
 
@@ -602,21 +608,32 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
         after = max(0, min(after, 2**63 - 1))
         in_conv = (Message.conversation_id == conv.id, Message.team_id == conv.team_id)
         # §19.8 M1: the cursors are hints. Messages after the cursor, and any created in the last 30 s (one that
-        # committed late with a lower seq); the client merges by id.
+        # committed late with a lower seq); the client merges by id. Both stay on the (conversation_id, seq) index
+        # (§19.9 F6): the lowest seq created in the last 30 s is found among the newest LIVE_IN_VIEW messages only,
+        # and the range starts below the lower of it and the cursor.
+        recent_window = now - LIVE_RECENT
+        newest_rows = (select(Message.seq, Message.created_at).where(*in_conv)
+                       .order_by(Message.seq.desc()).limit(LIVE_IN_VIEW).subquery())
+        recent_floor = db.scalar(select(func.min(newest_rows.c.seq)).where(newest_rows.c.created_at > recent_window))
+        lower = min(after, recent_floor - 1) if recent_floor is not None else after
         fresh = list(db.scalars(
-            select(Message).where(*in_conv, or_(Message.seq > after, Message.created_at > now - LIVE_RECENT))
+            select(Message).where(*in_conv, Message.seq > lower,
+                                  or_(Message.seq > after, Message.created_at > recent_window))
             .order_by(Message.seq).limit(LIVE_PAGE).execution_options(populate_existing=True)))
-        # The current state of the viewer's own messages in view that aren't final, plus any that changed since the
-        # last poll; applied idempotently by the client.
+        # States, for the viewer's own messages in view (the newest LIVE_IN_VIEW): every one that isn't final, and
+        # every one whose state changed since the last poll or in the last 30 s, final states included (§19.9 F1:
+        # delivery_updated_at is the transaction's start, so a reply that commits after a poll can carry an
+        # earlier time). Applied idempotently by the client. Recent messages are included too: the client already
+        # has them and applies the state to the one it has.
         mine = or_(Message.sender_user_id == viewer.user.id, Message.sender_agent_id.in_(list(owned) or [None]))
-        newest = select(Message.id).where(*in_conv).order_by(Message.seq.desc()).limit(LIVE_IN_VIEW).scalar_subquery()
+        newest_ids = select(Message.id).where(*in_conv).order_by(Message.seq.desc()).limit(LIVE_IN_VIEW).scalar_subquery()
         since = _parse_since(states_since)
-        current = and_(Message.id.in_(newest), Message.delivery_state.not_in(FINAL_STATES))
-        changed_cond = or_(current, Message.delivery_updated_at > since) if since is not None else current
-        # Recent messages are included too: the client already has them, and applies the state to the one it has.
+        changed_after = min(since, now) - LIVE_RECENT if since is not None else recent_window
         changed = list(db.scalars(
-            select(Message).where(*in_conv, mine, changed_cond).order_by(Message.seq).limit(LIVE_IN_VIEW)
-            .execution_options(populate_existing=True)))
+            select(Message).where(*in_conv, Message.id.in_(newest_ids), mine,
+                                  or_(Message.delivery_state.not_in(FINAL_STATES),
+                                      Message.delivery_updated_at > changed_after))
+            .order_by(Message.seq).limit(LIVE_IN_VIEW).execution_options(populate_existing=True)))
         names = thread.Names(db)
         lines, _ = queries.message_lines(db, viewer.user, owned, fresh + changed, names)
         atts = queries.attachment_meta(db, [m.id for m in fresh]) if fresh else {}
@@ -632,12 +649,13 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
                                       line.message.delivery_state,
                                       "html": fragment(request, "app_mode/_trail.html", viewer, line=line)})
         presence = thread.header_presence(db, peer.endpoint, now)
+        header_html = fragment(request, "app_mode/_head_status.html", viewer, presence=presence)
         out["header"] = {"word": presence.word if presence else None, "chip": presence.chip if presence else None,
-                         "html": fragment(request, "app_mode/_head_status.html", viewer, presence=presence)}
+                         "html": header_html, "sig": live_sig(header_html)}
         warning = thread.endpoint_warning(db, peer.endpoint)
-        if warning is not None:
-            out["warning"] = {"kind": warning.kind,
-                              "html": fragment(request, "_sender_warning.html", viewer, warning=warning)}
+        if warning is not None:  # null when there is none (§19.1); the client's empty slot is signed "none"
+            warning_html = fragment(request, "_sender_warning.html", viewer, warning=warning)
+            out["warning"] = {"kind": warning.kind, "html": warning_html, "sig": live_sig(warning_html)}
     html, rev = _live_list(request, db, viewer, current_id, list_rev)
     out["list_rev"] = rev
     if html is not None:
@@ -657,6 +675,8 @@ async def live_ack(request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"error": {"code": "invalid", "message": 'body must be {"csrf_token", "ids": [...]}'}},
                             status_code=400)
     viewer = app_viewer(request, db, str(data.get("csrf_token") or ""), app_mode_ok=True)
+    if not viewer.app_mode:
+        raise not_found()  # app mode only, like GET /app/live (§19.9); the website acks on view
     acked = []
     for raw in data["ids"]:
         mid = queries.parse_uuid(raw)
@@ -759,6 +779,11 @@ def _conversation_page(
         parent = next((m for m in view.messages if m.id == rid), None)
     to_label = _reply_target(db, viewer, view, parent)
     to_name = view.name if parent is None else _reply_name(db, viewer, parent)
+    if viewer.app_mode:  # the signatures of the parts live.js may replace (§19.9 F4)
+        ctx.setdefault("header_sig", live_sig(fragment(request, "app_mode/_head_status.html", viewer,
+                                                       presence=view.presence)))
+        ctx.setdefault("warning_sig", live_sig(fragment(request, "_sender_warning.html", viewer,
+                                                        warning=view.warning)) if view.warning else "none")
     common = dict(viewer=viewer, status=status, view=view, parent=parent, fixed_to=to_label, to_label=to_label,
                   to_name=to_name, conversation_id=view.conversation.id, message_id=str(uuid.uuid4()), form={},
                   live_now=identity.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"), **ctx)

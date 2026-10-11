@@ -1,8 +1,8 @@
 {# The "not connected" sender warning (§19.6), for a machine or agent recipient. Display only: delivery, holds
    and expiry are unchanged. Dates are <time> elements, shown in local time by localtime.js (§17.1). #}
-{% from "_state.html" import time %}
+{% from "_state.html" import date %}
 {% if warning %}<p class="sender-warning" role="status" data-sender-warning>
 {%- if warning.kind == 'never' %}<strong>{{ warning.handle }}</strong> has never connected.
-{%- elif warning.kind == 'not_connected' %}<strong>{{ warning.handle }}</strong> hasn't connected since {{ time(warning.since) }}. Messages will wait until it does.
-{%- else %}<strong>{{ warning.handle }}</strong> hasn't picked up messages since {{ time(warning.since) }}. Its owner may need to update RainCLI.
+{%- elif warning.kind == 'not_connected' %}<strong>{{ warning.handle }}</strong> hasn't connected since {{ date(warning.since) }}. Messages will wait until it does.
+{%- else %}<strong>{{ warning.handle }}</strong> hasn't picked up messages since {{ date(warning.since) }}. Its owner may need to update RainCLI.
 {%- endif %}</p>{% endif %}

@@ -9,6 +9,10 @@
 {% macro time(value) -%}
 {%- if value %}<time datetime="{{ value|iso }}">{{ value|ts }}</time>{% endif -%}
 {%- endmacro %}
+{% macro date(value) -%}
+{#- A date only ("Oct 3"), in local time once localtime.js runs (§19.9 F9); the UTC date without it. -#}
+{%- if value %}<time datetime="{{ value|iso }}" data-format="date">{{ (value|iso)[:10] }}</time>{% endif -%}
+{%- endmacro %}
 {% macro presence_badge(status) -%}
 {#- Advisory runtime availability; it says nothing about message delivery or receipt. -#}
 {%- set labels = {
