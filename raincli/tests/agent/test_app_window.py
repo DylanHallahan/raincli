@@ -938,12 +938,41 @@ def test_without_a_native_control_showing_still_works(tmp_path):
     assert win.shown == 1 and app.visible is True
 
 
-def test_the_controller_itself_is_set_when_it_exists(tmp_path, monkeypatch):
+@pytest.fixture
+def webview2_core(monkeypatch):
+    """A stand-in for Microsoft.Web.WebView2.Core (only CoreWebView2MoveFocusReason is used)."""
+    import sys
+    core = types.ModuleType("Microsoft.Web.WebView2.Core")
+    core.CoreWebView2MoveFocusReason = types.SimpleNamespace(Programmatic="programmatic")
+    for name in ("Microsoft", "Microsoft.Web", "Microsoft.Web.WebView2"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "Microsoft.Web.WebView2.Core", core)
+
+
+def test_showing_or_activating_moves_focus_into_the_page(tmp_path, monkeypatch, webview2_core):
+    """§20.7: the controller moves keyboard focus into the page on show and whenever the shown window is activated;
+    a hidden window's activation does nothing."""
+    moves = []
+    controller = types.SimpleNamespace(IsVisible=True, MoveFocus=lambda reason: moves.append(reason))
+    app, win, _ = make(tmp_path)
+    control = FakeControl()
+    win.native = types.SimpleNamespace(browser=types.SimpleNamespace(webview=control), Activated=Events())
+    monkeypatch.setattr(type(app), "_controller", staticmethod(lambda c: controller))
+    app.attach_native()
+    win.native.Activated.handlers[0](None, None)  # activated while hidden: nothing
+    assert moves == []
+    app.show()
+    assert moves == ["programmatic"] and controller.IsVisible is True
+    win.native.Activated.handlers[0](None, None)  # brought forward again
+    assert moves == ["programmatic", "programmatic"]
+
+
+def test_the_controller_itself_is_set_when_it_exists(tmp_path, monkeypatch, webview2_core):
     """§20.7: the hidden start happens before the controller exists, so the control's own Visible would not reach
     it; once WebView2 is up the controller's IsVisible is set directly."""
     app, win, _ = make(tmp_path)
     control = FakeControl()
-    controller = types.SimpleNamespace(IsVisible=True)
+    controller = types.SimpleNamespace(IsVisible=True, MoveFocus=lambda reason: None)
     win.native = types.SimpleNamespace(browser=types.SimpleNamespace(webview=control))
     monkeypatch.setattr(type(app), "_controller", staticmethod(lambda c: controller))
     app._core_ready(types.SimpleNamespace(Settings=types.SimpleNamespace(UserAgent="UA"),
@@ -951,7 +980,7 @@ def test_the_controller_itself_is_set_when_it_exists(tmp_path, monkeypatch):
                                           RemoveWebResourceRequestedFilter=lambda *a: None), context_all="all")
     assert controller.IsVisible is False  # hidden start: the page is hidden
     app.show()
-    assert controller.IsVisible is True and control.focused == 1
+    assert controller.IsVisible is True  # focus goes through the controller (MoveFocus), not control.Focus()
     app.on_closing()
     assert controller.IsVisible is False
 

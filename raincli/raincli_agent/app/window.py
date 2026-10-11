@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import json
 import logging
 import os
@@ -314,6 +315,8 @@ class AppWindow:
         except AttributeError:
             return False
         self._page_visible(self.visible)  # §20.7: a hidden start keeps the page hidden
+        with contextlib.suppress(AttributeError):  # §20.7: the window brought forward gives the page focus
+            self.window.native.Activated += lambda sender, args: self._focus_page() if self.visible else None
         control.NavigationStarting += lambda sender, args: self._native_starting(args)
         control.CoreWebView2InitializationCompleted += lambda sender, args: self._new_windows(sender.CoreWebView2)
         control.NavigationCompleted += lambda sender, args: self._native_completed(args, sender)
@@ -623,12 +626,29 @@ class AppWindow:
             self._log(f"page visibility: {'visible' if visible else 'hidden'} "
                       f"({'controller' if controller is not None else 'control only'})")
             if visible and focus:
-                control.Focus()
+                self._focus_page(control, controller)
         if getattr(control, "InvokeRequired", False):
             from System import Action
             control.Invoke(Action(apply))
         else:
             apply()
+        return True
+
+    def _focus_page(self, control=None, controller=None):
+        """§20.7: keyboard focus into the page itself (UI thread). pywebview focuses WebView2 only on the window's
+        first Shown, which a hidden start spends at opacity 0, and the WinForms control's own Focus() doesn't reach
+        the page (e2e D5h: shown, visible, hasFocus false), so the controller moves focus in."""
+        if control is None:
+            try:
+                control = self.window.native.browser.webview
+            except AttributeError:
+                return False
+        controller = controller if controller is not None else self._controller(control)
+        if controller is not None:
+            from Microsoft.Web.WebView2.Core import CoreWebView2MoveFocusReason
+            controller.MoveFocus(CoreWebView2MoveFocusReason.Programmatic)
+        else:
+            control.Focus()
         return True
 
     @staticmethod
