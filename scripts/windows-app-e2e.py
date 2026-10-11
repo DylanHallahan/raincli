@@ -1107,7 +1107,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         say("PASS: D5e. a message from the observer machine appeared in the open window without a reload, and the "
             "window's own message moved to replied")
 
-        # D5h. v0.5.5 (§20.3, §20.6 L6): a hidden start reads nothing, and launch opens the latest conversation. The
+        # D5h. v0.5.5 (§20.3, §20.6 L6, §20.7): a hidden start reads nothing, and launch opens the latest conversation. The
         # observer writes; the app restarts hidden (--background, as at logon), so the hosted page loads unseen: no
         # focus, nothing acknowledged after 10 s (and, while hidden, no polling). Shown and focused, the window is on
         # that conversation, selected in the list, and only then reads the message.
@@ -1132,9 +1132,9 @@ def part_d(app, server, installers, password, observer, menu, work):
             f"after 10 s the message is {state}; /app/live polls while hidden: {len(polls)}")
         check(not shown, "--background showed the window")
         check(state == "stored", f"the hidden window acknowledged a message: {state}")
-        check(focus is False, f"the hidden window's page has focus ({visibility})")
-        if visibility == "hidden":
-            check(not polls, f"the hidden window polled: {len(polls)} requests")
+        # §20.7: the hidden window's WebView2 is invisible, so its page is hidden and unfocused, and doesn't poll.
+        check(focus is False and visibility == "hidden", f"the hidden window's page: hasFocus={focus}, {visibility}")
+        check(not polls, f"the hidden window polled: {len(polls)} requests")
         hidden_polls = len(polls)
         app.stub("--open")  # the running app's show request
         hwnd = wait_for("the shown app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)

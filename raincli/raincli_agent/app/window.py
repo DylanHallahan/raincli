@@ -248,6 +248,7 @@ class AppWindow:
         self.handed_off = False  # an app-mode session exists in the profile (this run)
         self.load_timer = None
         self.quitting = False
+        self.visible = False  # §20.7: the window starts hidden; the page is told it is visible only once shown
         self.install_token = None  # §16.14 S3: sent as "RainCLIApp/<token>" to the service origin only
         self._ua_base = None
         self._core = None
@@ -312,6 +313,7 @@ class AppWindow:
             control = self.window.native.browser.webview
         except AttributeError:
             return False
+        self._page_visible(self.visible)  # §20.7: a hidden start keeps the page hidden
         control.NavigationStarting += lambda sender, args: self._native_starting(args)
         control.CoreWebView2InitializationCompleted += lambda sender, args: self._new_windows(sender.CoreWebView2)
         control.NavigationCompleted += lambda sender, args: self._native_completed(args, sender)
@@ -326,6 +328,7 @@ class AppWindow:
             from Microsoft.Web.WebView2.Core import CoreWebView2WebResourceContext
             context_all = CoreWebView2WebResourceContext.All
         self._core, self._context_all, self._filtered = core, context_all, set()
+        self._page_visible(self.visible)  # §20.7: again once WebView2 is up, whatever it defaulted to
         self._ua_base = str(core.Settings.UserAgent)
         self._ensure_filter()
         core.WebResourceRequested += lambda sender, args: self._native_request(args.Request)
@@ -582,15 +585,41 @@ class AppWindow:
 
     def show(self):
         if self.window is not None:
+            self.visible = True
             self.window.show()
             self.window.restore()
+            self._page_visible(True, focus=True)
 
     def on_closing(self):
         """Closing the window hides it; Quit (the tray) exits."""
         if self.quitting:
             return True
+        self.visible = False
+        self._page_visible(False)
         self.window.hide()
         return False
+
+    def _page_visible(self, visible, focus=False):
+        """§20.7: the page sees what the user sees. A hidden WinForms window leaves its WebView2 telling the page it
+        is visible and focused, so a hidden start (at logon, to the tray) or a window closed to the tray would read
+        the messages on screen (§19.2). The WebView2 control follows the window instead: invisible while it is
+        hidden (CoreWebView2Controller.IsVisible false: the page is hidden and unfocused), visible, with focus, once
+        shown. Runs on the UI thread; a no-op without the native control (tests, other platforms)."""
+        try:
+            control = self.window.native.browser.webview
+        except AttributeError:
+            return False
+
+        def apply():
+            control.Visible = bool(visible)
+            if visible and focus:
+                control.Focus()
+        if getattr(control, "InvokeRequired", False):
+            from System import Action
+            control.Invoke(Action(apply))
+        else:
+            apply()
+        return True
 
     def destroy(self):
         self.quitting = True

@@ -10,7 +10,8 @@
   // excluded), when the list is visible: above the app-mode breakpoint. Below it, Inbox shows the list. A toast
   // opens its own thread directly (the handoff's ``next``), so it never passes through here.
   function openLatest() {
-    if (!body.classList.contains("rc-inbox")) return false;
+    // §20.7: only where the server marks it (an app whose hidden window keeps its page hidden, 0.5.5 or later).
+    if (!body.classList.contains("rc-inbox") || !document.querySelector("[data-open-latest]")) return false;
     var list = document.querySelector("section.rc-list"), main = document.querySelector(".rc-main");
     var first = list && list.querySelector(".rc-convs .rc-conv");
     // Above the breakpoint both show; below it Inbox shows only the list (its main pane is hidden), and stays.

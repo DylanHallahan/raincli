@@ -1750,3 +1750,16 @@ This section covers app mode only. The website's pages are unchanged until D4. D
 - **Shared partials** (`_state.html`, `_archive_controls.html`, `_sender_warning.html`, `_owner_warnings.html`) may be changed by v0.5.5 only if the website's output stays byte-identical. Otherwise they are copied into `app_mode/`.
 - **`base_app.html`** belongs to v0.5.5.
 - **`routes.py`** is edited by both v0.5.5 and Phase B, and is merged deliberately.
+
+### 20.7 Amendment: P2's gate and the hidden window (binding; it overrides §20.3 and §20.6 M1 where they conflict)
+- **Why:** the Windows e2e (D5h) showed that a WinForms window started hidden (at logon, `--background`) or closed to the tray leaves its WebView2 telling the page it is visible and focused (`visibilityState` `visible`, `document.hasFocus()` true). With P2 the hidden window opened the latest conversation, and §19.2's read rule acknowledged its messages with nobody looking.
+- **The hidden-window rule (client, 0.5.5 and later):**
+  - while the app window is hidden, its WebView2 control is invisible (`CoreWebView2Controller.IsVisible` false), so the page is hidden and unfocused: it polls nothing and acknowledges nothing;
+  - showing the window makes the control visible and gives it focus;
+  - this covers the hidden start and closing to the tray.
+- **P2's gate (server):**
+  - Inbox marks the page for P2 only when the person session's app machine reports client **0.5.5 or later** (`AgentPresence.client_version`). A missing or unparsable report means no P2;
+  - without the mark, Inbox behaves as in v0.5.4: nothing is opened, so a hidden older window reads nothing;
+  - the rest of §20.6 M1 (the breakpoint, "latest", the toast) is unchanged.
+- **Tests:** a server test for 0.5.3, 0.5.4, 0.5.5, missing and unparsable; the window unit tests; and the e2e D5h (a hidden start: `hasFocus` false, `visibilityState` `hidden`, nothing acknowledged after 10 s; shown and focused: the latest conversation opens and is read).
+

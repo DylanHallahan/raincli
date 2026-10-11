@@ -4,6 +4,8 @@
 {% block body_class %} rc-inbox{% if not conversations %} rc-first-run{% endif %}{% endblock %}
 {% block list %}{% with current_id=None %}{% include "app_mode/_conv_list.html" %}{% endwith %}{% endblock %}
 {% block main %}
+{# §20.6 M1, §20.7: app-mode.js opens the latest conversation only with this marker (a 0.5.5+ app window). #}
+{% if open_latest and conversations %}<div data-open-latest hidden></div>{% endif %}
 {% include "app_mode/_owner_warnings.html" %}
 <div class="rc-scroll">
   {% if conversations %}

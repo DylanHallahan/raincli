@@ -11,7 +11,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from raincli_server import identity
-from raincli_server.models import Agent, AgentCredential, Conversation, Message, User
+from raincli_server.models import Agent, AgentCredential, AgentPresence, Conversation, Message, PersonSession, User
 
 CONNECTED_WITHIN = timedelta(hours=24)  # §20.4: step 1 shows done after a connection in the last 24 h
 _SUFFIX = re.compile(r"\s*\([^()]*\)\s*$")  # owners.displays' disambiguator, "Bob (bob)"
@@ -83,3 +83,24 @@ def handoff_next(value: str) -> str | None:
     the fixed pages the window opens directly (Agents, Archived, New message), so Inbox's latest-conversation step
     (§20.6 M1) never runs first. Anything else is Inbox; the handoff never redirects off the app's own pages."""
     return value if _NEXT.fullmatch(value or "") else None
+
+
+P2_SINCE = (0, 5, 5)  # §20.7: the first client whose hidden window tells its page it is hidden
+
+
+def opens_latest(db, viewer) -> bool:
+    """§20.7: Inbox opens the latest conversation (P2) only in an app whose window keeps its page hidden while the
+    window is hidden: the person session's machine reports client 0.5.5 or later. Older clients (a hidden start
+    would read the latest conversation), a missing or unparsable report, or the website: no P2."""
+    from raincli_server.presence import version_tuple
+
+    session = getattr(viewer, "web_session", None)
+    if session is None or not session.person_session_id:
+        return False
+    person = db.get(PersonSession, session.person_session_id)
+    row = db.get(AgentPresence, person.machine_agent_id) if person is not None else None
+    try:
+        return row is not None and version_tuple(row.client_version or "") >= P2_SINCE
+    except ValueError:
+        return False
+

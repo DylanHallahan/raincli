@@ -54,8 +54,11 @@ def seed(live, session):
 
     for handle in ("maya-laptop", "priya-app"):
         machines[handle] = (session.scalar(select(Agent).where(Agent.handle == handle)), tokens[handle])
-    presence(live, tokens["maya-laptop"], [entry("laptop-agent", "a" * 32)])
-    presence(live, tokens["priya-app"], [])
+    for handle, agents in (("maya-laptop", [entry("laptop-agent", "a" * 32)]), ("priya-app", [])):
+        # The apps run 0.5.5 (§20.7: Inbox opens the latest conversation only for 0.5.5 or later).
+        api(live, "/api/v1/presence", {"status": "ready", "agents": agents,
+                                       "client": {"version": "0.5.5", "update_mode": "automatic",
+                                                  "update_state": "current"}}, tokens[handle], method="PUT")
     presence(live, tokens["jon-laptop"], [entry("api-agent", "b" * 32)])
     presence(live, tokens["priya-desktop"], [entry("web-agent", "c" * 32, status="working")], status="busy")
     presence(live, tokens["sam-server"], [entry("ops-agent", "d" * 32)])
