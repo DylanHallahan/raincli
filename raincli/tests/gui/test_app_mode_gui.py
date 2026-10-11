@@ -128,10 +128,21 @@ def person_send(base, person, to, body):
     return api(base, "/api/v1/person/send", {"id": str(uuid.uuid4()), "to": to, "body": body}, person)["message"]
 
 
+def app_reports(base, token, version="0.5.5"):
+    """The app's own machine reports its client, as the running app does (§20.7: P2 needs 0.5.5 or later)."""
+    body = {"status": "ready", "client": {"version": version, "update_mode": "automatic", "update_state": "current"}}
+    request = urllib.request.Request(base + "/api/v1/presence", data=json.dumps(body).encode(), method="PUT",
+                                     headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        response.read()
+
+
 @pytest.fixture
 def people(live, world):
     alice = sign_in(live, "alice@example.test", "alice-laptop")
     bob = sign_in(live, "bob@example.test", "bob-laptop")
+    app_reports(live, alice["token"])
+    app_reports(live, bob["token"])
     return {"base": live, "alice": alice, "bob": bob, "world": world}
 
 

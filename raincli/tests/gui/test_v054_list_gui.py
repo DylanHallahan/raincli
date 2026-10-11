@@ -106,10 +106,15 @@ def team(live, session):
     session.execute(update(AgentPresence).where(AgentPresence.agent_id == machines["sam-server"][0].id)
                     .values(seen_at=AgentPresence.seen_at - timedelta(minutes=30)))
     session.commit()
-    maya = api(live, "/api/v1/app/login", {"email": "maya@example.test", "password": PASSWORD,
-                                           "machine_name": "maya-app", "person_session": True})["person_session"]
-    jon = api(live, "/api/v1/app/login", {"email": "jon@example.test", "password": PASSWORD,
-                                          "machine_name": "jon-app", "person_session": True})["person_session"]
+    apps = {}
+    for name, machine in (("maya", "maya-app"), ("jon", "jon-app")):
+        login = api(live, "/api/v1/app/login", {"email": f"{name}@example.test", "password": PASSWORD,
+                                                "machine_name": machine, "person_session": True})
+        # The app's own machine reports its client, as the running app does (§20.7: P2 needs 0.5.5 or later).
+        api(live, "/api/v1/presence", {"status": "ready", "client": {**CLIENT, "version": "0.5.5"}}, login["token"],
+            method="PUT")
+        apps[name] = login["person_session"]
+    maya, jon = apps["maya"], apps["jon"]
     return {"base": live, "session": session, "maya": maya, "jon": jon, "users": users, "machines": machines}
 
 

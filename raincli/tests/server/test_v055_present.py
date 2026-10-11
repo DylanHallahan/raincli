@@ -139,3 +139,34 @@ def test_the_owner_notice_sits_at_the_top_of_the_list_on_every_page(client, worl
         listing = page[page.index('<section class="rc-list"'):page.index("</section>", page.index('<section class="rc-list"'))]
         assert "has never connected" in listing or "of your machines aren't connecting" in listing, path
         assert listing.index("owner-warnings") < listing.index("rc-convs"), path
+
+
+# §20.7: P2 only for an app whose hidden window keeps its page hidden (client 0.5.5 or later) -----------------
+
+def _report_client(client, token, version):
+    r = client.put("/api/v1/presence", headers=auth(token), json={
+        "status": "ready", "client": {"version": version, "update_mode": "automatic", "update_state": "current"}})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("version, opens", [("0.5.3", False), ("0.5.4", False), ("0.5.5", True), ("0.6.0", True),
+                                            ("1.0.0", True), (None, False), ("garbage", False)])
+def test_inbox_opens_the_latest_only_for_a_0_5_5_app(client, world, alice_app, session, version, opens):  # noqa: F811
+    from raincli_server.models import AgentPresence, PersonSession
+
+    bob_reports(client, world)
+    person_send(client, alice_app["person"], BOB_AGENT, "hello")
+    if version == "garbage":  # can't be reported through the API: as if stored by an older server
+        _report_client(client, alice_app["token"], "0.5.5")
+        machine = session.query(PersonSession).one().machine_agent_id
+        session.execute(update(AgentPresence).where(AgentPresence.agent_id == machine).values(client_version="x.y"))
+        session.commit()
+    elif version is not None:
+        _report_client(client, alice_app["token"], version)
+    page = alice_app["webview"].get("/app/inbox").text
+    assert ("data-open-latest" in page) is opens
+
+
+def test_no_marker_without_a_conversation(client, world, alice_app):  # noqa: F811
+    _report_client(client, alice_app["token"], "0.5.5")
+    assert "data-open-latest" not in alice_app["webview"].get("/app/inbox").text

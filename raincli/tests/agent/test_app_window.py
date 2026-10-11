@@ -884,3 +884,56 @@ def test_a_refused_handoff_shows_sign_in_not_offline(tmp_path):
     services.handoff = lambda: (_ for _ in ()).throw(OSError("unreachable"))
     app.home()
     assert win.loads[-1] == LOCAL + "offline.html"
+
+
+# §20.7: the page sees what the user sees -------------------------------------------------------------------------
+
+class FakeControl:
+    """The WinForms WebView2 control: Visible drives CoreWebView2Controller.IsVisible."""
+
+    def __init__(self, invoke_required=False):
+        self.Visible, self.focused, self.InvokeRequired, self.invoked = True, 0, invoke_required, 0
+        self.NavigationStarting, self.NavigationCompleted = Events(), Events()
+        self.CoreWebView2InitializationCompleted = Events()
+
+    def Focus(self):
+        self.focused += 1
+
+    def Invoke(self, action):
+        self.invoked += 1
+        action()
+
+
+def test_a_hidden_window_keeps_its_page_hidden_until_shown(tmp_path):
+    app, win, _ = make(tmp_path)
+    control = FakeControl()
+    win.native = types.SimpleNamespace(browser=types.SimpleNamespace(webview=control))
+    assert app.attach_native() is True
+    assert control.Visible is False and app.visible is False  # a hidden start: the page is told it is hidden
+    app.show()
+    assert control.Visible is True and control.focused == 1 and win.shown == 1
+    assert app.on_closing() is False  # closed to the tray
+    assert control.Visible is False and win.hidden == 1
+    app.show()
+    assert control.Visible is True and control.focused == 2
+
+
+def test_the_control_is_changed_on_the_ui_thread(tmp_path):
+    app, win, _ = make(tmp_path)
+    control = FakeControl(invoke_required=True)
+    win.native = types.SimpleNamespace(browser=types.SimpleNamespace(webview=control))
+    import sys
+    sys.modules.setdefault("System", types.SimpleNamespace(Action=lambda fn: fn))
+    try:
+        app.show()
+    finally:
+        if isinstance(sys.modules.get("System"), types.SimpleNamespace):
+            del sys.modules["System"]
+    assert control.invoked == 1 and control.Visible is True
+
+
+def test_without_a_native_control_showing_still_works(tmp_path):
+    app, win, _ = make(tmp_path)
+    app.show()
+    assert win.shown == 1 and app.visible is True
+
