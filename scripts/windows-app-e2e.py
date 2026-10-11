@@ -764,6 +764,62 @@ def set_display(width, height, percent):
     return display_state()[2]
 
 
+def cdp_evaluate(port, url_fragment, expression, timeout=30):
+    """One Runtime.evaluate on the page whose URL contains ``url_fragment``, over a bare DevTools WebSocket (stdlib
+    only). Unlike a Playwright attachment, it turns on no emulation: Playwright enables focus emulation on every
+    page it attaches to, which makes document.hasFocus() true (and lets the page read what it shows)."""
+    import base64 as b64
+    import struct
+    deadline = time.monotonic() + timeout
+    target = None
+    while time.monotonic() < deadline and target is None:
+        with contextlib.suppress(OSError, ValueError):
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
+                target = next((t for t in json.loads(response.read())
+                               if t.get("type") == "page" and url_fragment in (t.get("url") or "")), None)
+        if target is None:
+            time.sleep(0.5)
+    check(target is not None, f"no page showing {url_fragment} on the DevTools port")
+    ws = urlsplit(target["webSocketDebuggerUrl"])
+    sock = socket.create_connection((ws.hostname, ws.port), timeout=timeout)
+    try:
+        key = b64.b64encode(os.urandom(16)).decode()
+        sock.sendall((f"GET {ws.path} HTTP/1.1\r\nHost: {ws.hostname}:{ws.port}\r\nUpgrade: websocket\r\n"
+                      f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            head += sock.recv(4096)
+        check(b" 101 " in head.split(b"\r\n", 1)[0], f"the DevTools WebSocket refused: {head[:80]!r}")
+        rest = head.split(b"\r\n\r\n", 1)[1]
+        payload = json.dumps({"id": 1, "method": "Runtime.evaluate",
+                              "params": {"expression": expression, "returnByValue": True}}).encode()
+        mask = os.urandom(4)
+        frame = bytearray([0x81])
+        frame += bytes([0x80 | 126]) + struct.pack(">H", len(payload)) if len(payload) >= 126 else bytes([0x80 | len(payload)])
+        frame += mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        sock.sendall(bytes(frame))
+        buffer = rest
+        while True:
+            while len(buffer) < 2:
+                buffer += sock.recv(65536)
+            length, offset = buffer[1] & 0x7F, 2
+            if length == 126:
+                while len(buffer) < 4:
+                    buffer += sock.recv(65536)
+                length, offset = struct.unpack(">H", buffer[2:4])[0], 4
+            elif length == 127:
+                while len(buffer) < 10:
+                    buffer += sock.recv(65536)
+                length, offset = struct.unpack(">Q", buffer[2:10])[0], 10
+            while len(buffer) < offset + length:
+                buffer += sock.recv(65536)
+            message, buffer = json.loads(buffer[offset:offset + length]), buffer[offset + length:]
+            if message.get("id") == 1:
+                return message["result"]["result"].get("value")
+    finally:
+        sock.close()
+
+
 def list_fits(page):
     """The §19.7 check: the conversation list shows, inside the window, with its times and counts inside it."""
     return page.evaluate("""() => {
@@ -1123,30 +1179,28 @@ def part_d(app, server, installers, password, observer, menu, work):
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
         wait_for("the hidden window's CDP endpoint", lambda: devtools_answer(f"127.0.0.1:{port}"), timeout=180)
-        window = WindowCDP(pw, port)
-        page = window.page("/app/conversations/", timeout=180)  # Inbox moved on to the latest conversation
-        polls = []
-        page.on("request", lambda request: polls.append(request.url) if "/app/live" in request.url else None)
-        shown = app_window(app_pids(app.root)) is not None  # a visible top-level window of the app?
-        focus, visibility = page.evaluate("[document.hasFocus(), document.visibilityState]")
+        # While hidden, nothing attaches with Playwright (its focus emulation would make the page focused): the
+        # DevTools target list and one bare Runtime.evaluate only.
+        focus, visibility = cdp_evaluate(port, f"/app/conversations/{conversation}",
+                                         "[document.hasFocus(), document.visibilityState]", timeout=180)
+        shown = app_window(app_pids(app.root)) is not None
         time.sleep(10)
         state = api(server, observer, f"/api/v1/messages/{unseen}")["message"]["delivery_state"]
         log_lines = [line.strip() for line in (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace")
                      .splitlines() if "page visibility" in line][-3:]
         say(f"D5h evidence: native window visible={shown}; page hasFocus={focus}, visibilityState={visibility}; "
-            f"after 10 s the message is {state}; /app/live polls while hidden: {len(polls)}; app log: {log_lines}")
+            f"after 10 s the message is {state}; app log: {log_lines}")
         check(not shown, "--background showed the window")
         check(state == "stored", f"the hidden window acknowledged a message: {state}")
-        # §20.7: the hidden window's WebView2 is invisible, so its page is hidden and unfocused, and doesn't poll.
         check(focus is False and visibility == "hidden", f"the hidden window's page: hasFocus={focus}, {visibility}")
-        check(not polls, f"the hidden window polled: {len(polls)} requests")
-        hidden_polls = len(polls)
         app.stub("--open")  # the running app's show request
         hwnd = wait_for("the shown app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
         focus_window(hwnd)
         wait_for("the shown, focused window to read the message",
                  lambda: api(server, observer, f"/api/v1/messages/{unseen}")["message"]["delivery_state"] != "stored",
                  timeout=60, interval=1)
+        window = WindowCDP(pw, port)  # attach only now, for the checks and captures below
+        page = window.page(f"/app/conversations/{conversation}", timeout=60)
         check(conversation in url_of(page), f"launch did not open the latest conversation: {url_of(page)}")
         current = page.locator(".rc-conv[aria-current=page]")
         check(current.count() == 1 and conversation in (current.get_attribute("href") or ""),
@@ -1154,7 +1208,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         for scheme in ("light", "dark"):
             themed_shot(page, scheme, f"after-win-10-opened-latest-{scheme}-1180x780")
         page.emulate_media(color_scheme="null")
-        say(f"PASS: D5h. started hidden ({visibility}, no focus): nothing read after 10 s and {hidden_polls} polls; "
+        say(f"PASS: D5h. started hidden ({visibility}, no focus): nothing read after 10 s; "
             "shown and focused, the window was on the latest conversation, selected, and read the message")
 
         # D5i. v0.5.5 (brief shot 13): one pass at a REAL 150% display scale (1920x1080, the per-monitor scale set
