@@ -4,12 +4,12 @@
 {% from "_state.html" import time %}
 {% set t = line.trail %}
 <div class="rc-trail{{ ' rc-trail-' ~ t.tone if t.tone else '' }}" data-trail="{{ line.message.id }}" data-state="{{ t.outcome or line.message.delivery_state }}">
-  <p class="rc-steps"><span class="sr-only">{{ t.phrase }}</span><span aria-hidden="true">
+  <p class="rc-trail-steps"><span class="sr-only">{{ t.phrase }}</span><span aria-hidden="true">
     {%- for s in t.steps -%}
     {%- if not loop.first %}<i>→</i>{% endif -%}
-    <span class="rc-step{{ ' rc-reached' if s.reached else '' }}"{% if s.at %} data-step-time="{{ s.at|iso }}" title="{{ s.name|capitalize }} {{ s.at|ts }}"{% else %} title="Not yet {{ s.name }}"{% endif %}>{{ s.name }}</span>
+    <span class="rc-tstep{{ ' rc-treached' if s.reached else '' }}"{% if s.at %} data-step-time="{{ s.at|iso }}" title="{{ s.name|capitalize }} {{ s.at|ts }}"{% else %} title="Not yet {{ s.name }}"{% endif %}>{{ s.name }}</span>
     {%- endfor -%}
-    {%- if t.outcome %}{% if t.steps %}<i>→</i>{% endif %}<span class="rc-step rc-outcome">{{ t.outcome }}: {{ t.reason }}</span>{% endif -%}
+    {%- if t.outcome %}{% if t.steps %}<i>→</i>{% endif %}<span class="rc-tstep rc-outcome">{{ t.outcome }}: {{ t.reason }}</span>{% endif -%}
   </span></p>
   <details class="rc-details"><summary>Details</summary>
     <ol>

@@ -117,8 +117,8 @@ def test_meta_line_names_and_reply_on_hover_and_focus(agent_thread, browser):
 
 def steps(page, message_id):
     trail = page.locator(f'[data-trail="{message_id}"]')
-    return ([s.inner_text() for s in trail.locator(".rc-step").all()],
-            [s.inner_text() for s in trail.locator(".rc-step.rc-reached").all()],
+    return ([s.inner_text() for s in trail.locator(".rc-tstep").all()],
+            [s.inner_text() for s in trail.locator(".rc-tstep.rc-treached").all()],
             trail.locator(".sr-only").first.inner_text())
 
 
@@ -131,10 +131,10 @@ def test_the_trail_for_each_recipient_kind_and_none_on_incoming(agent_thread, br
     names, reached, phrase = steps(page, p["first"]["id"])
     assert names == ["stored", "received", "submitted", "replied"] and reached == ["stored", "received", "submitted"]
     assert phrase == "Delivery: submitted, not yet replied"
-    title = page.locator(f'[data-trail="{p["first"]["id"]}"] .rc-step.rc-reached').first.get_attribute("title")
+    title = page.locator(f'[data-trail="{p["first"]["id"]}"] .rc-tstep.rc-treached').first.get_attribute("title")
     assert title.startswith("Stored ")
     assert page.locator(f"#m-{reply['id']} [data-trail]").count() == 0  # incoming: no state
-    reached_colour = page.evaluate("""() => [getComputedStyle(document.querySelector('.rc-step.rc-reached')).color,
+    reached_colour = page.evaluate("""() => [getComputedStyle(document.querySelector('.rc-tstep.rc-treached')).color,
         (() => { const el = document.createElement('span'); el.style.color = getComputedStyle(document.documentElement)
           .getPropertyValue('--rc-ok'); document.body.appendChild(el); const c = getComputedStyle(el).color; el.remove();
           return c; })()]""")
@@ -162,7 +162,7 @@ def test_held_uncertain_and_rejected_show_their_reason(agent_thread, browser, ar
     assert "held: waiting for approval" in held.inner_text() and "rc-trail-warn" in held.get_attribute("class")
     assert "uncertain:" in uncertain.inner_text() and "rc-trail-warn" in uncertain.get_attribute("class")
     assert "rejected:" in rejected.inner_text() and "rc-trail-danger" in rejected.get_attribute("class")
-    assert held.locator(".rc-step", has_text="submitted").count() == 0  # the outcome replaces the rest
+    assert held.locator(".rc-tstep", has_text="submitted").count() == 0  # the outcome replaces the rest
     page.screenshot(path=str(artifacts / "live-held-rejected.png"))
     context.close()
 
@@ -357,4 +357,21 @@ def test_new_colour_pairs_pass_aa_in_light_and_dark(agent_thread, browser):
                        ("--rc-ok", "--rc-out-bg")):
             assert _contrast(rgb[fg], rgb[bg]) >= 4.5, (scheme, fg, bg, _contrast(rgb[fg], rgb[bg]))
         assert page.locator("[style]:not(textarea)").count() == 0  # no inline styles in what the server sent
+        context.close()
+
+
+def test_the_thread_fits_the_minimum_window(agent_thread, browser, artifacts):
+    """At 760x520 the main pane is narrow: nothing in the thread or composer overflows it, and Send stays in view."""
+    p = agent_thread
+    machine_send(p["base"], p["bob"]["token"], {"person": "alice@example.test"}, "A reply with `code` " * 6, p["cid"])
+    for scheme in ("light", "dark"):
+        context, page = open_thread(browser, p, p["cid"], scheme, viewport={"width": 760, "height": 520})
+        fits = page.evaluate("""() => { const main = document.querySelector('.rc-main').getBoundingClientRect();
+            const out = [...document.querySelectorAll('.rc-main *')].filter(el => {
+              const r = el.getBoundingClientRect();
+              return r.width && (r.right > main.right + 1 || r.left < main.left - 1); }).map(el => el.className);
+            const send = document.querySelector('.rc-send').getBoundingClientRect();
+            return {out: out.slice(0, 5), send: send.right <= main.right && send.bottom <= window.innerHeight}; }""")
+        assert fits["out"] == [] and fits["send"], (scheme, fits)
+        page.screenshot(path=str(artifacts / f"live-thread-760x520-{scheme}.png"))
         context.close()

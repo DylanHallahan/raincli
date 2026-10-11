@@ -1,3 +1,3 @@
 {# The header's live part (§19.3): for an agent conversation only, its reachability chip and presence word.
    Rendered by the page and by GET /app/live. Never says what the agent is doing with any message. #}
-{% if presence %}<span class="rc-presence rc-presence-{{ presence.word|lower }}" title="{{ presence.tooltip }}">{% if presence.chip %}<span class="rc-chip">{{ presence.chip }}</span>{% endif %}<span class="rc-pdot" aria-hidden="true"></span><span>{{ presence.word }}</span></span>{% endif %}
+{% if presence %}{% if presence.chip %}<span class="rc-chip">{{ presence.chip }}</span>{% endif %}<span class="rc-presence rc-presence-{{ presence.word|lower }}" title="{{ presence.tooltip }}"><span class="rc-pdot" aria-hidden="true"></span><span>{{ presence.word }}</span></span>{% endif %}

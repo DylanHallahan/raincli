@@ -115,11 +115,11 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 
 /* The delivery trail under the viewer's own messages (§19.7). */
 .rc-trail { margin-top: 6px; font-size: var(--rc-fs-xs); color: var(--rc-muted); }
-.rc-steps { margin: 0; display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; }
-.rc-steps > span[aria-hidden] { display: contents; }
-.rc-steps i { font-style: normal; }
-.rc-step { color: var(--rc-muted); }
-.rc-step.rc-reached { color: var(--rc-ok); font-weight: 600; }
+.rc-trail-steps { margin: 0; display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; }
+.rc-trail-steps > span[aria-hidden] { display: contents; }
+.rc-trail-steps i { font-style: normal; }
+.rc-tstep { color: var(--rc-muted); }
+.rc-tstep.rc-treached { color: var(--rc-ok); font-weight: 600; }
 .rc-trail-warn .rc-outcome { color: var(--rc-warn); font-weight: 600; }
 .rc-trail-danger .rc-outcome { color: var(--rc-danger); font-weight: 600; }
 .rc-details { margin-top: 2px; }
@@ -127,8 +127,11 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-details ol { margin: var(--rc-s-1) 0 0; padding-left: var(--rc-s-5); }
 
 /* Header: reachability chip and presence word, for agent conversations only (§19.3). */
-.rc-head-status { display: flex; align-items: center; }
-.rc-presence { display: inline-flex; align-items: center; gap: 6px; font-size: var(--rc-fs-xs); color: var(--rc-muted); }
+.rc-head-title { display: flex; align-items: center; gap: var(--rc-s-2); min-width: 0; }
+.rc-head-title h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-head-status { display: contents; }
+.rc-presence { display: inline-flex; align-items: center; gap: 6px; font-size: var(--rc-fs-xs); color: var(--rc-muted);
+  margin-left: auto; white-space: nowrap; }
 .rc-chip { font-size: var(--rc-fs-xs); font-weight: 600; padding: 2px var(--rc-s-2); border-radius: var(--rc-radius-pill);
   background: var(--rc-accent-soft); color: var(--rc-accent); }
 .rc-pdot { width: 8px; height: 8px; border-radius: var(--rc-radius-pill); background: var(--rc-muted); }
@@ -259,3 +262,19 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-agents .reach-instant { background: var(--rc-info-bg); color: var(--rc-info); }
 .rc-agents .reach-next-turn { background: var(--rc-warn-bg); color: var(--rc-warn); }
 .rc-agents .reach-listed { background: var(--rc-surface-2); color: var(--rc-muted); }
+
+/* The thread at narrow window widths (the 760 px minimum leaves the main pane about 450 px): tighter padding, a
+   header that wraps, and "To: name" on its own line above the textarea, clip and Send. */
+@media (max-width: 1000px) {
+  .rc-main-head { flex-wrap: wrap; padding: var(--rc-s-2) var(--rc-s-3); gap: var(--rc-s-2); }
+  .rc-scroll { padding: var(--rc-s-3); }
+  .rc-thread { gap: var(--rc-s-4); }
+  .rc-compose { padding: 0 var(--rc-s-3) var(--rc-s-3); }
+  .rc-box.rc-box-row1 { flex-wrap: wrap; padding-left: var(--rc-s-3); }
+  .rc-box-row1 .rc-to { flex-basis: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app-mode .sender-warning { margin: var(--rc-s-2) var(--rc-s-3) 0; }
+}
+
+/* The header's Archive control sits at the end of the row, at its own size. */
+.rc-main-head > .rc-archive { flex: none; }
+.rc-archive .rc-btn { padding: var(--rc-s-1) var(--rc-s-3); font-size: var(--rc-fs-sm); }
