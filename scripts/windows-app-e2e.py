@@ -1201,9 +1201,17 @@ def part_d(app, server, installers, password, observer, menu, work):
         app.stub("--open")  # the running app's show request
         hwnd = wait_for("the shown app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
         focus_window(hwnd)
-        wait_for("the shown, focused window to read the message",
-                 lambda: api(server, observer, f"/api/v1/messages/{unseen}")["message"]["delivery_state"] != "stored",
-                 timeout=60, interval=1)
+        try:
+            wait_for("the shown, focused window to read the message",
+                     lambda: api(server, observer, f"/api/v1/messages/{unseen}")["message"]["delivery_state"] != "stored",
+                     timeout=60, interval=1)
+        except Failure as exc:
+            after = cdp_evaluate(port, f"/app/conversations/{conversation}",
+                                 "[document.hasFocus(), document.visibilityState]", timeout=30)
+            lines = [line.strip() for line in (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace")
+                     .splitlines() if "page visibility" in line][-3:]
+            raise Failure(f"{exc}; after show: page hasFocus={after[0]}, visibilityState={after[1]}; "
+                          f"window visible={app_window(app_pids(app.root)) is not None}; app log: {lines}") from None
         window = WindowCDP(pw, port)  # attach only now, for the checks and captures below
         page = window.page(f"/app/conversations/{conversation}", timeout=60)
         check(conversation in url_of(page), f"launch did not open the latest conversation: {url_of(page)}")
