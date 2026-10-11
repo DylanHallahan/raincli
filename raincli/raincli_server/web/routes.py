@@ -26,6 +26,7 @@ from raincli_server import identity, messaging, quotas, security
 from raincli_server.config import Settings
 from raincli_server.models import Agent, HandoffCode, Message, PersonSession, Team, User
 from raincli_server.web import auth, queries
+from raincli_server.web import team as team_section
 from raincli_server.web.middleware import WebSecurityMiddleware
 
 HERE = Path(__file__).parent
@@ -553,8 +554,8 @@ def _live_list(request: Request, db: Session, viewer: auth.Viewer, current_id) -
 
 def _list_extras(db: Session, viewer: auth.Viewer) -> dict:
     """Extra context for the conversation list (the sidebar's Team section, §19.5), shared by the pages and
-    GET /app/live. Empty until the sidebar uses it."""
-    return {}
+    GET /app/live."""
+    return {"team_agents": team_section.team_agents(db, viewer)}
 
 
 @router.get("/app/live")

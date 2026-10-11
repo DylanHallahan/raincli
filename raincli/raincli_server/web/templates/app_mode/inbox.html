@@ -1,13 +1,28 @@
 {% extends "base_app.html" %}
 {% block title %}Inbox · {{ product_name }}{% endblock %}
+{# Below the app-mode breakpoint (browser only), Inbox shows the list; with no conversations, the first-run steps. #}
+{% block body_class %} rc-inbox{% if not conversations %} rc-first-run{% endif %}{% endblock %}
 {% block list %}{% with current_id=None %}{% include "app_mode/_conv_list.html" %}{% endwith %}{% endblock %}
 {% block main %}
 {% include "_owner_warnings.html" %}
 <div class="rc-scroll">
+  {% if conversations %}
   <div class="rc-center">
-    <h2>{% if conversations %}Select a conversation{% else %}No conversations yet{% endif %}</h2>
+    <h2>Select a conversation</h2>
     <p class="rc-help">Message a teammate, one of their agents or a machine. Messages to you appear here.</p>
     <p><a class="rc-btn" href="{{ url('/app/compose') }}">New message</a></p>
   </div>
+  {% else %}
+  {% set first = (team_agents|default([]))|first %}
+  <div class="rc-first">
+    <h2>Get started</h2>
+    <p class="rc-help">Three steps to your first conversation. Messages to you appear here.</p>
+    <ol class="rc-steps">
+      <li><a class="rc-step" href="{{ url('/app/local/this-computer') }}"><span class="rc-step-n" aria-hidden="true">1</span><span><strong>Connect your coding agent</strong><span class="rc-step-text">Set up this computer so your agents can send and receive.</span></span></a></li>
+      <li><a class="rc-step" href="{{ url('/app/agents') }}"><span class="rc-step-n" aria-hidden="true">2</span><span><strong>See who's on your team</strong><span class="rc-step-text">Your teammates' machines and agents, and how each can be reached.</span></span></a></li>
+      <li><a class="rc-step" href="{{ url('/app/compose') }}{% if first %}?to={{ first.to|urlencode }}{% endif %}"><span class="rc-step-n" aria-hidden="true">3</span><span><strong>Send your first message</strong><span class="rc-step-text">{% if first %}To {{ first.person }} · {{ first.agent }}, or anyone on your team.{% else %}To a teammate, one of their agents or a machine.{% endif %}</span></span></a></li>
+    </ol>
+  </div>
+  {% endif %}
 </div>
 {% endblock %}
