@@ -34,6 +34,8 @@ from urllib.parse import quote
 from ..config import Secret
 from . import policy
 
+MIN_SIZE = (760, 520)  # logical px: the smallest window (the list always shows, §19.7)
+
 # §20.3: the pages a handoff may go straight to (the server checks the same list): a thread, Agents, Archived, New message.
 _HANDOFF_NEXT = re.compile(r"/app/(agents|archived|compose|conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 
@@ -292,7 +294,7 @@ class AppWindow:
         self.refresh_navigation()
         self.refresh_install_token()
         self.window = wv.create_window(TITLE, url=self.local_url("sign-in"), js_api=self.api,
-                                       width=1180, height=780, min_size=(760, 520), hidden=True,
+                                       width=1180, height=780, min_size=MIN_SIZE, hidden=True,
                                        text_select=True)
         self.window.events.loaded += self.on_loaded
         self.window.events.closing += self.on_closing
@@ -317,6 +319,10 @@ class AppWindow:
         self._page_visible(self.visible)  # §20.7: a hidden start keeps the page hidden
         with contextlib.suppress(AttributeError):  # §20.7: the window brought forward gives the page focus
             self.window.native.Activated += lambda sender, args: self._focus_page() if self.visible else None
+        with contextlib.suppress(AttributeError):  # the minimum size, in this monitor's physical px, after WinForms scales
+            self.window.native.Shown += lambda sender, args: self._apply_min_size()
+            self.window.native.DpiChanged += lambda sender, args: self._apply_min_size()
+        self._apply_min_size()
         control.NavigationStarting += lambda sender, args: self._native_starting(args)
         control.CoreWebView2InitializationCompleted += lambda sender, args: self._new_windows(sender.CoreWebView2)
         control.NavigationCompleted += lambda sender, args: self._native_completed(args, sender)
@@ -594,6 +600,7 @@ class AppWindow:
             self.visible = True
             self.window.show()
             self.window.restore()
+            self._apply_min_size()
             self._page_visible(True, focus=True)
 
     def on_closing(self):
@@ -633,6 +640,32 @@ class AppWindow:
         if getattr(control, "InvokeRequired", False):
             from System import Action
             control.Invoke(Action(apply))
+        else:
+            apply()
+        return True
+
+    def _apply_min_size(self):
+        """The window's minimum is MIN_SIZE logical px at its monitor's scale. pywebview sets it once, but the form's
+        own DPI scaling (AutoScaleMode.Dpi) leaves it at the unscaled 760x520 physical px, so at 150% the window could
+        shrink to 506x346 logical and squeeze the page (Windows e2e D5i; the inbox bug). Re-applied when the form is
+        shown and when its DPI changes (another monitor, a scale change). UI thread; a no-op off Windows."""
+        try:
+            form = self.window.native
+            import ctypes
+            user32 = ctypes.windll.user32
+            from System.Drawing import Size
+        except (AttributeError, ImportError):
+            return False
+
+        def apply():
+            dpi = user32.GetDpiForWindow(int(form.Handle.ToInt64())) or 96
+            width, height = (round(v * dpi / 96) for v in MIN_SIZE)
+            if (form.MinimumSize.Width, form.MinimumSize.Height) != (width, height):
+                form.MinimumSize = Size(width, height)
+                self._log(f"minimum size: {width}x{height} px at {dpi} dpi")
+        if getattr(form, "InvokeRequired", False):
+            from System import Action
+            form.Invoke(Action(apply))
         else:
             apply()
         return True
