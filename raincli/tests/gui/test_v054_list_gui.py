@@ -350,3 +350,26 @@ def test_the_list_names_agent_conversations_owner_and_agent(team, browser):
     assert previews[0].endswith("You: Retry cap?") and previews[1].endswith("Jon · api-agent: Two failures.")
     context.close()
 
+
+
+# §19.8 L3 (the Team dots) and L1 (no inline styles in the sidebar) ---------------------------------------------
+
+def test_team_blocked_is_busy_with_its_own_tooltip_and_unknown_has_no_word(team, browser):
+    agents = [entry("web-agent", "a" * 32, "working"), entry("qa-agent", "b" * 32, "blocked"),
+              entry("spare-agent", "c" * 32, "unknown")]
+    api(team["base"], "/api/v1/presence", {"status": "ready", "agents": agents, "client": CLIENT},
+        team["machines"]["priya-desktop"][1], method="PUT")
+    for scheme in ("light", "dark"):
+        context, page = open_app(browser, team, team["maya"], color_scheme=scheme, **size(1180, 780))
+        def item(name):
+            return page.locator(".rc-team-agent", has_text=name)
+        qa, web = item("Priya · qa-agent").locator(".rc-dot"), item("Priya · web-agent").locator(".rc-dot")
+        assert qa.get_attribute("aria-label") == web.get_attribute("aria-label") == "Busy"
+        assert qa.get_attribute("title") == "Busy: the session was waiting for its user at its last report."
+        assert web.get_attribute("title") == "Busy: the session was working at its last report."
+        spare = item("Priya · spare-agent")
+        assert spare.count() == 1 and spare.locator(".rc-dot").count() == 0
+        assert not any(w in spare.inner_text() for w in ("Ready", "Busy", "Offline"))
+        assert page.locator(".rc-list [style]").count() == 0  # no inline styles, also after app.js ran
+        assert not page.errors
+        context.close()

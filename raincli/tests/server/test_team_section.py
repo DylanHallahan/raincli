@@ -1,4 +1,4 @@
-"""The app-mode Team section's data (protocol §19.5, §19.3), real PostgreSQL."""
+"""The app-mode Team section's data (protocol §19.5, §19.8 L3, L6), real PostgreSQL."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def test_teammates_deliverable_agents_with_presence_words(client, world, session
     report(client, world["tokens"]["alice"], [entry("mine", "9" * 32)])  # the viewer's own: not listed
     rows = team_agents(session, viewer(world))
     assert [(r["agent"], r["status"]) for r in rows] == [
-        ("gone", "offline"), ("odd", "offline"), ("reviewer", "ready"), ("stuck", "busy"), ("writer", "busy")]
+        ("gone", "offline"), ("odd", "unknown"), ("reviewer", "ready"), ("stuck", "blocked"), ("writer", "busy")]
     assert rows[2] == {"person": "Bob", "agent": "reviewer", "handle": "bob-agent", "to": "bob-agent/reviewer",
                        "status": "ready", "team": "Acme"}
 
@@ -59,6 +59,14 @@ def test_every_agent_is_offline_once_its_machine_has_not_reported_for_two_minute
     assert {r["status"] for r in team_agents(session, viewer(world))} == {"ready", "busy"}
     age(session, world["agents"]["bob"], 2)
     assert {r["status"] for r in team_agents(session, viewer(world))} == {"offline"}
+
+
+def test_the_120_second_rule_on_an_injected_clock(client, world, session):
+    report(client, world["tokens"]["bob"], [entry("reviewer", "a" * 32), entry("stuck", "b" * 32, status="blocked")])
+    now = identity.now()
+    assert {r["status"] for r in team_agents(session, viewer(world), now=now + timedelta(seconds=119))} == {
+        "ready", "blocked"}
+    assert {r["status"] for r in team_agents(session, viewer(world), now=now + timedelta(seconds=121))} == {"offline"}
 
 
 def test_a_known_agent_that_left_the_snapshot_stays_listed_offline_within_the_window(client, world, session):
