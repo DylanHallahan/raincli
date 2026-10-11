@@ -1443,12 +1443,88 @@ def prepare_old_pip_client(work):
     return venv
 
 
+# -- the job token for this e2e's own GitHub API lookups -------------------------------------------
+# Unauthenticated REST calls are limited to 60 an hour per IP, and hosted runners share IPs, so the setup lookups
+# below failed with HTTP 403 on some first attempts. The workflow passes the job token as RAINCLI_E2E_GITHUB_TOKEN;
+# main() takes it out of the environment before anything starts, so nothing launched inherits it. It is sent only
+# on https requests to exactly api.github.com, never to codeload or any redirect target, and only inside
+# github_api_auth(). The shipped updater is unchanged: it sends no credentials.
+GITHUB_API_HOST = "api.github.com"
+_GITHUB_TOKEN = None
+
+
+def take_github_token(environ=None):
+    """Remove RAINCLI_E2E_GITHUB_TOKEN from the environment and keep it in this process only."""
+    global _GITHUB_TOKEN
+    _GITHUB_TOKEN = (os.environ if environ is None else environ).pop("RAINCLI_E2E_GITHUB_TOKEN", "") or None
+    return _GITHUB_TOKEN is not None
+
+
+class GitHubApiAuth(urllib.request.BaseHandler):
+    """At request time, for every request the opener sends (a redirect goes through the processors again): the
+    token on an https request to exactly api.github.com, and no Authorization at all on any other request."""
+    handler_order = 1000  # after the other processors, so nothing adds a header after this check
+
+    def __init__(self, token):
+        self._token = token
+
+    def _check(self, req):
+        parts = urlsplit(req.full_url)
+        for headers in (req.headers, req.unredirected_hdrs):
+            headers.pop("Authorization", None)
+        if parts.scheme == "https" and parts.hostname == GITHUB_API_HOST and parts.port in (None, 443):
+            req.add_unredirected_header("Authorization", "Bearer " + self._token)
+        return req
+
+    http_request = https_request = _check
+
+
+@contextlib.contextmanager
+def github_api_auth():
+    """The token on this e2e's own api.github.com lookups, through the updater's opener (its redirect allowlist
+    kept). The opener is swapped for one with GitHubApiAuth and restored, the same object, on exit."""
+    if _GITHUB_TOKEN is None:
+        yield False
+        return
+    saved = updates._OPENER
+    updates._OPENER = urllib.request.build_opener(updates._Redirects, GitHubApiAuth(_GITHUB_TOKEN))
+    try:
+        yield True
+    finally:
+        updates._OPENER = saved
+
+
+def report_rate_limit():
+    """One GET /rate_limit (it doesn't count against the limit): the core budget of whoever is asking."""
+    try:
+        core = json.loads(updates.fetch(f"https://{GITHUB_API_HOST}/rate_limit", 64 * 1024))["resources"]["core"]
+    except (updates.NetworkError, KeyError, TypeError, ValueError) as exc:
+        say(f"rate_limit: unavailable ({type(exc).__name__})")
+        return
+    reset = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(core.get("reset", 0))))
+    say(f"rate_limit: core.remaining={core.get('remaining')} core.limit={core.get('limit')} reset={reset}")
+
+
+def github_lookup(what, call):
+    """``call()`` under the job token when there is one; says only whether it was authenticated."""
+    with github_api_auth() as authenticated:
+        say(f"GitHub API lookup ({what}): {'authenticated' if authenticated else 'unauthenticated'}")
+        try:
+            return call()
+        except updates.ReleaseNotFound:
+            raise
+        except updates.NetworkError as exc:
+            raise Failure(f"{exc} ({what} on {GITHUB_API_HOST}, "
+                          f"{'authenticated' if authenticated else 'unauthenticated'})") from None
+
+
 def download_release_installers(work):
     """The published RainCLI-Setup assets of OLD and NEW, by exact name, checksum-verified."""
     target = work / "installers"
     target.mkdir()
     for version in (OLD, NEW):
-        release = json.loads(updates.fetch(f"{updates.API}/releases/tags/v{version}", 1024 * 1024))
+        release = json.loads(github_lookup(f"release v{version}", lambda: updates.fetch(
+            f"{updates.API}/releases/tags/v{version}", 1024 * 1024)))
         check(not release.get("draft") and not release.get("prerelease"), f"v{version} is not a stable release")
         files = {}
         for name in (f"RainCLI-Setup-{version}.exe", f"RainCLI-Setup-{version}.exe.sha256"):
@@ -1470,7 +1546,11 @@ def prepare_managed_install(work):
     root = profile() / ".raincli" / "client"
     check(not root.exists(), f"{root} already exists on this runner")
     try:
-        release = updates.resolve(OLD_MANAGED)
+        with github_api_auth():
+            report_rate_limit()
+        # resolve()'s two api.github.com calls (the release by tag, then its commit). The archive comes from
+        # codeload in install(), outside the token's scope.
+        release = github_lookup(f"release {OLD_MANAGED}", lambda: updates.resolve(OLD_MANAGED))
     except updates.ReleaseNotFound:
         raise Failure(f"release {OLD_MANAGED} not found in {updates.REPO}") from None
     result = updates.install(root, release)
@@ -1917,6 +1997,7 @@ def diagnose(work):
 
 def main(argv=None):
     global OLD, NEW
+    take_github_token()  # first: nothing this script launches may inherit the job token
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--installers",
