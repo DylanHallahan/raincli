@@ -4,6 +4,7 @@
 {% block body_class %} rc-inbox{% if not conversations %} rc-first-run{% endif %}{% endblock %}
 {% block list %}{% with current_id=None %}{% include "app_mode/_conv_list.html" %}{% endwith %}{% endblock %}
 {% block main %}
+{% include "_owner_warnings.html" %}
 <div class="rc-scroll">
   {% if conversations %}
   <div class="rc-center">

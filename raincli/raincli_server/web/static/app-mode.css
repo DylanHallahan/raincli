@@ -102,23 +102,66 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-msg-body { min-width: 0; }
 .rc-avatar { width: 32px; height: 32px; border-radius: var(--rc-radius-pill); display: grid; place-items: center; font-size: var(--rc-fs-xs);
   font-weight: 700; background: var(--rc-surface); color: var(--rc-text); border: 1px solid var(--rc-border); }
-.rc-out .rc-msg-body { min-width: 0; }
-.rc-avatar { background: var(--rc-accent-soft); color: var(--rc-accent); border-color: var(--rc-accent-soft); }
+/* Only the viewer's own messages use the accent colours (§19.7); everyone else's are neutral, with a border. */
+.rc-out .rc-avatar { background: var(--rc-accent-soft); color: var(--rc-accent); border-color: var(--rc-accent-soft); }
 .rc-who { font-size: var(--rc-fs-sm); color: var(--rc-muted); margin-bottom: var(--rc-s-1); display: flex; flex-wrap: wrap; gap: 0 var(--rc-s-2); }
 .rc-who strong { color: var(--rc-text); font-weight: 600; }
 .rc-who a { font-size: var(--rc-fs-sm); }
-.rc-state { margin-top: 6px; font-size: var(--rc-fs-xs); color: var(--rc-muted); }
-.rc-state.rc-ok { color: var(--rc-ok); }
-.rc-state.rc-held { color: var(--rc-warn); }
-.rc-state.rc-rejected { color: var(--rc-danger); }
+.rc-via { color: var(--rc-muted); }
+/* Reply shows on hover and on keyboard focus; it stays in the tab order (opacity, not visibility). */
+.rc-reply { opacity: 0; transition: opacity var(--rc-dur) var(--rc-ease); }
+.rc-msg:hover .rc-reply, .rc-msg:focus-within .rc-reply, .rc-reply:focus-visible { opacity: 1; }
+@media (hover: none) { .rc-reply { opacity: 1; } }
+
+/* The delivery trail under the viewer's own messages (§19.7). */
+.rc-trail { margin-top: 6px; font-size: var(--rc-fs-xs); color: var(--rc-muted); }
+.rc-steps { margin: 0; display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; }
+.rc-steps > span[aria-hidden] { display: contents; }
+.rc-steps i { font-style: normal; }
+.rc-step { color: var(--rc-muted); }
+.rc-step.rc-reached { color: var(--rc-ok); font-weight: 600; }
+.rc-trail-warn .rc-outcome { color: var(--rc-warn); font-weight: 600; }
+.rc-trail-danger .rc-outcome { color: var(--rc-danger); font-weight: 600; }
+.rc-details { margin-top: 2px; }
+.rc-details summary { cursor: pointer; width: max-content; }
+.rc-details ol { margin: var(--rc-s-1) 0 0; padding-left: var(--rc-s-5); }
+
+/* Header: reachability chip and presence word, for agent conversations only (§19.3). */
+.rc-head-status { display: flex; align-items: center; }
+.rc-presence { display: inline-flex; align-items: center; gap: 6px; font-size: var(--rc-fs-xs); color: var(--rc-muted); }
+.rc-chip { font-size: var(--rc-fs-xs); font-weight: 600; padding: 2px var(--rc-s-2); border-radius: var(--rc-radius-pill);
+  background: var(--rc-accent-soft); color: var(--rc-accent); }
+.rc-pdot { width: 8px; height: 8px; border-radius: var(--rc-radius-pill); background: var(--rc-muted); }
+.rc-presence-ready .rc-pdot { background: var(--rc-ok); }
+.rc-presence-busy .rc-pdot { background: var(--rc-warn); }
+
+/* The sender warning (§19.6) */
+.app-mode .sender-warning { margin: var(--rc-s-3) var(--rc-s-5) 0; padding: var(--rc-s-2) var(--rc-s-3); border-radius: var(--rc-radius);
+  background: var(--rc-warn-bg); color: var(--rc-warn); font-size: var(--rc-fs-sm); }
+.app-mode .sender-warning strong { font-weight: 700; }
+.rc-compose .sender-warning, .owner-warnings .sender-warning { margin: 0 0 var(--rc-s-2); }
+.owner-warnings { padding: var(--rc-s-3) var(--rc-s-5) 0; }
+
+/* Motion: new messages and state changes fade and rise in; none under reduced motion. */
+@keyframes rc-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes rc-fade { from { opacity: .3; } to { opacity: 1; } }
+.rc-msg.rc-arrived { animation: rc-rise 220ms var(--rc-ease) both; }
+.rc-trail.rc-changed { animation: rc-fade 200ms var(--rc-ease) both; }
+@media (prefers-reduced-motion: reduce) {
+  .rc-msg.rc-arrived, .rc-trail.rc-changed { animation: none; }
+  .rc-reply { transition: none; }
+}
 .rc-needs { border: 1px solid var(--rc-accent); background: var(--rc-accent-soft); border-radius: var(--rc-radius); padding: var(--rc-s-2) var(--rc-s-3);
   font-size: var(--rc-fs-sm); margin-bottom: var(--rc-s-2); }
 .rc-needs strong { color: var(--rc-accent); }
 .rc-attachments { list-style: none; margin: var(--rc-s-2) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--rc-s-2); }
+/* Attachment card: the filename, then size · sha256 abcd…wxyz; the full hash in the tooltip (§19.7). */
 .rc-file { display: inline-flex; gap: var(--rc-s-2); align-items: center; border: 1px solid var(--rc-border); background: var(--rc-surface);
-  border-radius: var(--rc-radius); padding: var(--rc-s-2) var(--rc-s-3); font-size: var(--rc-fs-sm); color: var(--rc-text); text-decoration: none; }
-.rc-file:hover { background: var(--rc-surface-2); color: var(--rc-text); }
-.rc-file span { color: var(--rc-muted); }
+  border-radius: var(--rc-radius); padding: var(--rc-s-2) var(--rc-s-3); font-size: var(--rc-fs-sm); color: var(--rc-text); }
+.rc-file a { color: var(--rc-text); font-weight: 600; text-decoration: none; }
+.rc-file a:hover { text-decoration: underline; color: var(--rc-text); }
+.rc-file-meta { color: var(--rc-muted); font-size: var(--rc-fs-xs); }
+.rc-hash { font-family: var(--rc-mono); user-select: text; }
 
 .rc-compose { padding: 0 var(--rc-s-5) var(--rc-s-5); }
 .rc-compose form { max-width: var(--rc-thread-max); margin: 0 auto; display: grid; gap: var(--rc-s-2); }
@@ -129,6 +172,13 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-to { font-size: var(--rc-fs-sm); color: var(--rc-muted); white-space: nowrap; }
 .rc-to strong { color: var(--rc-text); }
 .rc-box textarea { width: 100%; font: inherit; color: var(--rc-text); background: transparent; border: 0; resize: vertical; min-height: 52px; padding: var(--rc-s-1) 0; }
+/* The one-row composer (§19.7): To, a textarea from 1 to 8 lines, the clip and Send. */
+.rc-box.rc-box-row1 { display: flex; align-items: flex-end; gap: var(--rc-s-2); }
+.rc-box-row1 .rc-to { align-self: center; }
+.rc-box-row1 textarea { flex: 1; min-width: 0; min-height: 0; height: auto; resize: none; overflow-y: auto;
+  max-height: calc(8 * var(--rc-lh) * 1em + 2 * var(--rc-s-1)); line-height: var(--rc-lh); align-self: center; }
+.rc-compose .rc-files { margin: 0; color: var(--rc-muted); font-size: var(--rc-fs-xs); min-height: 0; }
+.rc-compose .rc-files:empty { display: none; }
 .rc-box textarea:focus { outline: none; }
 .rc-box input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .rc-box .rc-files { flex: 1; min-width: 0; color: var(--rc-muted); font-size: var(--rc-fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

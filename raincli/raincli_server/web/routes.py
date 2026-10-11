@@ -12,7 +12,7 @@ from typing import Iterator
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -20,7 +20,7 @@ from raincli_server.markdown import render as render_markdown
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from raincli_server import identity, messaging, quotas, security
 from raincli_server.config import Settings
@@ -148,8 +148,17 @@ def render(
     csrf: str | None = None, pre_nonce: list[str] | None = None, **ctx,
 ) -> HTMLResponse:
     settings = _settings(request)
+    context = _context(request, viewer, csrf, ctx)
+    response = templates.TemplateResponse(request, name, context, status_code=status)
+    for nonce in pre_nonce or []:
+        auth.set_pre_csrf_cookie(response, settings, nonce)
+    return response
+
+
+def _context(request: Request, viewer: auth.Viewer | None, csrf: str | None, ctx: dict) -> dict:
+    settings = _settings(request)
     root = settings.root_path
-    context = {
+    return {
         "url": lambda path: root + path,
         "static": lambda name: f"{root}/static/{name}?v={STATIC_VERSIONS.get(name, '0')}",
         "viewer": viewer,
@@ -162,10 +171,11 @@ def render(
         "website_url": settings.public_url + root,
         **ctx,
     }
-    response = templates.TemplateResponse(request, name, context, status_code=status)
-    for nonce in pre_nonce or []:
-        auth.set_pre_csrf_cookie(response, settings, nonce)
-    return response
+
+
+def fragment(request: Request, name: str, viewer: auth.Viewer | None, **ctx) -> str:
+    """A partial template rendered with the same context as a page (§19.1: the same templates as the page)."""
+    return templates.env.get_template(name).render(_context(request, viewer, None, ctx))
 
 
 def require_viewer(request: Request, db: Session) -> auth.Viewer:
@@ -478,11 +488,6 @@ def invite_accept(
 
 # App: inbox and conversations -----------------------------------------------------------
 
-def _list_extras(db: Session, viewer: auth.Viewer) -> dict:
-    """What every app-mode render of _conv_list.html needs besides the rows (§19.5)."""
-    return {"team_agents": team.team_agents(db, viewer)}
-
-
 def _directory(db: Session, viewer: auth.Viewer) -> dict:
     machines, people = queries.team_directory(db, viewer.user, _team_ids(viewer))
     return {"machines": machines, "people": people, "teams": viewer.teams}
@@ -494,11 +499,14 @@ def inbox(request: Request, db: Session = Depends(get_db)):
     viewer = app_viewer(request, db, app_mode_ok=True)
     team_ids = _team_ids(viewer)
     rows = queries.list_conversations(db, viewer.user, team_ids)
+    from raincli_server.web import thread
+
     template = "app_mode/inbox.html" if viewer.app_mode else "app/inbox.html"
     extras = _list_extras(db, viewer) if viewer.app_mode else {}
-    return render(request, template, viewer=viewer, conversations=rows, **extras,
+    return render(request, template, viewer=viewer, conversations=rows,
                   machines_owned=bool(queries.my_agents(db, viewer.user, team_ids)),
-                  pending=queries.pending_for_user(db, viewer.user, team_ids))
+                  pending=queries.pending_for_user(db, viewer.user, team_ids),
+                  owner_warnings=thread.owner_warnings(db, viewer.user, team_ids), **extras)
 
 
 @router.get("/app/conversations/{conversation_id}", response_class=HTMLResponse)
@@ -507,10 +515,150 @@ def conversation(request: Request, conversation_id: str, reply_to: str = "", db:
     view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id)
     if view is None:
         raise not_found()
-    if queries.ack_viewed(db, viewer.user, view):  # viewing acks messages to the person (§16.4)
+    # Viewing acks messages to the person on the website (§16.4). In app mode it never does: live.js acks a
+    # message once the window has focus and it has been half on screen (§19.2).
+    if not viewer.app_mode and queries.ack_viewed(db, viewer.user, view):
         db.commit()
         view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id)
     return _conversation_page(request, db, viewer, view, reply_to=reply_to)
+
+
+# Live updates in app mode (§19.1, §19.2) ---------------------------------------------------------------
+
+LIVE_INTERVAL = 5  # seconds between polls while the window is visible
+LIVE_PAGE = 50  # new messages per reply; the next poll fetches the rest
+ACK_MAX = 100
+
+
+def _parse_since(value: str):
+    from datetime import datetime, timezone
+
+    if not value or len(value) > 40:
+        return None
+    try:
+        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _live_list(request: Request, db: Session, viewer: auth.Viewer, current_id) -> tuple[str, str]:
+    """The rendered conversation list (the same template as the page) and its revision: a hash of the HTML,
+    so any change to names, unread counts, order or presence shows as a new revision."""
+    rows = queries.list_conversations(db, viewer.user, _team_ids(viewer))
+    html = fragment(request, "app_mode/_conv_list.html", viewer, conversations=rows, current_id=current_id,
+                    **_list_extras(db, viewer))
+    return html, hashlib.sha256(html.encode()).hexdigest()[:16]
+
+
+def _list_extras(db: Session, viewer: auth.Viewer) -> dict:
+    """Extra context for the conversation list (the sidebar's Team section, §19.5), shared by the pages and
+    GET /app/live."""
+    return {"team_agents": team.team_agents(db, viewer)}
+
+
+@router.get("/app/live")
+def live(request: Request, conversation: str = "", after: int = 0, states_since: str = "", list_rev: str = "",
+         db: Session = Depends(get_db)):
+    """One call per open window every 5 s (§19.1): the open thread's new messages (rendered with the page's own
+    templates and Markdown renderer), the viewer's own messages whose delivery state changed, the header's
+    presence, the sender warning, and the conversation list when it changed. Indexed queries only: messages by
+    (conversation_id, seq), events by message, presence by machine; nothing per message. Never acks (§19.2)."""
+    from raincli_server.web import thread
+
+    viewer = app_viewer(request, db, app_mode_ok=True)
+    if not viewer.app_mode:
+        raise not_found()  # the website doesn't poll (until D4)
+    now = identity.now()
+    out: dict = {"messages": [], "states": [], "header": None, "warning": None, "list": None,
+                 "now": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), "retry_after": LIVE_INTERVAL}
+    current_id = None
+    if conversation:
+        head = queries.conversation_head(db, viewer.user, _team_ids(viewer), conversation)
+        if head is None:
+            raise not_found()
+        conv, team, me, peer, owned = head
+        current_id = conv.id
+        after = max(0, min(after, 2**63 - 1))
+        fresh = list(db.scalars(
+            select(Message).where(Message.conversation_id == conv.id, Message.team_id == conv.team_id,
+                                  Message.seq > after)
+            .order_by(Message.seq).limit(LIVE_PAGE).execution_options(populate_existing=True)))
+        since = _parse_since(states_since)
+        changed = []
+        if since is not None:
+            mine = or_(Message.sender_user_id == viewer.user.id, Message.sender_agent_id.in_(list(owned) or [None]))
+            changed = list(db.scalars(
+                select(Message).where(Message.conversation_id == conv.id, Message.team_id == conv.team_id,
+                                      Message.seq <= after, Message.delivery_updated_at > since, mine)
+                .order_by(Message.seq).limit(ACK_MAX).execution_options(populate_existing=True)))
+        names = thread.Names(db)
+        lines, _ = queries.message_lines(db, viewer.user, owned, fresh + changed, names)
+        atts = queries.attachment_meta(db, [m.id for m in fresh]) if fresh else {}
+        view_ctx = dict(conv_id=conv.id, can_send=queries.ConversationView(conv, team, me, peer).can_send,
+                        machine_inbox=peer.endpoint.kind == "machine")
+        for line in lines[:len(fresh)]:
+            out["messages"].append({"id": str(line.message.id), "seq": line.message.seq,
+                                    "html": fragment(request, "app_mode/_message.html", viewer, line=line,
+                                                     atts=atts.get(line.message.id, []), **view_ctx)})
+        for line in lines[len(fresh):]:
+            if line.trail is not None:
+                out["states"].append({"id": str(line.message.id), "state": line.trail.outcome or
+                                      line.message.delivery_state,
+                                      "html": fragment(request, "app_mode/_trail.html", viewer, line=line)})
+        presence = thread.header_presence(db, peer.endpoint, now)
+        out["header"] = {"word": presence.word if presence else None, "chip": presence.chip if presence else None,
+                         "html": fragment(request, "app_mode/_head_status.html", viewer, presence=presence)}
+        warning = thread.endpoint_warning(db, peer.endpoint)
+        if warning is not None:
+            out["warning"] = {"kind": warning.kind,
+                              "html": fragment(request, "_sender_warning.html", viewer, warning=warning)}
+    html, rev = _live_list(request, db, viewer, current_id)
+    out["list_rev"] = rev
+    if rev != list_rev:
+        out["list"] = {"html": html}
+    return JSONResponse(out, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/app/ack")
+async def live_ack(request: Request, db: Session = Depends(get_db)):
+    """§19.2: live.js acks messages to the person that have been half on screen while the window had focus.
+    JSON ``{"csrf_token", "ids": [...]}``, at most 100 ids; anything not addressed to the person is skipped."""
+    try:
+        data = json.loads(await request.body() or b"{}")
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        data = None
+    if not isinstance(data, dict) or not isinstance(data.get("ids"), list) or len(data["ids"]) > ACK_MAX:
+        return JSONResponse({"error": {"code": "invalid", "message": 'body must be {"csrf_token", "ids": [...]}'}},
+                            status_code=400)
+    viewer = app_viewer(request, db, str(data.get("csrf_token") or ""), app_mode_ok=True)
+    acked = []
+    for raw in data["ids"]:
+        mid = queries.parse_uuid(raw)
+        if mid is None:
+            continue
+        msg = db.get(Message, mid)
+        if msg is None or msg.recipient_user_id != viewer.user.id or msg.team_id not in _team_ids(viewer):
+            continue
+        try:
+            _, done = messaging.person_ack(db, viewer.user, mid)
+        except messaging.MessagingError:
+            continue
+        if done:
+            acked.append(str(mid))
+    db.commit()
+    return JSONResponse({"acked": acked})
+
+
+@router.get("/app/recipient-warning", response_class=HTMLResponse)
+def recipient_warning(request: Request, to: str = "", db: Session = Depends(get_db)):
+    """§19.6: the sender warning for a recipient chosen on the compose page (app mode and website), as HTML."""
+    from raincli_server.web import thread
+
+    viewer = app_viewer(request, db, app_mode_ok=True)
+    warning = thread.recipient_warning(db, _team_ids(viewer), to)
+    return HTMLResponse(fragment(request, "_sender_warning.html", viewer, warning=warning),
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.get("/app/archived", response_class=HTMLResponse)
@@ -566,6 +714,14 @@ def _reply_target(db: Session, viewer: auth.Viewer, view: queries.ConversationVi
     return other.label()
 
 
+def _reply_name(db: Session, viewer: auth.Viewer, parent: Message) -> str:
+    from raincli_server.web import thread
+
+    other = messaging.recipient_endpoint(db, parent) if parent.sender_user_id == viewer.user.id else \
+        messaging.sender_endpoint(db, parent)
+    return thread.Names(db).endpoint(other)
+
+
 def _conversation_page(
     request: Request, db: Session, viewer: auth.Viewer, view: queries.ConversationView, *, reply_to: str = "",
     status: int = 200, **ctx,
@@ -575,12 +731,14 @@ def _conversation_page(
     if rid is not None:
         parent = next((m for m in view.messages if m.id == rid), None)
     to_label = _reply_target(db, viewer, view, parent)
+    to_name = view.name if parent is None else _reply_name(db, viewer, parent)
     common = dict(viewer=viewer, status=status, view=view, parent=parent, fixed_to=to_label, to_label=to_label,
-                  conversation_id=view.conversation.id, message_id=str(uuid.uuid4()), form={}, **ctx)
+                  to_name=to_name, conversation_id=view.conversation.id, message_id=str(uuid.uuid4()), form={},
+                  live_now=identity.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"), **ctx)
     if viewer.app_mode:
         return render(request, "app_mode/conversation.html",
-                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)), **common,
-                      **_list_extras(db, viewer))
+                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)),
+                      **_list_extras(db, viewer), **common)
     return render(request, "app/conversation.html", **common)
 
 
@@ -591,12 +749,15 @@ def compose(request: Request, to: str = "", db: Session = Depends(get_db)):
 
 
 def _compose_page(request, db, viewer, *, form, status: int = 200, error: str | None = None) -> HTMLResponse:
+    from raincli_server.web import thread
+
     ctx = dict(viewer=viewer, status=status, error=error, form=form, draft=form.get("body", ""),
-               message_id=str(uuid.uuid4()), conversation_id=None, **_directory(db, viewer))
+               message_id=str(uuid.uuid4()), conversation_id=None, **_directory(db, viewer),
+               to_warning=thread.recipient_warning(db, _team_ids(viewer), form.get("to", "")))
     if viewer.app_mode:
         return render(request, "app_mode/compose.html",
-                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)), **ctx,
-                      **_list_extras(db, viewer))
+                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)),
+                      **_list_extras(db, viewer), **ctx)
     return render(request, "app/compose.html", **ctx)
 
 

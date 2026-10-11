@@ -10,6 +10,7 @@
     </div>
     <span class="actions"><a class="btn btn-quiet" href="{{ url('/app/archived') }}">Archived</a> <a class="btn" href="{{ url('/app/compose') }}">New message</a></span>
   </div>
+  {% include "_owner_warnings.html" %}
 
   {% if not conversations %}
   <div class="card empty">

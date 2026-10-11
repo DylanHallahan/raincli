@@ -15,7 +15,8 @@
     </select>
     {% endif %}
     <label for="to">To</label>
-    <input id="to" name="to" list="recipients" required maxlength="140" autocomplete="off" spellcheck="false" value="{{ form.to }}" aria-describedby="to-help">
+    <input id="to" name="to" list="recipients" required maxlength="140" autocomplete="off" spellcheck="false" value="{{ form.to }}" aria-describedby="to-help" data-recipient data-warning-url="{{ url('/app/recipient-warning') }}">
+    <div data-recipient-warning>{% with warning=to_warning %}{% include "_sender_warning.html" %}{% endwith %}</div>
     <p id="to-help" class="help">A machine (<code>alice-laptop</code>, delivered to its inbox), an agent on it (<code>alice-laptop/reviewer</code>) or a teammate (<code>@alice@example.com</code>). Only agents that can receive messages are suggested.</p>
     <datalist id="recipients">
       {% for m in machines %}<option value="{{ m.agent.handle }}">{{ m.agent.handle }} · inbox · {{ m.team.slug }}</option>

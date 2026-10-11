@@ -653,3 +653,9 @@ pre.code {
 .archived-marker { display: inline-block; line-height: 32px; white-space: nowrap; padding: 0 var(--s-3); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--muted); font-size: var(--fs-sm); font-weight: 600; }
 .conv-archived { display: flex; align-items: center; gap: var(--s-3); padding-right: var(--s-4); }
 .conv-archived .conv { flex: 1; min-width: 0; }
+
+/* §19.6 the "not connected" sender warning, in the website's look */
+.sender-warning { margin: 0 0 var(--s-4); padding: var(--s-3) var(--s-4); border-radius: var(--radius); background: var(--warn-bg);
+  color: var(--warn); font-size: var(--fs-sm); }
+.owner-warnings { display: grid; gap: var(--s-2); margin-bottom: var(--s-4); }
+.owner-warnings .sender-warning { margin: 0; }

@@ -9,7 +9,7 @@
     {% else %}
     <div class="rc-field">
       <label for="to">To</label>
-      <input id="to" name="to" list="recipients" required maxlength="140" autocomplete="off" spellcheck="false" value="{{ form.to or '' }}" aria-describedby="to-help">
+      <input id="to" name="to" list="recipients" required maxlength="140" autocomplete="off" spellcheck="false" value="{{ form.to or '' }}" aria-describedby="to-help" data-recipient data-warning-url="{{ url('/app/recipient-warning') }}">
       <p id="to-help" class="rc-help">A machine (<code>alice-laptop</code>), an agent on it (<code>alice-laptop/reviewer</code>) or a teammate (<code>@alice@example.com</code>).</p>
       <datalist id="recipients">
         {% for m in machines %}<option value="{{ m.agent.handle }}">{{ m.agent.handle }} · inbox</option>
@@ -24,16 +24,17 @@
     </div>
     {% endif %}
     {% endif %}
-    <p class="rc-hint" id="body-hint">Markdown is supported. Attach Markdown files with the clip.</p>
-    <div class="rc-box">
-      {% if to_label %}<div class="rc-box-row"><span class="rc-to">To: <strong>{{ to_label }}</strong></span></div>{% endif %}
+    {% if not fixed_to %}<div class="rc-warning-slot" data-recipient-warning>{% with warning=to_warning %}{% include "_sender_warning.html" %}{% endwith %}</div>{% endif %}
+    {# One row (§19.7): "To: name", a textarea that grows from 1 to 8 lines, the clip and Send. Ctrl+Enter sends
+       (app.js); without JavaScript it is a plain form with a Send button. #}
+    <div class="rc-box rc-box-row1">
+      {% if to_label %}<span class="rc-to">To: <strong>{{ to_name or to_label }}</strong></span>{% endif %}
       <label class="sr-only" for="body">Message</label>
-      <textarea id="body" name="body" maxlength="16000" required placeholder="Write a message" aria-describedby="body-hint">{{ draft or '' }}</textarea>
-      <div class="rc-box-row">
-        <label class="rc-icon-btn" title="Attach Markdown files"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L15.5 7"/></svg><span class="sr-only">Attach Markdown files</span><input type="file" name="files" accept=".md,text/markdown" multiple></label>
-        <span class="rc-files"></span>
-        <button class="rc-icon-btn rc-send" type="submit" title="Send"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span class="sr-only">Send</span></button>
-      </div>
+      <textarea id="body" name="body" rows="1" maxlength="16000" required data-grow
+                placeholder="Message… Markdown and .md files supported">{{ draft or '' }}</textarea>
+      <label class="rc-icon-btn" title="Attach Markdown files"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L15.5 7"/></svg><span class="sr-only">Attach Markdown files</span><input type="file" name="files" accept=".md,text/markdown" multiple></label>
+      <button class="rc-icon-btn rc-send" type="submit" title="Send (Ctrl+Enter)"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span class="sr-only">Send</span></button>
     </div>
+    <p class="rc-files" aria-live="polite"></p>
   </form>
 </div>
