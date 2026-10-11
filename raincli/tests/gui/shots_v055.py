@@ -1,14 +1,14 @@
-"""v0.5.5 screenshot set: the v0.5.4 seed plus the brief's additions, captured in Chromium.
+"""v0.5.5 screenshot set: the v0.5.4 seed, with Maya's app on maya-laptop (first-run step 1 done), in Chromium.
 
 Not collected by default (no ``test_`` prefix). Run explicitly::
 
     RAINCLI_SHOTS_PHASE=after RAINCLI_SHOTS_DIR=<dir> pytest tests/gui/shots_v055.py
 
-Seed additions (fictional): Jon's machine sends one message stating the agent ``deploy-bot`` into the api-agent
-conversation (P1 mismatch); a second team, Contoso, where Lee is Maya's teammate; Maya's ``maya-laptop`` is
-connected (first-run step 1 done). Files are ``<phase>-<n>-<screen>-<light|dark>-<WxH>.png``; this script makes
-shots 5 to 12 (shot 6 and 10 here are the Chromium counterparts of the Windows captures). Shots 1 to 4 need the
-picker and send in place (web-builder's part) and are added when those land.
+Files are ``<phase>-<n>-<screen>-<light|dark>-<WxH>.png``. This script makes the trimmed scope's shots: 5 (the trail
+opened), 6 (focus: Tab and click; the Chromium counterpart of the Windows capture), 7 (header heights), 9 (the empty
+state with step 1 done), 10 (Inbox opened on the latest conversation) and 12 (the composer grown). Shot 4 (send in
+place) is ``shots_v055_r2.py``. Frozen and not captured: 1-3 (the picker, R1), 8 (P1) and 11 (R7). The P1 seed
+(``deploy_bot``) and the second team (``contoso``) stay below, unused, for when those return.
 """
 
 from __future__ import annotations
@@ -105,8 +105,9 @@ def stack(browser, paths, out):
     """The header crops one under another in a single image (shot 7)."""
     page = browser.new_page(viewport={"width": 1000, "height": 400})
     imgs = "".join(f'<img src="data:image/png;base64,{base64.b64encode(Path(p).read_bytes()).decode()}">' for p in paths)
-    page.set_content(f"<body style='margin:0;background:#888;display:flex;flex-direction:column;gap:6px;width:max-content'>{imgs}</body>")
-    page.locator("body").screenshot(path=str(out))
+    page.set_content(f"<body style='margin:0'><div id='stack' style='background:#888;display:inline-flex;"
+                     f"flex-direction:column;gap:6px;padding:6px'>{imgs}</div></body>")
+    page.locator("#stack").screenshot(path=str(out))
     page.close()
 
 
@@ -134,13 +135,9 @@ def test_capture_the_v055_set(seed, browser_pw):
     shoot(9, "empty-step1-done", "/app/inbox")
     ids = converse(seed)
     jon_replies(seed, ids)
-    ids["deploy"] = deploy_bot(seed, ids)
-    contoso(seed)
     jon = f"/app/conversations/{ids['jon']}"
     shoot(10, "opened-latest", "/app/inbox")  # Inbox opens the latest conversation (§20.6 M1)
     shoot(5, "trail-open", jon, act=lambda page: page.locator(".rc-msg.rc-out .rc-trail-box > summary").first.click())
-    shoot(8, "p1-api-agent", jon)
-    shoot(8, "p1-deploy-bot", f"/app/conversations/{ids['deploy']}")
     shoot(6, "focus-tab", jon, act=lambda page: tab_into(page, ".rc-msg"))
     shoot(6, "focus-click", jon, act=lambda page: page.locator(".rc-msg .rc-msg-content").first.click())
     for scheme in ("light", "dark"):
@@ -157,9 +154,6 @@ def test_capture_the_v055_set(seed, browser_pw):
         for path in crops:
             path.unlink()
         saved.append(name)
-    shoot(11, "short-window", "/app/inbox", sizes=(SMALL,))
-    shoot(11, "short-window-scrolled", "/app/inbox", sizes=(SMALL,),
-          act=lambda page: page.evaluate("() => { const l = document.querySelector('.rc-convs'); l.scrollTop = l.scrollHeight; }"))
     shoot(12, "composer-grown", jon, act=lambda page: page.locator("#body").fill(
         "\n".join(f"Line {i}: one more detail for the report." for i in range(1, 7))))
     (OUT / f"{PHASE}-files.txt").write_text("\n".join(saved) + "\n", "utf-8")

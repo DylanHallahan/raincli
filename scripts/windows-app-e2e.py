@@ -1151,6 +1151,8 @@ def part_d(app, server, installers, password, observer, menu, work):
         page.fill("#body", "Live from the window")
         page.click(".rc-compose button[type=submit]")
         page.wait_for_selector(".rc-thread .rc-msg:has-text('Live from the window')", timeout=60000)  # in place (§20.2)
+        page.mouse.move(2, 2)  # no hover state in the capture
+        shot(page, "after-win-4-send-in-place-light-1180x780")  # brief v0.5.5 shot 4: stored, no banner, no focus box
         mine = wait_for("the window's message in the observer's inbox", lambda: next(
             (m for m in api(server, observer, "/api/v1/inbox?routing=1&wait=0&limit=100")["messages"]
              if m["body"] == "Live from the window"),
@@ -1169,6 +1171,23 @@ def part_d(app, server, installers, password, observer, menu, work):
         shot(page, "d5e-live-replied")
         say("PASS: D5e. a message from the observer machine appeared in the open window without a reload, and the "
             "window's own message moved to replied")
+
+        # D5f. v0.5.5 R3 (§20.4, brief shot 6): keyboard focus on a message shows one ring in --rc-focus that follows the
+        # message's radius; after a mouse click no message has an outline.
+        rings = """() => [...document.querySelectorAll('.rc-msg')].filter(m => getComputedStyle(m).outlineStyle !== 'none')
+            .map(m => [getComputedStyle(m).outlineStyle, getComputedStyle(m).borderTopLeftRadius])"""
+        page.locator(".rc-msg .rc-msg-content").first.click()
+        check(page.evaluate(rings) == [], f"a mouse click left an outline on a message: {page.evaluate(rings)}")
+        page.mouse.move(2, 2)
+        shot(page, "after-win-6-focus-click-light-1180x780")
+        for _ in range(80):
+            page.keyboard.press("Tab")
+            if page.evaluate("!!document.activeElement.closest('.rc-msg')"):
+                break
+        ringed = page.evaluate(rings)
+        check(ringed == [["solid", "10px"]], f"Tab into a message: expected one rounded ring, got {ringed}")
+        shot(page, "after-win-6-focus-tab-light-1180x780")
+        say("PASS: D5f. Tab into a message shows one rounded ring (10px, the message radius); a click shows none")
 
         # D5h. v0.5.5 (§20.3, §20.6 L6, §20.7): a hidden start reads nothing, and launch opens the latest conversation. The
         # observer writes; the app restarts hidden (--background, as at logon), so the hosted page loads unseen: no
