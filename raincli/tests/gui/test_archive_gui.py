@@ -66,5 +66,6 @@ def test_archive_in_app_mode(people, browser, artifacts):
     page.wait_for_url("**/app/archived?notice=unarchived")
     assert page.locator(".rc-archived-row").count() == 1  # only Bob's
     page.click("nav.rc-nav a:has-text('Inbox')")
+    page.wait_for_url(f"**/app/conversations/{msg['conversation_id']}*")  # Inbox opens the latest (§20.6 M1)
     assert page.locator(f".rc-conv[href*='{msg['conversation_id']}']").count() == 1
     context.close()

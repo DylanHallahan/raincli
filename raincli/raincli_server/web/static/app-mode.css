@@ -290,3 +290,52 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 /* The owner notice: one combined line for several machines; the block is capped and scrolls as a backstop. */
 .owner-warnings { max-height: 30vh; overflow-y: auto; flex: none; }
 .app-mode .sender-warning a { color: inherit; text-decoration: underline; }
+/* v0.5.5 presentation (protocol §20.4). Tokens it needs are scoped to app mode here (§20.5), not in tokens.css. */
+.app-mode { --rc-app-head-h: 72px; --rc-app-head-row: 32px; --rc-app-fade-h: 32px; }
+
+/* R3: focus. No outline for mouse or programmatic focus; keyboard focus shows a ring in --rc-focus that follows
+   the element's own radius (outlines follow border-radius). A keyboard-focused link inside a message rings the
+   message, at its --rc-radius. */
+.app-mode :focus:not(:focus-visible) { outline: none; }
+.rc-msg { border-radius: var(--rc-radius); }
+.rc-msg:has(:focus-visible) { outline: 2px solid var(--rc-focus); outline-offset: 4px; }
+.rc-msg :focus-visible { outline: none; text-decoration: underline; }
+/* The composer gets a quiet border, not a ring: a text field counts as keyboard-focused even after a click or the
+   §20.3 composer-ready focus, so a ring here would show for mouse users too. The caret shows where focus is. */
+.rc-box:focus-within { border-color: var(--rc-border-strong); }
+
+/* R5: the trail is the toggle; a chevron after the last step turns when it is open. */
+.rc-trail-box > summary { list-style: none; cursor: pointer; width: max-content; max-width: 100%; align-items: center;
+  border-radius: var(--rc-radius-sm); }
+.rc-trail-box > summary::-webkit-details-marker { display: none; }
+.rc-chevron { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round;
+  stroke-linejoin: round; transition: transform var(--rc-dur) var(--rc-ease); }
+.rc-trail-box[open] .rc-chevron { transform: rotate(90deg); }
+.rc-history { margin: var(--rc-s-1) 0 0; padding-left: var(--rc-s-5); }
+
+/* R6: one header height for every conversation kind and for New message and Agents. The title row (name, chip,
+   presence word) and the Archive control are centred on one line; the second line never wraps. */
+.app-mode .rc-main-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--rc-s-3);
+  align-content: center; align-items: start; height: var(--rc-app-head-h); flex: none; padding: 0 var(--rc-s-5); }
+.app-mode .rc-main-head > div:first-child { min-width: 0; }
+.app-mode .rc-main-head h2, .app-mode .rc-head-title { min-height: var(--rc-app-head-row); display: flex; align-items: center; }
+.app-mode .rc-main-head h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;
+  line-height: var(--rc-app-head-row); }
+.app-mode .rc-main-head > div > p { line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-mode .rc-main-head > .rc-archive { height: var(--rc-app-head-row); align-self: start; }
+@media (max-width: 1000px) { .app-mode .rc-main-head { padding: 0 var(--rc-s-3); } }
+
+/* R7: an overflowing conversation list fades at its bottom edge (app.js sets rc-more while there is more). */
+.rc-convs.rc-more::after { content: ""; position: sticky; bottom: 0; height: var(--rc-app-fade-h);
+  margin-top: calc(-1 * var(--rc-app-fade-h)); background: linear-gradient(to bottom, transparent, var(--rc-bg));
+  pointer-events: none; }
+
+/* R8: "To:" stays on the first line, top-aligned with the text, while the composer grows. */
+.rc-box-row1 .rc-to { align-self: flex-start; line-height: calc(var(--rc-fs-base) * var(--rc-lh)); padding-top: var(--rc-s-1); }
+/* R8: the Team section is pinned at the bottom of the column with or without conversations. */
+.rc-list > .rc-empty { flex: 1; }
+/* R8: first-run step 1 done: a check mark and muted text. */
+.rc-step-done strong, .rc-step-done .rc-step-text { color: var(--rc-muted); }
+.rc-step-done .rc-step-n { border-color: var(--rc-ok); color: var(--rc-ok); }
+.rc-step-done .rc-step-n .rc-icon { width: 14px; height: 14px; stroke-width: 2.5; }
+@media (prefers-reduced-motion: reduce) { .rc-chevron { transition: none; } }

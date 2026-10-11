@@ -253,6 +253,7 @@ class ConversationRow:
     archived: bool = False  # §17.2: the effective state (§17.3 A1)
     archived_by: str = ""  # "Archived by <endpoint>" (§17.3 A8)
     name: str = ""  # §19.4: owner · agent, owner · inbox, or the person (worked out on the server)
+    last_sender_name: str = ""  # §20.4 R8: the app list's machine-inbox preview names its sender as the thread does
 
 
 @dataclass
@@ -265,6 +266,8 @@ class MessageLine:
     sender_name: str = ""  # §19.4, §19.7: the meta line's name
     recipient_name: str = ""
     trail: object = None  # thread.Trail, only for the viewer's own messages (§19.7)
+    initials: str = ""  # §20.4 R8: from the person behind the sender (present.initials)
+    via: str | None = None  # §20.4 P1: the stated agent name to show as "via …", or None (present.shown_via)
 
     @property
     def shown_state(self) -> str:
@@ -387,7 +390,8 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
         rows.append(ConversationRow(conversation=conv, team=team, me=me, peer=peer, last=last,
                                     last_sender=sender, count=count, unacked=unacked, archived=is_archived,
                                     archived_by=_archived_by(db, conv, user, owned) if is_archived else "",
-                                    name=names.endpoint(peer.endpoint)))
+                                    name=names.endpoint(peer.endpoint),
+                                    last_sender_name=names.sender(messaging.sender_endpoint(db, last)) if last else ""))
     rows.sort(key=lambda r: (r.last.seq if r.last else 0), reverse=True)
     return rows
 
@@ -415,7 +419,10 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
     events in one query."""
     from raincli_server.web import thread
 
+    from raincli_server.web import present
+
     names = names or thread.Names(db)
+    people = present.People(db)
     events: dict[uuid.UUID, list[DeliveryEvent]] = {}
     if messages:
         for ev in db.scalars(
@@ -453,7 +460,8 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
         lines.append(MessageLine(
             m, sender, recipient, outgoing=outgoing, hold_reason=hold,
             sender_name=names.sender(sender_ep), recipient_name=names.endpoint(recipient_ep),
-            trail=thread.trail_for(m, recipient_ep, events.get(m.id, []), hold) if outgoing else None))
+            trail=thread.trail_for(m, recipient_ep, events.get(m.id, []), hold) if outgoing else None,
+            initials=present.initials(people.of(m)), via=present.shown_via(db, m)))
     return lines, events
 
 

@@ -97,7 +97,8 @@ def test_meta_line_names_and_reply_on_hover_and_focus(agent_thread, browser):
     theirs = page.locator(f"#m-{reply['id']}")
     who = theirs.locator(".rc-who").inner_text()
     assert who.startswith("Bob · reviewer · ") and " to " not in who  # name · local time; no "to" here
-    assert "via reviewer (stated by the machine)" in who
+    # §20.4 P1: the stated name equals this conversation's agent name, so the "via" line is hidden.
+    assert "via " not in who
     link = theirs.locator(".rc-reply")
     assert float(link.evaluate("e => getComputedStyle(e).opacity")) == 0
     theirs.hover()
@@ -289,8 +290,9 @@ def test_a_message_counts_as_read_only_when_focused_and_half_visible(agent_threa
 
     p = agent_thread
     reply = machine_send(p["base"], p["bob"]["token"], {"person": "alice@example.test"}, "read me", p["cid"])
-    context, page = open_app(browser, p["base"], p["alice"]["person_session"])
-    page.add_init_script("window.__focus = false; document.hasFocus = () => window.__focus;")
+    # From the handoff on: Inbox opens this, the latest conversation, by itself (§20.6 M1), unfocused here.
+    context, page = open_app(browser, p["base"], p["alice"]["person_session"],
+                             init_script="window.__focus = false; document.hasFocus = () => window.__focus;")
     page.goto(p["base"] + f"/app/conversations/{p['cid']}#latest")
     page.wait_for_selector(f"#m-{reply['id']}")
     poll_now(page)
@@ -512,9 +514,9 @@ def test_a_failed_ack_keeps_the_message_unread(agent_thread, browser, session):
 
     p = agent_thread
     reply = machine_send(p["base"], p["bob"]["token"], {"person": "alice@example.test"}, "ack me", p["cid"])
-    context, page = open_app(browser, p["base"], p["alice"]["person_session"])
     failing = {"on": True}
-    page.route("**/app/ack", lambda route: route.fulfill(status=403, body="") if failing["on"] else route.continue_())
+    context, page = open_app(browser, p["base"], p["alice"]["person_session"], setup=lambda ctx: ctx.route(
+        "**/app/ack", lambda route: route.fulfill(status=403, body="") if failing["on"] else route.continue_()))
     page.goto(p["base"] + f"/app/conversations/{p['cid']}#latest")
     page.wait_for_selector(f"#m-{reply['id']}")
     page.wait_for_timeout(1500)

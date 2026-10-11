@@ -107,13 +107,20 @@ def app_user_agent(browser):
         probe.close()
 
 
-def open_app(browser, base, person, scheme="light", **options):
-    """A fresh 'webview' profile, signed in through the handoff exactly as the app does."""
+def open_app(browser, base, person, scheme="light", init_script=None, setup=None, **options):
+    """A fresh 'webview' profile, signed in through the handoff exactly as the app does. ``init_script`` and
+    ``setup(context)`` (routes, say) apply from the handoff on, since Inbox may open the latest conversation by
+    itself (§20.6 M1)."""
     context = browser.new_context(color_scheme=scheme, accept_downloads=True, user_agent=app_user_agent(browser),
                                   **options)
+    if init_script:
+        context.add_init_script(init_script)
+    if setup:
+        setup(context)
     page = context.new_page()
     page.goto(api(base, "/api/v1/app/handoff", {"app_install_hash": INSTALL_HASH}, person)["url"])
-    assert page.url.endswith("/app/inbox"), page.url
+    # §20.6 M1 (P2): Inbox opens the latest conversation when there is one and the list is visible.
+    assert re.search(r"/app/(inbox|conversations/[0-9a-f-]{36}#latest)$", page.url), page.url
     return context, page
 
 

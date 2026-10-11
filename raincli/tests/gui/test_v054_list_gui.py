@@ -349,7 +349,9 @@ def test_the_list_names_agent_conversations_owner_and_agent(team, browser):
     names = [t.strip() for t in page.locator(".rc-conv-name").all_inner_texts()]
     previews = [t.strip() for t in page.locator(".rc-conv-preview").all_inner_texts()]
     assert names == ["Priya · web-agent", "Jon · api-agent"]
-    assert previews[0].endswith("You: Retry cap?") and previews[1].endswith("Jon · api-agent: Two failures.")
+    # §20.4 R8: "You:" only for your own messages; otherwise the text alone.
+    assert previews[0].endswith("You: Retry cap?") and previews[1].endswith("Two failures.")
+    assert "Jon · api-agent:" not in previews[1]
     context.close()
 
 

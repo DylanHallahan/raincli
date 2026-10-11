@@ -2,13 +2,14 @@
    line, atts, conv_id, can_send and machine_inbox (show "to <recipient>" only there). #}
 {% from "_state.html" import time %}
 {% set m = line.message %}
-{%- set parts = (line.sender_name or '?').replace('·', ' ').replace('-', ' ').replace('_', ' ').split() -%}
-<li class="rc-msg{{ ' rc-out' if line.outgoing else '' }}" id="m-{{ m.id }}" data-seq="{{ m.seq }}"{% if not line.outgoing and line.recipient.mine and line.recipient.endpoint.kind == 'person' and not m.acked_at %} data-unread{% endif %} tabindex="-1">
-  <span class="rc-avatar" aria-hidden="true">{{ ((parts[0][:1] if parts else '?') ~ (parts[1][:1] if parts|length > 1 else ''))|upper }}</span>
+<li class="rc-msg{{ ' rc-out' if line.outgoing else '' }}" id="m-{{ m.id }}" data-seq="{{ m.seq }}"{% if not line.outgoing and line.recipient.mine and line.recipient.endpoint.kind == 'person' and not m.acked_at %} data-unread{% endif %}>
+  {# §20.4 R3: not focusable, so a #m-<id> link scrolls to it without a focus box. R8: the person's initials. #}
+  <span class="rc-avatar" aria-hidden="true">{{ line.initials or '?' }}</span>
   <div class="rc-msg-body">
     <div class="rc-who">
       <span><strong>{{ line.sender_name }}</strong> · {{ time(m.created_at) }}</span>
-      {% if m.sender_agent_name %}<span class="rc-via">via {{ m.sender_agent_name }} (stated by the machine)</span>{% endif %}
+      {# §20.4 P1: hidden only when the stated name equals the conversation endpoint's agent name. #}
+      {% if line.via %}<span class="rc-via">via {{ line.via }} (stated by the machine)</span>{% endif %}
       {% if machine_inbox %}<span>to {{ line.recipient_name }}</span>{% endif %}
       {% if can_send %}<a class="rc-reply" href="{{ url('/app/conversations/' ~ conv_id) }}?reply_to={{ m.id }}#body">Reply<span class="sr-only"> to this message</span></a>{% endif %}
     </div>

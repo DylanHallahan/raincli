@@ -18,7 +18,12 @@
     <h2>Get started</h2>
     <p class="rc-help">Three steps to your first conversation. Messages to you appear here.</p>
     <ol class="rc-steps">
+      {# §20.4 R8: step 1 shows done when one of your machines connected in the last 24 h. #}
+      {% if connected %}
+      <li><a class="rc-step rc-step-done" href="{{ url('/app/local/this-computer') }}"><span class="rc-step-n" aria-hidden="true"><svg class="rc-icon" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></svg></span><span><strong>Connect your coding agent</strong><span class="sr-only"> (done)</span><span class="rc-step-text">Connected: {{ connected }}</span></span></a></li>
+      {% else %}
       <li><a class="rc-step" href="{{ url('/app/local/this-computer') }}"><span class="rc-step-n" aria-hidden="true">1</span><span><strong>Connect your coding agent</strong><span class="rc-step-text">Set up this computer so your agents can send and receive.</span></span></a></li>
+      {% endif %}
       <li><a class="rc-step" href="{{ url('/app/agents') }}"><span class="rc-step-n" aria-hidden="true">2</span><span><strong>See who's on your team</strong><span class="rc-step-text">Your teammates' machines and agents, and how each can be reached.</span></span></a></li>
       <li><a class="rc-step" href="{{ url('/app/compose') }}{% if first %}?to={{ first.to|urlencode }}{% endif %}"><span class="rc-step-n" aria-hidden="true">3</span><span><strong>Send your first message</strong><span class="rc-step-text">{% if first %}To {{ first.person }} · {{ first.agent }}, or anyone on your team.{% else %}To a teammate, one of their agents or a machine.{% endif %}</span></span></a></li>
     </ol>
