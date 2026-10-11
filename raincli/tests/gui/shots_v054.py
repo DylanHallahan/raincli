@@ -169,8 +169,10 @@ def converse(seed):
     answer = send({"person": "maya@example.test"}, "Yes, 3, with backoff. I'll write it in the README.",
                   token=seed["persons"]["Priya"], in_reply_to=question["id"])
     api(base, f"/api/v1/person/messages/{question['id']}/ack", {}, seed["persons"]["Priya"])
-    backdate(seed["session"], [question["id"]], now - timedelta(days=1, hours=2))
-    backdate(seed["session"], [answer["id"]], now - timedelta(days=1, hours=1, minutes=40))
+    # Yesterday at noon in this computer's zone (the browser's too), so the Yesterday group shows at any hour.
+    noon = (datetime.now().astimezone() - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+    backdate(seed["session"], [question["id"]], noon.astimezone(timezone.utc))
+    backdate(seed["session"], [answer["id"]], (noon + timedelta(minutes=20)).astimezone(timezone.utc))
     ids["priya"] = question["conversation_id"]
     # Today: Priya's web-agent held one message for approval and rejected another.
     held = send({"machine": "priya-desktop", "agent": "web-agent"}, "Please bump the retry cap to 5 in prod.")
@@ -198,6 +200,15 @@ def jon_replies(seed, ids):
          "in_reply_to": ids["ask"], "attachments": [report]}, seed["tokens"]["jon-laptop"])
 
 
+def settle(page, timeout=10):
+    """Wait until no CSS transition or animation is running (review F11: never capture mid-fade)."""
+    deadline = time.monotonic() + timeout
+    while page.evaluate("document.getAnimations().filter(a => a.playState === 'running').length"):
+        if time.monotonic() > deadline:
+            raise AssertionError("animations still running")
+        time.sleep(0.05)
+
+
 class Camera:
     def __init__(self, browser, base, person):
         self.browser, self.base, self.person = browser, base, person
@@ -222,6 +233,7 @@ class Camera:
                 context, page = self.open(scheme, size, path)
                 if act:
                     act(page)
+                settle(page)
                 name = f"{PHASE}-{n}-{screen}-{scheme}-{size[0]}x{size[1]}.png"
                 page.screenshot(path=str(OUT / name))
                 self.saved.append(name)
@@ -256,6 +268,7 @@ def test_capture_the_v054_set(seed, browser_pw):
                                                  viewport={"width": BIG[0], "height": BIG[1]})
                 page = context.new_page()
                 page.goto(Path(DEMO).resolve().as_uri())
+                settle(page)
                 name = f"{PHASE}-9-demo-final-{scheme}-{BIG[0]}x{BIG[1]}.png"
                 page.screenshot(path=str(OUT / name), full_page=True)
                 cam.saved.append(name)
