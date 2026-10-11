@@ -522,6 +522,8 @@ def send(server, token, to, body):
 
 ARTIFACTS = ROOT / "build" / "e2e-artifacts"
 WINDOW_MACHINE = "e2e-window-machine"
+# v0.5.5 (§20.6 M1): Inbox moves on to the latest conversation when there is one; either counts as "the inbox".
+INBOX = ("app/inbox", "app/conversations/")
 
 
 def powershell(script, env=None):
@@ -650,6 +652,17 @@ def themed_shot(page, scheme, name):
     shot(page, name)
 
 
+def focus_window(hwnd):
+    """Bring the app window to the foreground with real keyboard focus (the ALT press lets this process take it)."""
+    import ctypes
+    user32 = ctypes.windll.user32
+    user32.keybd_event(0x12, 0, 0, 0)  # VK_MENU down
+    user32.keybd_event(0x12, 0, 2, 0)  # and up
+    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    user32.BringWindowToTop(hwnd)
+    user32.SetForegroundWindow(hwnd)
+
+
 def list_fits(page):
     """The §19.7 check: the conversation list shows, inside the window, with its times and counts inside it."""
     return page.evaluate("""() => {
@@ -682,16 +695,21 @@ class WindowCDP:
         except (OSError, ValueError):
             return []
 
+    @staticmethod
+    def _matches(fragment, url):
+        """``fragment`` is a substring of the URL, or a tuple of alternatives (any one)."""
+        return any(f in url for f in (fragment if isinstance(fragment, tuple) else (fragment,)))
+
     def _find(self, fragment):
         for context in self.browser.contexts:
             for candidate in context.pages:
-                if not candidate.is_closed() and fragment in url_of(candidate):
+                if not candidate.is_closed() and self._matches(fragment, url_of(candidate)):
                     return candidate
         return None
 
     def page(self, fragment, timeout=120):
         def found():
-            if not any(kind == "page" and fragment in url for kind, url in self.targets()):
+            if not any(kind == "page" and self._matches(fragment, url) for kind, url in self.targets()):
                 return None
             page = self._find(fragment)
             if page is None:  # the target is there, this connection hasn't followed it: attach again
@@ -899,6 +917,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         page.wait_for_url("**/app/archived?notice=unarchived", timeout=60000)
         check(page.locator(".rc-archived-row").count() == 0, "Unarchive left it under Archived")
         page.click("nav.rc-nav a:has-text('Inbox')")
+        page.wait_for_url(f"**/app/conversations/{conversation}*", timeout=60000)  # §20.6 M1
         page.wait_for_selector(f".rc-conv[href*='{conversation}']", timeout=60000)
         check(not observer_list("include")[conversation]["archived"], "the observer still sees it archived")
         say(f"PASS: D5b. the thread shows local times ({label!r}, title {title!r}); Archive moved the conversation "
@@ -915,6 +934,7 @@ def part_d(app, server, installers, password, observer, menu, work):
                  lambda: abs(window_rect(hwnd)[2] - min_size[0]) <= 2 and abs(window_rect(hwnd)[3] - min_size[1]) <= 2,
                  timeout=30, interval=0.5)
         page.click("nav.rc-nav a:has-text('Inbox')")
+        page.wait_for_url(f"**/app/conversations/{conversation}*", timeout=60000)  # §20.6 M1
         page.wait_for_selector(f".rc-conv[href*='{conversation}']", timeout=60000)
         wait_for("the page to see the small window", lambda: page.evaluate("innerWidth") < 760, timeout=30, interval=0.5)
         small_width = page.evaluate("innerWidth")
@@ -934,6 +954,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         for scheme in ("light", "dark"):
             themed_shot(page, scheme, f"after-win-conversation-{scheme}-1180x780")
         page.click("nav.rc-nav a:has-text('Inbox')")
+        page.wait_for_url(f"**/app/conversations/{conversation}*", timeout=60000)  # §20.6 M1
         page.wait_for_selector(f".rc-conv[href*='{conversation}']", timeout=60000)
         for scheme in ("light", "dark"):
             themed_shot(page, scheme, f"after-win-inbox-{scheme}-1180x780")
@@ -985,6 +1006,47 @@ def part_d(app, server, installers, password, observer, menu, work):
         say("PASS: D5e. a message from the observer machine appeared in the open window without a reload, and the "
             "window's own message moved to replied")
 
+        # D5h. v0.5.5 (§20.3, §20.6 L6): a hidden start reads nothing, and launch opens the latest conversation. The
+        # observer writes; the app restarts hidden (--background, as at logon), so the hosted page loads unseen: no
+        # focus, nothing acknowledged after 10 s (and, while hidden, no polling). Shown and focused, the window is on
+        # that conversation, selected in the list, and only then reads the message.
+        unseen = send(server, observer, {"person": EMAIL}, "Read me only when you can see me")
+        window.close()
+        app.quit()
+        port = free_port()
+        env = dict(os.environ, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f"--remote-debugging-port={port}")
+        subprocess.Popen([str(app.root / "RainCLI.exe"), "--background"], env=env, close_fds=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+        wait_for("the hidden window's CDP endpoint", lambda: devtools_answer(f"127.0.0.1:{port}"), timeout=180)
+        window = WindowCDP(pw, port)
+        page = window.page("/app/conversations/", timeout=180)  # Inbox moved on to the latest conversation
+        polls = []
+        page.on("request", lambda request: polls.append(request.url) if "/app/live" in request.url else None)
+        focus, visibility = page.evaluate("[document.hasFocus(), document.visibilityState]")
+        check(focus is False, f"the hidden window has focus ({visibility})")
+        time.sleep(10)
+        state = api(server, observer, f"/api/v1/messages/{unseen}")["message"]["delivery_state"]
+        check(state == "stored", f"the hidden window acknowledged a message: {state}")
+        if visibility == "hidden":
+            check(not polls, f"the hidden window polled: {len(polls)} requests")
+        hidden_polls = len(polls)
+        app.stub("--open")  # the running app's show request
+        hwnd = wait_for("the shown app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
+        focus_window(hwnd)
+        wait_for("the shown, focused window to read the message",
+                 lambda: api(server, observer, f"/api/v1/messages/{unseen}")["message"]["delivery_state"] != "stored",
+                 timeout=60, interval=1)
+        check(conversation in url_of(page), f"launch did not open the latest conversation: {url_of(page)}")
+        current = page.locator(".rc-conv[aria-current=page]")
+        check(current.count() == 1 and conversation in (current.get_attribute("href") or ""),
+              "the latest conversation is not selected in the list")
+        for scheme in ("light", "dark"):
+            themed_shot(page, scheme, f"after-win-10-opened-latest-{scheme}-1180x780")
+        page.emulate_media(color_scheme="null")
+        say(f"PASS: D5h. started hidden ({visibility}, no focus): nothing read after 10 s and {hidden_polls} polls; "
+            "shown and focused, the window was on the latest conversation, selected, and read the message")
+
         # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
         # hosted navigation and loads its own page, so the click must not wait for that navigation.
         page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
@@ -1011,7 +1073,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         shot(page, "d7-offline")
         server.start()
         page.click("#retry", no_wait_after=True)  # the app navigates, not the click
-        page = window.page("app/inbox", timeout=120)  # re-attached after the swap
+        page = window.page(INBOX, timeout=120)  # re-attached after the swap
         say("PASS: D7. with the server stopped the window showed the offline page; Retry returned to the inbox")
 
         # D8. Sign-out from This computer: confirmed, revoked, the profile marked for reset.
@@ -1130,7 +1192,7 @@ def codex_status_probe(codex):
 def inbox_after_sign_in(window, page, timeout=180):
     """The inbox after a sign-in, or a failure naming what the sign-in page said."""
     try:
-        return window.page("app/inbox", timeout=timeout)
+        return window.page(INBOX, timeout=timeout)
     except Failure as exc:
         try:
             said = page.inner_text("#message")
@@ -1194,7 +1256,7 @@ def part_e(app, server, installers, password, observer, work, codex=None):
     port = open_window_cdp(app)
     with sync_playwright() as pw:
         window = WindowCDP(pw, port)
-        page = window.page("app/inbox", timeout=180)
+        page = window.page(INBOX, timeout=180)
         check(EMAIL in page.inner_text(".rc-whoami"), "the fresh machine did not open the owner's inbox")
         shot(page, "e1-inbox")
         window.close()

@@ -23,13 +23,18 @@ import collections
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from ..config import Secret
 from . import policy
+
+# §20.3: the pages a handoff may go straight to (the server checks the same list): a thread, Agents, Archived, New message.
+_HANDOFF_NEXT = re.compile(r"/app/(agents|archived|compose|conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 
 LOCAL_DIR = Path(__file__).resolve().parent / "local"
 TITLE = "RainCLI"
@@ -446,6 +451,8 @@ class AppWindow:
                 self.handed_off = False
                 self.open_hosted(self.pending_path or "/app/inbox")
                 return
+            if self.pending_path and path == self.pending_path:  # the handoff's ``next`` got there
+                self.pending_path = None
             if self.pending_path and path == "/app/inbox":
                 target, self.pending_path = self.pending_path, None
                 self.load(self.service_base() + target)
@@ -550,6 +557,10 @@ class AppWindow:
             return False
         self.handed_off = True
         self.pending_path = path if path != "/app/inbox" else None
+        if self.pending_path and _HANDOFF_NEXT.fullmatch(self.pending_path):
+            # §20.3: the handoff goes straight there (a toast's thread wins over Inbox's latest conversation). An
+            # older server ignores ``next`` and lands on Inbox; the pending path still follows then (on_loaded).
+            url += ("&" if "?" in url else "?") + "next=" + quote(self.pending_path, safe="/")
         self.last_hosted = url
         self._arm_timeout()
         self.load(url)

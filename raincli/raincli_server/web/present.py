@@ -15,7 +15,7 @@ from raincli_server.models import Agent, AgentCredential, Conversation, Message,
 
 CONNECTED_WITHIN = timedelta(hours=24)  # §20.4: step 1 shows done after a connection in the last 24 h
 _SUFFIX = re.compile(r"\s*\([^()]*\)\s*$")  # owners.displays' disambiguator, "Bob (bob)"
-_NEXT = re.compile(r"/app/conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_NEXT = re.compile(r"/app/(agents|archived|compose|conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 
 
 def initials(name: str | None) -> str:
@@ -79,6 +79,7 @@ def connected_machine(db, user: User, team_ids: list[uuid.UUID], now=None) -> st
 
 
 def handoff_next(value: str) -> str | None:
-    """The page a handoff may continue to (§20.3, a toast's thread): exactly ``/app/conversations/<uuid>``.
-    Anything else is ignored, so the handoff can never redirect off the app's own pages."""
+    """The page a handoff may continue to (§20.3): a toast's thread, exactly ``/app/conversations/<uuid>``, or one of
+    the fixed pages the window opens directly (Agents, Archived, New message), so Inbox's latest-conversation step
+    (§20.6 M1) never runs first. Anything else is Inbox; the handoff never redirects off the app's own pages."""
     return value if _NEXT.fullmatch(value or "") else None
