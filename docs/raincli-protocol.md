@@ -1449,3 +1449,82 @@ Found on a real v0.5.0 machine: a Codex CLI session running, but zero directory 
 - Each item has regression tests.
 - Server items run against real PostgreSQL.
 - App items have Windows e2e coverage.
+
+## 19. App polish: live thread, reachability and names (v0.5.4, binding)
+
+This section covers app mode only, except item 19.6, which also applies to the website. The signed-in website's layout is unchanged; that is D4, the next increment.
+
+### 19.1 Live updates: one call per poll
+- **The endpoint:** `GET /app/live` serves the app-mode session (cookie and install-token rules of §16.12 C2 and §16.14 S3; scope `person:read`). Its query parameters are `conversation=<id>` (optional), `after=<seq>`, `states_since=<ISO>` and `list_rev=<opaque>`.
+- **The reply:** one JSON object with:
+  - `messages`: messages newer than `after` in that conversation, each with server-rendered HTML fragments from the same templates and the same Markdown renderer (§16.9) as the page;
+  - `states`: delivery-state changes since `states_since` for the viewer's own messages in that conversation;
+  - `header`: presence and reachability (19.3);
+  - `warning`: the sender warning (19.6) for that conversation's recipient, or null;
+  - `list`: when `list_rev` changed, the rendered conversation list (names, unread counts, order) and the Team section (19.5);
+  - `now`, `list_rev` and `retry_after`.
+- **Cost:** one call per open window every 5 s, using indexed queries only: messages by `(conversation_id, seq)`, events by message, presence by machine. There is no query per message: presence is joined once per conversation.
+- **The client** (`static/live.js`, same origin, no inline script, the CSP unchanged):
+  - polls every **5 s while `document.visibilityState == "visible"`**;
+  - stops when the window is hidden or minimised, and refreshes at once when it is shown again;
+  - backs off to 30 s after network errors, and honours `retry_after`; it shows no error dialogs.
+  - **Fragments** are parsed with `DOMParser` (an inert document), then imported node by node. They come only from this same-origin endpoint and the server's own renderer.
+- **The website** doesn't poll, until D4.
+
+### 19.2 Read state in app mode (amends §16.4 "viewing acks")
+- **In app mode,** opening or polling a thread **never** acknowledges a message to the person.
+- **What does:** `live.js` acknowledges a message only when the window has focus (`document.hasFocus()`) **and** at least half of the message has been visible (IntersectionObserver threshold 0.5). It does so with `POST /app/ack` (CSRF; the message ids, at most 100 per call).
+- **The website** keeps acknowledging on view until D4.
+- **The CLI and person API** are unchanged.
+
+### 19.3 Reachability and presence in the header
+- **Which conversations:** only those whose recipient is a named agent. Person and machine-inbox conversations show neither.
+- **The chip:** the agent's reachability (Instant or Next turn) from the same live directory as the Agents page.
+- **The presence word:**
+  - **Ready** for an idle status;
+  - **Busy** for working or blocked, with the tooltip "The session was working at its last report";
+  - **Offline**.
+- **The offline rule:** **Offline** applies whenever the agent's machine hasn't reported presence for **2 minutes**, and then there is no Instant chip. Nothing ever says or suggests that an agent is working on a particular message, and there is no "typing" indicator.
+
+### 19.4 Conversation names
+- **Agent conversations:** named *owner display name · agent name* (the owner from §18.1 item 7, disambiguated). The header's second line shows `handle/agent · team`.
+- **Machine-inbox conversations:** *owner · inbox*.
+- **Person conversations:** the person's display name.
+- **Derivation:** names are worked out on the server from the conversation's endpoints, never from message text.
+
+### 19.5 Sidebar and list
+- **Team section:** teammates' deliverable agents as *person · agent*, each with a presence dot (Ready green, Busy amber, Offline grey). Each dot has a text label and a tooltip. Clicking one opens New message to that agent.
+- **Remembered state:** the section's collapsed or open state is stored per viewer in local storage (a convenience only).
+- **Day groups:** Today, Yesterday and Earlier are computed in the browser in local time (§17.1). Without JavaScript there are no headings.
+- **Empty Inbox:** three steps: This computer, Agents, and New message (pre-filled with the first deliverable teammate agent).
+
+### 19.6 The "not connected" sender warning (app mode **and** the website)
+- **Applies to:** a machine or agent recipient only, never a person.
+- **When**, either of these:
+  - **(a) never connected:** the machine's credential has never been used (`last_used_at IS NULL`), or **has not connected** for more than 24 h (the newest `last_used_at` of its credentials is older than that);
+  - **(b) not picking up:** the oldest unacknowledged message to that machine is more than 24 h old.
+- **The texts,** with dates formatted in local time (§17.1):
+  - "**<handle>** has never connected.";
+  - "**<handle>** hasn't connected since <date>. Messages will wait until it does.";
+  - "**<handle>** hasn't picked up messages since <date>. Its owner may need to update RainCLI."
+- **Where it shows:**
+  - to senders on the compose page once the recipient is chosen, and in that conversation's header;
+  - to the machine's owner on their Inbox.
+- **Display only:** delivery, holds and expiry are unchanged.
+- **Migration 0009** replaces `ix_messages_recipient_pending` with a partial index on `(recipient_agent_id, seq) WHERE acked_at IS NULL`, so "oldest unacknowledged" is one index lookup.
+
+### 19.7 The thread view (app mode)
+- **Delivery trail,** only under the viewer's own messages:
+  - **Steps:** an agent recipient shows stored → received → submitted → replied; a person or machine inbox shows stored → received → replied.
+  - **Held, uncertain and rejected** replace the remaining steps, with their reason in words.
+  - **Times:** each step's tooltip has its local time.
+  - **Screen readers** hear one phrase.
+  - **Details:** the full event history sits behind a "Details" disclosure.
+  - **Incoming messages** show no state.
+- **Meta line:** *name · local time*. "to *recipient*" shows only in machine-inbox conversations. "via *agent* (stated by the machine)" is kept. **Reply** shows on hover and on keyboard focus.
+- **Attachment card:** the filename, then `size · sha256 abcd…wxyz`, with the full hash in a tooltip that stays selectable.
+- **Composer:** one row: "To: name", a textarea that grows from 1 to 8 lines, the clip and Send. Ctrl+Enter sends, and Enter adds a new line. Without JavaScript it is still a working form.
+- **Avatars:** only the viewer's own messages use the accent colours.
+- **Motion:** new messages and state changes animate over 150–300 ms, and not at all under `prefers-reduced-motion`.
+- **Minimum width:** the app-mode breakpoint sits below the window's minimum width (760 px), so the conversation list always shows in the app. Below the breakpoint, Inbox shows the list.
+- **Tokens:** only `--rc-*` tokens, with AA contrast in light and dark.
