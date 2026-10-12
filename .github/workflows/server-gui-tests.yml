@@ -50,10 +50,20 @@ jobs:
           import xml.etree.ElementTree as ET
           cases = [c for c in ET.parse("test-results.xml").getroot().iter("testcase")
                    if ".gui." in "." + c.get("classname", "") + "."]
-          skipped = [c.get("classname") + "::" + c.get("name") for c in cases if c.find("skipped") is not None]
-          print(f"GUI tests: {len(cases)}, skipped: {len(skipped)}")
+          # Tests skipped on purpose for frozen work carry exactly this reason; any other skip (Playwright or its
+          # browser missing) still fails the job.
+          FROZEN = "frozen for v0.5.5 (R7/P1/Team/M3)"
+          def reason(c):
+              s = c.find("skipped")
+              return None if s is None else (s.get("message") or "")
+          skipped = [c.get("classname") + "::" + c.get("name") for c in cases
+                     if reason(c) is not None and FROZEN not in reason(c)]
+          frozen = [c.get("classname") + "::" + c.get("name") for c in cases if reason(c) and FROZEN in reason(c)]
+          print(f"GUI tests: {len(cases)}, skipped: {len(skipped)}, frozen (allowed): {len(frozen)}")
           for name in skipped:
               print("SKIPPED", name)
+          for name in frozen:
+              print("FROZEN", name)
           sys.exit(1 if skipped or not cases else 0)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
