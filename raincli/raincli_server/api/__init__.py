@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message as ASGIMessage, Receive, Scope, Send
 
-from raincli_server import identity, messaging, presence, security
+from raincli_server import identity, messaging, presence, presentation, security
 from raincli_server import quotas
 from raincli_server.api import polls
 from raincli_server.db import session_scope
@@ -244,8 +244,8 @@ def build_api(parent: FastAPI) -> FastAPI:
         except (ValueError, UnicodeDecodeError, RecursionError):
             raise ApiError(400, "invalid", "request body must be valid JSON") from None
 
-    def m(session: Session, msg) -> dict:
-        return messaging.message_json(session, msg)
+    def m(session: Session, msg, auth: AgentAuth) -> dict:
+        return messaging.message_json(session, msg, reader_agent=auth.agent)
 
     # Endpoints -------------------------------------------------------------------
 
@@ -272,10 +272,50 @@ def build_api(parent: FastAPI) -> FastAPI:
 
     @api.get("/agents")
     async def agents(request: Request):
+        """§21 C13 M2: the caller's OWN machines in the old per-machine shape; teammates are in ``/people``."""
         def work(session, auth: AgentAuth):
-            rows = session.scalars(select(Agent).where(Agent.team_id == auth.team.id).order_by(Agent.handle))
+            rows = session.scalars(select(Agent).where(Agent.team_id == auth.team.id,
+                                                       Agent.owner_user_id == auth.agent.owner_user_id)
+                                   .order_by(Agent.handle))
             return {"agents": presence.directory(session, list(rows))}
         return await run(request, "messages:read", work)
+
+    @api.get("/people")
+    async def people(request: Request):
+        """§21 C5.3: the team's people, with presence and speed from each one's inbox (PR13)."""
+        def work(session, auth: AgentAuth):
+            return {"people": presentation.people_json(session, auth.team.id)}
+        return await run(request, "messages:read", work)
+
+    @api.get("/me/inbox")
+    async def my_inbox(request: Request):
+        """§21 C8.1: the credential owner's inbox in this team, the agents they may pick, and the waiting count."""
+        def work(session, auth: AgentAuth):
+            owner = session.get(User, auth.agent.owner_user_id)
+            return {"inbox": messaging.inbox_json(session, presentation.inbox_of(session, auth.team.id, owner.id)),
+                    "candidates": messaging.inbox_candidates(session, owner, auth.team.id),
+                    "waiting": messaging.waiting_count(session, owner, auth.team.id)}
+        return await run(request, "messages:read", work)
+
+    @api.put("/me/inbox")
+    async def set_my_inbox(request: Request):
+        """§21 C8.1, C13 L4: a machine credential picks an agent on the CALLING machine, or ``{"none": true}``."""
+        data = await authed_json_body(request, "messages:ack")
+
+        def work(session, auth: AgentAuth):
+            owner = session.get(User, auth.agent.owner_user_id)
+            if data == {"none": True}:
+                return messaging.clear_person_inbox(session, owner, auth.team.id, via="api")
+            if not isinstance(data, dict) or set(data) - {"machine", "agent", "deliver_waiting"} \
+                    or not isinstance(data.get("agent"), str) \
+                    or not isinstance(data.get("deliver_waiting", True), bool):
+                raise ApiError(400, "invalid", 'body must be {"machine", "agent", "deliver_waiting"} or {"none": true}')
+            if data.get("machine", auth.agent.handle) != auth.agent.handle:
+                raise messaging.MessagingError(400, "inbox_invalid", presentation.error_text(
+                    "inbox_invalid", machine=str(data.get("machine"))[:32]))
+            return messaging.set_person_inbox(session, owner, auth.team.id, auth.agent.id, data["agent"],
+                                              deliver_waiting=data.get("deliver_waiting", True), via="api")
+        return await run(request, "messages:ack", work, counted=False)
 
     @api.put("/presence")
     async def update_presence(request: Request):
@@ -297,7 +337,7 @@ def build_api(parent: FastAPI) -> FastAPI:
                 quotas=quotas.Quotas.from_settings(settings),
                 from_agent=req.from_agent, kind=req.kind,
             )
-            return created, {"message": m(session, msg), "created": created}
+            return created, {"message": m(session, msg, auth), "created": created}
         created, body = await run(request, "messages:send", work, counted=False)
         return JSONResponse(body, status_code=201 if created else 200)
 
@@ -321,7 +361,7 @@ def build_api(parent: FastAPI) -> FastAPI:
                     session, auth.agent, after=after, limit=limit, include_acked=include_acked,
                     routing_capable=bool(routing))
                 keys = (("credential", auth.credential.id), ("user", auth.agent.owner_user_id))
-                return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}, keys
+                return {"messages": messaging.messages_json(session, msgs, reader_agent=auth.agent), "cursor": cursor}, keys
         return await polls.long_poll(request, api.state.poll_slots, wait, POLL_INTERVAL, poll)
 
     @api.put("/routing")
@@ -343,14 +383,14 @@ def build_api(parent: FastAPI) -> FastAPI:
     @api.get("/messages/{message_id}")
     async def get_message(request: Request, message_id: str):
         def work(session, auth: AgentAuth):
-            return {"message": m(session, messaging.get_visible_message(session, auth.agent, message_id))}
+            return {"message": m(session, messaging.get_visible_message(session, auth.agent, message_id), auth)}
         return await run(request, "messages:read", work)
 
     @api.post("/messages/{message_id}/ack")
     async def ack(request: Request, message_id: str):
         def work(session, auth: AgentAuth):
             msg, acked = messaging.ack(session, auth.agent, message_id)
-            return {"message": m(session, msg), "acked": acked}
+            return {"message": m(session, msg, auth), "acked": acked}
         return await run(request, "messages:ack", work)
 
     @api.post("/messages/{message_id}/events")
@@ -361,7 +401,7 @@ def build_api(parent: FastAPI) -> FastAPI:
             if not isinstance(data, dict) or set(data) - {"state", "detail"} or "state" not in data:
                 raise ApiError(400, "invalid", 'body must be {"state": ..., "detail": ...}')
             msg = messaging.record_event(session, auth.agent, message_id, data["state"], data.get("detail"))
-            return {"message": m(session, msg)}
+            return {"message": m(session, msg, auth)}
         return await run(request, "messages:ack", work, counted=False)
 
     @api.get("/conversations")
@@ -395,7 +435,7 @@ def build_api(parent: FastAPI) -> FastAPI:
         def work(session, auth: AgentAuth):
             conv = messaging.archive_as_machine(session, auth.agent, conversation_id, True, through)
             return {"conversation": messaging.conversation_json(
-                session, conv, "a" if conv.agent_a_id == auth.agent.id else "b")}
+                session, conv, session.get(User, auth.agent.owner_user_id))}
         return await run(request, "messages:send", work, counted=False)
 
     @api.post("/conversations/{conversation_id}/unarchive")
@@ -403,7 +443,7 @@ def build_api(parent: FastAPI) -> FastAPI:
         def work(session, auth: AgentAuth):
             conv = messaging.archive_as_machine(session, auth.agent, conversation_id, False)
             return {"conversation": messaging.conversation_json(
-                session, conv, "a" if conv.agent_a_id == auth.agent.id else "b")}
+                session, conv, session.get(User, auth.agent.owner_user_id))}
         return await run(request, "messages:send", work)
 
     @api.get("/conversations/{conversation_id}/messages")
@@ -414,7 +454,7 @@ def build_api(parent: FastAPI) -> FastAPI:
         def work(session, auth: AgentAuth):
             msgs, cursor = messaging.conversation_messages(
                 session, auth.agent, conversation_id, after=after, limit=limit)
-            return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}
+            return {"messages": messaging.messages_json(session, msgs, reader_agent=auth.agent), "cursor": cursor}
         return await run(request, "messages:read", work)
 
     @api.get("/messages/{message_id}/attachments/{attachment_id}")

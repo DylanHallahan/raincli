@@ -569,6 +569,9 @@ def conversation(request: Request, conversation_id: str, reply_to: str = "", db:
     view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id)
     if view is None:
         raise not_found()
+    if str(view.conversation.id) != conversation_id:  # migration 0010: an old id redirects to where it went
+        query = f"?{request.url.query}" if request.url.query else ""
+        return RedirectResponse(_url(request, f"/app/conversations/{view.conversation.id}{query}"), status_code=302)
     # Viewing acks messages to the person on the website (§16.4). In app mode it never does: live.js acks a
     # message once the window has focus and it has been half on screen (§19.2).
     if not viewer.app_mode and queries.ack_viewed(db, viewer.user, view):

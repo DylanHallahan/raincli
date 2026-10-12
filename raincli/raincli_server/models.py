@@ -22,7 +22,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 DELIVERY_STATES = ("stored", "received", "held", "submitted", "submission_uncertain", "rejected", "replied")
@@ -303,6 +303,7 @@ class Conversation(Base):
     merged_into: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("conversations.id", name="fk_conversations_merged_into"))
     premerge_is_default: Mapped[bool | None] = mapped_column(Boolean)
+    premerge_archive: Mapped[dict | None] = mapped_column(JSONB)  # a reused row's archive state, or {"created": true}
     __table_args__ = (
         CheckConstraint("a_key < b_key", name="ck_conversations_order"),
         CheckConstraint("kind IN ('pair','self','own_agents')", name="ck_conversations_kind"),
