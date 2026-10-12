@@ -317,7 +317,7 @@ def test_feed_appends_id_kind_at_and_the_app_takes_each_once(account, home):
     taken = person.take_notifications(agent(home), now=1_000_100.0)
     assert [(e["kind"], e["at"]) for e in taken] == [("message", "1970-01-12T13:46:40Z"),
                                                      ("escalation", "1970-01-12T13:46:40Z")]
-    assert set(taken[0]) == {"id", "kind", "at"}
+    assert set(taken[0]) == {"id", "kind", "at", "from_kind", "hold", "waiting"}  # facts only, never a name
     assert person.take_notifications(agent(home), now=1_000_100.0) == []
     account.state.person_inbox[EMAIL].append(person_message(3))
     feed.poll_once(wait=0)
@@ -329,7 +329,8 @@ def test_feed_keeps_seven_days_and_500_entries(account, home):
     t = [0.0]
     feed = person.NotificationFeed(agent(home), now=lambda: t[0])
     account.state.person_inbox[EMAIL] = [person_message(n) for n in range(1, 601)]
-    feed.poll_once(wait=0)
+    for _ in range(6):  # a page is at most 100 messages, as the server answers
+        feed.poll_once(wait=0)
     queue = json.loads((person.notify_dir(agent(home)) / "queue.json").read_text())
     assert len(queue["entries"]) == 500 and queue["entries"][0]["seq"] == 101
     t[0] = 8 * 86400.0

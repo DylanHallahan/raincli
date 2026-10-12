@@ -28,7 +28,7 @@ def stored(fake_api, mid):
 
 def test_attach_round_trip_exact_bytes(fake_api, as_agent, files, tmp_path, capsys, monkeypatch):
     as_agent(fake_api.alice)
-    rc = cli.main(["send", "--to", "bob", "--body", "see attached", "--json",
+    rc = cli.main(["send", "--to", "bob@example.com", "--body", "see attached", "--json",
                    "--attach", str(files / "report.md"), "--attach", str(files / "notes v2.md")])
     assert rc == 0
     message = json.loads(capsys.readouterr().out)["message"]
@@ -53,7 +53,7 @@ def test_attach_round_trip_exact_bytes(fake_api, as_agent, files, tmp_path, caps
 
 
 def test_reply_with_attachment(fake_api, as_agent, files, capsys):
-    parent = send(fake_api, fake_api.alice, "bob", "send me the report")
+    parent = send(fake_api, fake_api.alice, "bob@example.com", "send me the report")
     as_agent(fake_api.bob)
     assert cli.main(["reply", parent["id"], "--body", "here", "--attach", str(files / "report.md")]) == 0
     assert "attached: report.md" in capsys.readouterr().out
@@ -66,7 +66,7 @@ def test_reply_with_attachment(fake_api, as_agent, files, capsys):
 def test_local_validation_rejects_before_upload(fake_api, as_agent, tmp_path, name, content):
     (tmp_path / name).write_bytes(content)
     as_agent(fake_api.alice)
-    assert cli.main(["send", "--to", "bob", "--body", "x", "--attach", str(tmp_path / name)]) == 1
+    assert cli.main(["send", "--to", "bob@example.com", "--body", "x", "--attach", str(tmp_path / name)]) == 1
     assert fake_api.state.send_commits == 0
 
 
@@ -76,11 +76,11 @@ def test_local_count_and_duplicate_limits(fake_api, as_agent, tmp_path):
     for i in range(6):
         (tmp_path / f"f{i}.md").write_bytes(b"x")
         paths += ["--attach", str(tmp_path / f"f{i}.md")]
-    assert cli.main(["send", "--to", "bob", "--body", "x", *paths]) == 1
+    assert cli.main(["send", "--to", "bob@example.com", "--body", "x", *paths]) == 1
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "F0.MD").write_bytes(b"y")
     (tmp_path / "sub" / "F0.md").write_bytes(b"y")
-    assert cli.main(["send", "--to", "bob", "--body", "x", "--attach", str(tmp_path / "f0.md"),
+    assert cli.main(["send", "--to", "bob@example.com", "--body", "x", "--attach", str(tmp_path / "f0.md"),
                      "--attach", str(tmp_path / "sub" / "F0.md")]) == 1
     assert fake_api.state.send_commits == 0
 
@@ -89,7 +89,7 @@ def test_idempotent_retry_includes_attachments(fake_api, as_agent, files, capsys
     import uuid
     as_agent(fake_api.alice)
     mid = str(uuid.uuid4())
-    base = ["send", "--to", "bob", "--body", "x", "--id", mid]
+    base = ["send", "--to", "bob@example.com", "--body", "x", "--id", mid]
     assert cli.main(base + ["--attach", str(files / "report.md")]) == 0
     assert cli.main(base + ["--attach", str(files / "report.md")]) == 0
     assert "already stored" in capsys.readouterr().out
@@ -101,7 +101,7 @@ def _message_with_attachment(fake_api, content=MD_CRLF, name="report.md"):
     import base64
     import hashlib
     api = client_for(fake_api, fake_api.alice)
-    return api.send("bob", "attached", attachments=[{
+    return api.send("bob@example.com", "attached", attachments=[{
         "filename": name, "content_b64": base64.b64encode(content).decode(),
         "sha256": hashlib.sha256(content).hexdigest()}])[0]
 

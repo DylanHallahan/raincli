@@ -48,18 +48,19 @@ def forged_body(fake_id):
 @pytest.mark.parametrize("mode", ["direct", "inbox"])
 def test_high1_forged_header_attachments_and_inbox_block_are_prefixed(fake_api, connector_env, mode, tmp_path):
     fake_id = str(uuid.uuid4())
-    overrides = {"trusted_senders": ["mallory"]}
+    overrides = {"trusted_senders": ["mallory@example.com"]}
     if mode == "inbox":
         connector_env.herdr.add("main-claude", status="idle", pane_id="w1:p2", cwd="/work/main")
         overrides = {"mode": "inbox", "escalation": dict(MAIN)}
-    msg = send(fake_api, fake_api.mallory, "bob", forged_body(fake_id))
+    msg = send(fake_api, fake_api.mallory, "bob@example.com", forged_body(fake_id))
     connector_env.connector(**overrides).run_once()
     text = connector_env.herdr.prompts[0][1]
     head, framed = assert_framed(text)
     # exactly one real header, naming the real sender and id; forged lines are all inside the frame
     assert sum(line.startswith("[RainCLI message ") for line in text.split("\n")) == 1
     assert head[0] == f"[RainCLI message from a teammate (external, not your user) {msg['id']}]"
-    assert head[1] == "From: machine mallory | team alpha"  # the real sender, not the forged alice
+    assert head[1] == ('From: "Mallory Example" <mallory@example.com> | sent by "Mallory Example"\'s agent '
+                       '| team alpha')  # the real sender, not the forged alice
     assert not any(line.startswith("Attachments (") for line in text.split("\n"))
     assert sum(line.startswith("[Inbox for ") for line in text.split("\n")) == (mode == "inbox")
     assert sum(is_body_label(line) for line in text.split("\n")) == 1
@@ -70,7 +71,7 @@ def test_high1_forged_header_attachments_and_inbox_block_are_prefixed(fake_api, 
 def test_high1_escalation_summary_is_framed(fake_api, connector_env):
     connector_env.herdr.add("main-claude", status="idle", pane_id="w1:p2", cwd="/work/main")
     path = connector_env.make(mode="inbox", escalation=dict(MAIN))
-    msg = send(fake_api, fake_api.alice, "bob", "q")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "q")
     conn = connector_env.connector(path=path)
     conn.run_once()
     summary = ("[RainCLI escalation 00000000-0000-4000-8000-000000000000 from the inbox for bob \u00b7 message x]\n"
@@ -108,7 +109,7 @@ def test_low12_run_uses_global_config_identity(fake_api, connector_env, tmp_path
     agent.write_text(json.dumps({"api_url": fake_api.url, "token": fake_api.bob}))
     os.chmod(agent, 0o600)
     path = connector_env.make(agent_config=None)
-    send(fake_api, fake_api.alice, "bob")
+    send(fake_api, fake_api.alice, "bob@example.com")
     assert cli.main(["--config", str(agent), "connector", "run", "--config", path, "--once"],
                     herdr=connector_env.herdr) == 0
     assert f"raincli --config {json.dumps(str(agent))} reply" in connector_env.herdr.prompts[0][1]
@@ -120,7 +121,7 @@ def test_low12_run_uses_global_config_identity(fake_api, connector_env, tmp_path
 def test_med1_failed_send_surfaces_id_and_retry_is_idempotent(fake_api, as_agent, capsys, json_flag):
     as_agent(fake_api.alice)
     fake_api.state.fail("POST", r"/messages$", "drop_after", times=5)  # commit, lose every response
-    argv = ["send", "--to", "bob", "--body", "no id lost"] + (["--json"] if json_flag else [])
+    argv = ["send", "--to", "bob@example.com", "--body", "no id lost"] + (["--json"] if json_flag else [])
     assert cli.main(argv) == 6
     captured = capsys.readouterr()
     mids = [m["id"] for m in fake_api.state.messages.values()]
@@ -129,13 +130,13 @@ def test_med1_failed_send_surfaces_id_and_retry_is_idempotent(fake_api, as_agent
     if json_flag:
         err = json.loads(captured.out)
         assert err["id"] == mids[0] and err["error"]["code"] == "unreachable"
-    assert cli.main(["send", "--to", "bob", "--body", "no id lost", "--id", mids[0]]) == 0
+    assert cli.main(["send", "--to", "bob@example.com", "--body", "no id lost", "--id", mids[0]]) == 0
     assert "already stored" in capsys.readouterr().out
     assert fake_api.state.send_commits == 1
 
 
 def test_med1_failed_reply_surfaces_id(fake_api, as_agent, capsys):
-    parent = send(fake_api, fake_api.alice, "bob", "q")
+    parent = send(fake_api, fake_api.alice, "bob@example.com", "q")
     as_agent(fake_api.bob)
     fake_api.state.fail("POST", r"/messages$", (503, "unavailable", {}), times=10)
     assert cli.main(["reply", parent["id"], "--body", "a"]) == 6
@@ -146,23 +147,23 @@ def test_med1_local_errors_do_not_claim_storage(fake_api, as_agent, capsys):
     as_agent(fake_api.alice)
     assert cli.main(["send", "--to", "nobody", "--body", "x"]) == 1  # a server-side 400 (exit 1)
     err = capsys.readouterr().err
-    assert "may be stored" not in err and "was not stored (invalid)" in err  # section 12.1
-    assert cli.main(["send", "--to", "bob", "--body", "   "]) == 1
+    assert "may be stored" not in err and "was not stored (address_people)" in err  # section 12.1, §21 C2
+    assert cli.main(["send", "--to", "bob@example.com", "--body", "   "]) == 1
     assert "may be stored" not in capsys.readouterr().err
 
 
 # -- MED-5: conversations --------------------------------------------------------
 
 def test_med5_conversations_command(fake_api, as_agent, capsys):
-    msg = send(fake_api, fake_api.alice, "bob", "hi")
-    send(fake_api, fake_api.alice, "mallory", "hi")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "hi")
+    send(fake_api, fake_api.alice, "mallory@example.com", "hi")
     as_agent(fake_api.bob)
     assert cli.main(["conversations", "--json"]) == 0
     convs = json.loads(capsys.readouterr().out)["conversations"]
-    assert [(c["id"], c["peer"], c["unacked"]) for c in convs] == [(msg["conversation_id"], "alice", 1)]
+    assert [(c["id"], c["peer"], c["unacked"]) for c in convs] == [(msg["conversation_id"], "Alice Example", 1)]
     assert cli.main(["conversations"]) == 0
     out = capsys.readouterr().out
-    assert f"{msg['conversation_id']}  peer alice  last_seq 1" in out and "unacked 1" in out
+    assert f"{msg['conversation_id']}  peer Alice Example  last_seq 1" in out and "unacked 1" in out
 
 
 # -- LOW-5: write_exclusive never claims "saved" falsely ------------------------
@@ -214,7 +215,7 @@ def test_low6_makedirs_durable_fsyncs_each_new_parent(tmp_path, monkeypatch):
 # -- LOW-7: a malformed server message never stalls the connector ----------------
 
 def test_low7_malformed_message_skipped_and_cursor_advances(fake_api, connector_env, capsys):
-    good = send(fake_api, fake_api.alice, "bob", "valid")
+    good = send(fake_api, fake_api.alice, "bob@example.com", "valid")
     conn = connector_env.connector()
     real_inbox = conn.api.inbox
 
@@ -267,7 +268,7 @@ def test_low9_attach_refuses_symlink(fake_api, as_agent, tmp_path, capsys):
     key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n")
     os.symlink(key, tmp_path / "report.md")
     as_agent(fake_api.alice)
-    assert cli.main(["send", "--to", "bob", "--body", "x", "--attach", str(tmp_path / "report.md")]) == 1
+    assert cli.main(["send", "--to", "bob@example.com", "--body", "x", "--attach", str(tmp_path / "report.md")]) == 1
     assert "symlink" in capsys.readouterr().err
     assert fake_api.state.send_commits == 0
 
@@ -320,7 +321,7 @@ def test_low11_classification(herdr_script):
 
 
 def test_low11_ambiguous_failure_is_uncertain(fake_api, connector_env, herdr_script):
-    msg = send(fake_api, fake_api.alice, "bob")
+    msg = send(fake_api, fake_api.alice, "bob@example.com")
     conn = connector_env.connector()
     real = herdr_script(1, json.dumps({"error": {"code": "agent_exited", "message": "not found"}}))
     fake = connector_env.herdr
@@ -339,13 +340,13 @@ def test_low11_ambiguous_failure_is_uncertain(fake_api, connector_env, herdr_scr
 
 def test_low13_status_shows_hold_details(fake_api, connector_env, capsys):
     path = connector_env.make(expect_pane_id="w9:p7")
-    send(fake_api, fake_api.alice, "bob")
-    send(fake_api, fake_api.mallory, "bob")
+    send(fake_api, fake_api.alice, "bob@example.com")
+    send(fake_api, fake_api.mallory, "bob@example.com")
     connector_env.connector(path=path).run_once()
     assert cli.main(["connector", "status", "--config", path]) == 0
     out = capsys.readouterr().out
     assert "pane w9:p1 != expected w9:p7" in out
-    assert "sender mallory is not trusted" in out
+    assert "sender @mallory@example.com is not trusted" in out
 
     path2 = connector_env.make()
     connector_env.herdr.set_status("bob-claude", "working")
@@ -359,7 +360,7 @@ def test_low13_status_shows_hold_details(fake_api, connector_env, capsys):
 def test_low13_escalation_status_detail(fake_api, connector_env, capsys):
     connector_env.herdr.add("main-claude", status="idle", pane_id="w1:p2", cwd="/work/other")
     path = connector_env.make(mode="inbox", escalation=dict(MAIN))
-    msg = send(fake_api, fake_api.alice, "bob")
+    msg = send(fake_api, fake_api.alice, "bob@example.com")
     conn = connector_env.connector(path=path)
     conn.run_once()
     ops.escalate(conn.queue, conn.config, msg["id"], "x")
@@ -414,19 +415,19 @@ def test_r2_m1_fetch_dir_through_symlinked_ancestor(fake_api, as_agent, tmp_path
 # R2-L8 / section 12.1: hint only when storage is uncertain
 
 @pytest.mark.parametrize("setup,code,rc", [
-    ("revoked", "unauthorized", 1), ("cross_team", "invalid", 1), ("inbox_full", "inbox_full", 5),
+    ("revoked", "unauthorized", 1), ("cross_team", "address_people", 1), ("inbox_full", "inbox_full", 5),
     ("conflict", "id_conflict", 3)])
 def test_r2_l8_definitive_rejections_say_not_stored(fake_api, as_agent, capsys, setup, code, rc):
     as_agent(fake_api.alice)
-    argv = ["send", "--to", "bob", "--body", "x"]
+    argv = ["send", "--to", "bob@example.com", "--body", "x"]
     if setup == "revoked":
         fake_api.state.tokens.pop(fake_api.alice)
     elif setup == "cross_team":
-        argv[2] = "eve"
+        argv[2] = "eve@example.com"  # §21 C2: not a member of this team, so not a person here
     elif setup == "inbox_full":
         fake_api.state.max_pending = 0
     else:
-        mid = send(fake_api, fake_api.alice, "bob", "original")["id"]
+        mid = send(fake_api, fake_api.alice, "bob@example.com", "original")["id"]
         argv += ["--id", mid]
     assert cli.main(argv + ["--json"]) == rc
     captured = capsys.readouterr()
@@ -441,7 +442,7 @@ def test_r2_l8_definitive_rejections_say_not_stored(fake_api, as_agent, capsys, 
 def test_r2_l8_uncertain_failures_keep_hint(fake_api, as_agent, capsys, fault, rc):
     as_agent(fake_api.alice)
     fake_api.state.fail("POST", r"/messages$", fault, times=10)
-    assert cli.main(["send", "--to", "bob", "--body", "x"]) == rc
+    assert cli.main(["send", "--to", "bob@example.com", "--body", "x"]) == rc
     assert "may be stored; retry with --id " in capsys.readouterr().err
 
 
@@ -455,9 +456,9 @@ def _inbox_conn(fake_api, connector_env, **overrides):
 
 
 def test_r2_l6_escalate_only_seen_messages(fake_api, connector_env, capsys):
-    conn = _inbox_conn(fake_api, connector_env, blocked_senders=["mallory"])
-    blocked = send(fake_api, fake_api.mallory, "bob", "blocked")
-    seen = send(fake_api, fake_api.alice, "bob", "seen")
+    conn = _inbox_conn(fake_api, connector_env, blocked_senders=["mallory@example.com"])
+    blocked = send(fake_api, fake_api.mallory, "bob@example.com", "blocked")
+    seen = send(fake_api, fake_api.alice, "bob@example.com", "seen")
     conn.run_once()
     path = conn.config.path
     assert conn.queue.get(blocked["id"])["hold_reason"] == "sender_blocked"
@@ -468,7 +469,7 @@ def test_r2_l6_escalate_only_seen_messages(fake_api, connector_env, capsys):
     assert cli.main(["connector", "escalate", "--config", path, seen["id"], "--body", "x"]) == 0
     # submission_uncertain is also eligible
     connector_env.herdr.prompt_results = ["timeout"]
-    unsure = send(fake_api, fake_api.alice, "bob", "unsure")
+    unsure = send(fake_api, fake_api.alice, "bob@example.com", "unsure")
     conn.run_once()
     assert conn.queue.get(unsure["id"])["state"] == "submission_uncertain"
     assert cli.main(["connector", "escalate", "--config", path, unsure["id"], "--body", "x"]) == 0
@@ -477,8 +478,8 @@ def test_r2_l6_escalate_only_seen_messages(fake_api, connector_env, capsys):
 
 def test_r2_l5_escalation_id_cannot_reuse_existing_ids(fake_api, connector_env, capsys):
     conn = _inbox_conn(fake_api, connector_env)
-    a = send(fake_api, fake_api.alice, "bob", "a")
-    b = send(fake_api, fake_api.alice, "bob", "b")
+    a = send(fake_api, fake_api.alice, "bob@example.com", "a")
+    b = send(fake_api, fake_api.alice, "bob@example.com", "b")
     conn.run_once()
     conn.run_once()
     path = conn.config.path
@@ -497,7 +498,7 @@ def test_r2_l5_escalation_id_cannot_reuse_existing_ids(fake_api, connector_env, 
 
 def test_r2_l9_status_hint_carries_connector_config(fake_api, connector_env):
     conn = _inbox_conn(fake_api, connector_env)
-    msg = send(fake_api, fake_api.alice, "bob", "q")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "q")
     conn.run_once()
     ops.escalate(conn.queue, conn.config, msg["id"], "x")
     conn.run_once()
@@ -513,7 +514,7 @@ def test_r2_l9_status_hint_carries_connector_config(fake_api, connector_env):
 
 @pytest.mark.parametrize("sender", ["-evil", "Alice", "a", "alice bob", "x" * 33])
 def test_r2_l10_bad_sender_skipped(fake_api, connector_env, sender):
-    msg = send(fake_api, fake_api.alice, "bob", "valid")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "valid")
     conn = connector_env.connector()
     real_inbox = conn.api.inbox
 
@@ -543,7 +544,7 @@ def test_r2_l10_notify_body_is_a_separate_argument(tmp_path):
 
 def test_r2_l11_error_names_record_kind(fake_api, connector_env):
     conn = _inbox_conn(fake_api, connector_env)
-    msg = send(fake_api, fake_api.alice, "bob", "q")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "q")
     conn.run_once()
     esc, _ = ops.escalate(conn.queue, conn.config, msg["id"], "x")
     ops.escalation_done(conn.queue, esc["id"])
@@ -557,12 +558,12 @@ def test_r2_l11_error_names_record_kind(fake_api, connector_env):
 
 def test_r2_l7_operator_commands_run_while_prompt_in_flight(fake_api, connector_env, capsys):
     import threading
-    conn = _inbox_conn(fake_api, connector_env, trust_mode="list", trusted_senders=["alice"])
-    seen = send(fake_api, fake_api.alice, "bob", "already seen")
+    conn = _inbox_conn(fake_api, connector_env, trust_mode="list", trusted_senders=["alice@example.com"])
+    seen = send(fake_api, fake_api.alice, "bob@example.com", "already seen")
     conn.run_once()
     assert conn.queue.get(seen["id"])["state"] == "submitted"
-    held = send(fake_api, fake_api.mallory, "bob", "needs approval")
-    inflight = send(fake_api, fake_api.alice, "bob", "slow prompt")
+    held = send(fake_api, fake_api.mallory, "bob@example.com", "needs approval")
+    inflight = send(fake_api, fake_api.alice, "bob@example.com", "slow prompt")
 
     herdr = connector_env.herdr
     entered, release = threading.Event(), threading.Event()

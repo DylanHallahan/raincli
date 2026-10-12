@@ -55,6 +55,8 @@ def add_person(configs, who):
 
 def test_person_round_trip_send_inbox_read_reply_fetch(machines, tmp_path):
     session = add_person(machines, "alice")
+    # §21 C6: with no inbox, a message to alice waits for her in her app (the person inbox).
+    cli(machines, "alice", "inbox", "clear")
     # A teammate's machine messages alice as a person, with an attachment.
     note = tmp_path / "notes.md"
     note.write_bytes(b"# notes\n")
@@ -62,12 +64,13 @@ def test_person_round_trip_send_inbox_read_reply_fetch(machines, tmp_path):
     cli(machines, "bob", "send", "@alice@example.test", "--body-file", "-", "--id", mid, "--attach", str(note),
         input="Could you look at the release notes?")
     [msg] = lines(cli(machines, "alice", "me", "inbox", "--json"))
-    assert msg["id"] == mid and msg["from"] == "bob-agent" and msg["to_endpoint"]["person"] == "alice@example.test"
+    assert msg["id"] == mid and msg["from"] == "@bob@example.test" and msg["to_endpoint"]["person"] == "alice@example.test"
+    assert msg["from_endpoint"] == {"person": "bob@example.test", "display_name": "Bob"} and msg["from_kind"] == "agent"
     # --watch prints it and never marks it read.
     watched = lines(cli(machines, "alice", "me", "inbox", "--watch", "--once", "--timeout", "10", "--json"))
     assert [m["id"] for m in watched] == [mid]
     shown = cli(machines, "alice", "me", "read", mid).stdout
-    assert "| Could you look at the release notes?" in shown and "from: bob-agent" in shown
+    assert "| Could you look at the release notes?" in shown and "bob-agent" not in shown
     assert lines(cli(machines, "alice", "me", "inbox", "--json")) == []  # reading acked it
     dest = tmp_path / "got"
     cli(machines, "alice", "me", "fetch", mid, "--attachment", "1", "--to", str(dest))
@@ -78,7 +81,7 @@ def test_person_round_trip_send_inbox_read_reply_fetch(machines, tmp_path):
     cli(machines, "alice", "me", "reply", mid, "--body-file", "-", "--id", rid, input="On it.")
     reply = json.loads(cli(machines, "bob", "show", rid, "--json").stdout)["message"]
     assert reply["from"] == "@alice@example.test" and reply["in_reply_to"] == mid and reply["to"] == "bob-agent"
-    # The machine replies to the person with raincli reply.
+    # The machine replies to the person with raincli reply: alice has no inbox, so it waits in her app.
     cli(machines, "bob", "reply", rid, "--body-file", "-", input="Thanks!")
     assert [m["body"] for m in lines(cli(machines, "alice", "me", "inbox", "--json"))] == ["Thanks!"]
     # Nothing printed the person session.
@@ -86,10 +89,14 @@ def test_person_round_trip_send_inbox_read_reply_fetch(machines, tmp_path):
         assert session not in cli(machines, "alice", *args).stdout
 
 
-def test_person_sends_to_a_machine_and_bodies_never_come_from_argv(machines):
+def test_person_sends_to_a_person_and_bodies_never_come_from_argv(machines):
     add_person(machines, "alice")
-    cli(machines, "alice", "me", "send", "bob-agent", "--body-file", "-", input="hello from Alice")
-    usage = cli(machines, "alice", "me", "send", "bob-agent", "--body", "x", check=False)
+    cli(machines, "alice", "me", "send", "bob@example.test", "--body-file", "-", input="hello from Alice")
+    [got] = lines(cli(machines, "bob", "inbox", "--json"))  # bob's inbox: his machine (the inbox-mode path)
+    assert got["body"] == "hello from Alice" and got["from"] == "@alice@example.test" and got["from_kind"] == "app"
+    refused = cli(machines, "alice", "me", "send", "bob-agent", "--body-file", "-", input="x", check=False)
+    assert refused.returncode != 0 and "Address people: send to Bob (bob@example.test)" in refused.stderr
+    usage = cli(machines, "alice", "me", "send", "bob@example.test", "--body", "x", check=False)
     assert usage.returncode == 2
     usage = cli(machines, "bob", "send", "@alice@example.test", "--body", "x", check=False)
     assert usage.returncode != 0 and "--body-file" in usage.stderr
@@ -100,9 +107,9 @@ def test_team_required_names_the_teams(machines, world, session):
     identity.add_member(session, world["teams"]["globex"], world["users"]["alice"])
     session.commit()
     add_person(machines, "alice")
-    refused = cli(machines, "alice", "me", "send", "bob-agent", "--body-file", "-", input="hi", check=False)
+    refused = cli(machines, "alice", "me", "send", "bob@example.test", "--body-file", "-", input="hi", check=False)
     assert refused.returncode != 0 and "--team" in refused.stderr and "acme" in refused.stderr
-    cli(machines, "alice", "me", "send", "bob-agent", "--team", "acme", "--body-file", "-", input="hi")
+    cli(machines, "alice", "me", "send", "bob@example.test", "--team", "acme", "--body-file", "-", input="hi")
     # A reply needs no --team: the server takes the parent conversation's team (§16.16 (3)).
     mid = str(uuid.uuid4())
     cli(machines, "bob", "send", "@alice@example.test", "--body-file", "-", "--id", mid, input="question")
@@ -111,32 +118,46 @@ def test_team_required_names_the_teams(machines, world, session):
     assert json.loads(cli(machines, "bob", "show", rid, "--json").stdout)["message"]["in_reply_to"] == mid
 
 
-def test_not_deliverable_offers_the_machine_endpoint(machines, world, server):  # noqa: F811
+def test_an_agent_address_is_refused_with_its_person_only(machines, world, server):  # noqa: F811
+    """§21 C2.2, INV F5: an agent form is refused as address_people, naming the machine's person and nothing about
+    the agent (pre-§21 this was not_deliverable, which told a teammate the agent's state)."""
     bob = ApiClient(server, world["tokens"]["bob"], max_attempts=1)
     bob.report_presence("ready", agents=[{"key": "k" * 16, "name": "reviewer", "type": "claude", "status": "idle",
                                           "reachability": "listed", "role": None, "source": "herdr"}],
                         client={"version": "0.5.0", "update_mode": "manual", "update_state": "current"})
-    refused = cli(machines, "alice", "send", "bob-agent/reviewer", "--body-file", "-", input="hi", check=False)
-    assert refused.returncode != 0
-    assert "can't receive messages (listed only)" in refused.stderr
-    assert "send to bob-agent" in refused.stderr  # offered, never done silently (C10)
+    for to in ("bob-agent/reviewer", "bob-agent/nobody"):
+        refused = cli(machines, "alice", "send", to, "--body-file", "-", input="hi", check=False)
+        assert refused.returncode != 0
+        assert "Address people: send to Bob (bob@example.test)" in refused.stderr
+        assert "listed" not in refused.stderr and "known agent" not in refused.stderr
     assert cli(machines, "bob", "inbox", "--json").stdout.strip() == ""
 
 
 def test_routing_and_named_agent_send(machines, world, server):  # noqa: F811
+    """§21 C3.1b: bob picks a named agent as his inbox; a message to bob reaches it. C4: the reply goes back to the
+    stated agent only while it is live, else to alice's inbox."""
     bob = ApiClient(server, world["tokens"]["bob"], max_attempts=1)
     bob.report_presence("ready", agents=[{"key": "k" * 16, "name": "reviewer", "type": "claude", "status": "idle",
                                           "reachability": "instant", "role": None, "source": "herdr"}],
                         client={"version": "0.5.0", "update_mode": "manual", "update_state": "current"})
     bob.inbox(routing=True)  # bob's connector is routing-capable (S1)
-    cli(machines, "alice", "send", "bob-agent/reviewer", "--from-agent", "planner", "--body-file", "-",
+    picked = json.loads(cli(machines, "bob", "inbox", "set", "reviewer", "--json").stdout)
+    assert picked["inbox"]["machine"] == "bob-agent" and picked["inbox"]["agent"] == "reviewer"
+    mid = str(uuid.uuid4())
+    cli(machines, "alice", "send", "bob@example.test", "--from-agent", "planner", "--id", mid, "--body-file", "-",
         input="please review")
     [msg] = lines(cli(machines, "bob", "inbox", "--agent", "reviewer", "--json"))
-    assert msg["to_endpoint"] == {"machine": "bob-agent", "agent": "reviewer"} and msg["from_agent"] == "planner"
+    assert msg["to_endpoint"] == {"machine": "bob-agent", "agent": "reviewer"}
+    assert msg["from_agent"] is None and "planner" not in json.dumps(msg)  # only the sender's owner sees it (C5.2)
     assert cli(machines, "bob", "inbox", "--json").stdout.strip() == ""  # S1: the machine's inbox only
+    # alice's planner isn't live (alice's machine reports no agents), so bob's answer goes to alice's inbox.
+    cli(machines, "bob", "reply", mid, "--from-agent", "reviewer", "--body-file", "-", input="looks good")
+    [answer] = lines(cli(machines, "alice", "inbox", "--json"))
+    assert answer["body"] == "looks good" and answer["to_endpoint"] == {"machine": "alice-agent"}
+    # A machine that accepts only its inbox takes messages to bob there (the inbox-mode path, C3.1a).
     assert json.loads(cli(machines, "bob", "routing", "--inbox-only", "--json").stdout) == {"routing": "inbox-only"}
-    refused = cli(machines, "alice", "send", "bob-agent/reviewer", "--body-file", "-", input="again", check=False)
-    assert refused.returncode != 0
+    cli(machines, "alice", "send", "bob@example.test", "--body-file", "-", input="again")
+    assert [m["body"] for m in lines(cli(machines, "bob", "inbox", "--json"))] == ["again"]
     assert json.loads(cli(machines, "bob", "routing", "--all", "--json").stdout) == {"routing": "all"}
 
 

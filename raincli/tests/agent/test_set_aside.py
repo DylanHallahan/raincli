@@ -149,7 +149,8 @@ def old_machine_with_held_messages(account, home):
     sessions.ensure_salt(str(state))
     sessions.sessions_dir(str(state), create=True)
     sender = account.state.add_agent("old-teammate")
-    held = ApiClient(account.url, sender).send({"machine": "work-pc", "agent": "reviewer"}, "old secret")[0]["id"]
+    account.state.set_inbox(EMAIL, "alpha", "work-pc", "reviewer")  # §21: the owner's inbox is that named agent
+    held = ApiClient(account.url, sender).send(EMAIL, "old secret")[0]["id"]
     conn = Connector(conn_cfg, ApiClient(account.url, load_config(str(agent(home))).token), FakeHerdr(),
                      Queue(conn_cfg.state_dir), log=lambda line: None, sleep=lambda s: None,
                      sessions_state=str(state))

@@ -14,6 +14,7 @@ from raincli_agent.connector.config import load_connector_config
 from raincli_agent.connector.herdr import FakeHerdr
 from raincli_agent.connector.queue import Queue
 from raincli_agent.connector.runner import EXPIRE_OFFLINE, Connector, frame_record
+from raincli_agent.errors import Invalid
 from raincli_agent.runtime import discovery, floors, hook, sessions
 
 from .conftest import body_of, write_agent_config
@@ -69,7 +70,7 @@ class Env:
 
     def connector(self, **overrides):
         data = {"agent_config": self.agent_cfg, "herdr_agent": "bob-claude", "expect_pane_id": "w9:p1",
-                "state_dir": str(self.tmp / "queue"), "trusted_senders": ["alice"], "prompt_timeout": 5}
+                "state_dir": str(self.tmp / "queue"), "trusted_senders": ["alice@example.com"], "prompt_timeout": 5}
         data.update(overrides)
         path = self.tmp / "connector.json"
         path.write_text(json.dumps({k: v for k, v in data.items() if v is not None}))
@@ -79,8 +80,12 @@ class Env:
                          sessions_state=str(self.state))
 
     def send(self, agent, body="hello", sender=None):
-        to = {"machine": "bob", "agent": agent} if agent else "bob"
-        return ApiClient(self.api.url, sender or self.api.alice).send(to, body)[0]["id"]
+        """§21: a message names a person. Bob's inbox decides where it lands: his machine's endpoint (``agent``
+        None, the inbox-mode path) or the named agent ``agent`` on it (the named path, C3.1b)."""
+        st = self.api.state
+        bob = st.owners[st.tokens[self.api.bob]]
+        st.set_inbox(bob, "alpha", "bob", agent)
+        return ApiClient(self.api.url, sender or self.api.alice).send(bob, body)[0]["id"]
 
     def hook_session(self, session_id, name, event="SessionStart", kind="claude"):
         out = io.BytesIO()
@@ -121,7 +126,7 @@ def test_a_v04_connector_delivers_none_of_the_agent_messages(env, tmp_path):
     (and pending attachments), prompts nothing and hands nothing over."""
     env.herdr.add("reviewer", status="working")
     ids = [env.send("reviewer", f"m{i}") for i in range(4)]
-    conn = env.connector()
+    conn = env.connector(trusted_senders=["alice"])  # v0.4 reads this config: handles only
     conn.run_once()
     states = (q.AGENT_RECEIVED, q.AGENT_HELD, q.AGENT_SUBMITTING, q.AGENT_HANDED_OVER)
     with conn.queue.lock():
@@ -173,7 +178,7 @@ def test_two_named_herdr_agents_each_get_their_own(env, fake_api):
         assert local(conn, mid)["state"] == q.SUBMITTED
         assert env.events(mid) == [("submitted", "delivered")]  # a fixed code; the name stays local
     text = env.herdr.prompts[0][1]
-    assert "\nTo: reviewer on bob\n" in text and '--from-agent "reviewer"' in text
+    assert "\nTo: you, as Bob Example's inbox\n" in text and '--from-agent "reviewer"' in text
 
 
 def test_inbox_pins_never_apply_to_named_agents(env):
@@ -238,7 +243,7 @@ def test_hook_session_by_name_gets_a_next_turn_handover_with_the_held_age(env):
     assert box.parent.name == "by-name" and (box / f"{mid}.md").is_file()
     context = env.hook_session("s1", "notes", event="UserPromptSubmit")
     assert body_of(context) == "please read"
-    assert "\nTo: notes on bob | held 2 h before this turn\n" in context
+    assert "\nTo: you, as Bob Example's inbox | held 2 h before this turn\n" in context
     conn.run_once()
     assert local(conn, mid)["state"] == q.SUBMITTED
 
@@ -278,7 +283,7 @@ def test_person_sender_and_its_frame(env, fake_api):
     conn = env.connector(trust_mode="team")
     conn.run_once()
     text = env.herdr.prompts[0][1]
-    assert '\nFrom: "Carol C" <carol@example.com> | team alpha\n' in text
+    assert '\nFrom: "Carol C" <carol@example.com> | sent by "Carol C" in the app | team alpha\n' in text  # §21
     assert local(conn, mid)["sender"] == "@carol@example.com"
 
 
@@ -381,14 +386,17 @@ def test_routing_capable_raises_every_floor(tmp_path, monkeypatch):
 
 def test_machine_mode_trusts_the_owners_own_machines_and_person(env, fake_api):
     """§16.16 (2): the server's from_same_owner is in the machine-mode default trust set, so list
-    mode needs no list of the owner's machines; a blocked sender stays blocked."""
+    mode needs no list of the owner's own sends; a blocked sender stays blocked. §21 C13 H2: the owner's
+    other machine can't address this one any more (it writes to the owner, as a person)."""
     env.herdr.add("reviewer", status="idle")
     st = fake_api.state
-    carol = st.add_agent("carol")
-    for token, owner in ((fake_api.bob, "bob@example.test"), (fake_api.alice, "bob@example.test"),
-                         (carol, "carol@example.test")):
-        st.owners[st.tokens[token]] = owner
-    own_machine = env.send("reviewer", "from my other machine")
+    carol = st.add_agent("carol", owner="carol@example.test")
+    st.set_owner(fake_api.bob, "bob@example.test", "Bob")
+    st.set_owner(fake_api.alice, "bob@example.test", "Bob")
+    with pytest.raises(Invalid, match="Address people: send to a teammate's name or email"):
+        ApiClient(env.api.url, fake_api.alice).send({"machine": "bob", "agent": "reviewer"}, "from my other machine")
+    to_owner = ApiClient(env.api.url, fake_api.alice).send("bob@example.test", "from my other machine")[0]
+    assert to_owner["to_endpoint"] == {"person": "bob@example.test", "display_name": "Bob"}  # the owner's app
     other = env.send("reviewer", "from carol", sender=carol)
     own_person = st.person_message("bob", "bob@example.test", "Bob", "from me", agent="reviewer")
     runtime = env.tmp / "runtime.json"
@@ -399,14 +407,14 @@ def test_machine_mode_trusts_the_owners_own_machines_and_person(env, fake_api):
                      log=lambda line: None, sleep=lambda s: None, sessions_state=str(env.state))
     for _ in range(3):
         conn.run_once()
-    assert local(conn, own_machine)["state"] == q.SUBMITTED
+    assert conn.queue.load(to_owner["id"]) is None
     assert local(conn, own_person)["state"] == q.SUBMITTED
     assert (local(conn, other)["state"], local(conn, other)["hold_reason"]) == (q.AGENT_HELD, "approval_required")
     runtime.write_text(json.dumps({"machine_config": env.agent_cfg, "state_dir": "machine-state",
-                                   "trust_mode": "list", "blocked_senders": ["alice"]}))
+                                   "trust_mode": "list", "blocked_senders": ["bob@example.test"]}))
     cfg = load_connector_config(str(runtime))
     conn = Connector(cfg, ApiClient(env.api.url, env.api.bob), env.herdr, Queue(cfg.state_dir),
                      log=lambda line: None, sleep=lambda s: None, sessions_state=str(env.state))
-    blocked = env.send("reviewer", "blocked even if mine")
+    blocked = st.person_message("bob", "bob@example.test", "Bob", "blocked even if mine", agent="reviewer")
     conn.run_once()
     assert local(conn, blocked)["hold_reason"] == "sender_blocked"

@@ -94,7 +94,7 @@ def connector_env(tmp_path, fake_api):
 
     def make(**overrides):
         data = {"agent_config": agent_cfg, "herdr_agent": "bob-claude",
-                "state_dir": str(tmp_path / "state"), "trusted_senders": ["alice"],
+                "state_dir": str(tmp_path / "state"), "trusted_senders": ["alice@example.com"],
                 "recheck_interval": 0.05, "prompt_timeout": 5}
         data.update(overrides)
         data = {k: v for k, v in data.items() if v is not None}

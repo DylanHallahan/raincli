@@ -60,7 +60,7 @@ def env(tmp_path, fake_api):
     def connector():
         path = tmp_path / "connector.json"
         path.write_text(json.dumps({"agent_config": agent_cfg, "inbox": {"hook": "codex", "name": "my project"},
-                                    "state_dir": str(tmp_path / "queue"), "trusted_senders": ["alice"]}))
+                                    "state_dir": str(tmp_path / "queue"), "trusted_senders": ["alice@example.com"]}))
         cfg = load_connector_config(str(path))
         return Connector(cfg, ApiClient(fake_api.url, fake_api.bob), FakeHerdr(), Queue(cfg.state_dir),
                          log=lambda line: None, sleep=lambda s: None, clock=lambda: now[0],
@@ -110,7 +110,7 @@ def test_codex_next_turn_claim_is_additional_context_above_2500_tokens(env, fake
     env.run("SessionStart")
     conn = env.connector()
     body = ("Ünïcödé ✓ report line with detail. " * 400)[:15000]
-    msg = send(fake_api, fake_api.alice, "bob", body)
+    msg = send(fake_api, fake_api.alice, "bob@example.com", body)
     conn.run_once()
     assert conn.queue.get(msg["id"])["state"] == "handed_over"
     code, output = env.run("UserPromptSubmit")
@@ -137,7 +137,7 @@ def test_codex_claim_cap_matches_the_configured_limit(env):
 def test_codex_session_start_also_claims(env, fake_api):
     env.run("SessionStart")
     conn = env.connector()
-    msg = send(fake_api, fake_api.alice, "bob", "hello codex")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "hello codex")
     conn.run_once()
     code, output = env.run("SessionStart", {**FIXTURES["SessionStart"], "source": "resume"})
     assert code == "claimed" and output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
@@ -148,7 +148,7 @@ def test_connector_accepts_a_codex_inbox_and_holds_oversize(env, fake_api):
     conn = env.connector()
     assert conn.config.inbox_hook == ("codex", "my project")
     env.run("SessionStart")
-    msg = send(fake_api, fake_api.alice, "bob", "日" * 16000)  # 48 KB of UTF-8: over 32 KiB
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "日" * 16000)  # 48 KB of UTF-8: over 32 KiB
     conn.run_once()
     rec = conn.queue.get(msg["id"])
     assert (rec["state"], rec["hold_reason"]) == ("held", "too_large_for_hook")

@@ -196,7 +196,7 @@ def test_launcher_real_client_reads_body_from_stdin(tmp_path):
         write_config(tmp_path / "agent.json", server.url, server.state.add_agent("alice"))
         server.state.add_agent("bob")
         base = [sys.executable, str(root / "launch.py"), "--config", str(tmp_path / "agent.json")]
-        result = subprocess.run([*base, "send", "--to", "bob", "--body-file", "-"],
+        result = subprocess.run([*base, "send", "--to", "bob@example.com", "--body-file", "-"],
                                 input="piped body", capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
         assert [m["body"] for m in server.state.messages.values()] == ["piped body"]

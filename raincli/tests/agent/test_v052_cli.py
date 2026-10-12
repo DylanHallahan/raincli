@@ -61,7 +61,7 @@ def test_utc_flag_and_unparseable_values(zone, utc_flag):
 
 
 def message_with_times(fake_api):
-    msg = send(fake_api, fake_api.alice, "bob", "hello")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "hello")
     record = fake_api.state.messages[msg["id"]]
     record["created_at"] = INSTANT
     record["delivery_updated_at"] = "2026-10-10T14:05:00Z"
@@ -94,7 +94,7 @@ def test_conversations_last_at_is_local(fake_api, as_agent, zone, capsys):
 # -- §17.2 archived conversations -------------------------------------------------------------------
 
 def test_archive_unarchive_and_the_lists(fake_api, as_agent, capsys):
-    msg = send(fake_api, fake_api.alice, "bob", "hello")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "hello")
     cid = msg["conversation_id"]
     as_agent(fake_api.bob)
     assert cli.main(["archive", cid]) == 0
@@ -105,10 +105,10 @@ def test_archive_unarchive_and_the_lists(fake_api, as_agent, capsys):
     assert capsys.readouterr().out.strip() == "No conversations."
     assert cli.main(["conversations", "--archived"]) == 0
     line = capsys.readouterr().out
-    assert cid in line and "archived " in line and "by bob" in line
+    assert cid in line and "archived " in line and "by Bob Example" in line  # §21: by name
     assert cli.main(["conversations", "--all", "--json"]) == 0
     [conv] = json.loads(capsys.readouterr().out)["conversations"]
-    assert conv["archived_at"] and conv["archived_by"] == {"machine": "bob"}
+    assert conv["archived_at"] and conv["archived_by"] == {"person": "bob@example.com", "display_name": "Bob Example"}
     # The other side sees it archived too, and may unarchive it for both.
     as_agent(fake_api.alice)
     assert cli.main(["conversations", "--json"]) == 0
@@ -124,8 +124,8 @@ def test_archive_unarchive_and_the_lists(fake_api, as_agent, capsys):
 
 def test_archive_records_the_newest_seq_seen(fake_api, as_agent, capsys):
     """§17.3 A1: the archive carries the conversation's last_seq as listed, or --through-seq."""
-    first = send(fake_api, fake_api.alice, "bob", "one")
-    second = send(fake_api, fake_api.alice, "bob", "two")
+    first = send(fake_api, fake_api.alice, "bob@example.com", "one")
+    second = send(fake_api, fake_api.alice, "bob@example.com", "two")
     seqs = sorted(m["seq"] for m in fake_api.state.messages.values())
     as_agent(fake_api.bob)
     assert cli.main(["archive", first["conversation_id"], "--through-seq", str(seqs[0])]) == 0
@@ -142,7 +142,7 @@ def test_archive_records_the_newest_seq_seen(fake_api, as_agent, capsys):
 
 def test_the_cli_always_sends_archived(fake_api, as_agent):
     """§17.3 A4: a machine credential sending none would get include."""
-    send(fake_api, fake_api.alice, "bob", "one")
+    send(fake_api, fake_api.alice, "bob@example.com", "one")
     as_agent(fake_api.bob)
     for argv, expected in ((["conversations"], "exclude"), (["conversations", "--archived"], "only"),
                            (["conversations", "--all"], "include")):
@@ -151,17 +151,17 @@ def test_the_cli_always_sends_archived(fake_api, as_agent):
 
 
 def test_a_new_message_brings_an_archived_conversation_back(fake_api, as_agent):
-    msg = send(fake_api, fake_api.alice, "bob", "first")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "first")
     api = ApiClient(fake_api.url, fake_api.bob)
     api.archive(msg["conversation_id"])
     assert api.conversations() == []
-    send(fake_api, fake_api.alice, "bob", "second")
+    send(fake_api, fake_api.alice, "bob@example.com", "second")
     [conv] = api.conversations()
     assert conv["id"] == msg["conversation_id"] and conv["archived_at"] is None
 
 
 def test_client_query_and_outsiders(fake_api):
-    msg = send(fake_api, fake_api.alice, "bob", "hello")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "hello")
     eve = fake_api.state.add_agent("eve")
     from raincli_agent.errors import NotFound
     with pytest.raises(NotFound):
@@ -176,10 +176,10 @@ def test_client_query_and_outsiders(fake_api):
 def test_the_connector_delivers_to_an_archived_conversation_exactly_as_to_an_active_one(fake_api, connector_env):
     """Two conversations with bob: one archived, one active. A new message in each is received,
     acked, framed, submitted and reported the same way, and the archived one returns to the list."""
-    archived_first = send(fake_api, fake_api.alice, "bob", "old thread")
+    archived_first = send(fake_api, fake_api.alice, "bob@example.com", "old thread")
     carol = fake_api.state.add_agent("carol")
-    active_first = send(fake_api, carol, "bob", "active thread")
-    conn = connector_env.connector(trusted_senders=["alice", "carol"])
+    active_first = send(fake_api, carol, "bob@example.com", "active thread")
+    conn = connector_env.connector(trusted_senders=["alice@example.com", "carol@example.com"])
     for _ in range(3):  # one submission per iteration: deliver both first messages
         conn.run_once()
     bob_api = ApiClient(fake_api.url, fake_api.bob)
@@ -187,12 +187,12 @@ def test_the_connector_delivers_to_an_archived_conversation_exactly_as_to_an_act
     assert [c["id"] for c in bob_api.conversations()] == [active_first["conversation_id"]]
     prompts_before = len(connector_env.herdr.prompts)
     connector_env.herdr.set_status("bob-claude", "idle")  # the same conditions for both messages
-    to_archived = send(fake_api, fake_api.alice, "bob", "to the archived thread")
+    to_archived = send(fake_api, fake_api.alice, "bob@example.com", "to the archived thread")
     assert to_archived["conversation_id"] == archived_first["conversation_id"]
     for _ in range(3):  # one at a time, so the agent is idle for each
         conn.run_once()
     connector_env.herdr.set_status("bob-claude", "idle")
-    to_active = send(fake_api, carol, "bob", "to the active thread")
+    to_active = send(fake_api, carol, "bob@example.com", "to the active thread")
     for _ in range(3):
         conn.run_once()
 

@@ -101,7 +101,7 @@ def test_next_turn_waits_for_an_idle_inbox_however_long(env, monkeypatch):  # no
         connector = env.connector()
         env.session("s1")
         env.clock.now += 3 * 3600  # the user is away for hours
-        mid = send(env.api, env.api.alice, "bob", "hello")["id"]
+        mid = send(env.api, env.api.alice, "bob@example.com", "hello")["id"]
         connector.run_once()
         assert connector.queue.get(mid)["state"] == q.HANDED_OVER
         env.clock.now += 3 * 3600
@@ -111,7 +111,7 @@ def test_next_turn_waits_for_an_idle_inbox_however_long(env, monkeypatch):  # no
         connector.run_once()
         assert connector.queue.get(mid)["state"] == q.SUBMITTED
         # Its process exits with a file pending: reclaimed and held offline.
-        other = send(env.api, env.api.alice, "bob", "second")["id"]
+        other = send(env.api, env.api.alice, "bob@example.com", "second")["id"]
         connector.run_once()
         assert connector.queue.get(other)["state"] == q.HANDED_OVER
         sleeper.kill()
@@ -128,7 +128,7 @@ def test_next_turn_waits_for_an_idle_inbox_however_long(env, monkeypatch):  # no
 def test_slow_hook_claim_is_submitted_not_uncertain(env):  # noqa: F811
     connector = env.connector()
     env.session("s1")
-    mid = send(env.api, env.api.alice, "bob", "hello")["id"]
+    mid = send(env.api, env.api.alice, "bob@example.com", "hello")["id"]
     connector.run_once()
     key = sessions.agent_key(env.salt, "claude:s1")
     inbox = Path(env.state, "sessions", key + ".inbox")
@@ -174,7 +174,7 @@ def test_unsafe_inbox_dir_holds_without_growing_history(env):  # noqa: F811
     key = sessions.agent_key(env.salt, "claude:s1")
     inbox = Path(sessions.inbox_dir(str(env.state), key, create=True))
     inbox.chmod(0o755)
-    mid = send(env.api, env.api.alice, "bob", "hello")["id"]
+    mid = send(env.api, env.api.alice, "bob@example.com", "hello")["id"]
     for _ in range(50):
         connector.run_once()
     record = connector.queue.get(mid)

@@ -170,7 +170,7 @@ def test_pid_from_another_namespace_is_not_determinable():
 def test_put_back_claim_resets_the_grace(env):  # noqa: F811
     connector = env.connector()
     env.session("s1")
-    mid = send(env.api, env.api.alice, "bob", "hello")["id"]
+    mid = send(env.api, env.api.alice, "bob@example.com", "hello")["id"]
     connector.run_once()
     key = sessions.agent_key(env.salt, "claude:s1")
     inbox = Path(env.state, "sessions", key + ".inbox")
