@@ -615,23 +615,23 @@ class AppWindow:
         the messages on screen (§19.2). WebView2's controller follows the window instead: ``IsVisible`` false while
         the window is hidden (the page is hidden and unfocused), true, with focus, once shown.
 
-        The controller is set directly: the WinForms control passes its own ``Visible`` on only when it changes,
-        and pywebview's hidden start (shown at opacity 0, then hidden) happens before the controller exists, which
-        leaves it at its default, visible (Windows e2e D5h). Runs on the UI thread; a no-op without the native
-        control (tests, other platforms)."""
+        Only the controller is hidden, never the WinForms control: a control hidden before the controller exists
+        (pywebview's hidden start) stayed hidden once shown, a white window (v0.5.6). Before the controller exists
+        this does nothing but remember the state, which _core_ready applies. Showing always makes the control
+        visible as well. Runs on the UI thread; a no-op without the native control (tests, other platforms)."""
         try:
             control = self.window.native.browser.webview
         except AttributeError:
             return False
 
         def apply():
+            if visible and getattr(control, "Visible", True) is False:
+                control.Visible = True
             controller = self._controller(control)
             if controller is not None:
                 controller.IsVisible = bool(visible)
-            else:
-                control.Visible = bool(visible)
-            self._log(f"page visibility: {'visible' if visible else 'hidden'} "
-                      f"({'controller' if controller is not None else 'control only'})")
+            self._log(f"page visibility: {'visible' if visible else 'hidden'} (control.Visible={getattr(control, 'Visible', 'unknown')}, "
+                      f"controller.IsVisible={controller.IsVisible if controller is not None else 'no controller yet'})")
             if visible and focus:
                 self._focus_page(control, controller)
         if getattr(control, "InvokeRequired", False):

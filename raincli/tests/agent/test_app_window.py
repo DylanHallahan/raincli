@@ -912,11 +912,13 @@ def test_a_hidden_window_keeps_its_page_hidden_until_shown(tmp_path):
     control = FakeControl()
     win.native = types.SimpleNamespace(browser=types.SimpleNamespace(webview=control))
     assert app.attach_native() is True
-    assert control.Visible is False and app.visible is False  # a hidden start: the page is told it is hidden
+    # v0.5.6: without a controller yet, a hidden start only remembers the state (_core_ready applies it); the
+    # WinForms control itself is never hidden.
+    assert control.Visible is True and app.visible is False
     app.show()
     assert control.Visible is True and control.focused == 1 and win.shown == 1
     assert app.on_closing() is False  # closed to the tray
-    assert control.Visible is False and win.hidden == 1
+    assert control.Visible is True and win.hidden == 1
     app.show()
     assert control.Visible is True and control.focused == 2
 
@@ -986,4 +988,48 @@ def test_the_controller_itself_is_set_when_it_exists(tmp_path, monkeypatch, webv
     assert controller.IsVisible is True  # focus goes through the controller (MoveFocus), not control.Focus()
     app.on_closing()
     assert controller.IsVisible is False
+
+
+def _core(app):
+    app._core_ready(types.SimpleNamespace(Settings=types.SimpleNamespace(UserAgent="UA"),
+                                          WebResourceRequested=Events(), AddWebResourceRequestedFilter=lambda *a: None,
+                                          RemoveWebResourceRequestedFilter=lambda *a: None), context_all="all")
+
+
+def test_a_hidden_start_then_show_makes_the_control_and_the_page_visible(tmp_path, monkeypatch, webview2_core):
+    """v0.5.6, the white window: pywebview attaches before WebView2's controller exists, WebView2 comes up, then the
+    window is shown. The WinForms control must end up visible as well as the controller: v0.5.5 hid the control at
+    attach (no controller yet) and only ever showed the controller, so the window stayed white."""
+    logged = []
+    app, win, _ = make(tmp_path, log=logged.append)
+    control = FakeControl()
+    win.native = types.SimpleNamespace(browser=types.SimpleNamespace(webview=control), Activated=Events())
+    holder = {"controller": None}
+    monkeypatch.setattr(type(app), "_controller", staticmethod(lambda c: holder["controller"]))
+    app.attach_native()  # before_show of a hidden start: no controller yet
+    assert control.Visible is True
+    holder["controller"] = types.SimpleNamespace(IsVisible=True, MoveFocus=lambda reason: None)
+    _core(app)  # WebView2 is up: the remembered state reaches the controller
+    assert holder["controller"].IsVisible is False and control.Visible is True
+    app.show()
+    assert control.Visible is True and holder["controller"].IsVisible is True
+    app.on_closing()  # close to the tray: only the controller is hidden
+    assert control.Visible is True and holder["controller"].IsVisible is False
+    app.show()  # reopened from the tray
+    assert control.Visible is True and holder["controller"].IsVisible is True
+    lines = [line for line in logged if "page visibility" in line]
+    assert len(lines) == 5 and all("control.Visible=True" in line for line in lines)  # both values logged
+    assert "controller.IsVisible=no controller yet" in lines[0] and "controller.IsVisible=True" in lines[-1]
+
+
+def test_showing_restores_a_hidden_control(tmp_path, monkeypatch, webview2_core):
+    """However the control came to be hidden, showing the window makes it visible again."""
+    app, win, _ = make(tmp_path)
+    control = FakeControl()
+    control.Visible = False
+    controller = types.SimpleNamespace(IsVisible=False, MoveFocus=lambda reason: None)
+    win.native = types.SimpleNamespace(browser=types.SimpleNamespace(webview=control))
+    monkeypatch.setattr(type(app), "_controller", staticmethod(lambda c: controller))
+    app.show()
+    assert control.Visible is True and controller.IsVisible is True
 
