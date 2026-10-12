@@ -866,17 +866,25 @@ def inbox(session: Session, agent: Agent, *, after: int = 0, limit: int = 100,
 
 
 def person_inbox(session: Session, user: User, *, after: int = 0, limit: int = 100,
-                 include_acked: bool = False) -> tuple[list[Message], int]:
-    """Messages addressed to the person in teams they still belong to, ``seq > after`` ascending."""
+                 include_acked: bool = False, routed: bool = False) -> tuple[list[Message], int]:
+    """Messages addressed to the person in teams they still belong to, ``seq > after`` ascending. With ``routed``
+    (§21 PR6: the app's toasts), also the messages routed to the person's own machines (their inbox, replies to
+    their agents), except those the person or their own machines sent; never acked by this read."""
     teams = select(Membership.team_id).where(Membership.user_id == user.id)
+    mine = select(Agent.id).where(Agent.owner_user_id == user.id)
+    to_me = Message.recipient_user_id == user.id
+    if routed:
+        to_me = or_(to_me, and_(Message.recipient_agent_id.in_(mine),
+                                or_(Message.sender_user_id.is_(None), Message.sender_user_id != user.id),
+                                or_(Message.sender_agent_id.is_(None), Message.sender_agent_id.not_in(mine))))
     stmt = (
-        select(Message).where(Message.recipient_user_id == user.id, Message.team_id.in_(teams),
+        select(Message).where(to_me, Message.team_id.in_(teams),
                               or_(Message.seq > after, and_(Message.redeliver.is_(True), Message.acked_at.is_(None))))
         .order_by(Message.seq).limit(_clamp(limit, 1, INBOX_LIMIT_MAX))
         .execution_options(populate_existing=True)
     )
-    if not include_acked:
-        stmt = stmt.where(Message.acked_at.is_(None))
+    if not include_acked:  # a machine's ack of a routed message is not the person reading it
+        stmt = stmt.where(or_(Message.acked_at.is_(None), Message.recipient_user_id.is_(None)))
     messages = list(session.scalars(stmt))
     return messages, max([after, *(m.seq for m in messages)])
 
@@ -1323,7 +1331,7 @@ def inbox_json(session: Session, row: PersonInbox | None) -> dict | None:
 
 
 def set_person_inbox(session: Session, user: User, team_id: uuid.UUID, machine_id: uuid.UUID, agent_name: str, *,
-                     deliver_waiting: bool = True, via: str) -> dict:
+                     deliver_waiting: bool = True, via: str, check_live: bool = True) -> dict:
     """Pick ``(machine, agent_name)`` as ``user``'s inbox in the team (C6, C8). Unacked messages at the previous
     inbox move to the new one; the waiting messages are delivered too when ``deliver_waiting``. Idempotent: the
     same inbox again moves nothing. Returns ``{inbox, moved, stayed, delivered_waiting}``; the caller commits."""
@@ -1335,7 +1343,7 @@ def set_person_inbox(session: Session, user: User, team_id: uuid.UUID, machine_i
             or machine.owner_user_id != user.id or machine.revoked_at is not None:
         raise _inbox_invalid(machine if machine is not None and machine.owner_user_id == user.id else None)
     if not isinstance(agent_name, str) or not valid_agent_name(agent_name) or agent_name.startswith("-") \
-            or not _accepted_inbox_name(session, machine, agent_name):
+            or (check_live and not _accepted_inbox_name(session, machine, agent_name)):  # operator: check_live=False
         raise _inbox_invalid(machine)
     row = _lock_inbox_row(session, user.id, team_id, write=True)
     if row is not None and (row.agent_id, row.agent_name) == (machine.id, agent_name):
