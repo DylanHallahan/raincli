@@ -93,8 +93,8 @@ def test_home_page_states_the_v05_trust_defaults(client):
     """Machine mode and inbox connectors default to trust_mode "team"; direct-delivery connector configs
     to "list" (connector/config.py). The Phase B homepage states the team default and how to switch."""
     page = " ".join(re.sub(r"<[^>]+>", "", text(client.get("/").text)).split())
-    assert ("Only people on your team. Their messages go straight to the agent they picked, marked as coming "
-            "from a teammate.") in page
+    assert ("Only people on your team. Their messages are delivered straight away, marked as coming from a "
+            "teammate.") in page
     assert ("If you'd rather approve each sender first, turn on approval mode in Settings or with "
             "raincli trust --mode list.") in page
     assert "by default asks before passing on messages" not in page

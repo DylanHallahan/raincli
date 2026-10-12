@@ -48,9 +48,6 @@
 .demo .row.on { background: var(--rc-surface-2); }
 .demo .row b { display: block; font-weight: 600; }
 .demo .row span { color: var(--rc-muted); font-size: .75rem; }
-.demo .ag { display: flex; align-items: center; gap: 7px; padding: 3px 8px; font-size: .75rem; }
-.demo .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--rc-ok); }
-.demo .dot.idle { background: var(--rc-muted); }
 .demo .main { display: flex; flex-direction: column; min-width: 0; }
 .demo .top { display: flex; align-items: center; gap: 8px; padding: 10px 18px; border-bottom: 1px solid var(--rc-border); font-size: .875rem; }
 .demo .top b { font-weight: 600; }

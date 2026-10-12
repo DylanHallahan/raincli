@@ -19,7 +19,7 @@ SECTIONS = [
     ("demo", [
         "Example",
         "Maya pastes her AI's answer into chat. Jon pastes it into his.",
-        "Here, Maya's agent sends the question to Jon's agent itself.",
+        "Here, Maya's agent sends the question to Jon.",
         "Maya can see how far it got.",
         "Jon's agent answers and attaches its report.",
         "Nobody pasted anything, and both of them saw the whole thread.",
@@ -29,13 +29,12 @@ SECTIONS = [
         "1 Install and sign in",
         "On Windows, install the RainCLI app. It needs no admin rights and no Python. On Linux, or over SSH, run "
         "raincli login. Either way you sign in with your email and password.",
-        "2 Your agents show up for the team",
-        "Each machine lists its Claude Code, Codex and Herdr sessions. Teammates see the names and whether each one "
-        "is ready, busy or offline. They never see prompts, paths or transcripts.",
-        "3 Send to an agent",
-        "Your agent sends with the raincli CLI, or you write in the app. Pick the teammate and the agent. Herdr "
-        "agents get it right away. Claude Code and Codex sessions get it at their next turn, and the conversation "
-        "header tells you which.",
+        "2 RainCLI finds your agents",
+        "Sign in once per machine and it picks up your Claude Code, Codex and Herdr sessions. They never send "
+        "prompts, paths or transcripts.",
+        "3 Send it to a teammate",
+        "Your agent uses the raincli CLI, or you write in the app. Herdr agents get it right away. Claude Code and "
+        "Codex get it at their next turn, and the conversation header tells you which.",
         "4 Watch it land",
         "Each message shows stored, received, submitted and replied as they happen. The app updates by itself, so "
         "replies show up without a refresh.",
@@ -43,7 +42,7 @@ SECTIONS = [
     ("app", [
         "In the app",
         "Instant or Next turn. How soon the agent will see your message.",
-        "Ready, Busy, Offline. Shown next to every agent on your team.",
+        "Ready, Busy, Offline. You can see whether the other side is around before you send.",
         "A heads-up when a machine is quiet. If a teammate's machine hasn't connected in a while, you're told before "
         "you send.",
         "Reports, attached. Markdown files go with the message, with their size and checksum.",
@@ -52,8 +51,7 @@ SECTIONS = [
     ]),
     ("trust", [
         "Who can reach your agents",
-        "Only people on your team. Their messages go straight to the agent they picked, marked as coming from a "
-        "teammate.",
+        "Only people on your team. Their messages are delivered straight away, marked as coming from a teammate.",
         "A message can ask your agent for something. It can't change the agent's instructions or permissions, and "
         "nothing runs by itself.",
         "If you'd rather approve each sender first, turn on approval mode in Settings or with "
@@ -82,7 +80,7 @@ SECTIONS = [
         "FAQ",
         "Is it free? Yes, during the pilot.",
         "Does everyone need the same AI tool? No. One person can use Claude Code, another Codex, another Herdr. "
-        "Each agent gets its own address.",
+        "Everyone on the team can be reached, whatever agent they use.",
         "Can a teammate's agent take over mine? No. It can send a request. Your agent decides what to do with it "
         "within its current job, and a message can't change instructions or permissions.",
         "What if their agent is offline? The message waits. Their machine picks it up when it's back, and you'll "
@@ -174,3 +172,33 @@ def test_no_external_resources_and_the_logo_is_inline(home):
     assert "<img" not in home and "fonts" not in home
     assert home.count('<svg class="mark"') == 2  # the header and the demo's sidebar
     assert re.search(r'style="', home) is None and "<style" not in home
+
+
+DEMO = [
+    "Team chat · #checkout", "Jon", "Checkout vs. the new orders API", "Priya", "Retry cap question", "Earlier", "Sam",
+    "Load test report", "Maya's agent · 10:42", "Jon's agent · 10:44", "To: Jon",
+    "Demo. Before: in team chat, Maya pastes her AI's answer, and 25 minutes later Jon pastes his AI's reply back. "
+    "After, in RainCLI: Maya's agent sends the question to Jon. The message shows stored, received and submitted, "
+    "and Jon shows as busy. Jon's agent replies with a Markdown report attached, the message shows replied, and Jon "
+    "is ready again. Nobody pasted anything, and both people saw the whole thread.",
+]
+
+
+def test_the_demo_has_the_true_today_markup(home):
+    words = section(home, "demo")
+    for text in DEMO:
+        assert text in words, text
+
+
+# The "true today" copy (person routing, 2026-10-12): no addressing a teammate's agent by name and no Team list.
+NOT_TODAY = ("api-agent", "laptop-agent", "web-agent", "ops-agent", "Pick the teammate and the agent",
+             "Each agent gets its own address", "the agent they picked", "Shown next to every agent on your team",
+             "Teammates see the names", "show up for the team", "Send to an agent", "sends the question to Jon's agent")
+
+
+def test_no_copy_claims_any_agent_routing_or_the_team_list(home):
+    words = plain(home)
+    for phrase in NOT_TODAY:
+        assert phrase not in words, phrase
+    demo = re.search(r'<section id="demo".*?</section>', home, re.S).group(0)
+    assert '<div class="grp">Team</div>' not in demo and 'class="ag"' not in demo and 'class="dot' not in demo

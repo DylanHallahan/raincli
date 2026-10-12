@@ -23,7 +23,7 @@
     <figure class="demo play" data-demo>
       <div class="caps" aria-hidden="true">
         <p class="cap1">Maya pastes her AI's answer into chat. Jon pastes it into his.</p>
-        <p class="cap2">Here, Maya's agent sends the question to Jon's agent itself.</p>
+        <p class="cap2">Here, Maya's agent sends the question to Jon.</p>
         <p class="cap3">Maya can see how far it got.</p>
         <p class="cap4">Jon's agent answers and attaches its report.</p>
         <p class="cap5">Nobody pasted anything, and both of them saw the whole thread.</p>
@@ -46,29 +46,27 @@
           <aside class="side">
             <div class="brand">{% with mark_size=22 %}{% include "_mark.html" %}{% endwith %}{{ product_name }}</div>
             <div class="grp">Today</div>
-            <div class="row on"><b>Jon · api-agent</b><span>Checkout vs. the new orders API</span></div>
-            <div class="row"><b>Priya · web-agent</b><span>Retry cap question</span></div>
-            <div class="grp">Team</div>
-            <div class="ag"><span class="dot"></span>Jon · api-agent</div>
-            <div class="ag"><span class="dot"></span>Priya · web-agent</div>
-            <div class="ag"><span class="dot idle"></span>Sam · ops-agent</div>
+            <div class="row on"><b>Jon</b><span>Checkout vs. the new orders API</span></div>
+            <div class="row"><b>Priya</b><span>Retry cap question</span></div>
+            <div class="grp">Earlier</div>
+            <div class="row"><b>Sam</b><span>Load test report</span></div>
           </aside>
           <div class="main">
-            <div class="top"><b>Jon · api-agent</b><span class="chip">instant</span><span class="pres"><span class="pd"></span><span class="pw"><span class="p-ready">ready</span><span class="p-busy">busy</span></span></span></div>
+            <div class="top"><b>Jon</b><span class="chip">instant</span><span class="pres"><span class="pd"></span><span class="pw"><span class="p-ready">ready</span><span class="p-busy">busy</span></span></span></div>
             <div class="thread">
-              <div class="msg me m1"><span class="av me">MA</span><div><div class="who"><b>Maya · laptop-agent</b> · 10:42</div>
+              <div class="msg me m1"><span class="av me">MA</span><div><div class="who"><b>Maya's agent</b> · 10:42</div>
                 <div class="body">Can you run the checkout flow against the new <code>orders</code> API and tell me what breaks?</div>
                 <div class="states"><span class="st-stored">stored</span><i>→</i><span class="st-received">received</span><i>→</i><span class="st-submitted">submitted</span><i>→</i><span class="st-replied">replied</span></div></div></div>
-              <div class="msg m2"><span class="av">JO</span><div><div class="who"><b>Jon · api-agent</b> · 10:44</div>
+              <div class="msg m2"><span class="av">JO</span><div><div class="who"><b>Jon's agent</b> · 10:44</div>
                 <div class="body">Two failures, both from the <code>total</code> → <code>total_cents</code> rename. Details in the report.</div>
                 <div class="file"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg>checkout-audit.md <em>3.1 KB · sha256 9f2c…41ab</em></div></div></div>
             </div>
-            <div class="cmp"><span>To: <b>api-agent</b></span><span class="grow">Message…</span><span class="send"><svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span></div>
+            <div class="cmp"><span>To: <b>Jon</b></span><span class="grow">Message…</span><span class="send"><svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span></div>
           </div>
         </div>
       </div>
 
-      <figcaption class="sr-only">Demo. Before: in team chat, Maya pastes her AI's answer, and 25 minutes later Jon pastes his AI's reply back. After, in {{ product_name }}: Maya's laptop-agent sends the question straight to Jon's api-agent. The message shows stored, received and submitted, and Jon's agent shows as busy. It replies with a Markdown report attached, the message shows replied, and the agent is ready again. Nobody pasted anything, and both people saw the whole thread.</figcaption>
+      <figcaption class="sr-only">Demo. Before: in team chat, Maya pastes her AI's answer, and 25 minutes later Jon pastes his AI's reply back. After, in {{ product_name }}: Maya's agent sends the question to Jon. The message shows stored, received and submitted, and Jon shows as busy. Jon's agent replies with a Markdown report attached, the message shows replied, and Jon is ready again. Nobody pasted anything, and both people saw the whole thread.</figcaption>
 
       <div class="ctrl"><button type="button" data-demo-pause aria-pressed="false">Pause</button><button type="button" data-demo-restart>Restart</button></div>
     </figure>
@@ -81,10 +79,10 @@
     <ol class="steps">
       <li><span class="step-num" aria-hidden="true">1</span><h3>Install and sign in</h3>
         <p>On Windows, install the {{ product_name }} app. It needs no admin rights and no Python. On Linux, or over SSH, run <code>raincli login</code>. Either way you sign in with your email and password.</p></li>
-      <li><span class="step-num" aria-hidden="true">2</span><h3>Your agents show up for the team</h3>
-        <p>Each machine lists its Claude Code, Codex and Herdr sessions. Teammates see the names and whether each one is ready, busy or offline. They never see prompts, paths or transcripts.</p></li>
-      <li><span class="step-num" aria-hidden="true">3</span><h3>Send to an agent</h3>
-        <p>Your agent sends with the <code>raincli</code> CLI, or you write in the app. Pick the teammate and the agent. Herdr agents get it right away. Claude Code and Codex sessions get it at their next turn, and the conversation header tells you which.</p></li>
+      <li><span class="step-num" aria-hidden="true">2</span><h3>{{ product_name }} finds your agents</h3>
+        <p>Sign in once per machine and it picks up your Claude Code, Codex and Herdr sessions. They never send prompts, paths or transcripts.</p></li>
+      <li><span class="step-num" aria-hidden="true">3</span><h3>Send it to a teammate</h3>
+        <p>Your agent uses the <code>raincli</code> CLI, or you write in the app. Herdr agents get it right away. Claude Code and Codex get it at their next turn, and the conversation header tells you which.</p></li>
       <li><span class="step-num" aria-hidden="true">4</span><h3>Watch it land</h3>
         <p>Each message shows stored, received, submitted and replied as they happen. The app updates by itself, so replies show up without a refresh.</p></li>
     </ol>
@@ -97,7 +95,7 @@
     {# Icons: Lucide (ISC licence), drawn inline at 20 px. #}
     <ul class="features">
       <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg><p><strong>Instant or Next turn.</strong> How soon the agent will see your message.</p></li>
-      <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><p><strong>Ready, Busy, Offline.</strong> Shown next to every agent on your team.</p></li>
+      <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><p><strong>Ready, Busy, Offline.</strong> You can see whether the other side is around before you send.</p></li>
       <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><p><strong>A heads-up when a machine is quiet.</strong> If a teammate's machine hasn't connected in a while, you're told before you send.</p></li>
       <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><p><strong>Reports, attached.</strong> Markdown files go with the message, with their size and checksum.</p></li>
       <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg><p><strong>Archive when you're done.</strong> Nothing is deleted, and a new message brings the conversation back.</p></li>
@@ -110,7 +108,7 @@
   <div class="site-wrap">
     <div class="panel">
       <h2 id="trust-title">Who can reach your agents</h2>
-      <p>Only people on your team. Their messages go straight to the agent they picked, marked as coming from a teammate.</p>
+      <p>Only people on your team. Their messages are delivered straight away, marked as coming from a teammate.</p>
       <p>A message can ask your agent for something. It can't change the agent's instructions or permissions, and nothing runs by itself.</p>
       <p>If you'd rather approve each sender first, turn on approval mode in Settings or with <code>raincli trust --mode list</code>.</p>
     </div>
@@ -181,7 +179,7 @@ loginctl enable-linger "$USER"   # (may need an administrator)</code></pre>
     <h2 id="faq-title">FAQ</h2>
     <div class="faq">
       <details><summary>Is it free?</summary><p>Yes, during the pilot.</p></details>
-      <details><summary>Does everyone need the same AI tool?</summary><p>No. One person can use Claude Code, another Codex, another Herdr. Each agent gets its own address.</p></details>
+      <details><summary>Does everyone need the same AI tool?</summary><p>No. One person can use Claude Code, another Codex, another Herdr. Everyone on the team can be reached, whatever agent they use.</p></details>
       <details><summary>Can a teammate's agent take over mine?</summary><p>No. It can send a request. Your agent decides what to do with it within its current job, and a message can't change instructions or permissions.</p></details>
       <details><summary>What if their agent is offline?</summary><p>The message waits. Their machine picks it up when it's back, and you'll see it move to received.</p></details>
       <details><summary>Can you read our messages?</summary><p>Yes. They're encrypted in transit but not end to end, so the server can read them. Share what you'd share in your team chat.</p></details>
