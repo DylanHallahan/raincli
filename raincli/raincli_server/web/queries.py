@@ -293,11 +293,19 @@ class MessageLine:
     initials: str = ""  # §20.4 R8: from the person behind the sender (present.initials)
     state: str = ""  # §21 C13 H4: the delivery state this viewer may see
     hold_text: str = ""  # §21 C5.5: "held: …" in presentation's words, for the website
+    updated_at: datetime | None = None  # the "updated" time this viewer may see (H1: never a person's read time)
 
     @property
     def shown_state(self) -> str:
         state = self.state or self.message.delivery_state
         return "held" if state == "stored" and self.hold_reason else state
+
+
+@dataclass
+class ShownEvent:
+    """A history entry derived from the viewer's view (H1), in place of a delivery event."""
+    state: str
+    created_at: datetime | None
 
 
 @dataclass
@@ -527,6 +535,15 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
         hold = hold_of(m)
         return ("held" if m.delivery_state == "stored" and hold else m.delivery_state), hold, route
 
+    # H1: a message to a person is read in their app, and its events and times record that. Anyone else sees a
+    # history derived from their view only: stored, then replied (at the first reply's time, which they see too).
+    to_others = [m for m in messages if m.recipient_user_id is not None and m.recipient_user_id != user.id]
+    replied_at = dict(db.execute(  # replies follow in the same conversation: a range on its index (§19.9 F6)
+        select(Message.in_reply_to, func.min(Message.created_at))
+        .where(Message.conversation_id.in_({m.conversation_id for m in to_others}),
+               Message.seq > min(m.seq for m in to_others), Message.in_reply_to.in_([m.id for m in to_others]))
+        .group_by(Message.in_reply_to)).all()) if to_others else {}
+
     lines = []
     for m in messages:
         sender_ep, recipient_ep = messaging.sender_endpoint(db, m), messaging.recipient_endpoint(db, m)
@@ -536,6 +553,13 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
         # machine of theirs sent to someone else. A machine of theirs writing to them is incoming.
         outgoing = m.sender_user_id == user.id or (sender.mine and not recipient.mine)
         state, hold, route = view(m, recipient_ep)
+        updated_at = m.delivery_updated_at
+        if m.recipient_user_id is not None and m.recipient_user_id != user.id:
+            shown = [ShownEvent("stored", m.created_at)]
+            if state == "replied":
+                shown.append(ShownEvent("replied", replied_at.get(m.id)))
+            events[m.id] = shown
+            updated_at = replied_at.get(m.id) if state == "replied" else m.created_at
         person = names.person(recipient_ep, m.team_id)
         lines.append(MessageLine(
             m, sender, recipient, outgoing=outgoing, hold_reason=hold,
@@ -543,7 +567,8 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
             trail=thread.trail_for(m, recipient_ep, events.get(m.id, []), state, hold, person, route)
             if outgoing else None,
             initials=present.initials(people.of(m)), state=state,
-            hold_text=(presentation.held_line(hold, person, route) or "") if outgoing and hold else ""))
+            hold_text=(presentation.held_line(hold, person, route) or "") if outgoing and hold else "",
+            updated_at=updated_at))
     return lines, events
 
 
@@ -572,7 +597,7 @@ def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], convers
                             archived_by=_archived_by(db, conv, user, owned) if is_archived else "",
                             name=who.label, address=team.name, peer_user=who.user, kind=who.kind,
                             presence=thread.header_presence(db, team.id, who.user),
-                            warning=thread.person_warning(db, team.id, who.user))
+                            warning=thread.person_warning(db, team.id, who.user, viewer=user))
 
 
 def ack_viewed(db: Session, user: User, view: ConversationView) -> int:

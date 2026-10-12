@@ -133,6 +133,69 @@ def test_a_person_reading_in_their_app_changes_nothing_the_sender_sees(maya, cli
     assert received_time(before) == received_time(after)  # no read time leaks through the step times
 
 
+def same(after: list, before: list):
+    """Equal, or the lines that differ."""
+    import difflib
+    import json
+
+    for a, b in zip(after, before):
+        a, b = (x if isinstance(x, str) else json.dumps(x, indent=1, sort_keys=True) for x in (a, b))
+        assert a == b, "\n".join(difflib.unified_diff(b.splitlines(), a.splitlines(), "before", "after", lineterm=""))
+
+
+def test_no_read_receipt_anywhere_the_sender_looks(app, maya, client, session, v06_seed):  # noqa: F811
+    """H1: everything Maya can fetch about her messages to people (the app page, /app/live without its clock, the
+    website page) is the same before and after they read them in their app, through the real person API; and after
+    a reply, the same before and after the read that follows it."""
+    from test_web_app import login
+
+    s = v06_seed
+    nw, maya_u = s["teams"]["northwind"], s["people"]["Maya"]
+
+    def to(person, conv, body):
+        msg = Message(id=uuid.uuid4(), team_id=nw.id, conversation_id=s["conversations"][conv].id, body=body,
+                      kind="message", route="person", sender_user_id=maya_u.id,
+                      recipient_user_id=s["people"][person].id, delivery_state="stored")
+        session.add(msg)
+        session.commit()
+        return msg
+
+    def ack(person, msg):
+        r = client.post(f"/api/v1/person/messages/{msg.id}/ack", headers=auth(s["person_tokens"][person]))
+        assert r.status_code == 200, r.text
+
+    to_sam, to_jon = to("Sam", "sam", "for Sam's app"), to("Jon", "jon", "for Jon's app")
+    with TestClient(app) as site:
+        assert login(site, "maya@example.test", "correct horse battery").status_code == 303
+
+        def snapshot():
+            out = []
+            for key in ("sam", "jon"):
+                cid = str(s["conversations"][key].id)
+                feed = live(maya, conversation=cid, after=0)
+                feed.pop("now")
+                out += [maya.get(f"/app/conversations/{cid}").text, feed, site.get(f"/app/conversations/{cid}").text]
+            # The poll's clock and the compose form's fresh message id differ on every fetch.
+            return [re.sub(r'data-states-since="[^"]*"|name="message_id" value="[^"]*"', "", x) if isinstance(x, str)
+                    else x for x in out]
+
+        snapshot()  # Maya's own reading (the website marks what she views read) settles first
+        before = snapshot()
+        ack("Sam", to_sam)
+        ack("Jon", to_jon)
+        same(snapshot(), before)
+        # Replied first, then read: the read still changes nothing.
+        again = to("Sam", "sam", "answer this one")
+        r = client.post("/api/v1/person/send", headers=auth(s["person_tokens"]["Sam"]),
+                        json={"id": str(uuid.uuid4()), "in_reply_to": str(again.id), "body": "answered"})
+        assert r.status_code in (200, 201), r.text
+        snapshot()  # Maya reads Sam's answer
+        replied = snapshot()
+        assert "replied" in replied[0]
+        ack("Sam", again)
+        same(snapshot(), replied)
+
+
 # Header presence (§21 C5.4) -------------------------------------------------------------------------
 
 def test_the_header_shows_the_persons_presence_and_speed_with_the_offline_rule(maya, session, v06_seed):  # noqa: F811
@@ -188,6 +251,35 @@ def test_warning_precedence_and_the_24_hour_clock(session, v06_seed):  # noqa: F
     assert thread.person_warning(session, team, jon, now=now) is None  # a presence report counts as contact
     assert thread.person_warning(session, team, s["people"]["Sam"]).kind == "no_inbox"
     assert thread.person_warning(session, s["teams"]["contoso"].id, jon).kind == "no_inbox"  # per team (H3)
+
+
+def test_the_not_picking_up_date_is_the_viewers_own_message(session, v06_seed):  # noqa: F811
+    """L4: "hasn't picked up messages since <date>" dates from the viewer's own oldest waiting message (sent as a
+    person or by one of their machines), never from someone else's, whose timing isn't theirs to see."""
+    from conftest_v06 import _message, _pair
+
+    s = v06_seed
+    team, jon, machine = s["teams"]["northwind"], s["people"]["Jon"], s["machines"]["jon"]
+    maya, priya, sam = s["people"]["Maya"], s["people"]["Priya"], s["people"]["Sam"]
+    for m in session.query(Message).filter(Message.recipient_agent_id == machine.id):
+        m.acked_at = identity.now()
+    now = identity.now()
+    used(session, machine, now)
+    old = _message(session, team, _pair(session, team, priya, jon, kind="pair"), body="from Priya", route="inbox",
+                   sender_user=priya, recipient_machine=machine, recipient_name="zq-agent-jon-api")
+    old.created_at = now - timedelta(days=3)
+    session.commit()
+    assert thread.person_warning(session, team.id, jon, now=now, viewer=priya).since == old.created_at
+    assert thread.person_warning(session, team.id, jon, now=now, viewer=maya) is None  # Priya's isn't Maya's
+    assert thread.person_warning(session, team.id, jon, now=now, viewer=sam) is None
+    mine = _message(session, team, s["conversations"]["jon"], body="from Maya's agent", route="inbox",
+                    sender_machine=s["machines"]["maya"], sender_name="zq-agent-maya-laptop",
+                    recipient_machine=machine, recipient_name="zq-agent-jon-api")
+    mine.created_at = now - timedelta(days=2)
+    session.commit()
+    warning = thread.person_warning(session, team.id, jon, now=now, viewer=maya)
+    assert warning.kind == "not_picking_up" and warning.since == mine.created_at  # her own, not Priya's older one
+    assert thread.person_warning(session, team.id, jon, now=now) is None  # no viewer, no date
 
 
 def test_the_warning_shows_in_the_header_on_compose_and_on_the_website(app, maya, client, session, v06_seed):  # noqa: F811

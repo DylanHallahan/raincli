@@ -20,7 +20,7 @@ from raincli_server.markdown import render as render_markdown
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from raincli_server import identity, messaging, presentation, quotas, security
 from raincli_server.config import Settings
@@ -683,10 +683,15 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
         newest_ids = select(Message.id).where(*in_conv).order_by(Message.seq.desc()).limit(LIVE_IN_VIEW).scalar_subquery()
         since = _parse_since(states_since)
         changed_after = min(since, now) - LIVE_RECENT if since is not None else recent_window
+        # H1: a message to someone else as a person changes delivery_updated_at when they read it in their app, so
+        # it is picked by what its sender sees instead: not yet replied, or answered by a message in this poll.
+        answered = [m.in_reply_to for m in fresh if m.in_reply_to is not None]
+        to_a_person = and_(Message.recipient_user_id.is_not(None), Message.recipient_user_id != viewer.user.id)
         changed = list(db.scalars(
             select(Message).where(*in_conv, Message.id.in_(newest_ids), mine,
                                   or_(Message.delivery_state.not_in(FINAL_STATES),
-                                      Message.delivery_updated_at > changed_after))
+                                      and_(~to_a_person, Message.delivery_updated_at > changed_after),
+                                      and_(to_a_person, Message.id.in_(answered or [None]))))
             .order_by(Message.seq).limit(LIVE_IN_VIEW).execution_options(populate_existing=True)))
         names = thread.Names(db)
         lines, _ = queries.message_lines(db, viewer.user, owned, fresh + changed, names)
@@ -707,7 +712,7 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
         header_html = fragment(request, "app_mode/_head_status.html", viewer, presence=presence)
         out["header"] = {"word": presence.word if presence else None, "chip": presence.chip if presence else None,
                          "html": header_html, "sig": live_sig(header_html)}
-        warning = thread.person_warning(db, team.id, who.user, now)
+        warning = thread.person_warning(db, team.id, who.user, now, viewer=viewer.user)
         if warning is not None:  # null when there is none (§19.1); the client's empty slot is signed "none"
             warning_html = fragment(request, "_sender_warning.html", viewer, warning=warning)
             out["warning"] = {"kind": warning.kind, "html": warning_html, "sig": live_sig(warning_html)}
@@ -897,7 +902,7 @@ def person_warning(request: Request, to: str = "", team: str = "", db: Session =
     viewer = app_viewer(request, db, app_mode_ok=True)
     chosen = [t.id for t, _ in viewer.teams if t.slug == team] if team else _team_ids(viewer)
     picked = queries.person_by_id(db, viewer.user, chosen, to) if to.startswith("p.") else None
-    warning = thread.person_warning(db, picked[0].id, picked[1]) if picked else \
+    warning = thread.person_warning(db, picked[0].id, picked[1], viewer=viewer.user) if picked else \
         thread.warning_for_text(db, chosen, to, viewer.user)
     return HTMLResponse(fragment(request, "_sender_warning.html", viewer, warning=warning),
                         headers={"Cache-Control": "no-store"})
@@ -1041,7 +1046,7 @@ def _compose_page(request, db, viewer, *, form, status: int = 200, error: str | 
                 break
     ctx = dict(viewer=viewer, status=status, error=error, form=form, draft=form.get("body", ""),
                message_id=str(uuid.uuid4()), conversation_id=None, **_directory(db, viewer),
-               to_warning=thread.person_warning(db, picked[0].id, picked[1]) if picked else
+               to_warning=thread.person_warning(db, picked[0].id, picked[1], viewer=viewer.user) if picked else
                thread.warning_for_text(db, chosen, to, viewer.user))
     if viewer.app_mode:
         return render(request, "app_mode/compose.html",

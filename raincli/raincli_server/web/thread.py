@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from raincli_server import identity, messaging, presentation
@@ -192,9 +192,15 @@ def _most_recent_machine(db: Session, team_id: uuid.UUID, user_id: uuid.UUID) ->
         .group_by(Agent.id).order_by(func.max(AgentCredential.last_used_at).desc().nulls_last()).limit(1)).first()
 
 
-def _oldest_unacked(db: Session, machine: Agent) -> datetime | None:
-    return db.scalar(select(Message.created_at).where(Message.recipient_agent_id == machine.id,
-                                                      Message.acked_at.is_(None)).order_by(Message.seq).limit(1))
+def _oldest_unacked(db: Session, machine: Agent, viewer: User | None) -> datetime | None:
+    """L4: the oldest message waiting at the machine that the viewer (as a person, or one of their machines) sent;
+    never anyone else's, whose timing isn't the viewer's to see."""
+    if viewer is None:
+        return None
+    theirs = select(Agent.id).where(Agent.owner_user_id == viewer.id)
+    return db.scalar(select(Message.created_at).where(
+        Message.recipient_agent_id == machine.id, Message.acked_at.is_(None),
+        or_(Message.sender_user_id == viewer.id, Message.sender_agent_id.in_(theirs))).order_by(Message.seq).limit(1))
 
 
 def _last_contact(db: Session, machine: Agent) -> datetime | None:
@@ -205,10 +211,11 @@ def _last_contact(db: Session, machine: Agent) -> datetime | None:
     return max((t for t in (used, seen) if t is not None), default=None)
 
 
-def person_warning(db: Session, team_id: uuid.UUID, person: User | None, now: datetime | None = None
-                   ) -> Warning | None:
+def person_warning(db: Session, team_id: uuid.UUID, person: User | None, now: datetime | None = None, *,
+                   viewer: User | None = None) -> Warning | None:
     """One warning at a time about a person's inbox in a team: none picked; its machine never connected or hasn't
-    for a day; or it hasn't picked up a message for a day. It names only the person and a date."""
+    for a day; or it hasn't picked up one of the viewer's messages for a day. It names only the person and a
+    date."""
     if person is None or not person.is_active:
         return None
     name = presentation.name_in_team(db, team_id, person)
@@ -219,7 +226,7 @@ def person_warning(db: Session, team_id: uuid.UUID, person: User | None, now: da
         # that never confirms delivery and has messages waiting, say so; otherwise "no inbox yet".
         recent = _most_recent_machine(db, team_id, person.id)
         if recent is not None and _never_reported_client(db, recent):
-            oldest = _oldest_unacked(db, recent)
+            oldest = _oldest_unacked(db, recent, viewer)
             if oldest is not None and (now or identity.now()) - oldest > WARNING_AFTER:
                 return Warning(name, "old_client", oldest, email=person.email)
         return Warning(name, "no_inbox", email=person.email)
@@ -229,9 +236,7 @@ def person_warning(db: Session, team_id: uuid.UUID, person: User | None, now: da
         return Warning(name, "never", email=person.email)
     if now - last > WARNING_AFTER:
         return Warning(name, "not_connected", last, email=person.email)
-    oldest = db.scalar(
-        select(Message.created_at).where(Message.recipient_agent_id == machine.id, Message.acked_at.is_(None))
-        .order_by(Message.seq).limit(1))
+    oldest = _oldest_unacked(db, machine, viewer)
     if oldest is not None and now - oldest > WARNING_AFTER:
         kind = "old_client" if _never_reported_client(db, machine) else "not_picking_up"  # W1
         return Warning(name, kind, oldest, email=person.email)
@@ -248,7 +253,7 @@ def warning_for_text(db: Session, team_ids: list[uuid.UUID], text: str, viewer: 
     for team_id in team_ids:
         found = presentation.resolve_person_text(db, team_id, text, sender=viewer)
         if found.kind == "person" and found.user is not None and found.user.id != viewer.id:
-            return person_warning(db, team_id, found.user, now)
+            return person_warning(db, team_id, found.user, now, viewer=viewer)
     return None
 
 
@@ -272,6 +277,7 @@ def machine_warning(db: Session, machine: Agent, now: datetime | None = None) ->
         return MachineWarning(machine.handle, "never")
     if now - last_used > WARNING_AFTER:
         return MachineWarning(machine.handle, "not_connected", last_used)
+    # The owner's own machine: every message waiting at it is theirs to see.
     oldest = db.scalar(
         select(Message.created_at).where(Message.recipient_agent_id == machine.id, Message.acked_at.is_(None))
         .order_by(Message.seq).limit(1))

@@ -40,7 +40,7 @@
         {{ state_badge(line.shown_state) }}
         {% set evs = view.events.get(m.id, []) if outgoing else [] %}
         {% if line.hold_text %}<span class="state-detail">{{ line.hold_text }}</span>{% endif %}
-        <span class="msg-times">updated {{ time(m.delivery_updated_at) }}{% if m.acked_at and (line.recipient.mine or line.recipient.endpoint.kind != 'person') %} · received {{ time(m.acked_at) }}{% endif %}</span>
+        <span class="msg-times">updated {{ time(line.updated_at) }}{% if m.acked_at and (line.recipient.mine or line.recipient.endpoint.kind != 'person') %} · received {{ time(m.acked_at) }}{% endif %}</span>
         {% if not outgoing and (view.can_send or view.kind == 'self') %}<a class="btn btn-quiet btn-small reply-link" href="?reply_to={{ m.id }}#compose">Reply</a>{% endif %}
       </div>
       {% if evs %}
