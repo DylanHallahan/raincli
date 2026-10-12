@@ -85,22 +85,31 @@ def handoff_next(value: str) -> str | None:
     return value if _NEXT.fullmatch(value or "") else None
 
 
+P1 = False  # §20.4 P1 (the "via" line hidden on an exact match) is frozen for v0.5.5: shown_via isn't computed
+
 P2_SINCE = (0, 5, 5)  # §20.7: the first client whose hidden window tells its page it is hidden
 
 
-def opens_latest(db, viewer) -> bool:
+def opens_latest(db, viewer, now=None) -> bool:
     """§20.7: Inbox opens the latest conversation (P2) only in an app whose window keeps its page hidden while the
-    window is hidden: the person session's machine reports client 0.5.5 or later. Older clients (a hidden start
-    would read the latest conversation), a missing or unparsable report, or the website: no P2."""
+    window is hidden: the person session's machine reports client 0.5.5 or later, and reported within the presence
+    TTL. Older clients (a hidden start would read the latest conversation), a stale, missing or unparsable report,
+    or the website: no P2."""
     from raincli_server.presence import version_tuple
+
+    from raincli_server.presence import TTL_SECONDS
 
     session = getattr(viewer, "web_session", None)
     if session is None or not session.person_session_id:
         return False
     person = db.get(PersonSession, session.person_session_id)
     row = db.get(AgentPresence, person.machine_agent_id) if person is not None else None
+    # Fresh too (within the presence TTL): after a rollback the old row still says 0.5.5 until the older runtime
+    # reports, and that window would get P2 (review L1). Gating on the window's own User-Agent is a later step.
+    if row is None or row.seen_at <= (now or identity.now()) - timedelta(seconds=TTL_SECONDS):
+        return False
     try:
-        return row is not None and version_tuple(row.client_version or "") >= P2_SINCE
+        return version_tuple(row.client_version or "") >= P2_SINCE
     except ValueError:
         return False
 

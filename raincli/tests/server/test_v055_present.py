@@ -169,6 +169,22 @@ def test_inbox_opens_the_latest_only_for_a_0_5_5_app(client, world, alice_app, s
     assert ("data-open-latest" in page) is opens
 
 
+def test_a_stale_0_5_5_report_opens_nothing(client, world, alice_app, session):  # noqa: F811
+    """Review L1: after a rollback the old row still says 0.5.5 until the older runtime reports; past the presence
+    TTL it no longer counts."""
+    from raincli_server.models import AgentPresence, PersonSession
+
+    bob_reports(client, world)
+    person_send(client, alice_app["person"], BOB_AGENT, "hello")
+    _report_client(client, alice_app["token"], "0.5.5")
+    assert "data-open-latest" in alice_app["webview"].get("/app/inbox").text
+    machine = session.query(PersonSession).one().machine_agent_id
+    session.execute(update(AgentPresence).where(AgentPresence.agent_id == machine)
+                    .values(seen_at=identity.now() - timedelta(seconds=121)))
+    session.commit()
+    assert "data-open-latest" not in alice_app["webview"].get("/app/inbox").text
+
+
 def test_no_marker_without_a_conversation(client, world, alice_app):  # noqa: F811
     _report_client(client, alice_app["token"], "0.5.5")
     assert "data-open-latest" not in alice_app["webview"].get("/app/inbox").text

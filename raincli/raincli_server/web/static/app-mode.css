@@ -303,6 +303,11 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-msg { border-radius: var(--rc-radius); }
 .rc-msg:has(:focus-visible) { outline: 2px solid var(--rc-focus); outline-offset: 4px; }
 .rc-msg :focus-visible { outline: none; text-decoration: underline; }
+/* Buttons and chips inside a message (Reply, the trail toggle, an attachment) also get their own ring at their radius;
+   plain text links keep the underline. */
+.rc-msg .rc-reply:focus-visible, .rc-msg .rc-trail-box > summary:focus-visible, .rc-msg .rc-file a:focus-visible,
+.rc-msg button:focus-visible { outline: 2px solid var(--rc-focus); outline-offset: 2px; border-radius: var(--rc-radius-sm);
+  text-decoration: none; }
 /* The composer gets a quiet border, not a ring: a text field counts as keyboard-focused even after a click or the
    §20.3 composer-ready focus, so a ring here would show for mouse users too. The caret shows where focus is. */
 .rc-box:focus-within { border-color: var(--rc-border-strong); }

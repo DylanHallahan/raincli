@@ -461,7 +461,7 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
             m, sender, recipient, outgoing=outgoing, hold_reason=hold,
             sender_name=names.sender(sender_ep), recipient_name=names.endpoint(recipient_ep),
             trail=thread.trail_for(m, recipient_ep, events.get(m.id, []), hold) if outgoing else None,
-            initials=present.initials(people.of(m)), via=present.shown_via(db, m)))
+            initials=present.initials(people.of(m)), via=present.shown_via(db, m) if present.P1 else None))
     return lines, events
 
 

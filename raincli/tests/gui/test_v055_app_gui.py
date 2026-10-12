@@ -126,7 +126,12 @@ def outlines(page):
         .filter(m => getComputedStyle(m).outlineStyle !== 'none').map(m => m.id)""")
 
 
+CONTROL_RING = """() => { const e = document.activeElement, s = getComputedStyle(e);
+    return [e.matches('.rc-reply, .rc-trail-box > summary, .rc-file a, button'), s.outlineStyle, s.borderTopLeftRadius]; }"""
+
+
 def test_no_ring_for_mouse_programmatic_or_live_focus_and_a_rounded_ring_for_the_keyboard(team, browser):
+    person_send(team, team["maya"], {"person": "jon@example.test"}, "mine, with a trail")
     first = jon_writes(team, "first")
     for scheme in ("light", "dark"):
         context, page = open_app(browser, team, team["maya"], path=conv_path(first) + f"#m-{first['id']}",
@@ -151,6 +156,13 @@ def test_no_ring_for_mouse_programmatic_or_live_focus_and_a_rounded_ring_for_the
             const want = getComputedStyle(p).color; p.remove();
             return {style: s.outlineStyle, color: s.outlineColor, want, radius: s.borderTopLeftRadius}; }""")
         assert style["style"] == "solid" and style["color"] == style["want"] and style["radius"] == "10px", style
+        # Review L3: a button or chip inside the message (here Reply) has its own ring at --rc-radius-sm too.
+        assert page.evaluate(CONTROL_RING) == [True, "solid", "6px"], page.evaluate(CONTROL_RING)
+        for _ in range(40):  # on to a trail toggle (a role=button summary): its own ring as well
+            page.keyboard.press("Tab")
+            if page.evaluate("document.activeElement.matches('.rc-trail-box > summary')"):
+                break
+        assert page.evaluate(CONTROL_RING) == [True, "solid", "6px"], page.evaluate(CONTROL_RING)
         assert not page.errors
         context.close()
 

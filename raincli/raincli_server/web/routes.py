@@ -516,12 +516,14 @@ def inbox(request: Request, db: Session = Depends(get_db)):
 def _app_inbox(request: Request, db: Session, viewer: auth.Viewer, team_ids, rows) -> HTMLResponse:
     """Inbox in app mode. §20.6 M1: app-mode.js opens the latest conversation from here when the list is visible
     (P2 runs in the client); with no conversations, the first-run steps, step 1 done after a recent connection."""
-    from raincli_server.web import present, thread
+    from raincli_server.web import present
 
+    extras = _list_extras(db, viewer)
+    # §20.6 M1: Inbox keeps the owner's notice in its main pane as well as at the top of the list; computed once.
     return render(request, "app_mode/inbox.html", viewer=viewer, conversations=rows,
-                  owner_warnings=thread.owner_warnings(db, viewer.user, team_ids),
+                  owner_warnings=extras["list_owner_warnings"],
                   connected=present.connected_machine(db, viewer.user, team_ids),
-                  open_latest=present.opens_latest(db, viewer), **_list_extras(db, viewer))
+                  open_latest=present.opens_latest(db, viewer), **extras)
 
 
 @router.get("/app/conversations/{conversation_id}", response_class=HTMLResponse)
@@ -568,11 +570,9 @@ def _live_list(request: Request, db: Session, viewer: auth.Viewer, current_id, c
     """The conversation list's revision (§19.8 L2), and its HTML (the page's own template) only when the client's
     revision differs. The revision is a digest of the list's inputs: each conversation's id, last seq, unread count
     and archive state, the Team section's presence words (minute-stable), and the owner's warnings."""
-    from raincli_server.web import thread
-
     rows = queries.list_conversations(db, viewer.user, _team_ids(viewer))
     extras = _list_extras(db, viewer)
-    warnings = thread.owner_warnings(db, viewer.user, _team_ids(viewer))
+    warnings = extras["list_owner_warnings"]  # computed once (review L4): the list shows the same notice
     digest = json.dumps([
         [[str(r.conversation.id), r.last.seq if r.last else 0, r.unacked, r.archived, r.name] for r in rows],
         [[a.get("to"), a.get("status")] for a in extras.get("team_agents", [])],
