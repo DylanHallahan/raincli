@@ -713,6 +713,124 @@ async def live_ack(request: Request, db: Session = Depends(get_db)):
     return JSONResponse({"acked": acked})
 
 
+# TEMP layout diagnostic (the "everything at the top" shell bug; remove when it is closed). app-mode.js posts at most
+# three reports per page load: numbers and short class names, never ids, URLs or text. One INFO line each.
+LAYOUT_DIAG = True
+LAYOUT_DIAG_MAX_BODY = 4096
+LAYOUT_DIAG_PER_WINDOW, LAYOUT_DIAG_WINDOW = 10, 600.0  # per app session: 10 reports per 10 minutes
+_PRINTABLE = re.compile(r"[\x20-\x7e]*")
+_INT = (-100_000, 10_000_000)
+
+
+def _diag_int(value, low=_INT[0], high=_INT[1], nullable=False):
+    if value is None and nullable:
+        return True
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def _diag_str(value, cap):
+    return isinstance(value, str) and len(value) <= cap and _PRINTABLE.fullmatch(value) is not None
+
+
+LAYOUT_DIAG_FIELDS = {
+    "event": lambda v: v in ("load", "show", "resize"),
+    "page": lambda v: v in ("inbox", "conversation", "other"),
+    "inner_w": lambda v: _diag_int(v, 0, 100_000), "inner_h": lambda v: _diag_int(v, 0, 100_000),
+    "client_h": lambda v: _diag_int(v, 0, 100_000),
+    "dpr": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 16,
+    "children_n": lambda v: _diag_int(v, 0, 10_000),
+    "children": lambda v: isinstance(v, list) and len(v) <= 10 and all(_diag_str(c, 40) for c in v),
+    "grid_rows": lambda v: _diag_str(v, 80), "body_height": lambda v: _diag_str(v, 40),
+    "nav_bottom": lambda v: _diag_int(v, nullable=True), "list_bottom": lambda v: _diag_int(v, nullable=True),
+    "main_bottom": lambda v: _diag_int(v, nullable=True), "compose_bottom": lambda v: _diag_int(v, nullable=True),
+    "doc_scroll_top": lambda v: _diag_int(v), "doc_scroll_h": lambda v: _diag_int(v, 0),
+    "doc_client_h": lambda v: _diag_int(v, 0),
+    "nav_scroll_h": lambda v: _diag_int(v, 0, nullable=True), "nav_client_h": lambda v: _diag_int(v, 0, nullable=True),
+    "visibility": lambda v: v in ("visible", "hidden", "prerender"),
+    "height_fix": lambda v: isinstance(v, bool), "scroll_guard": lambda v: isinstance(v, bool),
+}
+
+
+def _layout_diag_log():
+    import logging
+    import sys
+
+    logger = logging.getLogger("raincli_server.layout_diag")
+    if not logger.handlers:  # uvicorn configures only its own loggers: give this one a stderr line at INFO
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    return logger
+
+
+class _DiagLimiter:
+    """A sliding window per app session, in memory (per app instance)."""
+
+    def __init__(self, limit: int, window: float):
+        import threading
+        import time
+
+        self.limit, self.window, self.clock = limit, window, time.monotonic
+        self._hits: dict = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key) -> bool:
+        now = self.clock()
+        with self._lock:
+            hits = [t for t in self._hits.get(key, []) if t > now - self.window]
+            if len(hits) >= self.limit:
+                self._hits[key] = hits
+                return False
+            hits.append(now)
+            self._hits[key] = hits
+            if len(self._hits) > 10000:
+                for k in [k for k, v in self._hits.items() if not v or v[-1] <= now - self.window]:
+                    del self._hits[k]
+            return True
+
+
+_diag_limiter = _DiagLimiter(LAYOUT_DIAG_PER_WINDOW, LAYOUT_DIAG_WINDOW)
+
+
+@router.post("/app/layout-diag")
+async def layout_diag(request: Request, db: Session = Depends(get_db)):
+    """TEMP: one window-layout report from app-mode.js, validated strictly and logged as one line; 204."""
+    from raincli_server.models import PersonSession
+
+    def bad(status: int, code: str) -> JSONResponse:
+        return JSONResponse({"error": {"code": code}}, status_code=status, headers={"Cache-Control": "no-store"})
+
+    if not LAYOUT_DIAG:
+        raise not_found()
+    raw = await request.body()
+    if len(raw) > LAYOUT_DIAG_MAX_BODY:
+        return bad(413, "too_large")
+    try:
+        data = json.loads(raw or b"{}")
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        data = None
+    if not isinstance(data, dict) or set(data) - {"csrf_token", "layout"}:
+        return bad(400, "invalid")
+    viewer = app_viewer(request, db, str(data.get("csrf_token") or ""), app_mode_ok=True)
+    if not viewer.app_mode:
+        raise not_found()
+    if not _diag_limiter.allow(viewer.web_session.id):
+        return bad(429, "rate_limited")
+    layout = data.get("layout")
+    if (not isinstance(layout, dict) or set(layout) != set(LAYOUT_DIAG_FIELDS)
+            or not all(check(layout[key]) for key, check in LAYOUT_DIAG_FIELDS.items())):
+        return bad(400, "invalid")
+    person = db.get(PersonSession, viewer.web_session.person_session_id)
+    machine = db.get(Agent, person.machine_agent_id) if person is not None else None
+    version = security.app_version(request.headers.get("user-agent"))
+    fields = json.dumps({key: layout[key] for key in LAYOUT_DIAG_FIELDS}, separators=(",", ":"), sort_keys=False)
+    _layout_diag_log().info("layout-diag machine=%s version=%s %s", machine.handle if machine else "none",
+                            ".".join(map(str, version)) if version else "none", fields)
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/app/recipient-warning", response_class=HTMLResponse)
 def recipient_warning(request: Request, to: str = "", team: str = "", db: Session = Depends(get_db)):
     """§19.6: the sender warning for a recipient chosen on the compose page (app mode and website), as HTML. Only

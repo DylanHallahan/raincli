@@ -193,3 +193,40 @@ def test_without_javascript_the_fragment_jump_cannot_scroll_the_document(long_th
         assert_fills(page.evaluate(SHELL))
     finally:
         context.close()
+
+
+def test_the_temp_layout_diagnostic_posts_the_expected_keys_at_most_three_times(agent_thread, browser):  # noqa: F811
+    import json
+
+    from raincli_server.web import routes
+
+    p = agent_thread
+    posts, statuses = [], []
+
+    def setup(context):
+        def handle(route):
+            posts.append(json.loads(route.request.post_data))
+            route.continue_()  # to the real server, which must accept it
+        context.route("**/app/layout-diag", handle)
+        context.on("response", lambda r: statuses.append(r.status) if r.url.endswith("/app/layout-diag") else None)
+
+    context, page = open_thread(browser, p, p["cid"], viewport={"width": 910, "height": 512}, setup=setup)
+    try:
+        for size in ((910, 460), (1000, 600), (910, 512)):
+            page.set_viewport_size({"width": size[0], "height": size[1]})
+            page.wait_for_timeout(150)
+        for _ in range(2):
+            page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+            page.wait_for_timeout(150)
+        page.wait_for_timeout(500)
+        # The handoff page (Inbox) is a page load too; count the conversation page's reports.
+        mine = [b for b in posts if b["layout"]["page"] == "conversation"]
+        assert 1 <= len(mine) <= 3, posts
+        events = [b["layout"]["event"] for b in mine]
+        assert len(set(events)) == len(events) and set(events) <= {"load", "show", "resize"}, events
+        for body in posts:
+            assert set(body) == {"csrf_token", "layout"} and set(body["layout"]) == set(routes.LAYOUT_DIAG_FIELDS)
+            assert all("/" not in str(v) or k == "dpr" for k, v in body["layout"].items() if isinstance(v, str))
+        assert statuses and all(s == 204 for s in statuses), statuses
+    finally:
+        context.close()

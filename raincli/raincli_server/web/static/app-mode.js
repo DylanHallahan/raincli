@@ -129,6 +129,52 @@
   window.addEventListener("scroll", unscroll, {passive: true});
   window.addEventListener("hashchange", unscroll);
 
+  // TEMP layout diagnostic (remove when the shell bug is closed). At most three reports per page load (on load, on
+  // the first show, on the first resize), measured after the shell guards ran. Numbers and short class names only:
+  // no ids, URLs or text. The server answers 204 and logs one line; failures are ignored.
+  (function () {
+    var live = body.getAttribute("data-live-url"), csrf = body.getAttribute("data-csrf");
+    if (!live || !csrf || !window.fetch) return;
+    var url = live.replace(/\/app\/live$/, "/app/layout-diag"), sent = {}, count = 0;
+    function cut(text, n) { return String(text || "").slice(0, n); }
+    function bottom(selector) {
+      var el = document.querySelector(selector);
+      return el ? Math.round(el.getBoundingClientRect().bottom) : null;
+    }
+    function report(event) {
+      if (sent[event] || count >= 3) return;
+      sent[event] = true;
+      count += 1;
+      requestAnimationFrame(function () {
+        var doc = document.scrollingElement || document.documentElement, nav = document.querySelector(".rc-nav");
+        var style = getComputedStyle(body), kids = Array.prototype.slice.call(body.children);
+        var data = {
+          event: event,
+          page: body.classList.contains("rc-inbox") ? "inbox" : (document.querySelector("[data-thread]") ? "conversation" : "other"),
+          inner_w: window.innerWidth, inner_h: window.innerHeight, client_h: document.documentElement.clientHeight,
+          dpr: Math.round(window.devicePixelRatio * 100) / 100,
+          children_n: kids.length,
+          children: kids.slice(0, 10).map(function (el) {
+            return cut(el.tagName.toLowerCase() + (el.className && typeof el.className === "string" ?
+              "." + el.className.trim().split(/\s+/).join(".") : ""), 40);
+          }),
+          grid_rows: cut(style.gridTemplateRows, 80), body_height: cut(style.height, 40),
+          nav_bottom: bottom(".rc-nav"), list_bottom: bottom("section.rc-list"), main_bottom: bottom("main.rc-main"),
+          compose_bottom: bottom(".rc-compose"),
+          doc_scroll_top: Math.round(doc.scrollTop), doc_scroll_h: doc.scrollHeight, doc_client_h: doc.clientHeight,
+          nav_scroll_h: nav ? nav.scrollHeight : null, nav_client_h: nav ? nav.clientHeight : null,
+          visibility: cut(document.visibilityState, 16), height_fix: shell.heightFix, scroll_guard: shell.scrollGuard
+        };
+        fetch(url, {method: "POST", credentials: "same-origin", keepalive: true,
+                    headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf},
+                    body: JSON.stringify({csrf_token: csrf, layout: data})}).catch(function () {});
+      });
+    }
+    if (document.readyState === "complete") { report("load"); } else { window.addEventListener("load", function () { report("load"); }); }
+    document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") report("show"); });
+    window.addEventListener("resize", function () { report("resize"); });
+  }());
+
   if (openLatest()) return;
   trailToggles(document);
   watchThread();
