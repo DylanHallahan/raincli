@@ -27,7 +27,7 @@ def test_app_mode_combines_the_notice(client, world, alice_app, session):  # noq
     block = page[page.index('<div class="owner-warnings"'):page.index("</div>", page.index('<div class="owner-warnings"'))]
     assert block.count('class="sender-warning"') == 1
     assert "of your machines aren't connecting:" in block and "<strong>alice-old-0</strong>" in block
-    assert "See them in Agents" in block
+    assert "See This computer" in block
 
 
 def test_the_website_keeps_one_line_per_machine(client, world, session):
@@ -44,16 +44,29 @@ def _stuck(client, session, world, handle):
     from datetime import timedelta
 
     from api_helpers import auth
-    from raincli_server.models import Agent, Message
+    from sqlalchemy import select
+
+    from raincli_server.models import Agent, Conversation, Message
 
     agent, token = identity.register_agent(session, world["teams"]["acme"], world["users"]["alice"], handle)
     session.commit()
-    assert client.put("/api/v1/presence", headers=auth(token), json={"status": "ready"}).status_code == 200
-    r = client.post("/api/v1/messages", headers=auth(world["tokens"]["bob"]),
-                    json={"id": str(uuidlib.uuid4()), "to": {"machine": handle}, "body": "waiting"})
-    assert r.status_code == 201, r.text
-    session.execute(update(Message).where(Message.id == uuidlib.UUID(r.json()["message"]["id"]))
-                    .values(created_at=identity.now() - timedelta(hours=25)))
+    # A current client (it reports its version), so the notice is "not picking up", not W1's old-client wording.
+    assert client.put("/api/v1/presence", headers=auth(token), json={"status": "ready", "client": {
+        "version": "0.5.6", "update_mode": "automatic", "update_state": "current"}}).status_code == 200
+    # §21: nobody addresses a machine any more; a message waiting on it (from before, or a PR1 reply) is stored here.
+    conv = session.scalar(select(Conversation).where(Conversation.team_id == world["teams"]["acme"].id,
+                                                     Conversation.kind == "pair")) or None
+    if conv is None:
+        r = client.post("/api/v1/messages", headers=auth(world["tokens"]["bob"]),
+                        json={"id": str(uuidlib.uuid4()), "to": {"person": "alice@example.test"}, "body": "hello"})
+        assert r.status_code == 201, r.text
+        conv = session.get(Conversation, uuidlib.UUID(r.json()["message"]["conversation_id"]))
+    msg = Message(id=uuidlib.uuid4(), team_id=world["teams"]["acme"].id, conversation_id=conv.id, body="waiting",
+                  kind="message", route="inbox", sender_agent_id=world["agents"]["bob"].id, recipient_agent_id=agent.id,
+                  delivery_state="stored")
+    session.add(msg)
+    session.flush()
+    msg.created_at = identity.now() - timedelta(hours=25)
     session.commit()
     return agent
 
@@ -72,7 +85,7 @@ def test_the_combined_notice_splits_not_connecting_from_not_picking_up(client, w
     text = _notice(alice_app)
     assert "3 of your machines aren't connecting: <strong>" in text and "<strong>alice-old-0</strong>" in text
     assert " · 1 hasn't picked up messages (update RainCLI): <strong>alice-busy</strong>." in text
-    assert "alice-busy" not in text.split(" · ")[0] and "See them in Agents" in text
+    assert "alice-busy" not in text.split(" · ")[0] and "See This computer" in text
 
 
 def test_a_notice_of_only_stale_pickups_says_so(client, world, alice_app, session):  # noqa: F811

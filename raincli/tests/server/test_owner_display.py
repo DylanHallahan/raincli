@@ -14,25 +14,31 @@ def directory(client, token):
     return {a["handle"]: a for a in client.get("/api/v1/agents", headers=auth(token)).json()["agents"]}
 
 
-def test_the_directory_and_messages_name_the_owner_by_display_name(client, world):
+def test_the_directory_lists_only_your_own_machines_and_messages_name_no_owner(client, world):
+    """§21 C13 M2, C5.2: /api/v1/agents is the caller's own machines; a teammate's message names the person, and
+    from_owner is null."""
     shown = directory(client, world["tokens"]["alice"])
-    assert shown["bob-agent"]["owner"] == "Bob" and shown["alice-agent"]["owner"] == "Alice"
-    assert send(client, world["tokens"]["bob"], "alice-agent", "hi").status_code == 201
+    assert set(shown) == {"alice-agent"} and shown["alice-agent"]["owner"] == "Alice"
+    assert send(client, world["tokens"]["bob"], "alice@example.test", "hi").status_code == 201
     message = client.get("/api/v1/inbox", headers=auth(world["tokens"]["alice"])).json()["messages"][0]
-    assert message["from_owner"] == "Bob"
+    assert message["from_owner"] is None and message["from_endpoint"] == {"person": "bob@example.test",
+                                                                          "display_name": "Bob"}
 
 
-def test_owners_whose_names_look_alike_are_told_apart_within_the_team(client, world, session):
+def test_owners_whose_names_look_alike_are_told_apart_on_people(app, client, world, session):
+    """§18.1 item 7, for people (§21): the person is the address, so look-alike names in a team are told apart on
+    People and in the picker."""
+    from test_app_mode import open_app, person_session
+
     robert = identity.create_user(session, "robert@example.test", "Воb", "correct horse battery")  # Cyrillic В, о
     identity.add_member(session, world["teams"]["acme"], robert)
-    identity.register_agent(session, world["teams"]["acme"], robert, "build-01")
     session.commit()
-    shown = directory(client, world["tokens"]["alice"])
-    assert shown["bob-agent"]["owner"] == "Bob (bob)"
-    assert shown["build-01"]["owner"] == "Воb (robert)"
-    assert shown["alice-agent"]["owner"] == "Alice"
-    # Another team, where the names do not collide, is unaffected.
-    assert directory(client, world["tokens"]["eve"])["eve-agent"]["owner"] == "Eve"
+    webview, _ = open_app(app, person_session(client)["person_session"], client)
+    page = webview.get("/app/people").text
+    assert "Bob (bob)" in page and "Воb (robert)" in page
+    names = {p["name"] for p in webview.get("/app/recipients").json()["recipients"]}
+    assert {"Bob (bob)", "Воb (robert)"} <= names
+    webview.close()
 
 
 def test_a_person_sender_has_no_owner(client, world, session):
@@ -40,7 +46,7 @@ def test_a_person_sender_has_no_owner(client, world, session):
                                                "machine_name": "bob-pc", "person_session": True})
     person = r.json()["person_session"]
     r = client.post("/api/v1/person/send", headers=auth(person),
-                    json={"id": "11111111-1111-4111-8111-111111111111", "to": "alice-agent", "body": "from bob"})
+                    json={"id": "11111111-1111-4111-8111-111111111111", "to": "alice@example.test", "body": "from bob"})
     assert r.status_code == 201 and r.json()["message"]["from_owner"] is None
 
 
@@ -140,6 +146,6 @@ def test_web_pages_and_revoke_prompts_show_owners_told_apart(app, world, session
             assert "(owned by Воb (robert))" in page and "(owned by Bob (bob))" in page, path
     with TestClient(app) as client:
         webview, _ = open_app(app, person_session(client)["person_session"], client)
-        page = webview.get("/app/agents").text
+        page = webview.get("/app/people").text  # §21 C7.1: the app's Agents became People
         assert "Bob (bob)" in page and "Воb (robert)" in page
         webview.close()

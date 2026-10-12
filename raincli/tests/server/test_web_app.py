@@ -37,11 +37,14 @@ def app_csrf(client, root=""):
 
 
 def add_message(session, sender, recipient, body="hello", **kw):
-    """Store a message through the messaging service, as an agent would."""
+    """Store a message through the messaging service, as an agent would. §21: agents address people, so this
+    sends to the recipient machine's owner; the ``world`` fixture's inboxes are on those machines."""
     from raincli_server import messaging
+    from raincli_server.models import User
 
+    owner = session.get(User, recipient.owner_user_id)
     msg, _ = messaging.send_message(
-        session, sender, id=uuid.uuid4(), to_handle=recipient.handle, body=body, max_pending=1000, **kw,
+        session, sender, id=uuid.uuid4(), to={"person": owner.email}, body=body, max_pending=1000, **kw,
     )
     session.commit()
     return msg

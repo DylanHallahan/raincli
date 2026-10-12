@@ -12,7 +12,7 @@
 <p class="sender-warning" role="status" data-sender-warning>
 {%- set parts = [] %}
 {%- if off %}{% set _ = parts.append(off|length ~ (" of your machines isn't connecting: " if off|length == 1 else " of your machines aren't connecting: ") ~ names(off)) %}{% endif %}
-{%- if stuck %}{% set _ = parts.append(stuck|length ~ (" hasn't" if stuck|length == 1 else " haven't") ~ " picked up messages (update RainCLI): " ~ names(stuck)) %}{% endif %}
-{%- if old %}{% set _ = parts.append(old|length ~ (" runs" if old|length == 1 else " run") ~ " an old RainCLI that doesn't confirm delivery; update " ~ ("it" if old|length == 1 else "them") ~ ": " ~ names(old)) %}{% endif %}
+{%- if stuck %}{% set _ = parts.append(stuck|length ~ ((" hasn't" if stuck|length == 1 else " haven't") if off else " of your machines haven't") ~ " picked up messages (update RainCLI): " ~ names(stuck)) %}{% endif %}
+{%- if old %}{% set _ = parts.append(old|length ~ ((" runs" if old|length == 1 else " run") if (off or stuck) else (" of your machines runs" if old|length == 1 else " of your machines run")) ~ " an old RainCLI that doesn't confirm delivery; update " ~ ("it" if old|length == 1 else "them") ~ ": " ~ names(old)) %}{% endif %}
 {{- parts|join(' · ') }}. <a href="{{ url('/app/local/this-computer') }}">See This computer</a></p>
 {%- endif %}</div>{% endif %}

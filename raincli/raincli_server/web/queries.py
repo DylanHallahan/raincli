@@ -643,10 +643,11 @@ class PersonRow:
     team: Team
     presence: object  # presentation.PersonPresence
     last_seq: int = 0  # the newest message between the viewer and them in that team (recent first)
+    shown: str = ""  # §18.1 item 7: the name told apart from look-alikes in the team (owners.displays)
 
     @property
     def name(self) -> str:
-        return presentation.display_name(self.user)
+        return self.shown or presentation.display_name(self.user)
 
     @property
     def id(self) -> str:
@@ -675,7 +676,13 @@ def people_directory(db: Session, user: User, team_ids: list[uuid.UUID], now: da
     ):
         other = b if a == user.id else a
         recent[(team_id, other)] = max(last or 0, recent.get((team_id, other), 0))
-    return [PersonRow(u, t, presentation.person_presence(db, t.id, u, now), recent.get((t.id, u.id), 0))
+    from raincli_server import owners
+
+    # §18.1 item 7 for people: the person is the address now, so names that read alike in a team (a Cyrillic "Воb"
+    # beside "Bob") are told apart on People and in the picker.
+    shown = {t.id: owners.displays(db, t.id) for t in {t for t, _ in rows}}
+    return [PersonRow(u, t, presentation.person_presence(db, t.id, u, now), recent.get((t.id, u.id), 0),
+                      shown[t.id].get(u.id, ""))
             for t, u in rows]
 
 

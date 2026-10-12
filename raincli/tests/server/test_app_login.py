@@ -83,8 +83,17 @@ def test_replace_without_delivery_history_rotates(client, world):
 def test_replace_refused_after_a_message_was_received(client, world, session):
     from api_helpers import send
 
+    from raincli_server.models import Agent, PersonInbox
+
     token = app_login(client).json()["token"]
-    assert send(client, world["tokens"]["bob"], "alice-laptop").status_code == 201
+    # §21: a message reaches alice-laptop when it is Alice's inbox and a teammate messages her.
+    laptop = session.scalar(select(Agent).where(Agent.handle == "alice-laptop"))
+    session.query(PersonInbox).filter(PersonInbox.user_id == world["users"]["alice"].id).delete()
+    session.add(PersonInbox(user_id=world["users"]["alice"].id, team_id=world["teams"]["acme"].id, agent_id=laptop.id,
+                            agent_name="reviewer", set_via="app"))
+    session.commit()
+    sent = send(client, world["tokens"]["bob"], "alice@example.test")
+    assert sent.status_code == 201, sent.text
     r = app_login(client, replace=True)
     assert r.status_code == 409 and err(r) == "name_in_use"
     r = app_login(client, replace=True, previous_token=token)  # proof of the credential still works
