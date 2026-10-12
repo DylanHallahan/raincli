@@ -18,7 +18,7 @@ from test_app_mode import alice_app  # noqa: F401  (fixture)
 from test_routing import entry, report
 from test_web_app import login
 
-BOB_AGENT = {"machine": "bob-agent", "agent": "reviewer"}
+BOB_AGENT = {"person": "bob@example.test"}  # §21: people are addressed; Bob's inbox is his machine (world)
 
 
 def person_send(client, person, to, body="hello"):
@@ -57,11 +57,21 @@ def to_bob_agent(client, world, alice_app, body="hello"):  # noqa: F811
     return person_send(client, alice_app["person"], BOB_AGENT, body)
 
 
+def without_inbox(session, world, name="alice"):
+    """§21 C3.2: a person with no inbox gets teammates' messages in their app (``recipient_user_id``), the case the
+    app's read state (§19.2) is about. The ``world`` fixture gives everyone an inbox on their machine."""
+    from raincli_server.models import PersonInbox
+
+    session.query(PersonInbox).filter(PersonInbox.user_id == world["users"][name].id).delete()
+    session.commit()
+
+
 # GET /app/live ---------------------------------------------------------------------------------------
 
 def test_live_returns_new_messages_rendered_and_never_acks(client, world, alice_app, session):  # noqa: F811
     webview = alice_app["webview"]
-    first = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "first")
+    without_inbox(session, world)
+    first = person_send(client, alice_app["person"], {"person": "bob@example.test"}, "first")
     cid = first["conversation_id"]
     reply = agent_send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "**bold** reply",
                        conversation_id=cid)
@@ -91,7 +101,7 @@ def test_live_needs_an_app_mode_session_and_a_visible_conversation(app, client, 
 
 def test_the_list_comes_only_when_it_changed(client, world, alice_app):  # noqa: F811
     webview = alice_app["webview"]
-    person_send(client, alice_app["person"], {"machine": "bob-agent"}, "hello")
+    person_send(client, alice_app["person"], {"person": "bob@example.test"}, "hello")
     first = live(webview)
     assert first["list"] and 'class="rc-list"' in first["list"]["html"]
     again = live(webview, list_rev=first["list_rev"])
@@ -106,7 +116,7 @@ def test_a_poll_costs_the_same_however_long_the_thread(client, world, alice_app,
     webview = alice_app["webview"]
     counts = []
     for n in (3, 60):
-        world_msg = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "start")
+        world_msg = person_send(client, alice_app["person"], {"person": "bob@example.test"}, "start")
         cid = world_msg["conversation_id"]
         with app.state.sessionmaker() as s:
             bob = s.get(Agent, world["agents"]["bob"].id)
@@ -138,7 +148,8 @@ def test_a_poll_costs_the_same_however_long_the_thread(client, world, alice_app,
 
 def test_ack_needs_csrf_and_acks_only_messages_to_you(client, world, alice_app, session):  # noqa: F811
     webview = alice_app["webview"]
-    mine = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "from alice")
+    without_inbox(session, world)
+    mine = person_send(client, alice_app["person"], {"person": "bob@example.test"}, "from alice")
     to_me = agent_send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "for alice",
                        conversation_id=mine["conversation_id"])
     page = webview.get(f"/app/conversations/{mine['conversation_id']}").text
@@ -154,7 +165,8 @@ def test_ack_needs_csrf_and_acks_only_messages_to_you(client, world, alice_app, 
 
 
 def test_opening_a_thread_acks_on_the_website_but_never_in_app_mode(app, client, world, alice_app, session):  # noqa: F811
-    first = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "hi")
+    without_inbox(session, world)
+    first = person_send(client, alice_app["person"], {"person": "bob@example.test"}, "hi")
     to_me = agent_send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "read me",
                        conversation_id=first["conversation_id"])
     alice_app["webview"].get(f"/app/conversations/{first['conversation_id']}")
@@ -189,7 +201,7 @@ def test_migration_0009_orders_pending_messages_by_seq(engine):
 def test_out_of_order_commits_both_appear(client, world, alice_app, app, session):  # noqa: F811
     """M1: a message that commits after a higher seq still reaches the window on the next poll."""
     webview = alice_app["webview"]
-    first = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "start")
+    first = person_send(client, alice_app["person"], {"person": "bob@example.test"}, "start")
     cid = first["conversation_id"]
     age(session, first)
     # Sends to one recipient are serialized, so the two run in opposite directions, as two senders would.
@@ -197,7 +209,7 @@ def test_out_of_order_commits_both_appear(client, world, alice_app, app, session
     try:
         alice = late_session.get(type(world["users"]["alice"]), world["users"]["alice"].id)
         late, _ = messaging.send_as_person(late_session, alice, world["teams"]["acme"].id, id=str(uuid.uuid4()),
-                                           to={"machine": "bob-agent"}, body="lower seq, committed last",
+                                           to={"person": "bob@example.test"}, body="lower seq, committed last",
                                            conversation_id=cid, max_pending=1000)
         bob_early = early_session.get(Agent, world["agents"]["bob"].id)
         early, _ = messaging.send_message(early_session, bob_early, id=str(uuid.uuid4()),
@@ -218,7 +230,7 @@ def test_out_of_order_commits_both_appear(client, world, alice_app, app, session
 def test_a_state_committed_before_the_polls_now_still_shows(client, world, alice_app, session):  # noqa: F811
     """M1: states are sent as they are for the viewer's own messages that aren't final, whatever the cursor."""
     webview = alice_app["webview"]
-    mine = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "to bob")
+    mine = person_send(client, alice_app["person"], {"person": "bob@example.test"}, "to bob")
     cid = mine["conversation_id"]
     now = live(webview, conversation=cid, after=mine["seq"])["now"]
     assert client.post(f"/api/v1/messages/{mine['id']}/ack", headers=auth(world["tokens"]["bob"])).status_code == 200
@@ -239,9 +251,11 @@ def test_a_state_committed_before_the_polls_now_still_shows(client, world, alice
 
 
 def test_ack_never_acks_a_message_to_the_viewers_own_machine(client, world, alice_app, session):  # noqa: F811
-    """M2: only messages to the viewer as a person; their machines' connectors ack their own."""
+    """M2: only messages to the viewer as a person; their machines' connectors ack their own. §21: Bob addresses
+    Alice; with her inbox on her machine, it is that machine's to acknowledge."""
     webview = alice_app["webview"]
-    to_machine = agent_send(client, world["tokens"]["bob"], "alice-agent", "for alice's machine")
+    to_machine = agent_send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "for alice's inbox")
+    assert to_machine["to_endpoint"]["person"] == "alice@example.test"
     page = webview.get("/app/inbox").text
     csrf = re.search(r'data-csrf="([^"]+)"', page).group(1)
     r = webview.post("/app/ack", json={"csrf_token": csrf, "ids": [to_machine["id"]]})
@@ -251,15 +265,19 @@ def test_ack_never_acks_a_message_to_the_viewers_own_machine(client, world, alic
 
 
 def test_a_message_you_send_to_your_own_machine_is_yours(client, world, alice_app):  # noqa: F811
-    """Your own message, whoever receives it: a trail and the accent avatar; your machine writing to you is not."""
-    mine = person_send(client, alice_app["person"], {"machine": "alice-agent"}, "to my own machine")
-    back = agent_send(client, world["tokens"]["alice"], {"person": "alice@example.test"}, "from my machine",
-                      conversation_id=mine["conversation_id"])
-    page = alice_app["webview"].get(f"/app/conversations/{mine['conversation_id']}").text
+    """Your own message, whoever receives it: a trail and the accent avatar; your machine writing to you is not.
+    §21 C13 H2: your agent writes to you (i), and you answer it with a reply (ii), in "From your agents"."""
+    back = agent_send(client, world["tokens"]["alice"], {"person": "alice@example.test"}, "from my machine")
+    r = client.post("/api/v1/person/send", headers=auth(alice_app["person"]),
+                    json={"id": str(uuid.uuid4()), "in_reply_to": back["id"], "body": "my answer"})
+    assert r.status_code == 201, r.text
+    mine = r.json()["message"]
+    assert mine["conversation_id"] == back["conversation_id"]
+    page = alice_app["webview"].get(f"/app/conversations/{back['conversation_id']}").text
+    assert "From your agents" in page
     assert f'data-trail="{mine["id"]}"' in page and f'data-trail="{back["id"]}"' not in page
     assert re.search(rf'class="rc-msg rc-out" id="m-{mine["id"]}"', page)
     assert re.search(rf'class="rc-msg" id="m-{back["id"]}"', page)
-
 
 # §19.9 ---------------------------------------------------------------------------------------------------
 
@@ -267,7 +285,7 @@ def test_a_message_you_send_to_your_own_machine_is_yours(client, world, alice_ap
 def test_a_final_state_committed_after_a_poll_still_reaches_the_trail(client, world, alice_app, session, final):  # noqa: F811
     """F1: delivery_updated_at is a transaction's start, so a final state can commit 'before' the poll's now."""
     webview = alice_app["webview"]
-    mine = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "to bob")
+    mine = person_send(client, alice_app["person"], {"person": "bob@example.test"}, "to bob")
     cid = mine["conversation_id"]
     assert client.post(f"/api/v1/messages/{mine['id']}/ack", headers=auth(world["tokens"]["bob"])).status_code == 200
     now = live(webview, conversation=cid, after=mine["seq"])["now"]
@@ -299,7 +317,7 @@ def test_live_queries_stay_on_the_conversation_index(client, world, alice_app, s
     """F6: on a 20 000-message thread both /app/live queries use (conversation_id, seq), not a scan."""
     from sqlalchemy import text
 
-    first = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "start")
+    first = person_send(client, alice_app["person"], {"person": "bob@example.test"}, "start")
     cid = first["conversation_id"]
     bob = world["agents"]["bob"].id
     session.execute(text("""

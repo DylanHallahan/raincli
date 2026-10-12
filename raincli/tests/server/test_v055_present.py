@@ -69,19 +69,6 @@ def _legacy(session, like, stated, body):
 
 
 @pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
-def test_via_is_hidden_only_when_it_equals_the_sender_sides_agent(client, world, alice_app, session):  # noqa: F811
-    bob_reports(client, world)
-    ask = person_send(client, alice_app["person"], BOB_AGENT, "please review")
-    agent_send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "same name", from_agent="reviewer",
-               in_reply_to=ask["id"])
-    _legacy(session, _first_from_bob(session, ask), "deploy-bot", "other name")
-    _legacy(session, _first_from_bob(session, ask), "Reviewer", "case differs")
-    page = _thread(alice_app, ask["conversation_id"])
-    assert "via reviewer (stated by the machine)" not in page  # equal: hidden
-    assert "via deploy-bot (stated by the machine)" in page
-    assert "via Reviewer (stated by the machine)" in page  # byte for byte: case counts
-
-
 def _first_from_bob(session, ask):
     m = session.query(Message).filter(Message.conversation_id == uuid.UUID(ask["conversation_id"]),
                                       Message.sender_agent_id.isnot(None)).order_by(Message.seq).first()
@@ -89,13 +76,6 @@ def _first_from_bob(session, ask):
 
 
 @pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
-def test_via_shows_when_the_sender_side_is_a_machine_inbox(client, world, alice_app, session):  # noqa: F811
-    plain = agent_send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "from the machine")
-    _legacy(session, plain, "reviewer", "stated on an inbox conversation")
-    page = _thread(alice_app, plain["conversation_id"])
-    assert page.count("via reviewer (stated by the machine)") == 1
-
-
 def test_the_website_shows_no_via_line(client, world, alice_app, session):  # noqa: F811
     """§21 C7.5: P1 and the "via" line are gone everywhere; a stated agent name never reaches a teammate."""
     bob_reports(client, world)
@@ -119,10 +99,13 @@ def test_avatars_use_the_persons_initials(client, world, alice_app, session):  #
 
 # First-run step 1 and the owner notice (§20.4 R8, §20.6 M1) ---------------------------------------------------
 
+
 def test_step_one_is_done_once_an_inbox_is_picked(client, world, alice_app, session):  # noqa: F811
     """§21 C7.6: step 1 is "Pick your inbox agent", done (with the agent's name, the viewer's own) once picked."""
     from raincli_server.models import PersonInbox
 
+    session.query(PersonInbox).filter(PersonInbox.user_id == world["users"]["alice"].id).delete()
+    session.commit()
     page = htmllib.unescape(alice_app["webview"].get("/app/inbox").text)
     assert "rc-step-done" not in page and "Pick your inbox agent" in page
     session.add(PersonInbox(user_id=world["users"]["alice"].id, team_id=world["teams"]["acme"].id,
@@ -130,6 +113,7 @@ def test_step_one_is_done_once_an_inbox_is_picked(client, world, alice_app, sess
     session.commit()
     page = htmllib.unescape(alice_app["webview"].get("/app/inbox").text)
     assert "rc-step-done" in page and "Your inbox: team-inbox" in page
+
 
 def test_the_owner_notice_sits_at_the_top_of_the_list_on_every_page(client, world, alice_app, session):  # noqa: F811
     session.execute(update(AgentCredential).values(last_used_at=None))  # alice-agent: never connected

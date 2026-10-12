@@ -11,7 +11,7 @@ from test_app_mode import alice_app  # noqa: F401  (fixture)
 from test_live import live, person_send
 from test_web_app import login
 
-BOB = {"machine": "bob-agent"}
+BOB = {"person": "bob@example.test"}  # §21: people are addressed
 
 
 def page_of(webview, cid):
