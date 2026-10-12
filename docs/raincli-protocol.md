@@ -1771,3 +1771,213 @@ This section covers app mode only. The website's pages are unchanged until D4. D
     - `--background`: `hasFocus` false, `visibilityState` `hidden`, the latest conversation already open, and nothing acknowledged after 10 s; shown and focused, it is read;
     - `--open`: the latest conversation opens and is read.
 
+
+### 20.8 Amendment: items moved to or superseded by §21 (v0.6)
+- **R1, the recipient picker (§20.1):** moved to §21.8 as the people-only picker. `GET /app/recipients` lists people, never agents or machine inboxes.
+- **R7, Team collapse in short windows:** deleted. There is no Team section (§21.8).
+- **R8, the Team items** (the Team section pinned at the bottom, the empty state's Team position, step 3 pre-filled with a teammate's agent): deleted. Step 3 pre-fills a person, and step 1 becomes "Pick your inbox agent" (§21.8).
+- **P1, hiding "via *agent*":** deleted. Message meta reads "<Name>" or "<Name> · agent" (§21.6).
+- **M3, one listing rule (§20.6):** superseded by §21. Recipients are people; the agents a person may pick as their inbox follow §21.4.
+
+## 21. Person routing (v0.6, binding)
+
+People address people. Each person picks, per team, one agent of theirs that receives their teammates' messages: their **inbox**. Teammates see people and their availability, not machines or agents.
+
+### 21.1 Terms
+- **Person:** an active user who is a member of the team in question.
+- **Inbox:** the one `(machine, agent name)` a person picked in a team. The machine is one of their own in that team and not revoked.
+- **Own view:** what a viewer sees about an endpoint on a machine they own. **Teammate view:** everything else.
+- **Route:** how a message's recipient was chosen, stored on the message: `inbox`, `reply`, `person` or `self`.
+
+### 21.2 Addressing
+- **The only teammate address is a person:** an email (case-insensitive), or a display name that is unique (case-insensitive, trimmed) among the team's active members.
+  - **Wire forms:** `{"person": email}`, `{"person_name": name}`, and the strings `email`, `@email` and `name`.
+- **Machine and agent forms** (`handle`, `handle/agent`, `{"machine"}`, `{"machine", "agent"}`) are refused for every sender with `400 address_people`:
+  - `Address people: send to <Name> (<email>)` when the handle is a non-revoked machine of another active member of the team;
+  - otherwise, including the sender's own handles and handles that don't exist, `Address people: send to a teammate's name or email`.
+- **An ambiguous name:** `400 ambiguous_person`, with the matching people (name and email) in the top-level `people` list.
+- **Yourself:** a person may not send to themselves (§16.12 C7).
+- **Replies:** see §21.5. A reply's `to` may be omitted.
+
+### 21.3 Resolution
+A message to person P in team T is stored as follows, decided once, at send time:
+1. **P has an inbox (M, N) in T:**
+   - **The machine path:** if N is M's own reported inbox agent (`role = inbox`), or M accepts messages only at its inbox (`inbox-only`), the recipient is the machine M with no agent name.
+   - **The named path:** otherwise, the recipient is `(M, N)`. The routing-capability gate (§16.12 C1) applies.
+   - **Route:** `inbox`.
+2. **P has no inbox in T:** the recipient is P (`recipient_user_id`). The route is `person`, and the message waits in P's app.
+3. **The conversation** is the `pair` conversation of the sending person and P in T. The sending person is the person, or the sending machine's owner.
+4. **Senders** are unchanged: a machine credential (with an optional stated `from_agent`), or a person in the app or on the website.
+- **Locking:** send resolution holds `FOR KEY SHARE` on the person's membership and inbox rows, and inbox writes hold `FOR UPDATE` on the same rows.
+
+### 21.4 Inboxes (one per person and team)
+- **Choosing:** the hosted pages, the app's This computer, the CLI and the API (§21.10).
+  - A machine credential may pick only an agent on the calling machine.
+  - The hosted pages and the person API may pick an agent on any of the person's machines in that team.
+- **Valid choices:** an agent that `check_agent_route` accepts on that machine now (live and deliverable, or known within 14 days), or the machine's current `role = inbox` agent. Otherwise `400 inbox_invalid`, naming only the viewer's own machine.
+- **Suggestion:** a machine's `role = inbox` agent is offered as the suggestion, never set automatically.
+- **No cross-team delivery.** A person in several teams has one inbox per team.
+- **Revoking the machine or leaving the team** removes the inbox in the same transaction, as in §21.5's "Removing".
+
+### 21.5 Replies, waiting messages and changes of inbox
+- **Replies (`in_reply_to = X`).** The target comes from X, not from `to`, and is decided once, at send time:
+  1. **X was sent by a machine with a stated `from_agent` S,** and S is live now (the machine's presence and that agent's directory row fresh within 120 s, `instant` or `next-turn`, not ambiguous, exactly one): the reply goes to `(X's machine, S)`, route `reply`.
+  2. **Otherwise:** to the X sender person's inbox (§21.3).
+  3. **X was sent by a machine with no stated name:** to that machine, route `reply`.
+  4. **X was sent by a person:** to that person's inbox (§21.3).
+  - **The replier is X's own sender:** the target is X's recipient person, resolved now.
+  - **X's sending machine is revoked** but the person is still a member: their inbox.
+  - **X's sending person has left the team:** `400 invalid`.
+  - **Checking `to`:** if given, it must name the other person (any §21.2 form, or one of that person's machine handles, which is accepted as that person). Otherwise `400 invalid`.
+  - **The conversation** is X's (after `merged_into`), and X is marked `replied`.
+  - **A target that disappears later** is handled by the client as before: held `offline`, then rejected after 14 days.
+- **Waiting messages (no inbox).**
+  - **The waiting set:** messages to P with `recipient_user_id = P` and route `person`, unacked, not sent by P or P's machines, and not answered. "Answered" means a later message (greater `seq`) from P exists in the same conversation.
+  - **Picking an inbox** offers "Also deliver the N waiting messages", on by default. If accepted, those messages are re-targeted to the inbox endpoint in the same transaction. If declined, they stay in the app.
+- **Changing the inbox.**
+  - **Moved:** unacked route-`inbox` messages at the previous inbox endpoint move to the new one, except messages already marked `replied`.
+  - **Stayed:** acked messages remain with the previous inbox.
+  - **The response** has `moved`, `stayed` (acked, not replied, at the previous inbox) and `delivered_waiting`. The app shows "N messages are with your previous inbox" while `stayed > 0`, until dismissed.
+  - **The same inbox again** changes nothing (`moved = 0`).
+- **Removing the inbox** (explicitly, by revoking its machine, or by leaving the team): unacked route-`inbox` messages there go back to waiting for the person in their app (route `person`).
+- **Redelivery.** Every re-target sets `messages.redeliver`, and an ack clears it.
+  - Machine and person polls return `seq > after OR (redeliver AND unacked)` for the caller, in `seq` order. The returned cursor never goes below `after`.
+  - An ack from a machine of the recipient person that is not the current recipient answers `200` with `acked: false`.
+
+### 21.6 Presentation
+**One server module, `raincli_server/presentation.py`, produces every endpoint label, hold text and teammate-facing error.**
+- **Labels:**
+  - a person is shown by their display name, with a distinguishing suffix when another member's name reads alike (§18.1 item 7);
+  - something a machine sent is shown as `<Name> · agent`; something a person wrote in the app or on the website as `<Name>`;
+  - the same for every viewer.
+  - **A person's own machines and agents** are shown only on their own pages: This computer, the website's Machines page, owner warnings, `/me` and the inbox endpoints.
+- **Message JSON, per reader:**
+  - **`from_endpoint`, `to_endpoint`:** `{"person": email, "display_name": name}`. The reading machine's own endpoint keeps `{"machine", "agent"}`, so a connector still sees its own target.
+  - **`from`, `to`:** `@email`, except the reading machine's own handle.
+  - **`from_agent`:** shown only to the sending machine's owner.
+  - **`from_owner`:** null.
+  - **`from_kind`:** `app` (a person wrote it) or `agent` (a machine sent it).
+  - **`from_same_owner`:** unchanged.
+- **Hold reasons:**
+  - **The recipient machine's owner** sees the raw code.
+  - **Everyone else** sees a coarse code: `no_inbox`, `inbox_busy`, `inbox_offline`, `update_needed`, `approval` or `inbox_failed`. For route `reply` it's `agent_busy` or `agent_offline`.
+  - **Pages** show the matching sentence:
+    - "waiting for <Name> to pick an inbox";
+    - "<Name>'s inbox is busy" or "is offline" ("<Name>'s agent is busy" or "is offline" for replies);
+    - "<Name>'s RainCLI needs an update";
+    - "waiting for <Name>'s approval";
+    - "<Name>'s inbox couldn't take it".
+- **Event details** are accepted only from a fixed list of codes. Free text is `400 invalid`. The list:
+  - the holds above;
+  - `delivered`, `submission_uncertain`, `rejected`, `declined`, `target_mismatch`, `agent_not_ready`;
+  - `herdr_timeout`, `herdr_failed`, `handover_failed`, `handover_missing`, `claimed_without_receipt`, `next_turn_emitted`;
+  - `owner_unreachable` and `no_inbox`.
+
+  Pages never render a raw detail. Event lists shown to anyone but the recipient machine's owner carry neither `reported_by` nor `detail`.
+- **No read receipt.** For a message to a person (`recipient_user_id`), everyone but that person sees:
+  - held `no_inbox` while the person has no inbox in that team, otherwise `received` (`replied` once they replied);
+  - no `acked_at`;
+  - `delivery_updated_at` equal to `created_at`, until replied.
+
+  The person sees their own read state.
+- **Conversations:**
+  - `peer`, `peer_endpoint` and `archived_by` are people;
+  - a person's `self` conversation is "From your agents", and their `own_agents` conversation is "Your agents".
+- **Directory:**
+  - `GET /api/v1/people` returns the team's people: `display_name`, `email`, `team`, `presence` (`ready`, `busy`, `offline` or `no_inbox`) and `speed` (`instant`, `next_turn` or null).
+  - **Presence and speed** come from the person's inbox only: the inbox agent's directory row; on the machine path (§21.3), the machine's own presence. Both must be fresh within 120 s.
+  - `GET /api/v1/agents` returns only the caller's own machines, in the per-machine shape of §16.
+- **Website Machines:** a member sees their own machines. A team owner also sees every team machine's handle, owner, client version, update state and last-connected time; no agents, sessions or presence words.
+- **Old-client warning:** when the machine concerned has never reported a client version, the wording changes:
+  - **to a sender:** "<Name> is on an old version of RainCLI that doesn't confirm delivery. Ask them to update.";
+  - **to the owner:** "This machine runs an old RainCLI that doesn't confirm delivery; update it."
+
+  The machine concerned is the recipient's inbox machine, or, without an inbox, their machine most recently seen in the team.
+
+### 21.7 Own traffic
+- **A machine writing to its own owner** (escalations, an agent reporting to its person) is allowed. It is stored with the owner as recipient (route `self`) in the owner's `self` conversation for the team, which stays unarchived ("From your agents").
+- **The owner may write back to that machine only as a reply** (route `self`).
+- **A machine writing to another of its owner's machines, and every agent form,** are refused (§21.2).
+- **A machine** may read and archive the `pair`, `self` and `own_agents` conversations of its owner in its team. It sees its owner's messages there.
+
+### 21.8 Pages
+- **The people picker:** People with presence · speed. The team shows as quiet text with several teams.
+  - From §20.1, kept: the combobox, recent first, filtering, keyboard and ARIA, and the no-JavaScript `<select>`.
+  - `?to=` takes a person.
+- **The rail:** "People", with presence · speed and a Message button per person. There is no Team section.
+- **Inbox first-run banner** (until an inbox is picked): "Pick the agent that receives your teammates' messages". It lists the person's deliverable agents across their machines in that team, each with Use as my inbox; the suggestion is pre-selected. It also carries the waiting-messages offer (§21.5).
+- **Conversation header:** the person, presence · speed and Archive. The second line shows the team.
+- **The trail** for messages to a person: stored → received → submitted → replied, with the hold sentences of §21.6.
+- **Warnings** are keyed by person: "<Name>'s inbox hasn't connected since …", "<Name> hasn't picked an inbox yet", and the old-client wording of §21.6.
+
+### 21.9 Migration 0010 (one revision, with a downgrade)
+- **Schema:**
+  - `person_inboxes`, primary key `(user_id, team_id)`;
+  - `conversations.kind` (`pair`, `self` or `own_agents`). `self` and `own_agents` rows have one person on both sides, with the keys `p:<id>` and `self:<id>`, one of each per team and person, and only `self` rows are a default;
+  - `conversations.merged_into`, plus the downgrade's scratch columns `premerge_is_default` and `premerge_archive`;
+  - `messages.redeliver`, `messages.route` and `messages.premerge_conversation_id`.
+- **The merge.** Every endpoint maps to its person (a machine, or an agent on it, maps to the machine's owner). In each team, conversations with messages merge as follows:
+  - **two people:** one `pair` conversation. An existing default person-to-person row is reused and counts as a source;
+  - **a person and their own machine:** their `self` conversation;
+  - **two machines of one person:** their `own_agents` conversation, always archived.
+
+  Messages keep their endpoints; only `conversation_id` changes, with the original kept in `premerge_conversation_id`. Source rows stay, with `merged_into` set and their default mark cleared.
+
+  A merged `pair` or `self` conversation is archived only if every source was archived through its newest message. It is then archived through the greatest of their `archived_through_seq`, by the most recent archiver mapped to their person. Conversations without messages are left alone. Nothing is deleted.
+- **Old ids:** a lookup by conversation id follows `merged_into` to its end, then authorizes that conversation. An unauthorized one answers exactly as an unknown id. App and website URLs answer `302` to the final id, with the query kept. The API answers with the final conversation's data. A send naming an old id resolves it too, including idempotent retries.
+- **The downgrade:**
+  - merged messages go back, and the sources' default marks and the reused rows' archive state are restored;
+  - a message sent after the upgrade whose endpoints are not its conversation's two keys moves to the default conversation of its own endpoints, created if needed;
+  - `self`, `own_agents` and empty created rows are then deleted. A created person-pair row holding later messages stays as an ordinary person-to-person conversation;
+  - re-targets made after the upgrade are not undone.
+
+### 21.10 Endpoints
+- **Machine credential:**
+  - `GET /api/v1/me/inbox` returns `{inbox: {machine, agent, set_at} | null, candidates: [{machine, agent, live, suggested}], waiting}`;
+  - `PUT /api/v1/me/inbox` takes `{machine?, agent, deliver_waiting = true}` or `{"none": true}`, and returns `{inbox, moved, stayed, delivered_waiting}`;
+  - `GET /api/v1/people`.
+- **Person session:**
+  - `GET` and `PUT /api/v1/person/me/inbox`, the same with a `team` slug (required with several teams);
+  - `GET /api/v1/person/inbox?routed=1` also returns messages routed to the person's own machines (acked or not), never ones the person or their machines sent. Without `routed`, the endpoint is unchanged.
+- **Hosted:** `POST /app/inbox` (the banner and the picker).
+- **Operator:** `raincli-server admin set-inbox --team SLUG --email EMAIL (--handle H --agent NAME [--no-deliver-waiting] | --clear)` sets or clears a person's inbox without the live-agent check, for support.
+
+### 21.11 Clients (v0.6.0)
+- **The C17 frame:** only the From and To lines change.
+  - **From:** `From: "<Name>" <<email>> | sent by "<Name>" in the app | team <team>`, or `| sent by "<Name>"'s agent | team <team>`, from `from_kind`. The name is in JSON string form wherever it appears.
+  - **To:** `To: you, as <Name>'s inbox`, where `<Name>` is this machine's owner (from `/me`). The held-age suffix stays.
+  - **Fallback:** without `from_kind`, the §16.12 C17 lines are used.
+- **CLI:**
+  - `raincli send <person>`. On `ambiguous_person` it lists the matches.
+  - `raincli people`, and `raincli agents` as an alias with a one-line notice.
+  - `raincli inbox show`, `raincli inbox set <agent> [--machine <handle>] [--no-deliver-waiting]` and `raincli inbox clear`. Plain `raincli inbox` still lists messages.
+  - `raincli reply` sends `in_reply_to` without `to`.
+  - `raincli connector trust` takes a person's email.
+- **This computer:**
+  - Use as my inbox on each deliverable local agent;
+  - "Your inbox: <agent> on this computer" or "… on <machine>";
+  - Change, and the waiting-messages tick;
+  - "Use as my inbox in <team>" when the person is in several teams;
+  - all through `/api/v1/me/inbox`.
+- **Notifications:** the app's feed reads `/api/v1/person/inbox?routed=1`. Toasts fire only for:
+  - a message a teammate wrote by hand (`from_kind = app`);
+  - a message held for the person's approval;
+  - a message waiting with no inbox;
+  - an escalation;
+  - their inbox offline for more than 60 minutes (once, re-armed when it is back).
+
+  "Notify me about every message" is off by default. §16.12 C14 is unchanged: the toast shows the sender's name only, never body text.
+- **The window:** the rail says People. The handoff accepts `/app/people`, and `/app/agents` is kept for older windows.
+- **SKILL.md:**
+  - agents address people by name or email;
+  - teammates' agents can't be seen or addressed;
+  - replies come back to the agent that asked;
+  - an inbox agent acts for its person and follows their instructions on passing work to their other agents.
+
+### 21.12 Compatibility
+- **v0.5.0 to v0.5.6 clients:**
+  - receive messages to their owner on both paths of §21.3, and PR1 replies;
+  - send to a person with `{"person": email}`, and reply to the person;
+  - frame teammates' messages as persons.
+- **`raincli agents` and `raincli send <handle>` from those versions** degrade without crashing: the former lists the caller's own machines, the latter gets `address_people`.
+- **Clients before v0.5.0** need an update to receive messages under §21 (named delivery needs v0.5.0, §16.12 C1).

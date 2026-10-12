@@ -192,6 +192,47 @@ sudo bash /opt/raincli/current/deploy/raincli/scripts/rollback.sh
 - **Fallback:** if the downgrade fails, restore the release's recorded backup (`PRE_BACKUP`) as in item 2 of the
   rollback checklist. Messages written since the backup are lost.
 
+### Upgrading to the v0.6 server (person routing, migration `0010`)
+
+The server half ships first, ahead of the v0.6.0 client release. Clients from v0.5.0 to v0.5.6 keep working: they
+receive messages to their owner and replies, and they send to people with `{"person": email}`. See protocol §21.
+
+1. **Dry run first.** Restore the latest backup into a scratch database and run the migration there, as the service
+   user with `RAINCLI_DATABASE_URL` pointing at the scratch database: `python -m raincli_server.migrate upgrade`.
+   Check that each merged conversation's message count is the sum of its sources, then `downgrade 0009` and confirm the
+   conversations come back unchanged.
+2. **Stop the service before installing.** Migration `0010` merges each team's conversations by the people on both
+   sides, so it runs with the service stopped: `sudo systemctl stop raincli`, then run `install.sh` as above. It backs
+   up, migrates in one transaction and starts the new release. Nothing is deleted; old conversation links redirect.
+3. **After the start:**
+   - each person picks their inbox once: the hosted Inbox banner, This computer in the app (v0.6.0), or
+     `raincli inbox set`. Until they do, messages to them wait in their app (`no_inbox`);
+   - for support, the operator can set or clear one without the live-agent check:
+     ```bash
+     rc_admin set-inbox --team pilot --email <member email> --handle <their machine> --agent <agent name>
+     rc_admin set-inbox --team pilot --email <member email> --clear
+     ```
+   - check a send to a person, a `no_inbox` hold, and that `GET /api/v1/people` lists people only.
+
+#### Rolling back the v0.6 server
+
+Only the v0.6 release has the code that undoes migration `0010`, so run the downgrade **before** switching back, with
+the service stopped, as the service user with the env file loaded:
+
+```bash
+sudo systemctl stop raincli
+(cd / && sudo runuser -u raincli -- bash -c 'set -a; . /etc/raincli/raincli.env; set +a;
+  exec /opt/raincli/current/venv/bin/python -m raincli_server.migrate downgrade 0009')   # the 0.6 code
+sudo bash /opt/raincli/current/deploy/raincli/scripts/rollback.sh
+```
+
+- **What the downgrade does:** merged messages return to their original conversations, with their default marks and
+  archive state. Messages sent after the upgrade move to the conversation of their own two endpoints. Inbox choices
+  are dropped, and re-targets made after the upgrade are not undone.
+- **`rollback.sh` alone is not safe for this release**: the older code would run on the `0010` schema.
+- **Fallback:** if the downgrade fails, restore the release's recorded backup (`PRE_BACKUP`) as in item 2 of the
+  rollback checklist. Messages written since the backup are lost.
+
 ### Client versions (admin CLI)
 
 The operator chooses which client version each team's managed installs run. The server stores and replies with **a version only**; clients install it only from stable releases of the canonical GitHub repository, so the server can't choose where code comes from. Releases are unsigned (see [SETUP.md](../SETUP.md#updates)).
