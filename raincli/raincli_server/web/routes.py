@@ -551,10 +551,13 @@ def _app_inbox(request: Request, db: Session, viewer: auth.Viewer, team_ids, row
     first_team = viewer.teams[0][0] if viewer.teams else None
     people = queries.people_directory(db, viewer.user, team_ids)
     # §20.6 M1: Inbox keeps the owner's notice in its main pane as well as at the top of the list; computed once.
+    banners = _inbox_banner(db, viewer)
+    # §21 C7.3: while there is an inbox to pick, Inbox shows the banner; P2 (opening the latest conversation) waits.
     return render(request, "app_mode/inbox.html", viewer=viewer, conversations=rows,
-                  owner_warnings=extras["list_owner_warnings"], banners=_inbox_banner(db, viewer),
+                  owner_warnings=extras["list_owner_warnings"], banners=banners,
                   my_inbox=present.my_inbox(db, viewer.user, first_team), first_person=people[0] if people else None,
-                  open_latest=present.opens_latest(viewer, request.headers.get("user-agent")), **extras)
+                  open_latest=present.opens_latest(viewer, request.headers.get("user-agent"))
+                  and not any(b["candidates"] for b in banners), **extras)
 
 
 @router.get("/app/conversations/{conversation_id}", response_class=HTMLResponse)

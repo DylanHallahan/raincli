@@ -366,3 +366,18 @@ def test_the_website_banner_sets_the_inbox_too(client, session, v06_seed):  # no
     session.expire_all()
     inbox = session.get(PersonInbox, (v06_seed["people"]["Maya"].id, v06_seed["teams"]["northwind"].id))
     assert inbox.agent_name == "zq-agent-maya-notes" and inbox.set_via == "web"
+
+
+def test_inbox_shows_the_banner_rather_than_opening_the_latest(maya, session, v06_seed, monkeypatch):  # noqa: F811
+    """§21 C7.3 with §20.6 M1: while there is an inbox to pick, a 0.5.5+ window's Inbox shows the banner and doesn't
+    open the latest conversation (P2) by itself; once picked, P2 is back. (The session is bound to its exact app
+    User-Agent, so the window's version check is stubbed.)"""
+    from raincli_server.web import present
+
+    monkeypatch.setattr(present, "opens_latest", lambda viewer, ua: True)
+    page = maya.get("/app/inbox").text
+    assert "Pick the agent that receives your teammates' messages" in text(page) and "data-open-latest" not in page
+    r = maya.post("/app/inbox", data={"csrf_token": _csrf_app(maya), "team": "northwind",
+                                      "choice": "zq-handle-maya|zq-agent-maya-laptop"}, follow_redirects=False)
+    assert r.status_code in (302, 303)
+    assert "data-open-latest" in maya.get("/app/inbox").text  # Contoso has nothing to pick: P2 again

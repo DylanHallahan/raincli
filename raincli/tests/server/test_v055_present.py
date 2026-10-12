@@ -68,14 +68,12 @@ def _legacy(session, like, stated, body):
     session.commit()
 
 
-@pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
 def _first_from_bob(session, ask):
     m = session.query(Message).filter(Message.conversation_id == uuid.UUID(ask["conversation_id"]),
                                       Message.sender_agent_id.isnot(None)).order_by(Message.seq).first()
     return {"id": str(m.id)}
 
 
-@pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
 def test_the_website_shows_no_via_line(client, world, alice_app, session):  # noqa: F811
     """§21 C7.5: P1 and the "via" line are gone everywhere; a stated agent name never reaches a teammate."""
     bob_reports(client, world)
