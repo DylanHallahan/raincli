@@ -155,7 +155,7 @@ def test_layout_rail_list_thread_compose_in_light_and_dark(people, browser, arti
     for scheme in ("light", "dark"):
         context, page = open_app(browser, base, people["alice"]["person_session"], scheme)
         rail = page.locator("nav.rc-nav a")
-        assert [t.strip() for t in rail.all_inner_texts()] == ["Inbox", "Agents", "Archived", "This computer", "Settings"]
+        assert [t.strip() for t in rail.all_inner_texts()] == ["Inbox", "People", "Archived", "This computer", "Settings"]
         assert page.locator(".site-footer").count() == 0 and page.locator(".site-header").count() == 0
         page.click(".rc-conv")
         assert page.locator(".rc-thread .rc-msg .md strong").inner_text() == "Alice"
@@ -177,7 +177,10 @@ def test_send_reply_and_attachments(people, browser, tmp_path, artifacts):
     alice_ctx, alice = open_app(browser, base, people["alice"]["person_session"])
     alice.click("text=New")
     alice.screenshot(path=str(artifacts / "app-mode-compose-light.png"))
-    alice.fill("#to", "@bob@example.test")
+    alice.click("#to")  # §21 C7.2: the people picker
+    alice.fill("#to", "Bob")
+    alice.wait_for_selector(".rc-picker-option")
+    alice.press("#to", "Enter")
     alice.fill("#body", "Here is the *report*")
     alice.set_input_files("input[name=files]", str(report))
     alice.click("button:has-text('Send')")
@@ -225,34 +228,39 @@ def test_markdown_xss_corpus_does_not_execute(people, browser):
 
 # The agents picker refuses listed and ambiguous agents --------------------------------------------
 
-def test_agents_picker_and_listed_agents(people, browser, artifacts):
+def test_people_and_the_picker(people, browser, artifacts):
+    """§21 C7.1, C7.2: People lists teammates with presence · speed and Message; the picker on New message is
+    people only, with the combobox keyboard and ARIA (arrow keys, Enter, Esc, a removable chip)."""
     base = people["base"]
-    bob_token = people["bob"]["token"]
-    request = urllib.request.Request(base + "/api/v1/presence", method="PUT", data=json.dumps({"status": "ready", "agents": [
-        {"key": "a" * 32, "name": "reviewer", "type": "claude", "status": "idle", "role": None,
-         "reachability": "instant", "source": "herdr"},
-        {"key": "b" * 32, "name": "scanned", "type": "other", "status": "unknown", "role": None,
-         "reachability": "listed", "source": "scan"},
-        {"key": "c" * 32, "name": "twin", "type": "claude", "status": "idle", "role": None,
-         "reachability": "listed", "source": "hook", "ambiguous": True}]}).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + bob_token})
-    urllib.request.urlopen(request, timeout=15).read()
     context, page = open_app(browser, base, people["alice"]["person_session"])
-    page.click("nav.rc-nav a:has-text('Agents')")
-    page.screenshot(path=str(artifacts / "app-mode-agents-light.png"))
-    card = page.locator("section.rc-card", has_text="bob-laptop")
-    reviewer = card.locator("li", has_text="reviewer")
-    assert reviewer.locator("a:has-text('Message')").count() == 1
-    assert reviewer.locator(".badge.reach-instant").inner_text() == "Instant"  # the website's reach_badge
-    for name, reason in (("scanned", "listed only"), ("twin", "ambiguous")):
-        row = card.locator("li", has_text=name)
-        assert row.locator("a").count() == 0 and f"can't receive messages ({reason})" in row.inner_text()
-    reviewer.locator("a:has-text('Message')").click()
-    assert page.input_value("#to") == "bob-laptop/reviewer"
-    page.fill("#to", "bob-laptop/scanned")
-    page.fill("#body", "hello")
-    page.click("button:has-text('Send')")
-    assert "can't receive messages" in page.locator(".rc-flash-error").inner_text()
+    recipients = []
+    page.on("response", lambda r: recipients.append(r.text()) if r.url.endswith("/app/recipients") else None)
+    page.click("nav.rc-nav a:has-text('People')")
+    page.screenshot(path=str(artifacts / "app-mode-people-light.png"))
+    row = page.locator(".rc-people li", has_text="Bob")
+    assert row.count() == 1 and "bob-laptop" not in page.content() and "bob-agent" not in page.content()
+    row.locator("a:has-text('Message')").click()
+    page.wait_for_selector(".rc-chip-picked:not([hidden])")  # ?to= pre-picks the person
+    assert "Bob" in page.inner_text(".rc-chip-picked")
+    page.click(".rc-chip-remove")
+    combo = page.locator("#to")
+    assert combo.get_attribute("role") == "combobox" and combo.get_attribute("aria-controls") == "to-options"
+    combo.click()
+    page.wait_for_selector("#to-options:not([hidden]) .rc-picker-option")
+    assert combo.get_attribute("aria-expanded") == "true"
+    combo.press("ArrowDown")
+    assert combo.get_attribute("aria-activedescendant") == "to-option-0"
+    assert page.get_attribute("#to-option-0", "aria-selected") == "true"
+    combo.press("Escape")
+    assert combo.get_attribute("aria-expanded") == "false"
+    combo.fill("zzz")
+    page.wait_for_selector(".rc-picker-none")
+    assert page.inner_text(".rc-picker-none") == "Nobody on your team matches 'zzz'"
+    combo.fill("bob@example")  # the email is a hidden match term
+    page.wait_for_selector(".rc-picker-option")
+    combo.press("Enter")
+    assert "Bob" in page.inner_text(".rc-chip-picked") and page.input_value('input[name="to"]').startswith("p.")
+    assert recipients and all("bob-laptop" not in r and "bob-agent" not in r for r in recipients)
     context.close()
 
 
@@ -309,6 +317,7 @@ def test_labels_focus_order_and_token_contrast(people, browser):
         context, page = open_app(browser, base, people["alice"]["person_session"], scheme)
         page.goto(base + "/app/compose")
         unlabeled = page.evaluate("""() => [...document.querySelectorAll('input:not([type=hidden]), textarea, select')]
+            .filter(el => !el.hidden && !el.disabled)  // the picker keeps the original <select> hidden and disabled
             .filter(el => !(el.labels && el.labels.length) && !el.getAttribute('aria-label')).map(el => el.name)""")
         assert unlabeled == []
         page.keyboard.press("Tab")
@@ -316,7 +325,7 @@ def test_labels_focus_order_and_token_contrast(people, browser):
         for _ in range(5):
             order.append(page.evaluate("document.activeElement.textContent.trim()"))
             page.keyboard.press("Tab")
-        assert order == ["Inbox", "Agents", "Archived", "This computer", "Settings"]
+        assert order == ["Inbox", "People", "Archived", "This computer", "Settings"]
         tokens = page.evaluate("""() => { const s = getComputedStyle(document.documentElement);
             const probe = (v) => { const el = document.createElement('span'); el.style.color = s.getPropertyValue(v);
               document.body.appendChild(el); const c = getComputedStyle(el).color; el.remove(); return c; };

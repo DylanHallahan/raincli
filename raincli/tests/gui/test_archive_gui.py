@@ -14,7 +14,16 @@ from .test_localtime_gui import website
 pytest.importorskip("playwright.sync_api")
 
 
-def test_archive_on_the_website(people, browser, artifacts):
+def no_inbox(people, session):
+    """§21 C3.2: Alice reads in her app (no inbox), so opening the conversation reads it."""
+    from raincli_server.models import PersonInbox
+
+    session.query(PersonInbox).filter(PersonInbox.user_id == people["world"]["users"]["alice"].id).delete()
+    session.commit()
+
+
+def test_archive_on_the_website(people, browser, artifacts, session):
+    no_inbox(people, session)
     msg = person_send(people["base"], people["bob"]["person_session"], {"person": "alice@example.test"},
                       "Archive me on the website")
     context, page = website(browser, people["base"])
@@ -41,7 +50,8 @@ def test_archive_on_the_website(people, browser, artifacts):
     context.close()
 
 
-def test_archive_in_app_mode(people, browser, artifacts):
+def test_archive_in_app_mode(people, browser, artifacts, session):
+    no_inbox(people, session)
     msg = person_send(people["base"], people["bob"]["person_session"], {"person": "alice@example.test"},
                       "Archive me in the app")
     context, page = open_app(browser, people["base"], people["alice"]["person_session"])
@@ -50,21 +60,21 @@ def test_archive_in_app_mode(people, browser, artifacts):
     page.click(".rc-archive button:has-text('Archive')")
     page.wait_for_url("**/app/inbox?notice=archived")
     assert page.locator(f".rc-conv[href*='{msg['conversation_id']}']").count() == 0
-    # Bob archives a conversation Alice hasn't opened: it stays unread under Archived (§17.3 A3).
-    unread = person_send(people["base"], people["bob"]["person_session"], {"machine": "alice-laptop"},
+    # §21: one conversation per person pair. Bob's new message brings it back (§17.3), and Bob archives it again
+    # before Alice opens it: it stays unread under Archived, "Archived by Bob" (§17.3 A3, A8).
+    unread = person_send(people["base"], people["bob"]["person_session"], {"person": "alice@example.test"},
                          "Unread when archived")
+    assert unread["conversation_id"] == msg["conversation_id"]
     api(people["base"], f"/api/v1/person/conversations/{unread['conversation_id']}/archive", {},
         people["bob"]["person_session"])
     page.click("nav.rc-nav a:has-text('Archived')")
     assert page.get_attribute("nav.rc-nav a:has-text('Archived')", "aria-current") == "page"
-    row = page.locator(".rc-archived-row", has_text="Archived by you")
-    assert row.count() == 1 and row.locator(".rc-count").count() == 0  # read in the window before archiving
-    other = page.locator(".rc-archived-row", has_text="Archived by Bob")
-    assert other.count() == 1 and other.locator(".rc-count").inner_text() == "1"
+    row = page.locator(".rc-archived-row", has_text="Archived by Bob")
+    assert row.count() == 1 and row.locator(".rc-count").inner_text() == "1"
     page.screenshot(path=str(artifacts / "app-mode-archived.png"))
     row.locator("button:has-text('Unarchive')").click()
     page.wait_for_url("**/app/archived?notice=unarchived")
-    assert page.locator(".rc-archived-row").count() == 1  # only Bob's
+    assert page.locator(".rc-archived-row").count() == 0
     page.click("nav.rc-nav a:has-text('Inbox')")
     page.wait_for_url(f"**/app/conversations/{msg['conversation_id']}*")  # Inbox opens the latest (§20.6 M1)
     assert page.locator(f".rc-conv[href*='{msg['conversation_id']}']").count() == 1

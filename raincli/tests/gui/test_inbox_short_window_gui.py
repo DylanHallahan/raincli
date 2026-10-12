@@ -16,9 +16,17 @@ SELECT_VISIBLE = """() => { const h = [...document.querySelectorAll('h2')].find(
 
 
 def five_conversations(team):
-    for target in ({"machine": "jon-laptop", "agent": "api-agent"}, {"machine": "priya-desktop", "agent": "web-agent"},
-                   {"person": "jon@example.test"}, {"person": "priya@example.test"}, {"machine": "sam-server"}):
-        person_send(team, team["maya"], target, "hello")
+    """§21: one conversation per person, so five teammates (two more than the team fixture's)."""
+    from raincli_server import identity
+    from raincli_server.models import Team
+
+    s = team["session"]
+    northwind = s.query(Team).filter_by(slug="northwind").one()
+    for name in ("Lee", "Ana"):
+        identity.add_member(s, northwind, identity.create_user(s, f"{name.lower()}@example.test", name, "correct horse battery"))
+    s.commit()
+    for email in ("jon", "priya", "sam", "lee", "ana"):
+        person_send(team, team["maya"], {"person": f"{email}@example.test"}, "hello")
 
 
 def stale_machines(team, count):
@@ -56,8 +64,8 @@ def test_several_stale_machines_are_one_notice_and_the_list_keeps_three_rows(tea
         notices = page.locator(".rc-list .owner-warnings .sender-warning")
         assert notices.count() == 1
         text = notices.inner_text()
-        assert text.startswith("8 of your machines aren't connecting: maya-old-pc-0") and "See them in Agents" in text
-        assert notices.locator("a").get_attribute("href").endswith("/app/agents")
+        assert text.startswith("8 of your machines aren't connecting: maya-old-pc-0") and "See This computer" in text
+        assert notices.locator("a").get_attribute("href").endswith("/app/local/this-computer")
         assert page.evaluate(ROWS) >= 3
         context.close()
 
