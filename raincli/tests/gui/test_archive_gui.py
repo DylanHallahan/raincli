@@ -22,6 +22,17 @@ def no_inbox(people, session):
     session.commit()
 
 
+def inbox_again(people, session):
+    """Alice's inbox back (as the world seed had it), without moving any message: Inbox opens the latest
+    conversation only when there is no inbox banner (an inbox to pick) on the page."""
+    from raincli_server.models import PersonInbox
+
+    world = people["world"]
+    session.add(PersonInbox(user_id=world["users"]["alice"].id, team_id=world["teams"]["acme"].id,
+                            agent_id=world["agents"]["alice"].id, agent_name="inbox", set_via="api"))
+    session.commit()
+
+
 def test_archive_on_the_website(people, browser, artifacts, session):
     no_inbox(people, session)
     msg = person_send(people["base"], people["bob"]["person_session"], {"person": "alice@example.test"},
@@ -75,6 +86,7 @@ def test_archive_in_app_mode(people, browser, artifacts, session):
     row.locator("button:has-text('Unarchive')").click()
     page.wait_for_url("**/app/archived?notice=unarchived")
     assert page.locator(".rc-archived-row").count() == 0
+    inbox_again(people, session)
     page.click("nav.rc-nav a:has-text('Inbox')")
     page.wait_for_url(f"**/app/conversations/{msg['conversation_id']}*")  # Inbox opens the latest (§20.6 M1)
     assert page.locator(f".rc-conv[href*='{msg['conversation_id']}']").count() == 1

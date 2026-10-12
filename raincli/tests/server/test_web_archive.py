@@ -138,14 +138,15 @@ def test_archive_in_app_mode(alice_app, session):  # noqa: F811
     assert "app mode thread" in webview.get("/app/inbox").text
 
 
-def test_machines_page_says_named_agents_can_be_messaged(app, world):
-    """v0.5.2: the Machines page no longer says only the inbox agent can be reached."""
-    page = htmllib.unescape(signed_in(app).get("/app/agents").text)
+def test_machines_page_says_teammates_message_people(app, world):
+    """v0.6 (C7.7): the Machines page says teammates message you through the inbox you pick, not machines or agents."""
+    page = re.sub(r"<[^>]+>", "", htmllib.unescape(signed_in(app).get("/app/agents").text))
     for stale in ("You can't message the other agents directly", "hands messages to one",
-                  "The other agents on a machine are listed for visibility only"):
+                  "any named agent marked Instant", "Teammates message the machine's address",
+                  "can't be messaged"):
         assert stale not in page
-    assert "any named agent marked Instant" in re.sub(r"<[^>]+>", "", page) and "Next turn" in page
-    assert "shown for visibility only and can't be messaged" in page
+    assert "Teammates message you, not your machines" in page
+    assert "Instant" in page and "Next turn" in page and "can be your inbox" in page
 
 
 def test_every_layout_loads_localtime_without_inline_script(app, session, world, alice_app):  # noqa: F811

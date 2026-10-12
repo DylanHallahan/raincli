@@ -196,9 +196,13 @@ def test_without_javascript_the_fragment_jump_cannot_scroll_the_document(long_th
 
 
 @pytest.mark.parametrize("size", [(1164, 741), (1000, 520), (760, 400)])
-def test_the_apps_own_open_of_the_latest_conversation_never_scrolls_the_document(long_thread, browser, artifacts, size):  # noqa: F811
-    """P2 (Inbox opens the latest conversation, location.replace to its #latest link), as a cold --open does."""
+def test_the_apps_own_open_of_the_latest_conversation_never_scrolls_the_document(long_thread, browser, artifacts, size, session):  # noqa: F811
+    """P2 (Inbox opens the latest conversation, location.replace to its #latest link), as a cold --open does. Alice
+    has an inbox again first: with an inbox to pick, Inbox shows the banner instead."""
+    from .test_archive_gui import inbox_again
+
     p = long_thread
+    inbox_again(p, session)
     context, page = open_app(browser, p["base"], p["alice"]["person_session"],
                              viewport={"width": size[0], "height": size[1]}, device_scale_factor=1.5)
     try:
