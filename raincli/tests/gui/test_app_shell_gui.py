@@ -230,3 +230,50 @@ def test_the_temp_layout_diagnostic_posts_the_expected_keys_at_most_three_times(
         assert statuses and all(s == 204 for s in statuses), statuses
     finally:
         context.close()
+
+
+@pytest.mark.parametrize("size", [(1164, 741), (1000, 520), (760, 400)])
+def test_the_apps_own_open_of_the_latest_conversation_never_scrolls_the_document(long_thread, browser, artifacts, size):  # noqa: F811
+    """P2 (Inbox opens the latest conversation, location.replace to its #latest link), as a cold --open does."""
+    p = long_thread
+    context, page = open_app(browser, p["base"], p["alice"]["person_session"],
+                             viewport={"width": size[0], "height": size[1]}, device_scale_factor=1.5)
+    try:
+        page.wait_for_url("**/app/conversations/**#latest")
+        page.wait_for_selector("[data-thread]")
+        page.wait_for_timeout(600)
+        shoot(page, artifacts, f"p2-open-{size[0]}x{size[1]}")
+        doc = page.evaluate(DOC)
+        assert doc["top"] == 0 and doc["height"] <= doc["client"], doc
+        assert_fills(page.evaluate(SHELL))
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("start", ["hidden", "one-pixel"])
+def test_a_page_loaded_hidden_or_at_almost_no_height_is_whole_when_shown(long_thread, browser, artifacts, start):  # noqa: F811
+    """Loaded while hidden (visibilityState), or in a 1 px tall viewport (a host's zero-size control), then shown
+    at 910x512: the shell fills the window and the document never scrolled."""
+    p = long_thread
+    hide = """(() => { let state = 'hidden';
+        Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => state});
+        Object.defineProperty(document, 'hidden', {configurable: true, get: () => state !== 'visible'});
+        window.__show = () => { state = 'visible'; document.dispatchEvent(new Event('visibilitychange')); }; })();"""
+    height = 1 if start == "one-pixel" else 512
+    context, page = open_app(browser, p["base"], p["alice"]["person_session"], init_script=hide if start == "hidden" else None,
+                             viewport={"width": 910, "height": height}, device_scale_factor=1.5)
+    try:
+        page.goto(p["base"] + f"/app/conversations/{p['cid']}#latest")
+        page.wait_for_selector("[data-thread]", state="attached")
+        page.wait_for_timeout(300)
+        if start == "one-pixel":
+            page.set_viewport_size({"width": 910, "height": 512})
+        else:
+            page.evaluate("() => window.__show()")
+        page.wait_for_timeout(300)
+        shoot(page, artifacts, f"loaded-{start}-then-shown-910x512")
+        doc = page.evaluate(DOC)
+        assert doc["top"] == 0 and doc["height"] <= doc["client"], doc
+        assert_fills(page.evaluate(SHELL))
+    finally:
+        context.close()
