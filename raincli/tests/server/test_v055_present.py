@@ -154,12 +154,20 @@ def _inbox(alice_app, version=None, ua=None):
 
 @pytest.mark.parametrize("version, opens", [("0.5.3", False), ("0.5.4", False), ("0.5.5", True), ("0.5.6", True),
                                             ("0.6.0", True), ("1.0.0", True), (None, False), ("garbage", False),
-                                            ("0.5", False), ("0.5.5-beta", False),
-                                            ("0.\u0665.5", False), ("\uff10.5.5", False)])  # non-ASCII digits
+                                            ("0.5", False), ("0.5.5-beta", False)])
 def test_inbox_opens_the_latest_only_for_a_0_5_5_window(client, world, alice_app, version, opens):  # noqa: F811
     bob_reports(client, world)
     person_send(client, alice_app["person"], BOB_AGENT, "hello")
     assert ("data-open-latest" in _inbox(alice_app, version)) is opens
+
+
+@pytest.mark.parametrize("text", ["RainCLIAppVersion/0.\u0665.5", "RainCLIAppVersion/\uff10.5.5",
+                                  "RainCLIAppVersion/0.5.\u0e55"])
+def test_non_ascii_digits_are_no_version(text):
+    """ASCII digits only (review recheck 2): other Unicode digits in a header don't parse as a version."""
+    from raincli_server.security import app_version
+
+    assert app_version("Mozilla/5.0 " + text) is None and app_version("x RainCLIAppVersion/0.5.5") == (0, 5, 5)
 
 
 def test_the_version_needs_no_presence_report(client, world, alice_app, session):  # noqa: F811
