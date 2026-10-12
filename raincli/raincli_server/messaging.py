@@ -142,6 +142,9 @@ def view_state(session: Session, viewer: User | None, msg: Message) -> tuple[str
         if not own and presentation.inbox_of(session, msg.team_id, msg.recipient_user_id) is None:
             return "held", "no_inbox", msg.route
         return "received", None, msg.route
+    if msg.recipient_user_id is not None:  # the person's own view: their own read state
+        return ("received" if msg.person_seen_at is not None and msg.delivery_state == "stored"
+                else msg.delivery_state), None, msg.route
     hold = hold_reason(session, msg)
     state = "held" if msg.delivery_state == "stored" and hold else msg.delivery_state
     return state, hold, msg.route
@@ -193,8 +196,9 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
         "body": msg.body,
         "created_at": iso(msg.created_at),
         "seq": msg.seq,
-        "acked_at": iso(msg.acked_at) if msg.recipient_user_id is None or viewer_id == msg.recipient_user_id
-        or owns_recipient else None,
+        # a person's own read state for them (person_seen_at); a machine's pickup for the machine's owner
+        "acked_at": iso(msg.person_seen_at) if msg.recipient_user_id is not None and viewer_id == msg.recipient_user_id
+        else iso(msg.acked_at) if msg.recipient_user_id is None and owns_recipient else None,
         "delivery_state": state,
         "hold_reason": hold if owns_recipient else presentation.api_hold_code(hold, route),
         # H4: for a message to a person, the time it changed would tell the sender when they read it.
@@ -296,8 +300,12 @@ def parse_uuid(value: object, what: str, *, not_found: bool = False) -> uuid.UUI
 
 
 def _pending_count(session: Session, recipient: Endpoint) -> int:
-    where = (Message.recipient_user_id == recipient.user.id) if recipient.kind == "person" else \
-        (Message.recipient_agent_id == recipient.agent.id)
+    """Messages the recipient has not taken yet: a machine's unacked ones; for a person, the ones they have neither
+    seen (person_seen_at, §21 H2) nor had picked up by a machine."""
+    if recipient.kind == "person":
+        where = and_(Message.recipient_user_id == recipient.user.id, Message.person_seen_at.is_(None))
+    else:
+        where = Message.recipient_agent_id == recipient.agent.id
     return session.scalar(
         select(func.count()).select_from(Message).where(where, Message.acked_at.is_(None))) or 0
 
@@ -639,6 +647,15 @@ def live_agent(session: Session, machine: Agent, name: str) -> bool:
     return len(live) == 1 and routing.deliverable(live[0]) and machine.routing != "inbox-only"
 
 
+def has_inbox_path(session: Session, machine: Agent) -> bool:
+    """Whether a machine takes machine-endpoint messages: a reported inbox agent (``role = inbox``), or
+    ``inbox-only`` routing. A machine-mode machine (the app, ``raincli login``) has neither."""
+    if machine.routing == "inbox-only":
+        return True
+    return session.scalar(select(MachineAgent.agent_id).where(MachineAgent.agent_id == machine.id,
+                                                              MachineAgent.role == "inbox").limit(1)) is not None
+
+
 def _active_member(session: Session, team_id: uuid.UUID, user_id: uuid.UUID | None) -> User | None:
     user = session.get(User, user_id) if user_id is not None else None
     if user is None or not user.is_active or session.get(Membership, (team_id, user.id)) is None:
@@ -672,7 +689,10 @@ def _reply_target(session: Session, sender: Endpoint, me: User, parent: Message)
         raise _invalid(presentation.error_text("invalid"))
     if x_sender.kind != "person" and x_sender.agent.revoked_at is None:
         if x_sender.kind == "machine":
-            return Endpoint("machine", agent=x_sender.agent), "reply", other
+            if has_inbox_path(session, x_sender.agent):  # a connector inbox receives machine-endpoint messages
+                return Endpoint("machine", agent=x_sender.agent), "reply", other
+            target, route = inbox_endpoint(session, other, team_id)  # machine mode: no inbox path (C13 M1 review)
+            return target, route, other
         if live_agent(session, x_sender.agent, x_sender.name):
             return x_sender, "reply", other
     target, route = inbox_endpoint(session, other, team_id)
@@ -879,33 +899,52 @@ def person_inbox(session: Session, user: User, *, after: int = 0, limit: int = 1
                                 or_(Message.sender_agent_id.is_(None), Message.sender_agent_id.not_in(mine))))
     stmt = (
         select(Message).where(to_me, Message.team_id.in_(teams),
-                              or_(Message.seq > after, and_(Message.redeliver.is_(True), Message.acked_at.is_(None))))
+                              or_(Message.seq > after, and_(Message.redeliver.is_(True), Message.person_seen_at.is_(None),
+                                                           Message.acked_at.is_(None))))
         .order_by(Message.seq).limit(_clamp(limit, 1, INBOX_LIMIT_MAX))
         .execution_options(populate_existing=True)
     )
-    if not include_acked:  # a machine's ack of a routed message is not the person reading it
-        stmt = stmt.where(or_(Message.acked_at.is_(None), Message.recipient_user_id.is_(None)))
+    if not include_acked:  # unread by the person; a machine's ack of a routed message is not the person reading it
+        stmt = stmt.where(or_(Message.person_seen_at.is_(None), Message.recipient_user_id.is_(None)))
     messages = list(session.scalars(stmt))
     return messages, max([after, *(m.seq for m in messages)])
 
 
 def person_ack(session: Session, user: User, message_id: uuid.UUID | str) -> tuple[Message, bool]:
-    """A person marks a message addressed to them ``received`` (§16.4). Idempotent."""
+    """The person has seen a message to them (§16.4, §21 H2): only their own read state, ``person_seen_at``, used
+    in their own views and unread counts. Nothing a sender can fetch changes (no event, no state, no ``acked_at``:
+    that stays the machine's pickup, so a message read in the app is still delivered to an inbox picked later).
+    Idempotent. A message routed to one of the person's machines may be marked seen too."""
     msg = get_message_for_person(session, user, message_id)
-    if msg.recipient_user_id != user.id:
+    if person_of_endpoint(session, recipient_endpoint(session, msg)) != user.id or \
+            person_of_endpoint(session, sender_endpoint(session, msg)) == user.id and msg.recipient_user_id is None:
         raise MessagingError(403, "forbidden", "only the recipient can do this")
     updated = session.execute(
-        update(Message).where(Message.id == msg.id, Message.acked_at.is_(None))
-        .values(acked_at=func.now(), redeliver=False,
-                delivery_state=func.coalesce(func.nullif(Message.delivery_state, "stored"),
-                                                                  "received"),
-                delivery_updated_at=func.now())
-        .returning(Message.id)
-    ).scalar()
-    if updated is not None:
-        session.add(DeliveryEvent(message_id=msg.id, state="received", reported_by=None))
-        session.flush()
+        update(Message).where(Message.id == msg.id, Message.person_seen_at.is_(None))
+        .values(person_seen_at=func.now()).returning(Message.id)).scalar()
+    session.flush()
     return _load_message(session, msg.id), updated is not None
+
+
+def is_unread_for(session: Session, user_id: uuid.UUID, msg: Message, owned: set | None = None) -> bool:
+    """``unread_for`` for one loaded message (templates). ``owned``: the user's machine ids, if already known."""
+    if msg.person_seen_at is not None:
+        return False
+    owned = owned if owned is not None else set(session.scalars(select(Agent.id).where(Agent.owner_user_id == user_id)))
+    to_user = msg.recipient_user_id == user_id or msg.recipient_agent_id in owned
+    from_user = msg.sender_user_id == user_id or msg.sender_agent_id in owned
+    return bool(to_user and not from_user)
+
+
+def unread_for(user_id: uuid.UUID):
+    """A SQL condition: a message ``user_id`` has not seen yet (their unread counts and lists, §21 H2): to them as a
+    person, or routed to one of their machines, not sent by them or their machines, and without ``person_seen_at``."""
+    mine = select(Agent.id).where(Agent.owner_user_id == user_id)
+    return and_(
+        or_(Message.recipient_user_id == user_id, Message.recipient_agent_id.in_(mine)),
+        or_(Message.sender_user_id.is_(None), Message.sender_user_id != user_id),
+        or_(Message.sender_agent_id.is_(None), Message.sender_agent_id.not_in(mine)),
+        Message.person_seen_at.is_(None))
 
 
 def conversation_endpoint(session: Session, conv: Conversation, side: str) -> Endpoint:
@@ -982,7 +1021,7 @@ def list_person_conversations(session: Session, user: User, *, limit: int = 50,
         session, and_(or_(Conversation.a_user_id == user.id, Conversation.b_user_id == user.id),
                       Conversation.team_id.in_(teams), Conversation.merged_into.is_(None)),
         lambda conv: "a" if conv.a_user_id == user.id else "b",
-        Message.recipient_user_id == user.id, limit, archived, viewer_id=user.id)
+        unread_for(user.id), limit, archived, viewer_id=user.id)
 
 
 # Archived conversations (§17.2) ----------------------------------------------------
@@ -1361,8 +1400,8 @@ def set_person_inbox(session: Session, user: User, team_id: uuid.UUID, machine_i
     moved = stayed = delivered = 0
     if previous is not None:
         where = _previous_inbox_messages(session, team_id, previous)
-        stayed = session.scalar(select(func.count()).select_from(Message).where(
-            where, Message.acked_at.is_not(None), Message.delivery_state != "replied")) or 0
+        stayed = session.scalar(select(func.count()).select_from(Message).where(  # picked up, still in progress
+            where, Message.acked_at.is_not(None), Message.delivery_state.in_(("received", "held")))) or 0
         moved = _retarget(session, where, target, route)
     if deliver_waiting:
         delivered = _retarget(session, waiting_messages(session, user, team_id), target, route)

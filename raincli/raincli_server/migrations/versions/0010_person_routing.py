@@ -6,7 +6,8 @@ Run with the service stopped; Alembic runs it in one transaction.
 - conversations.kind: ``pair`` (two people), ``self`` (a person's own agents writing to them) or ``own_agents``
   (a person's machine-to-machine history, private); ``merged_into`` and ``premerge_is_default`` for the merge;
 - messages.redeliver (re-targeted, returned below the poll cursor until acked), messages.route (how the
-  recipient was chosen) and messages.premerge_conversation_id (for the downgrade).
+  recipient was chosen), messages.person_seen_at (the recipient person's own read state; acked_at is the machine's
+  pickup) and messages.premerge_conversation_id (for the downgrade).
 
 The merge. Every endpoint maps to its person (a machine, or an agent on it, to the machine's owner). Per team:
 - two people: their conversations with any messages become one ``pair`` conversation between them (the existing
@@ -76,6 +77,9 @@ def upgrade():
     op.add_column("messages", sa.Column("premerge_conversation_id", UUID(as_uuid=True), nullable=True))
     op.add_column("messages", sa.Column("redeliver", sa.Boolean(), nullable=False, server_default=sa.text("false")))
     op.add_column("messages", sa.Column("route", sa.String(8), nullable=True))
+    op.add_column("messages", sa.Column("person_seen_at", sa.DateTime(timezone=True), nullable=True))
+    # A person's read state so far was acked_at on messages to them.
+    op.execute("UPDATE messages SET person_seen_at = acked_at WHERE recipient_user_id IS NOT NULL")
     op.create_check_constraint("ck_messages_route", "messages", "route IN ('inbox','reply','person','self')")
     for column in ("agent", "user"):
         op.create_index(f"ix_messages_redeliver_{column}", "messages", [f"recipient_{column}_id", "seq"],
@@ -246,9 +250,13 @@ def _unmerge(conn):
 
 def downgrade():
     _unmerge(op.get_bind())
+    # Reads made after the upgrade become acked_at again (before 0010 a person's read was acked_at).
+    op.execute("UPDATE messages SET acked_at = person_seen_at WHERE recipient_user_id IS NOT NULL "
+               "AND acked_at IS NULL AND person_seen_at IS NOT NULL")
     for column in ("agent", "user"):
         op.drop_index(f"ix_messages_redeliver_{column}", table_name="messages")
     op.drop_constraint("ck_messages_route", "messages", type_="check")
+    op.drop_column("messages", "person_seen_at")
     op.drop_column("messages", "route")
     op.drop_column("messages", "redeliver")
     op.drop_column("messages", "premerge_conversation_id")
