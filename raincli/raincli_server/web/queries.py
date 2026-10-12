@@ -510,6 +510,15 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
             return held[-1].detail if held else None
         return None
 
+    inboxes: dict = {}
+
+    def has_inbox(team_id, user_id) -> bool:
+        """Once per (team, person) per request: a miss isn't cached by the identity map (§19.1: no query per
+        message)."""
+        if (team_id, user_id) not in inboxes:
+            inboxes[(team_id, user_id)] = presentation.inbox_of(db, team_id, user_id) is not None
+        return inboxes[(team_id, user_id)]
+
     def view(m: Message, recipient_ep) -> tuple[str, str | None, str | None]:
         """(state, raw hold code, route) as this viewer may see it (§21 C13 H4, M3). The shared
         ``messaging.view_state`` when core provides it; until then the same rule here."""
@@ -521,7 +530,7 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
             # A message delivered in a person's app: never their read state. Held "no_inbox" while they have no
             # inbox in that team, otherwise received.
             if m.delivery_state in ("stored", "held", "received") and m.sender_user_id != m.recipient_user_id:
-                if presentation.inbox_of(db, m.team_id, m.recipient_user_id) is None:
+                if not has_inbox(m.team_id, m.recipient_user_id):
                     return "stored", "no_inbox", route
                 return "received", None, route
         return m.delivery_state, hold_of(m), route

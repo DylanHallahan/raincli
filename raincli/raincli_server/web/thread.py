@@ -111,10 +111,14 @@ def trail_for(message: Message, recipient: messaging.Endpoint, events: list[Deli
     first = {}
     for ev in events:
         first.setdefault(ev.state, ev.created_at)
-    received_at = first.get("received") or (message.acked_at if recipient.kind != "person" else None)
-    times = {"stored": message.created_at, "received": received_at or (
-        message.delivery_updated_at if recipient.kind == "person" and state == "received" else None),
-        "submitted": first.get("submitted"), "replied": first.get("replied")}
+    if recipient.kind == "person":
+        # §21 C13 H4: delivered in their app when it was sent; their read time (acked_at, delivery_updated_at) is
+        # never shown to anyone else.
+        received_at = message.created_at if state == "received" else None
+    else:
+        received_at = first.get("received") or message.acked_at
+    times = {"stored": message.created_at, "received": received_at,
+             "submitted": first.get("submitted"), "replied": first.get("replied")}
     if shown == "replied":
         reached_upto = len(steps)
     elif shown == "submitted":

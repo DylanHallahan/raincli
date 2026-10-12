@@ -96,7 +96,8 @@ def test_via_shows_when_the_sender_side_is_a_machine_inbox(client, world, alice_
     assert page.count("via reviewer (stated by the machine)") == 1
 
 
-def test_the_website_keeps_its_via_line(client, world, alice_app, session):  # noqa: F811
+def test_the_website_shows_no_via_line(client, world, alice_app, session):  # noqa: F811
+    """§21 C7.5: P1 and the "via" line are gone everywhere; a stated agent name never reaches a teammate."""
     bob_reports(client, world)
     ask = person_send(client, alice_app["person"], BOB_AGENT, "please review")
     agent_send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "same name", from_agent="reviewer",
@@ -104,7 +105,7 @@ def test_the_website_keeps_its_via_line(client, world, alice_app, session):  # n
     with TestClient(client.app) as site:
         login(site)
         page = htmllib.unescape(site.get(f"/app/conversations/{ask['conversation_id']}").text)
-    assert "via reviewer (stated by the machine)" in page
+    assert "stated by the machine" not in page and "via reviewer" not in page
 
 
 def test_avatars_use_the_persons_initials(client, world, alice_app, session):  # noqa: F811
@@ -118,18 +119,17 @@ def test_avatars_use_the_persons_initials(client, world, alice_app, session):  #
 
 # First-run step 1 and the owner notice (§20.4 R8, §20.6 M1) ---------------------------------------------------
 
-def test_step_one_is_done_after_a_connection_in_the_last_day(client, world, alice_app, session):  # noqa: F811
+def test_step_one_is_done_once_an_inbox_is_picked(client, world, alice_app, session):  # noqa: F811
+    """§21 C7.6: step 1 is "Pick your inbox agent", done (with the agent's name, the viewer's own) once picked."""
+    from raincli_server.models import PersonInbox
+
     page = htmllib.unescape(alice_app["webview"].get("/app/inbox").text)
-    assert "rc-step-done" not in page  # signed in, but the machine has not connected yet
-    r = client.put("/api/v1/presence", headers=auth(alice_app["token"]), json={"status": "ready"})
-    assert r.status_code == 200, r.text
-    page = htmllib.unescape(alice_app["webview"].get("/app/inbox").text)
-    assert "rc-step-done" in page and "Connected: alice-laptop" in page
-    session.execute(update(AgentCredential).values(last_used_at=identity.now() - timedelta(hours=25)))
+    assert "rc-step-done" not in page and "Pick your inbox agent" in page
+    session.add(PersonInbox(user_id=world["users"]["alice"].id, team_id=world["teams"]["acme"].id,
+                            agent_id=world["agents"]["alice"].id, agent_name="team-inbox", set_via="app"))
     session.commit()
     page = htmllib.unescape(alice_app["webview"].get("/app/inbox").text)
-    assert "rc-step-done" not in page and "Connected:" not in page
-
+    assert "rc-step-done" in page and "Your inbox: team-inbox" in page
 
 def test_the_owner_notice_sits_at_the_top_of_the_list_on_every_page(client, world, alice_app, session):  # noqa: F811
     session.execute(update(AgentCredential).values(last_used_at=None))  # alice-agent: never connected

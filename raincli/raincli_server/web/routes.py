@@ -701,7 +701,7 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
         for line in lines[len(fresh):]:
             if line.trail is not None:
                 out["states"].append({"id": str(line.message.id), "state": line.trail.outcome or
-                                      line.message.delivery_state,
+                                      line.state or line.message.delivery_state,  # §21 C13 H4: the viewer's view
                                       "html": fragment(request, "app_mode/_trail.html", viewer, line=line)})
         presence = thread.header_presence(db, team.id, who.user, now)
         header_html = fragment(request, "app_mode/_head_status.html", viewer, presence=presence)

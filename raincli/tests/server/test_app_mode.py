@@ -139,12 +139,13 @@ def test_app_mode_layout_and_allowed_routes(alice_app, session):
     assert "site-footer" not in inbox.text and "How it works" not in inbox.text  # no marketing chrome
     # The raincli_app cookie is scoped to /app/, so the rail links to /app/inbox, never /app.
     assert webview.get("/app", follow_redirects=False).status_code == 303
-    for path, marker in (("/app/compose", "New message"), ("/app/agents", "Agents"),
+    for path, marker in (("/app/compose", "New message"), ("/app/people", "People"),
                          ("/app/local/this-computer", "Open the RainCLI app")):
         r = webview.get(path)
         assert r.status_code == 200 and marker in r.text, path
-    agents = webview.get("/app/agents").text
-    assert "Add a machine" not in agents and "Rotate" not in agents and "bob-agent" in agents
+    assert webview.get("/app/agents", follow_redirects=False).headers["location"].endswith("/app/people")  # §21 C7.1
+    people = webview.get("/app/people").text
+    assert "Add a machine" not in people and "Rotate" not in people and "bob-agent" not in people and "Bob" in people
     # Compose and reply as the person.
     csrf = csrf_of(webview.get("/app/compose").text)
     r = webview.post("/app/conversations/new/send", data={"csrf_token": csrf, "message_id": str(uuid.uuid4()),
@@ -255,7 +256,7 @@ def test_web_sends_are_rate_limited_per_user(settings, engine, world, session):
             login(c)
             csrf = app_csrf(c)
             codes = [c.post("/app/conversations/new/send", data={
-                "csrf_token": csrf, "message_id": str(uuid.uuid4()), "to": "bob-agent", "body": f"m{i}"},
+                "csrf_token": csrf, "message_id": str(uuid.uuid4()), "to": "bob@example.test", "body": f"m{i}"},
                 follow_redirects=False).status_code for i in range(3)]
             assert codes == [303, 303, 429]
     finally:

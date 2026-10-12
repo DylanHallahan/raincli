@@ -1,8 +1,8 @@
-"""The app's live thread (protocol §19.1-§19.4, §19.6, §19.7), real PostgreSQL."""
+"""The app's live thread (protocol §19.1-§19.4, §19.6, §19.7), real PostgreSQL. The v0.5 agent-addressed cases of names,
+header presence, trails and warnings moved to test_v06_live.py and test_v06_web.py (protocol §21)."""
 
 from __future__ import annotations
 
-import html as htmllib
 import re
 import uuid
 from datetime import timedelta
@@ -13,8 +13,7 @@ from sqlalchemy import event, update
 
 from api_helpers import auth
 from raincli_server import identity, messaging
-from raincli_server.models import Agent, AgentCredential, AgentPresence, Message, MachineAgent
-from raincli_server.web import thread
+from raincli_server.models import Agent, AgentCredential, Message
 from test_app_mode import alice_app  # noqa: F401  (fixture)
 from test_routing import entry, report
 from test_web_app import login
@@ -77,21 +76,6 @@ def test_live_returns_new_messages_rendered_and_never_acks(client, world, alice_
     assert live(webview, conversation=cid, after=reply["seq"])["messages"] == []
     session.expire_all()
     assert session.get(Message, uuid.UUID(reply["id"])).acked_at is None  # polling never acks (§19.2)
-
-
-def test_live_reports_state_changes_of_your_own_messages(client, world, alice_app):  # noqa: F811
-    webview = alice_app["webview"]
-    mine = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "to bob")
-    cid = mine["conversation_id"]
-    since = live(webview, conversation=cid, after=mine["seq"])["now"]
-    r = client.post(f"/api/v1/messages/{mine['id']}/ack", headers=auth(world["tokens"]["bob"]))
-    assert r.status_code == 200, r.text
-    out = live(webview, conversation=cid, after=mine["seq"], states_since=since)
-    assert [s["id"] for s in out["states"]] == [mine["id"]] and out["states"][0]["state"] == "received"
-    trail = out["states"][0]["html"]
-    assert 'data-trail="' in trail and "Delivery: received, not yet replied" in trail
-    again = live(webview, conversation=cid, after=mine["seq"], states_since=out["now"])["states"]
-    assert [s["state"] for s in again] == ["received"]  # not final: sent again, applied idempotently (§19.8 M1)
 
 
 def test_live_needs_an_app_mode_session_and_a_visible_conversation(app, client, world, alice_app):  # noqa: F811
@@ -185,133 +169,11 @@ def test_opening_a_thread_acks_on_the_website_but_never_in_app_mode(app, client,
 
 # Names, header and trail ---------------------------------------------------------------------------------
 
-def test_conversations_are_named_after_owners_and_agents(client, world, alice_app, session):  # noqa: F811
-    webview = alice_app["webview"]
-    agent_conv = to_bob_agent(client, world, alice_app)["conversation_id"]
-    inbox_conv = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "to the inbox")["conversation_id"]
-    page = htmllib.unescape(webview.get(f"/app/conversations/{agent_conv}").text)
-    assert "<h2>Bob · reviewer</h2>" in page and "bob-agent/reviewer · Acme" in page
-    page = htmllib.unescape(webview.get(f"/app/conversations/{inbox_conv}").text)
-    assert "<h2>Bob · inbox</h2>" in page and "rc-pill" not in page
-    from raincli_server.web import queries
-
-    alice = alice_app["world"]["users"]["alice"]
-    names = {str(r.conversation.id): r.name for r in queries.list_conversations(
-        session, alice, [world["teams"]["acme"].id])}
-    assert names == {agent_conv: "Bob · reviewer", inbox_conv: "Bob · inbox"}  # row.name, for the list
-
-
-def test_the_header_shows_chip_and_presence_for_agents_only_with_the_offline_rule(client, world, alice_app, session):  # noqa: F811
-    webview = alice_app["webview"]
-    cid = to_bob_agent(client, world, alice_app)["conversation_id"]
-    header = live(webview, conversation=cid)["header"]
-    assert header["chip"] == "Instant" and header["word"] == "Ready" and "Instant" in header["html"]
-    bob_reports(client, world, status="working")
-    header = live(webview, conversation=cid)["header"]
-    assert header["word"] == "Busy" and "working at its last report" in header["html"]
-    assert "message" not in header["html"].lower().replace("messages", "")  # never about any message
-    old = identity.now() - timedelta(seconds=121)
-    session.execute(update(AgentPresence).where(AgentPresence.agent_id == world["agents"]["bob"].id).values(seen_at=old))
-    session.execute(update(MachineAgent).where(MachineAgent.agent_id == world["agents"]["bob"].id).values(seen_at=old))
-    session.commit()
-    header = live(webview, conversation=cid)["header"]
-    assert header["word"] == "Offline" and header["chip"] is None and "Instant" not in header["html"]
-    person_conv = person_send(client, alice_app["person"], {"person": "bob@example.test"}, "hi bob")["conversation_id"]
-    assert live(webview, conversation=person_conv)["header"]["word"] is None
-
-
-@pytest.mark.parametrize("kind,steps", [("agent", ["stored", "received", "submitted", "replied"]),
-                                        ("machine", ["stored", "received", "replied"]),
-                                        ("person", ["stored", "received", "replied"])])
-def test_the_trail_has_the_steps_of_the_recipient_kind(kind, steps):
-    from types import SimpleNamespace
-
-    recipient = SimpleNamespace(kind=kind)
-    msg = SimpleNamespace(delivery_state="stored", acked_at=None, created_at=identity.now())
-    trail = thread.trail_for(msg, recipient, [], None)
-    assert [s.name for s in trail.steps] == steps and [s.reached for s in trail.steps] == [True] + [False] * (len(steps) - 1)
-    assert trail.phrase == "Delivery: stored, not yet received"
-
-
-def test_held_uncertain_and_rejected_replace_the_remaining_steps_with_a_reason():
-    from types import SimpleNamespace
-
-    agent = SimpleNamespace(kind="agent")
-    acked = SimpleNamespace(delivery_state="held", acked_at=identity.now(), created_at=identity.now())
-    held = thread.trail_for(acked, agent, [], "approval_required")
-    assert [s.name for s in held.steps] == ["stored", "received"] and held.outcome == "held"
-    assert held.reason == "waiting for approval" and held.tone == "warn"
-    assert held.phrase == "Delivery: held, waiting for approval"
-    stored = SimpleNamespace(delivery_state="stored", acked_at=None, created_at=identity.now())
-    derived = thread.trail_for(stored, agent, [], "busy")  # derived before pick-up
-    assert [s.name for s in derived.steps] == ["stored"] and derived.reason == "the session is busy"
-    for state, outcome, tone in (("submission_uncertain", "uncertain", "warn"), ("rejected", "rejected", "danger")):
-        msg = SimpleNamespace(delivery_state=state, acked_at=identity.now(), created_at=identity.now())
-        trail = thread.trail_for(msg, agent, [], None)
-        assert trail.outcome == outcome and trail.tone == tone and trail.reason
-    replied = SimpleNamespace(delivery_state="replied", acked_at=identity.now(), created_at=identity.now())
-    assert all(s.reached for s in thread.trail_for(replied, agent, [], None).steps)
-
-
-def test_the_thread_shows_trails_only_under_your_messages(client, world, alice_app):  # noqa: F811
-    mine = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "mine")
-    agent_send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "theirs",
-               conversation_id=mine["conversation_id"])
-    page = alice_app["webview"].get(f"/app/conversations/{mine['conversation_id']}").text
-    assert page.count('data-trail="') == 1 and f'data-trail="{mine["id"]}"' in page
-    # Bob's machine has never reported as routing-capable, so the server shows the message held for that reason.
-    assert "Delivery: held, the recipient's RainCLI needs an update" in htmllib.unescape(page)
-    # §20.4 R5: the trail itself is the <details> summary; there is no separate Details line.
-    assert '<summary class="rc-trail-steps">' in page and "<summary>Details</summary>" not in page
-
-
 # The sender warning (§19.6) ------------------------------------------------------------------------------
 
 def credential_used(session, agent_id, when):
     session.execute(update(AgentCredential).where(AgentCredential.agent_id == agent_id).values(last_used_at=when))
     session.commit()
-
-
-def test_warning_cases(client, world, session, alice_app):  # noqa: F811
-    bob = world["agents"]["bob"].id
-    credential_used(session, bob, None)
-    assert thread.machine_warning(session, session.get(Agent, bob)).kind == "never"
-    credential_used(session, bob, identity.now() - timedelta(hours=25))
-    w = thread.machine_warning(session, session.get(Agent, bob))
-    assert w.kind == "not_connected" and w.since is not None
-    credential_used(session, bob, identity.now())
-    assert thread.machine_warning(session, session.get(Agent, bob)) is None
-    msg = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "waiting")
-    credential_used(session, bob, identity.now())
-    session.execute(update(Message).where(Message.id == uuid.UUID(msg["id"]))
-                    .values(created_at=identity.now() - timedelta(hours=25)))
-    session.commit()
-    w = thread.machine_warning(session, session.get(Agent, bob))
-    assert w.kind == "not_picking_up"
-    assert thread.recipient_warning(session, [world["teams"]["acme"].id], "@bob@example.test") is None  # never a person
-
-
-def test_the_warning_shows_to_senders_and_to_the_owner(app, client, world, session, alice_app):  # noqa: F811
-    bob = world["agents"]["bob"].id
-    credential_used(session, bob, identity.now() - timedelta(days=3))
-    webview = alice_app["webview"]
-    for client_ in (webview,):
-        page = htmllib.unescape(client_.get("/app/compose?to=bob-agent").text)
-        assert "hasn't connected since" in page and "Messages will wait until it does." in page
-    fragment = webview.get("/app/recipient-warning", params={"to": "bob-agent/reviewer"}).text
-    assert "<strong>bob-agent</strong> hasn't connected since <time datetime=" in fragment
-    assert webview.get("/app/recipient-warning", params={"to": "@bob@example.test"}).text.strip() == ""
-    cid = person_send(client, alice_app["person"], {"machine": "bob-agent"}, "hello")["conversation_id"]
-    credential_used(session, bob, identity.now() - timedelta(days=3))  # the send didn't use bob's credential
-    assert "hasn't connected since" in webview.get(f"/app/conversations/{cid}").text
-    assert live(webview, conversation=cid)["warning"]["kind"] == "not_connected"
-    with TestClient(app) as browser:  # the website: compose, conversation, and the owner's Inbox
-        assert login(browser).status_code == 303
-        assert "hasn't connected since" in browser.get("/app/compose?to=bob-agent").text
-        assert "hasn't connected since" in browser.get(f"/app/conversations/{cid}").text
-    with TestClient(app) as owner:
-        assert login(owner, "bob@example.test").status_code == 303
-        assert "<strong>bob-agent</strong> hasn't connected since" in owner.get("/app/inbox").text
 
 
 def test_migration_0009_orders_pending_messages_by_seq(engine):
@@ -388,77 +250,6 @@ def test_ack_never_acks_a_message_to_the_viewers_own_machine(client, world, alic
     assert session.get(Message, uuid.UUID(to_machine["id"])).acked_at is None
 
 
-def test_presence_mapping_and_the_injectable_clock(client, world, alice_app, session):  # noqa: F811
-    """L3 and L6."""
-    to_bob_agent(client, world, alice_app)
-    peer = messaging.Endpoint("agent", agent=session.get(Agent, world["agents"]["bob"].id), name="reviewer")
-    for status, word, tip in (("idle", "Ready", "idle"), ("working", "Busy", "working at its last report"),
-                              ("blocked", "Busy", "waiting for its user at its last report"), ("unknown", None, "")):
-        bob_reports(client, world, status=status)
-        session.expire_all()
-        presence = thread.header_presence(session, peer)
-        assert presence.word == word and tip in presence.tooltip and presence.chip == "Instant", status
-    bob_reports(client, world, status="idle")
-    session.expire_all()
-    seen = session.get(AgentPresence, world["agents"]["bob"].id).seen_at
-    assert thread.header_presence(session, peer, now=seen + timedelta(seconds=119)).word == "Ready"
-    late = thread.header_presence(session, peer, now=seen + timedelta(seconds=121))
-    assert late.word == "Offline" and late.chip is None
-
-
-def test_warning_precedence_scope_and_clock(client, world, session):
-    """L4 and L6: one warning at a time, in order; only in the viewer's current team; a 24 h threshold."""
-    bob = session.get(Agent, world["agents"]["bob"].id)
-    used = identity.now()
-    credential_used(session, bob.id, used)
-    assert thread.machine_warning(session, bob, now=used + timedelta(hours=23)) is None
-    assert thread.machine_warning(session, bob, now=used + timedelta(hours=25)).kind == "not_connected"
-    acme, globex = world["teams"]["acme"].id, world["teams"]["globex"].id
-    credential_used(session, bob.id, None)
-    assert thread.recipient_warning(session, [acme], "bob-agent").kind == "never"
-    assert thread.recipient_warning(session, [globex], "bob-agent") is None  # not in that team
-
-
-def test_live_headers_and_the_list_digest_follow_team_presence(client, world, alice_app):  # noqa: F811
-    """L5 headers; L2: the Team section's presence is part of the list revision."""
-    webview = alice_app["webview"]
-    to_bob_agent(client, world, alice_app)
-    r = webview.get("/app/live")
-    assert r.headers["content-type"].startswith("application/json") and r.headers["cache-control"] == "no-store"
-    rev = r.json()["list_rev"]
-    assert live(webview, list_rev=rev)["list"] is None
-    bob_reports(client, world, status="working")
-    changed = live(webview, list_rev=rev)
-    assert changed["list"] is not None and changed["list_rev"] != rev
-
-
-def test_a_poll_costs_the_same_however_many_of_your_messages_are_in_flight(client, world, alice_app, app, session):  # noqa: F811
-    """§19.1 with §19.8 M1: the states of the viewer's non-final messages come without a query per message."""
-    from raincli_server.models import User
-
-    webview = alice_app["webview"]
-    counts = []
-    for n in (3, 30):
-        alice = session.get(User, world["users"]["alice"].id)
-        sent = [messaging.send_as_person(session, alice, world["teams"]["acme"].id, id=str(uuid.uuid4()),
-                                         to={"machine": "bob-agent"}, body=f"in flight {i}", max_pending=10_000)[0]
-                for i in range(n)]
-        session.commit()
-        cid = str(sent[0].conversation_id)
-        seen = []
-
-        def count(conn, cursor, statement, *args):
-            seen.append(statement)
-        event.listen(app.state.engine, "before_cursor_execute", count)
-        try:
-            out = live(webview, conversation=cid, after=sent[-1].seq, states_since=identity.now().isoformat())
-        finally:
-            event.remove(app.state.engine, "before_cursor_execute", count)
-        assert len(out["states"]) >= n
-        counts.append(len(seen))
-    assert counts[1] <= counts[0] + 2, counts
-
-
 def test_a_message_you_send_to_your_own_machine_is_yours(client, world, alice_app):  # noqa: F811
     """Your own message, whoever receives it: a trail and the accent avatar; your machine writing to you is not."""
     mine = person_send(client, alice_app["person"], {"machine": "alice-agent"}, "to my own machine")
@@ -502,18 +293,6 @@ def test_ack_is_app_mode_only(app, client, world):
         page = browser.get("/app/compose").text
         csrf = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
         assert browser.post("/app/ack", json={"csrf_token": csrf, "ids": []}).status_code == 404
-
-
-def test_qualifiers_reach_assistive_technology_and_warning_dates_are_dates(client, world, alice_app, session):  # noqa: F811
-    """F7 and F9."""
-    webview = alice_app["webview"]
-    cid = to_bob_agent(client, world, alice_app)["conversation_id"]
-    bob_reports(client, world, status="working")
-    header = live(webview, conversation=cid)["header"]["html"]
-    assert '<span class="sr-only">: the session was working at its last report.</span>' in header
-    credential_used(session, world["agents"]["bob"].id, identity.now() - timedelta(days=3))
-    warning = live(webview, conversation=cid)["warning"]["html"]
-    assert re.search(r'since <time datetime="[^"]+" data-format="date">\d{4}-\d\d-\d\d</time>\. Messages', warning)
 
 
 def test_live_queries_stay_on_the_conversation_index(client, world, alice_app, session, engine):  # noqa: F811

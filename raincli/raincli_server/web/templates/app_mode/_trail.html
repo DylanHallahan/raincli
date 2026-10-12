@@ -3,7 +3,7 @@
    phrase. The trail itself opens the full history (§20.4 R5). Rendered by the page and by GET /app/live. #}
 {% from "_state.html" import time %}
 {% set t = line.trail %}
-<div class="rc-trail{{ ' rc-trail-' ~ t.tone if t.tone else '' }}" data-trail="{{ line.message.id }}" data-state="{{ t.outcome or line.message.delivery_state }}">
+<div class="rc-trail{{ ' rc-trail-' ~ t.tone if t.tone else '' }}" data-trail="{{ line.message.id }}" data-state="{{ t.outcome or line.state or line.message.delivery_state }}">
   {# §20.4 R5: the trail is the toggle for the event history. Without JavaScript a <details> whose summary is the
      trail; app.js marks the summary as a button with aria-expanded. live.js keeps an open one open on a swap. #}
   <details class="rc-trail-box">
