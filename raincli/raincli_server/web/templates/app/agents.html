@@ -6,13 +6,13 @@
   <div class="page-head">
     <div>
       <h1>Machines</h1>
-      <p class="muted">Every machine in your teams, yours first. Each machine has one address and one credential. Teammates message the machine's address (its inbox) or a named agent that can receive messages.</p>
+      <p class="muted">Your machines first, then, if you own a team, every machine in it. Each machine has one credential.</p>
     </div>
   </div>
   {% if error %}<p class="flash flash-error" role="alert">{{ error[:1]|upper ~ error[1:] }}.</p>{% endif %}
 
   <div class="agent-explainer">
-    <p><strong>Your account owns machines, not open sessions.</strong> A RainCLI handle is the address teammates message. Teammates can message the machine, which goes to its <strong>inbox</strong> agent, or any named agent marked <strong>Instant</strong> (a Herdr agent, handed the message as soon as it is idle) or <strong>Next turn</strong> (a Claude Code or Codex session through hooks, at its next turn). Agents without a reachability badge, marked Listed, are shown for visibility only and can't be messaged.</p>
+    <p><strong>Your account owns machines, not open sessions.</strong> Teammates message you, not your machines: their messages go to the agent you pick as your inbox in each team, from Inbox in the app. An agent marked <strong>Instant</strong> (a Herdr agent, handed a message as soon as it is idle) or <strong>Next turn</strong> (a Claude Code or Codex session through hooks, at its next turn) can be your inbox. Agents marked Listed are shown for visibility only.</p>
     <p class="help">API connection reflects recent credential use. Session availability and the agent list are reported by the machine's runtime and lapse after two minutes without a report. Availability is advisory: it does not show that a message was delivered or read. <a href="https://github.com/DylanHallahan/raincli/blob/main/SETUP.md">Setup guide</a> · <a href="#add-machine">Add a machine</a></p>
   </div>
   {% for row in agents %}

@@ -190,9 +190,12 @@ def test_capture_the_v06_set(scratch_url, browser_pw):
     OUT.mkdir(parents=True, exist_ok=True)
     saved: list[str] = []
 
-    def shoot(page, name, locator=None):
+    def shoot(page, name, locator=None, full_page=False):
         settle(page)
-        (page.locator(locator) if locator else page).screenshot(path=str(OUT / name))
+        if locator:
+            page.locator(locator).screenshot(path=str(OUT / name))
+        else:
+            page.screenshot(path=str(OUT / name), full_page=full_page)
         saved.append(name)
 
     # 1. Before: migration 0009 and main's code; main's own server.
@@ -296,11 +299,11 @@ def test_capture_the_v06_set(scratch_url, browser_pw):
             page.goto(base + "/app/inbox")  # the banner itself (not the latest conversation P2 would open)
             page.wait_for_load_state("networkidle")
             shoot(page, f"after-5-inbox-first-run-banner-{scheme}-1180x780.png")
-            shoot(page, f"after-7-pick-with-waiting-messages-{scheme}-1180x780.png", ".inbox-banner")
+            shoot(page, f"after-7-pick-with-waiting-messages-{scheme}-1180x780.png", "section.inbox-banner[aria-labelledby=inbox-banner-northwind]")
             context.close()
         context, page = cam.app("light", BIG, "/app/inbox")
         page.goto(base + "/app/inbox")
-        page.click(".inbox-banner button[type=submit]")  # laptop-agent is pre-selected: one more click
+        page.click("section.inbox-banner[aria-labelledby=inbox-banner-northwind] button[type=submit]")  # laptop-agent is pre-selected: one more click
         page.wait_for_url("**notice=inbox-set**")
         context.close()
 
@@ -346,10 +349,10 @@ def test_capture_the_v06_set(scratch_url, browser_pw):
             shoot(page, f"after-13-sidebar-short-{scheme}-760x520.png")
             context.close()
             context, page = cam.website(scheme, BIG, "maya@example.test", "/app/agents")
-            shoot(page, f"after-10-website-machines-team-owner-{scheme}-1180x780.png")
+            shoot(page, f"after-10-website-machines-team-owner-{scheme}-1180-full.png", full_page=True)
             context.close()
             context, page = cam.website(scheme, BIG, "jon@example.test", "/app/agents")
-            shoot(page, f"after-11-website-machines-member-{scheme}-1180x780.png")
+            shoot(page, f"after-11-website-machines-member-{scheme}-1180-full.png", full_page=True)
             context.close()
         engine.dispose()
     finally:
