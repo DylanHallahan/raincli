@@ -12,7 +12,7 @@ from sqlalchemy import select, update
 
 from api_helpers import auth, err
 from raincli_server import identity
-from raincli_server.models import Agent, PersonSession
+from raincli_server.models import Agent, PersonInbox, PersonSession
 
 PASSWORD = "correct horse battery"
 
@@ -32,6 +32,12 @@ def alice(client, world):
 def psend(client, person, to, body="hello", **extra):
     payload = {"id": str(extra.pop("id", uuid.uuid4())), "to": to, "body": body, **extra}
     return client.post("/api/v1/person/send", headers=auth(person), json=payload)
+
+
+def drop_inbox(session, world, name, team="acme"):
+    """§21 C3.2: a person without an inbox is reached in their app (``recipient_user_id``), the person inbox."""
+    session.delete(session.get(PersonInbox, (world["users"][name].id, world["teams"][team].id)))
+    session.commit()
 
 
 def person_of(client, email, machine_name):
@@ -177,14 +183,14 @@ def test_member_removal_keeps_the_session_but_rechecks_membership(client, world,
     identity.add_member(session, world["teams"]["globex"], world["users"]["alice"])
     session.commit()
     person = app_login(client, team="acme", person_session=True).json()["person_session"]
-    sent = psend(client, person, "eve-agent", team="globex").json()["message"]
+    sent = psend(client, person, "eve@example.test", team="globex").json()["message"]
     identity.remove_member(session, world["teams"]["globex"], world["users"]["alice"])
     session.commit()
     assert client.get("/api/v1/person/me", headers=auth(person)).json()["teams"] == [{"slug": "acme", "name": "Acme"}]
     assert client.get(f"/api/v1/person/messages/{sent['id']}", headers=auth(person)).status_code == 404
-    r = psend(client, person, "eve-agent", team="globex")
+    r = psend(client, person, "eve@example.test", team="globex")
     assert r.status_code == 400 and err(r) == "invalid"
-    assert psend(client, person, "bob-agent").status_code == 201  # acme still works
+    assert psend(client, person, "bob@example.test").status_code == 201  # acme still works
 
 
 def test_removal_from_the_machines_team_ends_the_session(client, world, session):
@@ -197,15 +203,21 @@ def test_removal_from_the_machines_team_ends_the_session(client, world, session)
 
 # The person API ----------------------------------------------------------------------------
 
-def test_person_to_person_states(client, alice):
+def test_person_to_person_states(client, alice, session):
+    """bob has no inbox, so alice's message waits in his app (§21 C3.2); alice gets no read receipt (C13 H4)."""
+    drop_inbox(session, alice["world"], "bob")
     bob = person_of(client, "bob@example.test", "bob-laptop")
     sent = psend(client, alice["person"], {"person": "bob@example.test"}, body="**hi** bob").json()["message"]
     assert sent["from"] == "@alice@example.test" and sent["to"] == "@bob@example.test"
-    assert sent["delivery_state"] == "stored" and sent["kind"] == "message"
+    assert sent["to_endpoint"] == {"person": "bob@example.test", "display_name": "Bob"} and sent["from_kind"] == "app"
+    assert sent["delivery_state"] == "held" and sent["hold_reason"] == "no_inbox" and sent["kind"] == "message"
     inbox = client.get("/api/v1/person/inbox", headers=auth(bob)).json()
     assert [m["id"] for m in inbox["messages"]] == [sent["id"]]
     acked = client.post(f"/api/v1/person/messages/{sent['id']}/ack", headers=auth(bob)).json()
-    assert acked["acked"] is True and acked["message"]["delivery_state"] == "received"
+    assert acked["acked"] is True and acked["message"]["delivery_state"] == "received"  # bob's own read state
+    after = client.get(f"/api/v1/person/messages/{sent['id']}", headers=auth(alice["person"])).json()["message"]
+    assert after == sent  # H4: Bob reading it in his app changes nothing Alice can fetch
+    assert after["acked_at"] is None and after["delivery_state"] == "held"
     assert client.post(f"/api/v1/person/messages/{sent['id']}/ack", headers=auth(bob)).json()["acked"] is False
     assert client.post(f"/api/v1/person/messages/{sent['id']}/ack", headers=auth(alice["person"])).status_code == 403
     reply = psend(client, bob, {"person": "alice@example.test"}, in_reply_to=sent["id"]).json()["message"]
@@ -213,21 +225,40 @@ def test_person_to_person_states(client, alice):
     seen = client.get(f"/api/v1/person/messages/{sent['id']}", headers=auth(alice["person"])).json()["message"]
     assert seen["delivery_state"] == "replied"
     convs = client.get("/api/v1/person/conversations", headers=auth(alice["person"])).json()["conversations"]
-    assert [c["peer"] for c in convs] == ["@bob@example.test"]
+    assert [c["peer"] for c in convs] == ["Bob"]
+    assert convs[0]["peer_endpoint"] == {"person": "bob@example.test", "display_name": "Bob"}
     thread = client.get(f"/api/v1/person/conversations/{sent['conversation_id']}", headers=auth(alice["person"])).json()
     assert [m["id"] for m in thread["messages"]] == [sent["id"], reply["id"]]
 
 
-def test_person_to_machine_and_reply_to_person(client, alice):
+def test_person_reading_changes_nothing_the_sender_can_fetch(client, alice, session):
+    drop_inbox(session, alice["world"], "bob")
+    bob = person_of(client, "bob@example.test", "bob-laptop")
+    sent = psend(client, alice["person"], {"person": "bob@example.test"}).json()["message"]
+    assert client.post(f"/api/v1/person/messages/{sent['id']}/ack", headers=auth(bob)).json()["acked"] is True
+    after = client.get(f"/api/v1/person/messages/{sent['id']}", headers=auth(alice["person"])).json()["message"]
+    assert after == sent
+
+
+def test_person_to_machine_and_reply_to_person(client, alice, session):
+    """A person's message to bob reaches bob's inbox machine (§21 C3.1a); bob's reply goes to alice's inbox, or to
+    her app when she has none (C4.3)."""
     world = alice["world"]
-    sent = psend(client, alice["person"], "bob-agent").json()["message"]
+    sent = psend(client, alice["person"], "bob@example.test").json()["message"]
     # bob's v0.5 connector sees it; a v0.4 connector would not (§16.2 gate).
     assert client.get("/api/v1/inbox", headers=auth(world["tokens"]["bob"])).json()["messages"] == []
     got = client.get("/api/v1/inbox?routing=1", headers=auth(world["tokens"]["bob"])).json()["messages"]
     assert [m["id"] for m in got] == [sent["id"]] and got[0]["from_endpoint"]["person"] == "alice@example.test"
-    r = client.post("/api/v1/messages", headers=auth(world["tokens"]["bob"]), json={
-        "id": str(uuid.uuid4()), "to": {"person": "alice@example.test"}, "body": "back", "in_reply_to": sent["id"]})
-    assert r.status_code == 201
+    def reply(body):
+        r = client.post("/api/v1/messages", headers=auth(world["tokens"]["bob"]), json={
+            "id": str(uuid.uuid4()), "to": {"person": "alice@example.test"}, "body": body, "in_reply_to": sent["id"]})
+        assert r.status_code == 201, r.text
+
+    reply("to her inbox")
+    got = client.get("/api/v1/inbox?routing=1", headers=auth(world["tokens"]["alice"])).json()["messages"]
+    assert [m["body"] for m in got] == ["to her inbox"]
+    drop_inbox(session, world, "alice")
+    reply("back")
     assert [m["body"] for m in client.get("/api/v1/person/inbox", headers=auth(alice["person"])).json()["messages"]] \
         == ["back"]
 
@@ -235,8 +266,8 @@ def test_person_to_machine_and_reply_to_person(client, alice):
 def test_person_sees_messages_of_their_machines(client, alice):
     world = alice["world"]
     r = client.post("/api/v1/messages", headers=auth(world["tokens"]["bob"]),
-                    json={"id": str(uuid.uuid4()), "to": "alice-agent", "body": "to the machine"})
-    mid = r.json()["message"]["id"]
+                    json={"id": str(uuid.uuid4()), "to": "alice@example.test", "body": "to the machine"})
+    mid = r.json()["message"]["id"]  # lands on alice-agent, alice's inbox machine
     assert client.get(f"/api/v1/person/messages/{mid}", headers=auth(alice["person"])).status_code == 200
     eve = person_of(client, "eve@example.test", "eve-laptop")
     assert client.get(f"/api/v1/person/messages/{mid}", headers=auth(eve)).status_code == 404
@@ -248,22 +279,29 @@ def test_person_send_rules(client, alice, session):
     assert r.status_code == 400 and err(r) == "invalid"  # never to yourself
     r = psend(client, person, {"person": "alice@example.test"}, kind="escalation")
     assert r.status_code == 400 and err(r) == "invalid"  # C11: escalations come from machines
-    r = psend(client, person, {"person": "eve@example.test"})
-    assert r.status_code == 400 and err(r) == "invalid"  # another team
-    r = client.post("/api/v1/person/send", headers=auth(person), json={"id": str(uuid.uuid4()), "to": "bob-agent",
+    r = psend(client, person, {"person": "eve@example.test"})  # another team: answered like nobody (§21 C2.2)
+    assert r.status_code == 400 and err(r) == "address_people"
+    assert r.json() == psend(client, person, {"person": "nobody@example.test"}).json()
+    assert "eve" not in r.text.lower() and "globex" not in r.text.lower()
+    r = client.post("/api/v1/person/send", headers=auth(person), json={"id": str(uuid.uuid4()),
+                                                                        "to": "bob@example.test",
                                                                         "body": "x", "from_agent": "spoof"})
     assert r.status_code == 400 and err(r) == "invalid"
+    for machine in ("bob-agent", "bob-agent/inbox", {"machine": "bob-agent"},
+                    {"machine": "bob-agent", "agent": "inbox"}, "alice-agent", "alice-laptop"):  # §21 C2.2: machines are never addresses, own ones included
+        r = psend(client, person, machine)
+        assert r.status_code == 400 and err(r) == "address_people", machine
     # C9: several teams need "team".
     identity.add_member(session, world["teams"]["globex"], world["users"]["alice"])
     session.commit()
-    r = psend(client, person, "bob-agent")
+    r = psend(client, person, "bob@example.test")
     assert r.status_code == 400 and r.json()["error"]["code"] == "team_required"
     assert {t["slug"] for t in r.json()["teams"]} == {"acme", "globex"}
-    assert psend(client, person, "bob-agent", team="acme").status_code == 201
-    assert psend(client, person, "eve-agent", team="globex").status_code == 201
-    r = psend(client, person, "eve-agent", team="acme")
-    assert r.status_code == 400 and err(r) == "invalid"
-    r = psend(client, person, "bob-agent", team="nope")
+    assert psend(client, person, "bob@example.test", team="acme").status_code == 201
+    assert psend(client, person, "eve@example.test", team="globex").status_code == 201
+    r = psend(client, person, "eve@example.test", team="acme")  # eve is not in acme
+    assert r.status_code == 400 and err(r) == "address_people" and "eve" not in r.text.lower()
+    r = psend(client, person, "bob@example.test", team="nope")
     assert r.status_code == 400 and err(r) == "invalid"
 
 
@@ -299,9 +337,11 @@ def test_person_rate_limit_per_session(settings, world, engine):
         app.state.engine.dispose()
 
 
-def test_person_inbox_long_poll_returns_on_arrival(client, alice):
+def test_person_inbox_long_poll_returns_on_arrival(client, alice, session):
     import threading
     import time
+
+    drop_inbox(session, alice["world"], "bob")  # bob is reached in his app
 
     bob = person_of(client, "bob@example.test", "bob-laptop")
     timer = threading.Timer(1.0, lambda: psend(client, alice["person"], {"person": "bob@example.test"}, body="late"))
@@ -329,16 +369,22 @@ def test_from_same_owner_is_decided_by_the_server(client, alice):
         assert r.status_code == 201, r.text
         return r.json()["message"]
 
-    # alice-laptop (signed in above) and alice-agent are both alice's machines.
-    assert send(alice["token"], "alice-agent")["from_same_owner"] is True
-    assert send(world["tokens"]["bob"], "alice-agent")["from_same_owner"] is False
-    assert send(alice["token"], "bob-agent")["from_same_owner"] is False
-    assert send(world["tokens"]["bob"], {"person": "alice@example.test"})["from_same_owner"] is False  # not a machine
-    assert psend(client, alice["person"], "alice-agent").json()["message"]["from_same_owner"] is True
-    assert psend(client, alice["person"], "bob-agent").json()["message"]["from_same_owner"] is False
+    # alice-laptop (signed in above) and alice-agent are both alice's machines; alice-agent is her inbox. §21: a
+    # machine may write to its own owner (C13 H2), which reaches her in the app, not a machine; her answer goes back
+    # to that machine (H2 ii) and is the same-owner case. Machine-to-machine sends are refused.
+    to_self = send(alice["token"], "alice@example.test")
+    assert to_self["from_same_owner"] is False  # to a person, not a machine
+    answer = psend(client, alice["person"], "alice@example.test", in_reply_to=to_self["id"]).json()["message"]
+    assert answer["from_same_owner"] is True
+    laptop = client.get("/api/v1/inbox?routing=1", headers=auth(alice["token"])).json()["messages"]
+    assert [(m["id"], m["from_same_owner"]) for m in laptop] == [(answer["id"], True)]
+    assert send(world["tokens"]["bob"], "alice@example.test")["from_same_owner"] is False
+    assert send(alice["token"], "bob@example.test")["from_same_owner"] is False
+    assert send(world["tokens"]["bob"], {"person": "alice@example.test"})["from_same_owner"] is False
+    assert psend(client, alice["person"], "bob@example.test").json()["message"]["from_same_owner"] is False
     seen = client.get("/api/v1/inbox?routing=1", headers=auth(world["tokens"]["alice"])).json()["messages"]
     assert sorted((m["from"], m["from_same_owner"]) for m in seen) == [
-        ("@alice@example.test", True), ("alice-laptop", True), ("bob-agent", False)]
+        ("@bob@example.test", False), ("@bob@example.test", False)]
 
 
 def test_person_reply_takes_the_parents_team(client, alice, session):
@@ -352,7 +398,7 @@ def test_person_reply_takes_the_parents_team(client, alice, session):
     assert r.status_code == 201 and r.json()["message"]["conversation_id"] == parent["conversation_id"]
     r = psend(client, person, "bob-agent", "again", in_reply_to=parent["id"], team="globex")  # team is ignored
     assert r.status_code == 201 and r.json()["message"]["conversation_id"] == parent["conversation_id"]
-    r = psend(client, person, "bob-agent", "new")  # a new conversation still needs it
+    r = psend(client, person, "bob@example.test", "new")  # a new conversation still needs it
     assert r.status_code == 400 and r.json()["error"]["code"] == "team_required"
     r = psend(client, person, "bob-agent", "x", in_reply_to=str(uuid.uuid4()))  # unknown or unseen: 404
     assert r.status_code == 404

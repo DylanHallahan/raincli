@@ -275,6 +275,7 @@ class FakeState:
                 # As messaging.message_json: the sending machine's owner at the top level, null for a person.
                 "from_owner": None if person else self.owner_names.get(m["sender"]),
                 "from_same_owner": self.same_owner(m),
+                "from_kind": "app" if person else "agent",
                 "body": m["body"], "created_at": m["created_at"], "seq": m["seq"],
                 "acked_at": m["acked_at"], "delivery_state": m["delivery_state"],
                 "delivery_updated_at": m["delivery_updated_at"],

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import uuid
 
 from fastapi.testclient import TestClient
 
@@ -14,10 +15,10 @@ from raincli_server.api import polls
 from test_app_login import app_login
 
 
-def poll(app, token, results, path="/api/v1/inbox", wait=4):
+def poll(app, token, results, path="/api/v1/inbox", wait=4, **params):
     with TestClient(app) as c:
         started = time.monotonic()
-        r = c.get(f"{path}?wait={wait}", headers=auth(token))
+        r = c.get(path, params={"wait": wait, **params}, headers=auth(token))
         results.append((r, time.monotonic() - started))
 
 
@@ -43,7 +44,7 @@ def test_a_third_concurrent_poll_on_one_credential_returns_at_once(client, world
     # still polls slowly.
     assert r.status_code == 200 and r.json()["messages"] == [] and polls.OVER_LIMIT_HOLD - 0.5 < took < 4
     assert r.headers["retry-after"] == str(polls.RETRY_AFTER_SECONDS)
-    send(client, world["tokens"]["alice"], "bob-agent", "wake up")
+    send(client, world["tokens"]["alice"], "bob@example.test", "wake up")
     for t in waiting:
         t.join(15)
     assert [len(r.json()["messages"]) for r, _ in results] == [1, 1]  # the two waiting polls received it
@@ -59,20 +60,35 @@ def test_one_users_twelve_machines_and_twelve_sessions_all_keep_receiving(client
                                                    "person_only": True, "previous_token": token})
         assert r.status_code == 200, r.text
         sessions.append(r.json()["person_session"])
+    # Teammates address Alice, never her machines (§21 C2). What reaches each machine is her own traffic: each box
+    # writes to her (C13 H2 i) and her answers in the app go back to that box (H2 ii).
+    asks = []
+    for i, token in enumerate(machines):
+        r = send(client, token, "alice@example.test", f"from box {i}")
+        assert r.status_code == 201, r.text
+        asks.append(r.json()["message"])
+        r = client.post(f"/api/v1/person/messages/{asks[-1]['id']}/ack", headers=auth(sessions[0]))
+        assert r.status_code == 200, r.text  # she has read it (and stays under the pending cap)
+    seen = max(m["seq"] for m in asks)
     results = []
-    threads = [threading.Thread(target=poll, args=(app, t, results)) for t in machines] + \
-        [threading.Thread(target=poll, args=(app, s, results, "/api/v1/person/inbox")) for s in sessions]
+    threads = [threading.Thread(target=poll, args=(app, t, results), kwargs={"routing": 1}) for t in machines] + \
+        [threading.Thread(target=poll, args=(app, s, results, "/api/v1/person/inbox"), kwargs={"after": seen})
+         for s in sessions]
     for t in threads:
         t.start()
     wait_until(lambda: slots.held(("user", world["users"]["alice"].id)) == 24)
-    for i in range(12):
-        send(client, world["tokens"]["bob"], f"box-{i:02d}", f"to box {i}")
-    send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "to alice")
+    for i, ask in enumerate(asks):
+        r = client.post("/api/v1/person/send", headers=auth(sessions[0]),
+                        json={"id": str(uuid.uuid4()), "body": f"to box {i}", "in_reply_to": ask["id"]})
+        assert r.status_code == 201, r.text
+    send(client, machines[0], "alice@example.test", "to alice")
     for t in threads:
         t.join(20)
     assert len(results) == 24
     assert all(r.status_code == 200 and r.json()["messages"] and "retry-after" not in r.headers
                for r, _ in results)
+    bodies = sorted(m["body"] for r, _ in results for m in r.json()["messages"])
+    assert bodies == sorted([f"to box {i}" for i in range(12)] + ["to alice"] * 12)
 
 
 def test_a_slot_is_released_when_the_client_goes_away():
@@ -119,7 +135,7 @@ def test_a_poll_past_the_process_limit_is_a_held_short_poll(client, world, app):
     r, took = other[0]
     assert r.status_code == 200 and r.headers["retry-after"] == str(polls.RETRY_AFTER_SECONDS)
     assert 0.5 < took < 3  # held for min(wait, 2) seconds
-    send(client, world["tokens"]["alice"], "bob-agent", "wake")
+    send(client, world["tokens"]["alice"], "bob@example.test", "wake")
     first.join(15)
     assert results[0][0].json()["messages"]
 

@@ -12,6 +12,7 @@ from raincli_server import admin, identity, security
 from raincli_server.models import DeliveryEvent, Invitation, Membership, WebSession
 
 PASSWORD = "correct horse battery"
+# §21 (v0.6): teammates are addressed as people (conftest gives each person their own machine's inbox).
 
 
 def events_of(engine, mid):
@@ -34,9 +35,9 @@ def web_login(client, email):
 
 def test_replied_is_sticky_against_later_events(client, world, engine):
     t_alice, t_bob = world["tokens"]["alice"], world["tokens"]["bob"]
-    m = send(client, t_alice, "bob-agent", "question").json()["message"]
+    m = send(client, t_alice, "bob@example.test", "question").json()["message"]
     client.post(f"/api/v1/messages/{m['id']}/ack", headers=auth(t_bob))
-    assert send(client, t_bob, "alice-agent", "answer", in_reply_to=m["id"]).status_code == 201
+    assert send(client, t_bob, "alice@example.test", "answer", in_reply_to=m["id"]).status_code == 201
     before = client.get(f"/api/v1/messages/{m['id']}", headers=auth(t_alice)).json()["message"]
     assert before["delivery_state"] == "replied"
     for state in ("held", "submitted", "submission_uncertain", "rejected"):
@@ -51,8 +52,8 @@ def test_replied_is_sticky_against_later_events(client, world, engine):
 
 def test_reply_before_ack_stays_replied_after_ack(client, world):
     t_alice, t_bob = world["tokens"]["alice"], world["tokens"]["bob"]
-    m = send(client, t_alice, "bob-agent").json()["message"]
-    send(client, t_bob, "alice-agent", "quick answer", in_reply_to=m["id"])
+    m = send(client, t_alice, "bob@example.test").json()["message"]
+    send(client, t_bob, "alice@example.test", "quick answer", in_reply_to=m["id"])
     r = client.post(f"/api/v1/messages/{m['id']}/ack", headers=auth(t_bob)).json()
     assert r["acked"] is True and r["message"]["delivery_state"] == "replied"
 
@@ -61,21 +62,21 @@ def test_reply_before_ack_stays_replied_after_ack(client, world):
 
 def test_repeated_identical_event_is_idempotent(client, world, engine):
     t_alice, t_bob = world["tokens"]["alice"], world["tokens"]["bob"]
-    mid = send(client, t_alice, "bob-agent").json()["message"]["id"]
+    mid = send(client, t_alice, "bob@example.test").json()["message"]["id"]
     client.post(f"/api/v1/messages/{mid}/ack", headers=auth(t_bob))
     url = f"/api/v1/messages/{mid}/events"
-    first = client.post(url, json={"state": "submitted", "detail": "ok"}, headers=auth(t_bob))
-    retry = client.post(url, json={"state": "submitted", "detail": "ok"}, headers=auth(t_bob))
+    first = client.post(url, json={"state": "submitted", "detail": "delivered"}, headers=auth(t_bob))
+    retry = client.post(url, json={"state": "submitted", "detail": "delivered"}, headers=auth(t_bob))
     assert first.status_code == retry.status_code == 200
     assert retry.json()["message"] == first.json()["message"]
-    assert events_of(engine, mid) == [("received", None), ("submitted", "ok")]
+    assert events_of(engine, mid) == [("received", None), ("submitted", "delivered")]
     # a different detail, or a later change and back, is a new event
-    client.post(url, json={"state": "submitted", "detail": "again"}, headers=auth(t_bob))
+    client.post(url, json={"state": "submitted", "detail": "next_turn"}, headers=auth(t_bob))
     client.post(url, json={"state": "held"}, headers=auth(t_bob))
     client.post(url, json={"state": "held", "detail": ""}, headers=auth(t_bob))  # "" == no detail
-    client.post(url, json={"state": "submitted", "detail": "ok"}, headers=auth(t_bob))
-    assert events_of(engine, mid) == [("received", None), ("submitted", "ok"), ("submitted", "again"),
-                                      ("held", None), ("submitted", "ok")]
+    client.post(url, json={"state": "submitted", "detail": "delivered"}, headers=auth(t_bob))
+    assert events_of(engine, mid) == [("received", None), ("submitted", "delivered"), ("submitted", "next_turn"),
+                                      ("held", None), ("submitted", "delivered")]
 
 
 # LOW-1 --------------------------------------------------------------------------
@@ -110,7 +111,7 @@ def test_scope_and_rate_limit_before_body(settings, world, session):
             r = c.post("/api/v1/messages", content=b"[" * 60000, headers={**auth(read_only), **garbage})
             assert r.status_code == 403 and err(r) == "forbidden"
             t = world["tokens"]["alice"]
-            ok = send(c, t, "bob-agent")  # one send = one rate-limit hit, not two
+            ok = send(c, t, "bob@example.test")  # one send = one rate-limit hit, not two
             assert ok.status_code == 201
             assert c.get("/api/v1/me", headers=auth(t)).status_code == 200
             r = c.post("/api/v1/messages", content=b"{bad", headers={**auth(t), **garbage})
@@ -208,13 +209,15 @@ def test_admin_remove_member_disable_enable(database_url, client, world, session
 # LOW-2 (accepted, §11.8) ----------------------------------------------------------
 
 def test_cross_team_id_collision_is_generic_conflict(client, world, session):
-    identity.register_agent(session, world["teams"]["globex"], world["users"]["eve"], "eve-two")
+    # eve needs a globex teammate to address (§21: people only; her own machine is refused)
+    fred = identity.create_user(session, "fred@example.test", "Fred", PASSWORD)
+    identity.add_member(session, world["teams"]["globex"], fred)
     session.commit()
-    m = send(client, world["tokens"]["alice"], "bob-agent", "acme secret").json()["message"]
-    r = send(client, world["tokens"]["eve"], "eve-two", "probe", id=m["id"])
+    m = send(client, world["tokens"]["alice"], "bob@example.test", "acme secret").json()["message"]
+    r = send(client, world["tokens"]["eve"], "fred@example.test", "probe", id=m["id"])
     assert r.status_code == 409 and err(r) == "id_conflict"
     assert "acme" not in r.text and "secret" not in r.text and "bob" not in r.text
-    same_team = send(client, world["tokens"]["bob"], "alice-agent", "other", id=m["id"])
+    same_team = send(client, world["tokens"]["bob"], "alice@example.test", "other", id=m["id"])
     assert same_team.json() == r.json()  # indistinguishable from any other conflicting id
 
 

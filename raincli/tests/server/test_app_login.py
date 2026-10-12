@@ -84,7 +84,16 @@ def test_replace_refused_after_a_message_was_received(client, world, session):
     from api_helpers import send
 
     token = app_login(client).json()["token"]
-    assert send(client, world["tokens"]["bob"], "alice-laptop").status_code == 201
+    # §21: Bob addresses Alice, not her machine; so Alice first makes an agent on the laptop her inbox
+    # (without publishing an inbox role, which would be delivery history on its own).
+    report = {"status": "ready", "agents": [{"key": "2" * 32, "name": "notes", "type": "claude", "status": "idle",
+                                             "role": None, "reachability": "instant", "source": "herdr"}]}
+    assert client.put("/api/v1/presence", json=report, headers=auth(token)).status_code == 200
+    r = client.put("/api/v1/me/inbox", json={"agent": "notes"}, headers=auth(token))
+    assert r.status_code == 200, r.text
+    assert client.get("/api/v1/me", headers=auth(token)).json()["delivery_history"] is False
+    assert send(client, world["tokens"]["bob"], "alice@example.test").status_code == 201
+    assert client.get("/api/v1/me", headers=auth(token)).json()["delivery_history"] is True
     r = app_login(client, replace=True)
     assert r.status_code == 409 and err(r) == "name_in_use"
     r = app_login(client, replace=True, previous_token=token)  # proof of the credential still works

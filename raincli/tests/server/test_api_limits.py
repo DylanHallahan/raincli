@@ -18,7 +18,7 @@ from raincli_server.models import Agent
 def test_body_over_64k_is_413(client, world):
     """64 KiB everywhere except POST /messages (2 MiB, see test_api_attachments)."""
     t = world["tokens"]["alice"]
-    mid = send(client, t, "bob-agent").json()["message"]["id"]
+    mid = send(client, t, "bob@example.test").json()["message"]["id"]
     url = f"/api/v1/messages/{mid}/events"
     big = b'{"state": "held", "detail": "' + b"x" * 70000 + b'"}'
     r = client.post(url, content=big, headers={**auth(t), "Content-Type": "application/json"})
@@ -32,7 +32,7 @@ def test_body_over_64k_is_413(client, world):
     r = client.post("/api/v1/messages", content=(b"x" * 4096 for _ in range(600)), headers=auth(t))
     assert r.status_code == 413 and err(r) == "too_large"
     # 16000 characters of 4-byte UTF-8 (64000 bytes of text) is a valid body
-    assert send(client, t, "bob-agent", "\U0001F600" * 16000).status_code == 201
+    assert send(client, t, "bob@example.test", "\U0001F600" * 16000).status_code == 201
 
 
 def test_rate_limit_429_with_retry_after(settings, world):
@@ -76,7 +76,7 @@ def test_long_poll_returns_early_on_arrival(client, world, engine, settings):
     s = make_sessionmaker(engine)()
     try:
         alice = s.get(Agent, world["agents"]["alice"].id)
-        msg, _ = messaging.send_message(s, alice, id=uuid.uuid4(), to_handle="bob-agent", body="ping",
+        msg, _ = messaging.send_message(s, alice, id=uuid.uuid4(), to="bob@example.test", body="ping",
                                         max_pending=settings.max_pending)
         s.commit()
     finally:

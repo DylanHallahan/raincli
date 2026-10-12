@@ -7,6 +7,7 @@ import importlib.util
 import uuid
 from pathlib import Path
 
+import pytest
 from api_helpers import auth
 
 from raincli_agent.connector.runner import frame_record
@@ -22,18 +23,24 @@ def _fake_state():
 
 def received(client, world):
     sent = client.post("/api/v1/messages", headers=auth(world["tokens"]["alice"]),
-                       json={"id": str(uuid.uuid4()), "to": "bob-agent", "body": "please review"})
+                       json={"id": str(uuid.uuid4()), "to": "bob@example.test", "body": "please review"})
     assert sent.status_code == 201, sent.text
     [message] = client.get("/api/v1/inbox", headers=auth(world["tokens"]["bob"])).json()["messages"]
     return message
 
 
-def test_the_frame_shows_the_owner_the_server_sends(client, world):
+def test_the_frame_shows_a_teammate_machine_as_its_person(client, world):
+    """§21 C5.2: a teammate's machine reaches the reader as its person; no handle, owner or agent name."""
     message = received(client, world)
-    assert message["from_owner"] == "Alice" and "owner" not in message["from_endpoint"]
+    assert message["from_owner"] is None and message["from_agent"] is None
+    assert message["from"] == "@alice@example.test" and message["from_kind"] == "agent"
+    assert message["from_endpoint"] == {"person": "alice@example.test", "display_name": "Alice"}
+    # The reading machine's own endpoint keeps its machine form, so the connector sees its own target.
+    assert message["to"] == "bob-agent" and message["to_endpoint"] == {"machine": "bob-agent"}
+    assert "alice-agent" not in str(message)
     record = {"id": message["id"], "sender": message["from"], "message": message, "target": None}
     text = frame_record(record, {"handle": "bob-agent", "team": "acme"})
-    assert text.split("\n")[1] == 'From: machine alice-agent (owner "Alice") | team acme'
+    assert text.split("\n")[1] == 'From: "Alice" <alice@example.test> | team acme'
 
 
 def test_a_person_sender_never_gets_an_owner(client, world):
@@ -54,5 +61,9 @@ def test_the_fake_server_renders_the_real_message_keys(client, world):
         status, reply = state.send(state.agents[state.tokens[alice]], body)
     fake = reply["message"]
     assert set(fake) == set(real), {"only in the fake": set(fake) - set(real), "only real": set(real) - set(fake)}
-    assert fake["from_owner"] is None and set(fake["from_endpoint"]) == set(real["from_endpoint"])
+    # The real server shows a teammate's machine as its person (§21 C5.2). The client tests' fake still renders the
+    # machine form the v0.5 client was written against; the v0.6.0 client work moves it (and tightens this) along.
+    assert set(real["from_endpoint"]) == {"person", "display_name"}
+    assert fake["from_owner"] is None and real["from_owner"] is None
+    assert set(fake["from_endpoint"]) in ({"machine"}, {"machine", "agent"}, {"person", "display_name"})
     del bob

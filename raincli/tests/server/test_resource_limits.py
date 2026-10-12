@@ -20,6 +20,7 @@ from test_routing import entry, report, send
 from test_web_app import app_csrf, login
 
 KIB = 1024
+ALICE, BOB = "alice@example.test", "bob@example.test"  # people, never machines (§21 C2)
 
 
 def machine(session, world, name):
@@ -97,19 +98,19 @@ def test_two_sessions_and_machines_of_one_user_share_the_daily_quota(client, wor
     alice, second = machine(session, world, "alice"), identity.register_agent(
         session, session.get(Team, world["teams"]["acme"].id), session.get(User, world["users"]["alice"].id),
         "alice-two")[0]
-    send_files(session, alice, "bob-agent", 200, q)
+    send_files(session, alice, BOB, 200, q)
     messaging.send_as_person(session, session.get(User, world["users"]["alice"].id), world["teams"]["acme"].id,
                              id=str(uuid.uuid4()), to={"person": "bob@example.test"}, body="as alice",
                              attachments=files(200), max_pending=1000, quotas=q)
     session.commit()
     with pytest.raises(messaging.MessagingError) as refused:
-        send_files(session, second, "bob-agent", 200, q)  # 600 KiB > 500 KiB, from another machine of hers
+        send_files(session, second, BOB, 200, q)  # 600 KiB > 500 KiB, from another machine of hers
     session.rollback()
     assert refused.value.status == 413 and refused.value.code == "quota_exceeded"
     assert refused.value.details["quota"] == "user_daily" and refused.value.details["resets_at"].endswith("T00:00:00Z")
     # Bob is not affected, and a message without attachments is never refused.
-    send_files(session, machine(session, world, "bob"), "alice-agent", 200, q)
-    messaging.send_message(session, alice, id=str(uuid.uuid4()), to="bob-agent", body="text only",
+    send_files(session, machine(session, world, "bob"), ALICE, 200, q)
+    messaging.send_message(session, alice, id=str(uuid.uuid4()), to=BOB, body="text only",
                            max_pending=1000, quotas=q)
     session.commit()
 
@@ -124,7 +125,7 @@ def test_concurrent_uploads_do_not_overshoot_the_quota(client, world, app):
             sender = s.get(Agent, world["agents"]["alice"].id)
             start.wait()
             try:
-                send_files(s, sender, "bob-agent", 200, q)
+                send_files(s, sender, BOB, 200, q)
                 s.commit()
                 outcomes.append("stored")
             except messaging.MessagingError as exc:
@@ -141,11 +142,11 @@ def test_concurrent_uploads_do_not_overshoot_the_quota(client, world, app):
 def test_one_user_cannot_block_the_team_beyond_the_rolling_window(client, world, session):
     q = quotas.Quotas(user_daily=10_000 * KIB, team_window=400 * KIB)
     alice, bob = machine(session, world, "alice"), machine(session, world, "bob")
-    first = send_files(session, alice, "bob-agent", 200, q)
-    send_files(session, alice, "bob-agent", 200, q)
+    first = send_files(session, alice, BOB, 200, q)
+    send_files(session, alice, BOB, 200, q)
     session.commit()
     with pytest.raises(messaging.MessagingError) as refused:
-        send_files(session, bob, "alice-agent", 100, q)
+        send_files(session, bob, ALICE, 100, q)
     session.rollback()
     assert refused.value.details["quota"] == "team_30_days"
     frees = refused.value.details["resets_at"]
@@ -154,23 +155,23 @@ def test_one_user_cannot_block_the_team_beyond_the_rolling_window(client, world,
     session.execute(update(Attachment).where(Attachment.message_id == first.id)
                     .values(created_at=identity.now() - timedelta(days=31)))
     session.commit()
-    send_files(session, bob, "alice-agent", 100, q)
+    send_files(session, bob, ALICE, 100, q)
     session.commit()
 
 
 def test_the_api_answers_413_naming_the_quota(client, world, session):
     session.execute(update(User).where(User.id == world["users"]["alice"].id).values(attachment_quota_bytes=10))
     session.commit()
-    r = send(client, world["tokens"]["alice"], "bob-agent", "file", attachments=[att("a.md", b"hello world")])
+    r = send(client, world["tokens"]["alice"], BOB, "file", attachments=[att("a.md", b"hello world")])
     error = r.json()["error"]
     assert r.status_code == 413 and set(r.json()) == {"error"}  # the error envelope, the details inside it
     assert error["code"] == "quota_exceeded" and error["quota"] == "user_daily" and "resets" in error["message"]
     assert error["resets_at"].endswith("T00:00:00Z")
-    assert send(client, world["tokens"]["alice"], "bob-agent", "no file").status_code == 201
+    assert send(client, world["tokens"]["alice"], BOB, "no file").status_code == 201
 
 
 def test_the_operator_sees_and_raises_a_quota(client, world, database_url, session):
-    send_files(session, machine(session, world, "alice"), "bob-agent", 2, quotas.Quotas())
+    send_files(session, machine(session, world, "alice"), BOB, 2, quotas.Quotas())
     session.commit()
 
     def run(*argv):
@@ -196,9 +197,13 @@ def test_names_starting_with_a_dash_are_never_targets_or_listed(client, world, s
     stored = set(session.scalars(select(MachineAgent.name).where(MachineAgent.agent_id == world["agents"]["bob"].id)))
     assert stored == {"reviewer"}  # only those entries are dropped; the report is accepted
     for name in ("-x", "-", "--help"):
+        # Never an inbox (the only way an agent name becomes a target, §21 C3.5), never addressable by a teammate.
+        r = client.put("/api/v1/me/inbox", headers=auth(world["tokens"]["bob"]), json={"agent": name})
+        assert r.status_code == 400 and err(r) == "inbox_invalid", name
         r = send(client, world["tokens"]["alice"], {"machine": "bob-agent", "agent": name})
-        assert r.status_code == 400 and err(r) == "invalid", name
-    directory = client.get("/api/v1/agents", headers=auth(world["tokens"]["alice"])).json()["agents"]
+        assert r.status_code == 400 and err(r) == "address_people", name
+    assert "-x" not in str(client.get("/api/v1/me/inbox", headers=auth(world["tokens"]["bob"])).json()["candidates"])
+    directory = client.get("/api/v1/agents", headers=auth(world["tokens"]["bob"])).json()["agents"]  # own machines
     bob = next(a for a in directory if a["handle"] == "bob-agent")
     assert [a["name"] for a in bob["agents"]] == ["reviewer"]
 
@@ -212,8 +217,10 @@ def test_existing_rows_with_a_leading_dash_are_ignored_and_pruned(client, world,
     session.execute(KnownAgent.__table__.insert(), [
         {"agent_id": bob, "name": "-old", "type": "claude", "reachability": "instant", "last_seen_at": now}])
     session.commit()
-    directory = client.get("/api/v1/agents", headers=auth(world["tokens"]["alice"])).json()["agents"]
+    directory = client.get("/api/v1/agents", headers=auth(world["tokens"]["bob"])).json()["agents"]
     assert not [a for a in next(d for d in directory if d["handle"] == "bob-agent")["agents"] if a["name"] == "-old"]
+    r = client.put("/api/v1/me/inbox", headers=auth(world["tokens"]["bob"]), json={"agent": "-old"})
+    assert r.status_code == 400 and err(r) == "inbox_invalid"
     report(client, world["tokens"]["bob"], [entry("reviewer", "b" * 32)])
     session.expire_all()
     assert session.scalar(select(KnownAgent).where(KnownAgent.agent_id == bob, KnownAgent.name == "-old")) is None

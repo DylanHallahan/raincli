@@ -169,7 +169,8 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
         if reader_agent is not None and ep.agent is not None and ep.agent.id == reader_agent.id:
             return ep.agent.handle, ep.json()
         person = session.get(User, person_of_endpoint(session, ep))
-        return "@" + person.email, {"person": person.email, "display_name": presentation.display_name(person)}
+        return "@" + person.email, {"person": person.email,
+                                    "display_name": presentation.name_in_team(session, msg.team_id, person)}
 
     from_text, from_json = shown(sender)
     to_text, to_json = shown(recipient)
@@ -196,7 +197,9 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
         or owns_recipient else None,
         "delivery_state": state,
         "hold_reason": hold if owns_recipient else presentation.api_hold_code(hold, route),
-        "delivery_updated_at": iso(msg.delivery_updated_at),
+        # H4: for a message to a person, the time it changed would tell the sender when they read it.
+        "delivery_updated_at": iso(msg.delivery_updated_at) if msg.recipient_user_id is None
+        or viewer_id == msg.recipient_user_id or msg.delivery_state == "replied" else iso(msg.created_at),
         "attachments": attachments,
     }
 
@@ -586,7 +589,8 @@ def _person_named(session: Session, team_id: uuid.UUID, to: object, me: User) ->
     else:
         handle = None
     if handle:
-        machine = session.scalar(select(Agent).where(Agent.team_id == team_id, Agent.handle == handle))
+        machine = session.scalar(select(Agent).where(Agent.team_id == team_id, Agent.handle == handle,
+                                                     Agent.revoked_at.is_(None)))  # C13 L3
         if machine is not None:
             return machine.owner_user_id
     try:
@@ -1029,7 +1033,7 @@ def archive_json(session: Session, conv: Conversation, last_seq: int | None = No
     by = endpoint_for_key(session, conv.archived_by_key)
     who = session.get(User, person_of_endpoint(session, by)) if by is not None else None
     return {"archived": True, "archived_at": iso(conv.archived_at), "archived_through_seq": conv.archived_through_seq,
-            "archived_by": {"person": who.email, "display_name": presentation.display_name(who)}
+            "archived_by": {"person": who.email, "display_name": presentation.name_in_team(session, conv.team_id, who)}
             if who is not None else None}
 
 
