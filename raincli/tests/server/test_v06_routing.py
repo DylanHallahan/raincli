@@ -339,3 +339,19 @@ def test_a_machine_reads_and_archives_its_owners_conversations(client, session, 
     assert ok.status_code == 201, ok.text
     wrong = machine_send(client, t, "priya@example.test", "not that pair", conversation_id=conv)
     assert wrong.status_code == 400
+
+
+def test_the_apps_feed_sees_messages_routed_to_your_inbox(client, v06_seed):  # noqa: F811
+    """PR6: with routed=1 the person feed also returns what reached Jon's inbox machine (acked or not), never
+    what Jon or his machines sent."""
+    jon_person, jon_machine = v06_seed["person_tokens"]["Jon"], v06_seed["machine_tokens"]["jon"]
+    mid = person_send(client, v06_seed["person_tokens"]["Maya"], "jon@example.test", "by hand").json()["message"]["id"]
+    assert client.post(f"/api/v1/messages/{mid}/ack", headers=auth(jon_machine)).status_code == 200
+    plain = client.get("/api/v1/person/inbox", headers=auth(jon_person)).json()["messages"]
+    assert mid not in {m["id"] for m in plain}
+    routed = client.get("/api/v1/person/inbox", headers=auth(jon_person), params={"routed": 1}).json()["messages"]
+    seen = {m["id"]: m for m in routed}
+    assert seen[mid]["from_kind"] == "app" and seen[mid]["from_endpoint"]["person"] == "maya@example.test"
+    own = machine_send(client, jon_machine, "maya@example.test", "from jon's agent").json()["message"]["id"]
+    again = client.get("/api/v1/person/inbox", headers=auth(jon_person), params={"routed": 1}).json()["messages"]
+    assert own not in {m["id"] for m in again}
