@@ -13,7 +13,7 @@
       {% for row in conversations %}
       <li class="rc-card rc-archived-row">
         <a class="rc-conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}#latest">
-          <span class="rc-conv-top"><span class="rc-conv-name">{{ row.peer.display }}</span>{% if row.unacked %}<span class="rc-count" title="Not yet read">{{ row.unacked }}</span>{% endif %}<span class="rc-conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span></span>
+          <span class="rc-conv-top"><span class="rc-conv-name">{{ row.name }}</span>{% if row.unacked %}<span class="rc-count" title="Not yet read">{{ row.unacked }}</span>{% endif %}<span class="rc-conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span></span>
           <span class="rc-conv-preview">Archived{% if row.archived_by %} by {{ row.archived_by }}{% endif %} {{ time(row.conversation.archived_at) }} · {{ row.team.name }}</span>
         </a>
         <form method="post" action="{{ url('/app/conversations/' ~ row.conversation.id ~ '/unarchive') }}">

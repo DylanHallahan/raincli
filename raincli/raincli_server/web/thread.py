@@ -1,14 +1,17 @@
-"""What the app-mode thread shows beyond the messages themselves (protocol §19.3, §19.4, §19.6, §19.7).
+"""What the app-mode thread shows beyond the messages themselves (protocol §19, as changed by §21).
 
-- **Names** (§19.4): from the conversation's endpoints, never from message text. An agent is
-  *owner · agent*, a machine inbox *owner · inbox*, a person their display name.
-- **The delivery trail** (§19.7): only under the viewer's own messages, with the steps that apply to the
-  recipient kind, and held, uncertain or rejected in place of the remaining steps, with the reason in words.
-- **Header presence** (§19.3): for an agent recipient only, its reachability chip and Ready, Busy or Offline
-  from the same live directory as the Agents page. Offline once its machine hasn't reported for 2 minutes,
-  and then no chip. Nothing here says what an agent is doing with a particular message.
-- **The sender warning** (§19.6): a machine that has never connected, hasn't connected for a day, or hasn't
-  picked up a message for a day. Display only.
+v0.6 (§21 C5, C7): teammates see people, never machines or agents. Every label, hold reason and presence word here
+comes from ``raincli_server.presentation``; this module only arranges them.
+
+- **Names:** ``presentation.person_label``: "Jon" for what Jon wrote in the app, "Jon · agent" for what his machine
+  sent (PR4). The same for every viewer, the owner included.
+- **The delivery trail** (§19.7, §21 C7.5): only under the viewer's own messages: stored → received → submitted →
+  replied for a message to a person's inbox, stored → received → replied for one delivered in the app; held,
+  uncertain or rejected in place of the remaining steps, worded by ``presentation.hold_text`` (no agent or session
+  words, C5.5). Raw event details are never shown.
+- **Header presence** (§21 C5.4): the person's presence · speed, from their inbox in that team.
+- **Warnings** (§21 C7.4): about a person's inbox, never a handle: their inbox hasn't connected, hasn't picked up
+  messages, or they haven't picked an inbox yet. Display only. The owner's own machine notices stay owner-only.
 """
 
 from __future__ import annotations
@@ -20,78 +23,55 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from raincli_server import identity, messaging, owners, presence
-from raincli_server.models import Agent, AgentCredential, AgentPresence, DeliveryEvent, Message, User
+from raincli_server import identity, messaging, presentation
+from raincli_server.models import Agent, AgentCredential, AgentPresence, DeliveryEvent, Message, Team, User
 
 WARNING_AFTER = timedelta(hours=24)
-OFFLINE_AFTER = timedelta(seconds=presence.TTL_SECONDS)  # 2 minutes
 
-AGENT_STEPS = ("stored", "received", "submitted", "replied")
-INBOX_STEPS = ("stored", "received", "replied")  # a person or a machine inbox
+AGENT_STEPS = ("stored", "received", "submitted", "replied")  # a message to a person's inbox (an agent)
+INBOX_STEPS = ("stored", "received", "replied")  # a message delivered in the person's app (no inbox)
 STEP_LABELS = {"stored": "stored", "received": "received", "submitted": "submitted", "replied": "replied"}
 OUTCOMES = {"held": "held", "submission_uncertain": "uncertain", "rejected": "rejected"}
 
-# The hold reasons a sender can see (§16.12 C8 and the connectors' holds), in words.
-HOLD_WORDS = {
-    "approval_required": "waiting for approval",
-    "sender_blocked": "the recipient doesn't accept messages from this sender",
-    "busy": "the session is busy",
-    "blocked": "the session is blocked",
-    "offline": "the recipient is offline",
-    "next_turn": "waiting for the session's next turn",
-    "target_ambiguous": "two agents there share that name",
-    "too_large_for_command_line": "too long to hand to the session",
-    "too_large_for_hook": "too long to hand to the session",
-    "owner_unreachable": "the machine's owner can't be reached",
-    "client_update_needed": "the recipient's RainCLI needs an update",
-}
-UNCERTAIN_WORDS = "the hand-off was interrupted; it may not have reached the session"
-REJECTED_WORDS = "declined on the recipient's machine"
+
+def uncertain_words(name: str) -> str:
+    return f"it may not have reached {name}'s inbox"
 
 
-def hold_words(reason: str | None) -> str:
-    if not reason:
-        return "waiting on the recipient's machine"
-    return HOLD_WORDS.get(reason, reason.replace("_", " "))
+def rejected_words(name: str) -> str:
+    return f"{name}'s inbox declined it"
 
 
-# Names (§19.4) -------------------------------------------------------------------------------------
+# Names (§21 C5.1) ----------------------------------------------------------------------------------
 
 class Names:
-    """Shown names for one team, worked out once per request (one owner query per team)."""
+    """Shown names, worked out once per endpoint per request, all through ``presentation.person_label``."""
 
     def __init__(self, db: Session):
         self.db = db
-        self._teams: dict[uuid.UUID, dict] = {}
+        self._cache: dict = {}
 
-    def owner(self, agent: Agent) -> str:
-        shown = self._teams.get(agent.team_id)
-        if shown is None or agent.owner_user_id not in shown:
-            owner = self.db.get(User, agent.owner_user_id)
-            shown = self._teams[agent.team_id] = owners.displays(self.db, agent.team_id, [owner])
-        return shown[agent.owner_user_id]
+    def _label(self, ep: messaging.Endpoint, sender: bool) -> str:
+        key = (ep.key, sender)
+        if key not in self._cache:
+            self._cache[key] = presentation.person_label(self.db, ep, sender=sender)
+        return self._cache[key]
 
     def endpoint(self, ep: messaging.Endpoint) -> str:
-        """*owner · agent*, *owner · inbox* or the person's display name."""
-        if ep.kind == "person":
-            return ep.user.display_name
-        if ep.kind == "agent":
-            return f"{self.owner(ep.agent)} · {ep.name}"
-        return f"{self.owner(ep.agent)} · inbox"
+        """A recipient or a conversation side: the person ("Jon"), whatever machine or agent it is."""
+        return self._label(ep, False)
 
     def sender(self, ep: messaging.Endpoint) -> str:
-        """The meta line's name: like ``endpoint``, but a machine sender is *owner · handle*."""
-        if ep.kind == "machine":
-            return f"{self.owner(ep.agent)} · {ep.agent.handle}"
-        return self.endpoint(ep)
+        """The meta line's name: "Jon", or "Jon · agent" for what Jon's machine sent."""
+        return self._label(ep, True)
+
+    def person(self, ep: messaging.Endpoint) -> str:
+        """The person's name alone, for hold reasons ("waiting for Sam to pick an inbox")."""
+        user = presentation.person_of(self.db, ep)
+        return presentation.display_name(user) if user is not None else "a teammate"
 
 
-def address(ep: messaging.Endpoint) -> str:
-    """The header's second line: ``handle/agent``, ``handle`` or the person's email."""
-    return ep.label().lstrip("@")
-
-
-# The delivery trail (§19.7) ------------------------------------------------------------------------
+# The delivery trail (§19.7, §21 C7.5) --------------------------------------------------------------
 
 @dataclass
 class Step:
@@ -105,7 +85,7 @@ class Trail:
     steps: list[Step]
     outcome: str | None = None  # held, uncertain or rejected
     reason: str = ""
-    events: list[DeliveryEvent] = field(default_factory=list)
+    events: list[DeliveryEvent] = field(default_factory=list)  # states and times only are ever shown
 
     @property
     def phrase(self) -> str:
@@ -122,87 +102,162 @@ class Trail:
         return {"held": "warn", "uncertain": "warn", "rejected": "danger"}.get(self.outcome or "", "")
 
 
-def trail_for(message: Message, recipient: messaging.Endpoint, events: list[DeliveryEvent],
-              hold_reason: str | None) -> Trail:
-    steps = AGENT_STEPS if recipient.kind == "agent" else INBOX_STEPS
-    state = message.delivery_state
-    shown = "held" if state == "stored" and hold_reason else state
+def trail_for(message: Message, recipient: messaging.Endpoint, events: list[DeliveryEvent], state: str,
+              hold_code: str | None, name: str, route: str | None = None) -> Trail:
+    """``state`` and ``hold_code`` are what the viewer may see (§21 C13 H4: for a message delivered in a person's
+    app, never their read state); ``name`` is the recipient person's name for the hold wording."""
+    steps = AGENT_STEPS if recipient.kind != "person" else INBOX_STEPS
+    shown = "held" if state == "stored" and hold_code else state
     first = {}
     for ev in events:
         first.setdefault(ev.state, ev.created_at)
-    times = {"stored": message.created_at, "received": message.acked_at or first.get("received"),
-             "submitted": first.get("submitted"), "replied": first.get("replied")}
+    received_at = first.get("received") or (message.acked_at if recipient.kind != "person" else None)
+    times = {"stored": message.created_at, "received": received_at or (
+        message.delivery_updated_at if recipient.kind == "person" and state == "received" else None),
+        "submitted": first.get("submitted"), "replied": first.get("replied")}
     if shown == "replied":
         reached_upto = len(steps)
     elif shown == "submitted":
         reached_upto = steps.index("submitted" if "submitted" in steps else "received") + 1
-    elif message.acked_at is not None or shown == "received":
+    elif shown == "received" or (recipient.kind != "person" and message.acked_at is not None):
         reached_upto = steps.index("received") + 1  # picked up; held, uncertain and rejected happen after this
     else:
         reached_upto = 1  # stored, including a hold the server derives before it is picked up
     outcome = OUTCOMES.get(shown)
-    trail_steps = [Step(name, i < reached_upto, times.get(name) if i < reached_upto else None)
-                   for i, name in enumerate(steps)]
+    trail_steps = [Step(n, i < reached_upto, times.get(n) if i < reached_upto else None) for i, n in enumerate(steps)]
     if outcome:
         trail_steps = trail_steps[:reached_upto]  # the outcome replaces the remaining steps
     reason = ""
     if outcome == "held":
-        reason = hold_words(hold_reason)
+        reason = presentation.hold_text(hold_code or "failed", name, route) or ""
     elif outcome == "uncertain":
-        reason = UNCERTAIN_WORDS
+        reason = uncertain_words(name)
     elif outcome == "rejected":
-        reason = REJECTED_WORDS
+        reason = rejected_words(name)
     return Trail(trail_steps, outcome, reason, events)
 
 
-# Header presence (§19.3) ---------------------------------------------------------------------------
+# Header presence (§21 C5.4) ------------------------------------------------------------------------
 
 @dataclass
 class HeaderPresence:
-    chip: str | None  # "Instant" or "Next turn", only for a live agent
-    word: str | None  # Ready, Busy or Offline; None for a live agent whose status is unknown (§19.8 L3)
-    tooltip: str
+    chip: str | None  # "Instant" or "Next turn"
+    word: str | None  # Ready, Busy, Offline or "No inbox yet"
+    tooltip: str = ""
+
+    @property
+    def text(self) -> str:
+        return " · ".join(p for p in (self.word, self.chip) if p)
 
 
-def header_presence(db: Session, peer: messaging.Endpoint, now: datetime | None = None) -> HeaderPresence | None:
-    """For an agent recipient only (person and machine-inbox conversations show neither). Two indexed reads:
-    the machine's presence row and its live directory entries."""
-    if peer.kind != "agent":
+def header_presence(db: Session, team_id: uuid.UUID, person: User | None, now: datetime | None = None
+                    ) -> HeaderPresence | None:
+    """The person's presence · speed in that team, from their inbox (``presentation.person_presence``). None for
+    a conversation that isn't with a teammate (your own agents)."""
+    if person is None:
         return None
-    now = now or identity.now()
-    machine = peer.agent
-    row = db.get(AgentPresence, machine.id)
-    if machine.revoked_at is not None or row is None or now - row.seen_at >= OFFLINE_AFTER:
-        return HeaderPresence(None, "Offline", "Its machine hasn't reported in the last 2 minutes.")
-    entries = [e for e in presence.live_machine_agents(db, [machine.id]).get(machine.id, [])
-               if e.name == peer.name and now - e.seen_at < OFFLINE_AFTER]
-    entry = next((e for e in entries if not e.ambiguous), None)
-    if entry is None:
-        return HeaderPresence(None, "Offline", "Its machine doesn't list this agent at the moment.")
-    chip = {"instant": "Instant", "next-turn": "Next turn"}.get(entry.reachability or "")
-    # §19.8 L3: idle is Ready; working and blocked are Busy, each with its own tooltip; unknown has no word (the
-    # chip still follows the offline rule); offline, or an entry older than the 120 s TTL, is Offline.
-    if entry.status == "idle":
-        return HeaderPresence(chip, "Ready", "The session was idle at its last report.")
-    if entry.status == "working":
-        return HeaderPresence(chip, "Busy", "The session was working at its last report.")
-    if entry.status == "blocked":
-        return HeaderPresence(chip, "Busy", "The session was waiting for its user at its last report.")
-    if entry.status == "unknown":
-        return HeaderPresence(chip, None, "")
-    return HeaderPresence(None, "Offline", "The session wasn't running at its last report.")
+    p = presentation.person_presence(db, team_id, person, now)
+    if p.presence == "no_inbox":
+        return HeaderPresence(None, "No inbox yet")
+    if p.presence == "offline" or p.speed is None:
+        return HeaderPresence(None, "Offline")
+    return HeaderPresence("Instant" if p.speed == "instant" else "Next turn", p.presence.capitalize())
 
 
-# The sender warning (§19.6) ------------------------------------------------------------------------
+# Warnings (§21 C7.4) -------------------------------------------------------------------------------
 
 @dataclass
 class Warning:
-    handle: str
-    kind: str  # never, not_connected or not_picking_up
+    name: str  # the person, never a handle
+    kind: str  # no_inbox, never, not_connected, not_picking_up or old_client (W1)
+    since: datetime | None = None
+    email: str = ""
+
+
+def _never_reported_client(db: Session, machine: Agent) -> bool:
+    """W1: the machine has never reported a client version (a pre-0.5 RainCLI that doesn't confirm delivery)."""
+    report = db.get(AgentPresence, machine.id)
+    return report is None or not report.client_version
+
+
+def _most_recent_machine(db: Session, team_id: uuid.UUID, user_id: uuid.UUID) -> Agent | None:
+    """The person's non-revoked machine in the team with the newest credential use."""
+    return db.scalars(
+        select(Agent).join(AgentCredential, AgentCredential.agent_id == Agent.id, isouter=True)
+        .where(Agent.team_id == team_id, Agent.owner_user_id == user_id, Agent.revoked_at.is_(None))
+        .group_by(Agent.id).order_by(func.max(AgentCredential.last_used_at).desc().nulls_last()).limit(1)).first()
+
+
+def _oldest_unacked(db: Session, machine: Agent) -> datetime | None:
+    return db.scalar(select(Message.created_at).where(Message.recipient_agent_id == machine.id,
+                                                      Message.acked_at.is_(None)).order_by(Message.seq).limit(1))
+
+
+def _last_contact(db: Session, machine: Agent) -> datetime | None:
+    """The machine's newest sign of life: a credential use or a presence report."""
+    used = db.scalar(select(func.max(AgentCredential.last_used_at)).where(AgentCredential.agent_id == machine.id))
+    report = db.get(AgentPresence, machine.id)
+    seen = report.seen_at if report is not None else None
+    return max((t for t in (used, seen) if t is not None), default=None)
+
+
+def person_warning(db: Session, team_id: uuid.UUID, person: User | None, now: datetime | None = None
+                   ) -> Warning | None:
+    """One warning at a time about a person's inbox in a team: none picked; its machine never connected or hasn't
+    for a day; or it hasn't picked up a message for a day. It names only the person and a date."""
+    if person is None or not person.is_active:
+        return None
+    name = presentation.display_name(person)
+    inbox = presentation.inbox_of(db, team_id, person.id)
+    machine = db.get(Agent, inbox.agent_id) if inbox is not None else None
+    if machine is None or machine.revoked_at is not None:
+        # W1: with no inbox, the machine concerned is their most recently seen one in the team; if it runs a client
+        # that never confirms delivery and has messages waiting, say so; otherwise "no inbox yet".
+        recent = _most_recent_machine(db, team_id, person.id)
+        if recent is not None and _never_reported_client(db, recent):
+            oldest = _oldest_unacked(db, recent)
+            if oldest is not None and (now or identity.now()) - oldest > WARNING_AFTER:
+                return Warning(name, "old_client", oldest, email=person.email)
+        return Warning(name, "no_inbox", email=person.email)
+    now = now or identity.now()
+    last = _last_contact(db, machine)
+    if last is None:
+        return Warning(name, "never", email=person.email)
+    if now - last > WARNING_AFTER:
+        return Warning(name, "not_connected", last, email=person.email)
+    oldest = db.scalar(
+        select(Message.created_at).where(Message.recipient_agent_id == machine.id, Message.acked_at.is_(None))
+        .order_by(Message.seq).limit(1))
+    if oldest is not None and now - oldest > WARNING_AFTER:
+        kind = "old_client" if _never_reported_client(db, machine) else "not_picking_up"  # W1
+        return Warning(name, kind, oldest, email=person.email)
+    return None
+
+
+def warning_for_text(db: Session, team_ids: list[uuid.UUID], text: str, viewer: User,
+                     now: datetime | None = None) -> Warning | None:
+    """The compose page's warning for a typed person (an email or a unique name), in the viewer's teams. Anything
+    else (a handle, nobody, the viewer) has none, the same for every input: it never confirms a handle exists."""
+    text = (text or "").strip()
+    if not text or len(text) > 254:
+        return None
+    for team_id in team_ids:
+        found = presentation.resolve_person_text(db, team_id, text, sender=viewer)
+        if found.kind == "person" and found.user is not None and found.user.id != viewer.id:
+            return person_warning(db, team_id, found.user, now)
+    return None
+
+
+# The owner's own machines (§19.6, owner-only) ------------------------------------------------------
+
+@dataclass
+class MachineWarning:
+    handle: str  # the owner's own machine: shown only to them
+    kind: str  # never, not_connected, not_picking_up or old_client (W1)
     since: datetime | None = None
 
 
-def machine_warning(db: Session, machine: Agent, now: datetime | None = None) -> Warning | None:
+def machine_warning(db: Session, machine: Agent, now: datetime | None = None) -> MachineWarning | None:
     """Two indexed reads: the machine's newest credential use, and its oldest unacknowledged message
     (``ix_messages_recipient_pending``, migration 0009)."""
     if machine.revoked_at is not None:
@@ -210,53 +265,27 @@ def machine_warning(db: Session, machine: Agent, now: datetime | None = None) ->
     now = now or identity.now()
     last_used = db.scalar(select(func.max(AgentCredential.last_used_at)).where(AgentCredential.agent_id == machine.id))
     if last_used is None:
-        return Warning(machine.handle, "never")
+        return MachineWarning(machine.handle, "never")
     if now - last_used > WARNING_AFTER:
-        return Warning(machine.handle, "not_connected", last_used)
+        return MachineWarning(machine.handle, "not_connected", last_used)
     oldest = db.scalar(
         select(Message.created_at).where(Message.recipient_agent_id == machine.id, Message.acked_at.is_(None))
         .order_by(Message.seq).limit(1))
     if oldest is not None and now - oldest > WARNING_AFTER:
-        return Warning(machine.handle, "not_picking_up", oldest)
+        kind = "old_client" if _never_reported_client(db, machine) else "not_picking_up"  # W1
+        return MachineWarning(machine.handle, kind, oldest)
     return None
 
 
-def endpoint_warning(db: Session, ep: messaging.Endpoint | None, now: datetime | None = None) -> Warning | None:
-    """A machine or agent recipient only, never a person. One warning at a time, in the order never connected,
-    not connected, not picking up (§19.8 L4)."""
-    if ep is None or ep.kind == "person":
-        return None
-    return machine_warning(db, ep.agent, now)
-
-
-def recipient_warning(db: Session, team_ids: list[uuid.UUID], text: str, now: datetime | None = None
-                      ) -> Warning | None:
-    """The warning for a recipient typed on the compose page (``handle`` or ``handle/agent``), in the viewer's
-    current team (§19.8 L4: pass that one team when the page names it). A person (``@email``) or anything unknown
-    has none. It reveals only the handle and a date."""
-    from raincli_server import routing
-    from raincli_server.messaging_errors import MessagingError
-    from raincli_server.web.queries import endpoint_from_text
-
-    text = (text or "").strip()
-    if not text or text.startswith("@") or len(text) > 140:
-        return None
-    try:
-        ref = routing.parse_endpoint(endpoint_from_text(text))
-    except MessagingError:
-        return None
-    for team_id in team_ids:
-        try:
-            return endpoint_warning(db, routing.resolve(db, team_id, ref), now)
-        except MessagingError:
-            continue
-    return None
-
-
-def owner_warnings(db: Session, user: User, team_ids: list[uuid.UUID], now: datetime | None = None) -> list[Warning]:
-    """The same notices for the machines the viewer owns, for their Inbox (§19.6)."""
+def owner_warnings(db: Session, user: User, team_ids: list[uuid.UUID], now: datetime | None = None
+                   ) -> list[MachineWarning]:
+    """The same notices for the machines the viewer owns, for their Inbox (§19.6): their own handles only."""
     if not team_ids:
         return []
     machines = db.scalars(select(Agent).where(Agent.owner_user_id == user.id, Agent.team_id.in_(team_ids),
                                               Agent.revoked_at.is_(None)).order_by(Agent.handle))
     return [w for w in (machine_warning(db, m, now) for m in machines) if w is not None]
+
+
+def team_label(db: Session, team: Team | None) -> str:
+    return team.name if team is not None else ""

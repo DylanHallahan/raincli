@@ -18,7 +18,7 @@
     <li class="conv-archived">
       <a class="conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}#latest">
         <div class="conv-top">
-          <span class="conv-peers"><span class="handle">{{ row.me.display }}</span> <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> <span class="handle">{{ row.peer.display }}</span></span>
+          <span class="conv-peers">{% if row.kind == 'pair' %}You <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> {% endif %}{{ row.name }}</span>
           <span class="conv-team">{{ row.team.slug }}</span>
           {% if row.unacked %}<span class="badge badge-count" title="Messages to you or your machines not yet read or acknowledged">{{ row.unacked }} new</span>{% endif %}
           <span class="conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span>

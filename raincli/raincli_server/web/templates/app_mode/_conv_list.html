@@ -11,16 +11,15 @@
   <ul class="rc-convs" data-day-groups>
     {% for row in conversations %}
     <li class="rc-conv-item"><a class="rc-conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}#latest" {% if current_id == row.conversation.id %}aria-current="page"{% endif %}>
-      <span class="rc-conv-top"><span class="rc-conv-name">{{ row.name or row.peer.display }}</span>{% if row.unacked %}<span class="rc-count" title="Not yet read">{{ row.unacked }}<span class="sr-only"> unread</span></span>{% endif %}<span class="rc-conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span></span>
-      {# §20.4 R8: "You:" only for your own messages; a machine inbox (several possible senders) keeps the sender's
-         name; otherwise the text alone. #}
-      {% if row.last %}<span class="rc-conv-preview">{% if row.last_sender == 'You' or row.peer.endpoint.kind == 'machine' %}<span class="sr-only">Last message from </span>{{ 'You' if row.last_sender == 'You' else row.last_sender_name or row.last_sender }}: {% else %}<span class="sr-only">Last message: </span>{% endif %}{{ row.last.body[:120] }}</span>{% endif %}
+      <span class="rc-conv-top"><span class="rc-conv-name">{{ row.name }}</span>{% if row.unacked %}<span class="rc-count" title="Not yet read">{{ row.unacked }}<span class="sr-only"> unread</span></span>{% endif %}<span class="rc-conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span></span>
+      {# §20.4 R8, §21: "You:" only for your own messages; your own agents' conversation names its sender ("Maya ·
+         agent"); otherwise the text alone. #}
+      {% if row.last %}<span class="rc-conv-preview">{% if row.last_sender == 'You' or row.kind != 'pair' %}<span class="sr-only">Last message from </span>{{ 'You' if row.last_sender == 'You' else row.last_sender_name }}: {% else %}<span class="sr-only">Last message: </span>{% endif %}{{ row.last.body[:120] }}</span>{% endif %}
     </a></li>
     {% endfor %}
   </ul>
   {% else %}
   <p class="rc-empty">No conversations yet.</p>
   {% endif %}
-  {% include "app_mode/_team.html" %}
   {% include "app_mode/_whoami.html" %}
 </section>

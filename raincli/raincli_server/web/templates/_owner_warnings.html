@@ -1,2 +1,2 @@
 {# §19.6: the machine owner's notice on their Inbox, one line per own machine that isn't connecting or picking up. #}
-{% if owner_warnings %}<div class="owner-warnings" aria-label="Your machines">{% for warning in owner_warnings %}{% include "_sender_warning.html" %}{% endfor %}</div>{% endif %}
+{% if owner_warnings %}<div class="owner-warnings" aria-label="Your machines">{% for warning in owner_warnings %}{% include "_machine_warning.html" %}{% endfor %}</div>{% endif %}

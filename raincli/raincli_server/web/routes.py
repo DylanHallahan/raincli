@@ -22,11 +22,10 @@ from sqlalchemy.orm import Session
 
 from sqlalchemy import func, or_, select
 
-from raincli_server import identity, messaging, quotas, security
+from raincli_server import identity, messaging, presentation, quotas, security
 from raincli_server.config import Settings
 from raincli_server.models import Agent, HandoffCode, Message, PersonSession, Team, User
 from raincli_server.web import auth, queries
-from raincli_server.web import team as team_section
 from raincli_server.web.middleware import WebSecurityMiddleware
 
 HERE = Path(__file__).parent
@@ -60,7 +59,19 @@ NOTICES = {
     "invite-revoked": "Invitation revoked. The link no longer works.",
     "member-removed": "Member removed. Their agents in this team were revoked and they were signed out.",
     "app-signed-out": "Signed out of that app. Its person session stopped working immediately.",
+    "inbox-set": "Your inbox is set. Your teammates' messages now go to it.",
+    "inbox-invalid": "That agent can't be your inbox: pick one of your own agents that can receive messages.",
 }
+
+
+def _notice(request: Request) -> str | None:
+    """The page's notice; after an inbox change, also how many messages stayed with the previous inbox (§21 C6.3)."""
+    text = NOTICES.get(request.query_params.get("notice", ""))
+    stayed = request.query_params.get("stayed", "")
+    if text and request.query_params.get("notice") == "inbox-set" and stayed.isdigit() and 0 < int(stayed) < 10**6:
+        n = int(stayed)
+        text += f" {n} message{' is' if n == 1 else 's are'} with your previous inbox."
+    return text
 _NEXT_RE = re.compile(r"^/app(/[A-Za-z0-9/_.-]*)?$")
 
 
@@ -165,7 +176,7 @@ def _context(request: Request, viewer: auth.Viewer | None, csrf: str | None, ctx
         "viewer": viewer,
         "csrf": csrf if csrf is not None else (viewer.csrf if viewer else ""),
         "path": _route_path(request),
-        "notice": NOTICES.get(request.query_params.get("notice", "")),
+        "notice": _notice(request),
         "product_name": settings.product_name,
         "product_logo": settings.product_logo,
         "layout": "base_app.html" if viewer is not None and viewer.app_mode else "base.html",
@@ -493,8 +504,26 @@ def invite_accept(
 # App: inbox and conversations -----------------------------------------------------------
 
 def _directory(db: Session, viewer: auth.Viewer) -> dict:
-    machines, people = queries.team_directory(db, viewer.user, _team_ids(viewer))
-    return {"machines": machines, "people": people, "teams": viewer.teams}
+    """§21 C7.2: the people the viewer can message (the no-JavaScript <select> and the picker), never machines."""
+    return {"people": queries.people_directory(db, viewer.user, _team_ids(viewer)), "teams": viewer.teams}
+
+
+def _inbox_banner(db: Session, viewer: auth.Viewer) -> list[dict]:
+    """§21 C7.3: one entry per team where the viewer has no inbox yet: the team, their own deliverable agents
+    (``messaging.inbox_candidates``), the suggested one first, and the waiting messages. Empty once picked."""
+    from raincli_server import presentation
+
+    candidates = getattr(messaging, "inbox_candidates", None)
+    waiting = getattr(messaging, "waiting_count", None)
+    out = []
+    for team, _ in viewer.teams:
+        if presentation.inbox_of(db, team.id, viewer.user.id) is not None:
+            continue
+        options = list(candidates(db, viewer.user, team.id)) if candidates is not None else []
+        options.sort(key=lambda c: (not c.get("suggested"), not c.get("live"), c.get("agent", "")))
+        out.append({"team": team, "candidates": options,
+                    "waiting": waiting(db, viewer.user, team.id) if waiting is not None else 0})
+    return out
 
 
 @router.get("/app", response_class=HTMLResponse)
@@ -507,7 +536,7 @@ def inbox(request: Request, db: Session = Depends(get_db)):
 
     if viewer.app_mode:
         return _app_inbox(request, db, viewer, team_ids, rows)
-    return render(request, "app/inbox.html", viewer=viewer, conversations=rows,
+    return render(request, "app/inbox.html", viewer=viewer, conversations=rows, banners=_inbox_banner(db, viewer),
                   machines_owned=bool(queries.my_agents(db, viewer.user, team_ids)),
                   pending=queries.pending_for_user(db, viewer.user, team_ids),
                   owner_warnings=thread.owner_warnings(db, viewer.user, team_ids))
@@ -519,16 +548,24 @@ def _app_inbox(request: Request, db: Session, viewer: auth.Viewer, team_ids, row
     from raincli_server.web import present
 
     extras = _list_extras(db, viewer)
+    first_team = viewer.teams[0][0] if viewer.teams else None
+    people = queries.people_directory(db, viewer.user, team_ids)
     # §20.6 M1: Inbox keeps the owner's notice in its main pane as well as at the top of the list; computed once.
     return render(request, "app_mode/inbox.html", viewer=viewer, conversations=rows,
-                  owner_warnings=extras["list_owner_warnings"],
-                  connected=present.connected_machine(db, viewer.user, team_ids),
+                  owner_warnings=extras["list_owner_warnings"], banners=_inbox_banner(db, viewer),
+                  my_inbox=present.my_inbox(db, viewer.user, first_team), first_person=people[0] if people else None,
                   open_latest=present.opens_latest(viewer, request.headers.get("user-agent")), **extras)
 
 
 @router.get("/app/conversations/{conversation_id}", response_class=HTMLResponse)
 def conversation(request: Request, conversation_id: str, reply_to: str = "", db: Session = Depends(get_db)):
     viewer = app_viewer(request, db, app_mode_ok=True)
+    final = queries.final_conversation_id(db, conversation_id)
+    if final is not None and str(final) != conversation_id:  # §21 C1.6: an old (merged) id answers 302 to the final
+        query = ("?" + request.url.query) if request.url.query else ""
+        if queries.conversation_head(db, viewer.user, _team_ids(viewer), str(final)) is None:
+            raise not_found()  # C13 L2: unauthorized looks exactly like an unknown id
+        return redirect(request, f"/app/conversations/{final}{query}")
     view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id)
     if view is None:
         raise not_found()
@@ -568,14 +605,14 @@ def _parse_since(value: str):
 def _live_list(request: Request, db: Session, viewer: auth.Viewer, current_id, client_rev: str
                ) -> tuple[str | None, str]:
     """The conversation list's revision (§19.8 L2), and its HTML (the page's own template) only when the client's
-    revision differs. The revision is a digest of the list's inputs: each conversation's id, last seq, unread count
-    and archive state, the Team section's presence words (minute-stable), and the owner's warnings."""
+    revision differs. The revision is a digest of the list's inputs (§21 C5.7, narrowed): only the viewer's own
+    conversations (id, last seq, unread count, archive state, name) and the owner's warnings about their own machines.
+    No teammate's presence goes into it, so its change says nothing about a teammate."""
     rows = queries.list_conversations(db, viewer.user, _team_ids(viewer))
     extras = _list_extras(db, viewer)
     warnings = extras["list_owner_warnings"]  # computed once (review L4): the list shows the same notice
     digest = json.dumps([
         [[str(r.conversation.id), r.last.seq if r.last else 0, r.unacked, r.archived, r.name] for r in rows],
-        [[a.get("to"), a.get("status")] for a in extras.get("team_agents", [])],
         [[w.handle, w.kind, w.since.isoformat() if w.since else None] for w in warnings],
         str(current_id or ""),
     ], separators=(",", ":"))
@@ -592,13 +629,12 @@ FINAL_STATES = ("replied", "rejected")
 
 
 def _list_extras(db: Session, viewer: auth.Viewer) -> dict:
-    """Extra context for the conversation list (the sidebar's Team section, §19.5), shared by the pages and
-    GET /app/live."""
+    """Extra context for the conversation list, shared by the pages and GET /app/live. §21 C7.6: there is no Team
+    section any more; only the owner's own notice."""
     from raincli_server.web import thread
 
     # §20.6 M1: the owner's "not connected" notice also sits at the top of the list on every app-mode page.
-    return {"team_agents": team_section.team_agents(db, viewer),
-            "list_owner_warnings": thread.owner_warnings(db, viewer.user, _team_ids(viewer))}
+    return {"list_owner_warnings": thread.owner_warnings(db, viewer.user, _team_ids(viewer))}
 
 
 @router.get("/app/live")
@@ -655,8 +691,9 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
         names = thread.Names(db)
         lines, _ = queries.message_lines(db, viewer.user, owned, fresh + changed, names)
         atts = queries.attachment_meta(db, [m.id for m in fresh]) if fresh else {}
-        view_ctx = dict(conv_id=conv.id, can_send=queries.ConversationView(conv, team, me, peer).can_send,
-                        machine_inbox=peer.endpoint.kind == "machine")
+        who = presentation.conversation_peer(db, viewer.user, conv)
+        view_ctx = dict(conv_id=conv.id, can_send=queries.ConversationView(
+            conv, team, me, peer, peer_user=who.user, kind=who.kind).can_send, reply_only=who.kind == "self")
         for line in lines[:len(fresh)]:
             out["messages"].append({"id": str(line.message.id), "seq": line.message.seq,
                                     "html": fragment(request, "app_mode/_message.html", viewer, line=line,
@@ -666,11 +703,11 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
                 out["states"].append({"id": str(line.message.id), "state": line.trail.outcome or
                                       line.message.delivery_state,
                                       "html": fragment(request, "app_mode/_trail.html", viewer, line=line)})
-        presence = thread.header_presence(db, peer.endpoint, now)
+        presence = thread.header_presence(db, team.id, who.user, now)
         header_html = fragment(request, "app_mode/_head_status.html", viewer, presence=presence)
         out["header"] = {"word": presence.word if presence else None, "chip": presence.chip if presence else None,
                          "html": header_html, "sig": live_sig(header_html)}
-        warning = thread.endpoint_warning(db, peer.endpoint)
+        warning = thread.person_warning(db, team.id, who.user, now)
         if warning is not None:  # null when there is none (§19.1); the client's empty slot is signed "none"
             warning_html = fragment(request, "_sender_warning.html", viewer, warning=warning)
             out["warning"] = {"kind": warning.kind, "html": warning_html, "sig": live_sig(warning_html)}
@@ -850,15 +887,18 @@ async def layout_diag(request: Request, db: Session = Depends(get_db)):
     return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
-@router.get("/app/recipient-warning", response_class=HTMLResponse)
-def recipient_warning(request: Request, to: str = "", team: str = "", db: Session = Depends(get_db)):
-    """§19.6: the sender warning for a recipient chosen on the compose page (app mode and website), as HTML. Only
-    a recipient in the viewer's current team: the one the page chose, when it names one (§19.8 L4)."""
+@router.get("/app/person-warning", response_class=HTMLResponse)
+def person_warning(request: Request, to: str = "", team: str = "", db: Session = Depends(get_db)):
+    """§21 C7.4: the warning about a person's inbox for the compose page (app mode and website), as HTML. ``to`` is
+    an email, a unique name or a picker id. Only people in the viewer's teams; anything else gets the same empty
+    answer, so it never confirms that a handle, an agent or an outsider exists."""
     from raincli_server.web import thread
 
     viewer = app_viewer(request, db, app_mode_ok=True)
     chosen = [t.id for t, _ in viewer.teams if t.slug == team] if team else _team_ids(viewer)
-    warning = thread.recipient_warning(db, chosen, to)
+    picked = queries.person_by_id(db, viewer.user, chosen, to) if to.startswith("p.") else None
+    warning = thread.person_warning(db, picked[0].id, picked[1]) if picked else \
+        thread.warning_for_text(db, chosen, to, viewer.user)
     return HTMLResponse(fragment(request, "_sender_warning.html", viewer, warning=warning),
                         headers={"Cache-Control": "no-store"})
 
@@ -907,21 +947,49 @@ def unarchive_conversation(request: Request, conversation_id: str, csrf_token: s
     return redirect(request, f"/app/conversations/{conversation_id}?notice=unarchived#latest")
 
 
-def _reply_target(db: Session, viewer: auth.Viewer, view: queries.ConversationView, parent: Message | None) -> str:
-    """Where the person's message goes: the parent's other participant, else the conversation's peer."""
-    if parent is None:
-        return view.peer.label
-    other = messaging.recipient_endpoint(db, parent) if parent.sender_user_id == viewer.user.id else \
-        messaging.sender_endpoint(db, parent)
-    return other.label()
+def _reply_target(db: Session, viewer: auth.Viewer, view: queries.ConversationView, parent: Message | None):
+    """§21 C2, C4: where the person's message goes. In a conversation, the other person (``{"person": email}``); a
+    reply carries only ``in_reply_to`` (``to`` None) and the server picks its target from the parent (PR1)."""
+    if parent is not None or view.peer_user is None:
+        return None
+    return {"person": view.peer_user.email}
 
 
 def _reply_name(db: Session, viewer: auth.Viewer, parent: Message) -> str:
+    """The person a reply goes to, by name (the composer's "To: …")."""
     from raincli_server.web import thread
 
     other = messaging.recipient_endpoint(db, parent) if parent.sender_user_id == viewer.user.id else \
         messaging.sender_endpoint(db, parent)
-    return thread.Names(db).endpoint(other)
+    return thread.Names(db).person(other)
+
+
+def _typed_recipient(db: Session, viewer: auth.Viewer, text: str, team_slug: str):
+    """§21 C2.1, C7.2: a typed recipient (email, unique name) or a picker id ``p.<team>.<user>`` to ``(team, to)``,
+    or a ``(None, message)`` refusal in presentation's words. One team: that one; several: the chosen team, else
+    the one where the text names a person."""
+    from raincli_server import presentation
+
+    teams = [t for t, _ in viewer.teams]
+    if team_slug:
+        teams = [t for t in teams if t.slug == team_slug] or teams
+    text = (text or "").strip()
+    if text.startswith("p."):
+        picked = queries.person_by_id(db, viewer.user, [t.id for t in teams], text)
+        if picked is None:
+            return None, presentation.error_text("invalid")
+        return picked[0], {"person": picked[1].email}
+    refusal = None
+    for team in teams:
+        found = presentation.resolve_person_text(db, team.id, text, sender=viewer.user)
+        if found.kind == "person" and found.user is not None:
+            if found.user.id == viewer.user.id:
+                return None, "You can't send a message to yourself."
+            return team, {"person": found.user.email}
+        error = found.error
+        if refusal is None or (error and error[1] != "address_people") or (found.mapped is not None):
+            refusal = error[2] if error else refusal
+    return None, refusal or presentation.error_text("invalid")
 
 
 def _conversation_page(
@@ -932,7 +1000,8 @@ def _conversation_page(
     rid = queries.parse_uuid(reply_to)
     if rid is not None:
         parent = next((m for m in view.messages if m.id == rid), None)
-    to_label = _reply_target(db, viewer, view, parent)
+    to_target = _reply_target(db, viewer, view, parent)
+    to_label = "@" + to_target["person"] if to_target else ""
     to_name = view.name if parent is None else _reply_name(db, viewer, parent)
     if viewer.app_mode:  # the signatures of the parts live.js may replace (§19.9 F4)
         ctx.setdefault("header_sig", live_sig(fragment(request, "app_mode/_head_status.html", viewer,
@@ -958,11 +1027,22 @@ def compose(request: Request, to: str = "", db: Session = Depends(get_db)):
 def _compose_page(request, db, viewer, *, form, status: int = 200, error: str | None = None) -> HTMLResponse:
     from raincli_server.web import thread
 
+    chosen = [t.id for t, _ in viewer.teams if t.slug == form.get("team")] if form.get("team") else _team_ids(viewer)
+    to = form.get("to", "")
+    picked = queries.person_by_id(db, viewer.user, chosen, to) if to.startswith("p.") else None
+    if picked is None and to:  # §21 C7.2: ?to= takes an email or a unique name, pre-picked as that person
+        from raincli_server import presentation
+
+        for team in [t for t, _ in viewer.teams if t.id in chosen]:
+            found = presentation.resolve_person_text(db, team.id, to, sender=viewer.user)
+            if found.kind == "person" and found.user is not None and found.user.id != viewer.user.id:
+                picked = (team, found.user)
+                form = {**form, "to": f"p.{team.id}.{found.user.id}"}
+                break
     ctx = dict(viewer=viewer, status=status, error=error, form=form, draft=form.get("body", ""),
                message_id=str(uuid.uuid4()), conversation_id=None, **_directory(db, viewer),
-               to_warning=thread.recipient_warning(
-                   db, [t.id for t, _ in viewer.teams if t.slug == form.get("team")] if form.get("team")
-                   else _team_ids(viewer), form.get("to", "")))
+               to_warning=thread.person_warning(db, picked[0].id, picked[1]) if picked else
+               thread.warning_for_text(db, chosen, to, viewer.user))
     if viewer.app_mode:
         return render(request, "app_mode/compose.html",
                       conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)),
@@ -987,14 +1067,21 @@ def send_message(
     mid = queries.parse_uuid(message_id) or uuid.uuid4()
     parent_id = queries.parse_uuid(in_reply_to) if in_reply_to else None
     body = body.replace("\r\n", "\n")
+    typed = to
+    refusal = None
     if view is not None:
         team_obj = view.team
         parent = next((m for m in view.messages if m.id == parent_id), None) if parent_id else None
+        if parent_id and parent is None:
+            parent_id = None  # not a message in this conversation: an ordinary message to the person
         to = _reply_target(db, viewer, view, parent)
-        conv_for_send = view.conversation.id if view.me.endpoint.kind == "person" and parent is None and \
-            to == view.peer.label else None
+        conv_for_send = view.conversation.id if parent is None and to is not None else None
+        if parent is None and to is None:
+            refusal = "Reply to one of the messages here."  # your own agents' conversation takes replies only
     else:
-        team_obj = _choose_team(viewer, team)
+        team_obj, to = _typed_recipient(db, viewer, typed, team)
+        if team_obj is None:
+            refusal, to = to, None
         conv_for_send = None
 
     def fail(status: int, message: str):
@@ -1004,8 +1091,10 @@ def send_message(
             return _conversation_page(request, db, viewer, fresh, reply_to=in_reply_to, status=status,
                                       error=message, draft=body)
         return _compose_page(request, db, viewer, status=status, error=message,
-                             form={"to": to[:140], "body": body, "team": team})
+                             form={"to": (typed or "")[:254], "body": body, "team": team})
 
+    if refusal is not None:
+        return fail(400, refusal)
     if team_obj is None:
         return fail(400, "Choose one of your teams.")
     retry = request.app.state.web_send_limiter.check(("user", viewer.user.id))  # §16.3: per-user web limit
@@ -1014,7 +1103,7 @@ def send_message(
     try:
         attachments = _read_uploads(files)
         msg, created = queries.send_as_person(
-            db, viewer.user, team_obj, id=mid, to=queries.endpoint_from_text(to), body=body,
+            db, viewer.user, team_obj, id=mid, to=to, body=body,
             conversation_id=conv_for_send, in_reply_to=parent_id,
             max_pending=_settings(request).max_pending, attachments=attachments,
             quotas=quotas.Quotas.from_settings(_settings(request)),
@@ -1040,6 +1129,14 @@ def _send_error(status: int, code: str, message: str, retry_after: int | None = 
     return JSONResponse({"error": error}, status_code=status, headers={"Cache-Control": "no-store"})
 
 
+def _message_ctx(db: Session, viewer: auth.Viewer, conv, team, me, peer) -> dict:
+    """What _message.html needs besides the line: may the viewer write here, and replies-only for their own
+    agents' conversation (§21 C13 H2)."""
+    who = presentation.conversation_peer(db, viewer.user, conv)
+    return {"can_send": queries.ConversationView(conv, team, me, peer, peer_user=who.user, kind=who.kind).can_send,
+            "reply_only": who.kind == "self"}
+
+
 def _sent_message(request: Request, db: Session, viewer: auth.Viewer, msg: Message, **extra) -> JSONResponse:
     """The message as the thread shows it (§19.1, the same template as /app/live), for the client's merge by id."""
     from raincli_server.web import thread
@@ -1048,8 +1145,7 @@ def _sent_message(request: Request, db: Session, viewer: auth.Viewer, msg: Messa
     lines, _ = queries.message_lines(db, viewer.user, owned, [msg], thread.Names(db))
     html = fragment(request, "app_mode/_message.html", viewer, line=lines[0],
                     atts=queries.attachment_meta(db, [msg.id]).get(msg.id, []), conv_id=conv.id,
-                    can_send=queries.ConversationView(conv, team, me, peer).can_send,
-                    machine_inbox=peer.endpoint.kind == "machine")
+                    **_message_ctx(db, viewer, conv, team, me, peer))
     return JSONResponse({"conversation_id": str(msg.conversation_id), "id": str(msg.id), "seq": msg.seq,
                          "message_html": html, **extra}, headers={"Cache-Control": "no-store"})
 
@@ -1078,9 +1174,12 @@ def send_in_place(
         return _send_error(400, "invalid", "This message has no id. Reload the window and try again.")
     parent_id = queries.parse_uuid(in_reply_to) if in_reply_to else None
     parent = next((m for m in view.messages if m.id == parent_id), None) if parent_id else None
-    to = _reply_target(db, viewer, view, parent)
-    conv_for_send = view.conversation.id if view.me.endpoint.kind == "person" and parent is None and \
-        to == view.peer.label else None
+    if parent_id and parent is None:
+        parent_id = None
+    to = _reply_target(db, viewer, view, parent)  # §21 C2, C4: the person, or a reply by in_reply_to alone
+    if parent is None and to is None:
+        return _send_error(400, "invalid", "Reply to one of the messages here.")
+    conv_for_send = view.conversation.id if parent is None else None
     stored = db.get(Message, mid)
     if stored is None:  # §20.6 M2: a replay never counts against the limit
         retry = request.app.state.web_send_limiter.check(("user", viewer.user.id))
@@ -1089,7 +1188,7 @@ def send_in_place(
                                retry_after=retry)
     try:
         msg, created = queries.send_as_person(
-            db, viewer.user, view.team, id=mid, to=queries.endpoint_from_text(to), body=body.replace("\r\n", "\n"),
+            db, viewer.user, view.team, id=mid, to=to, body=body.replace("\r\n", "\n"),
             conversation_id=conv_for_send, in_reply_to=parent_id, max_pending=_settings(request).max_pending,
             attachments=_read_uploads(files), quotas=quotas.Quotas.from_settings(_settings(request)),
         )
@@ -1150,7 +1249,7 @@ def _config_json(request: Request, token: str) -> str:
 def _agents_page(request, db, viewer, *, status: int = 200, **ctx) -> HTMLResponse:
     return render(
         request, "app/agents.html", viewer=viewer, status=status,
-        agents=queries.team_machines(db, viewer.user, _team_ids(viewer)), **ctx,
+        agents=queries.visible_machines(db, viewer.user, viewer.teams), **ctx,
     )
 
 
@@ -1165,9 +1264,86 @@ def _token_page(request: Request, viewer: auth.Viewer, agent: Agent, team: Team,
 @router.get("/app/agents", response_class=HTMLResponse)
 def agents(request: Request, db: Session = Depends(get_db)):
     viewer = app_viewer(request, db, app_mode_ok=True)
-    if viewer.app_mode:  # the directory and picker only; machine management stays on the website (C2)
-        return render(request, "app_mode/agents.html", viewer=viewer, **_directory(db, viewer))
+    if viewer.app_mode:  # §21 C7.1: Agents became People
+        return redirect(request, "/app/people")
     return _agents_page(request, db, viewer, form={})
+
+
+# People, the picker and the inbox (§21 C7.1-C7.3, C8.3) -----------------------------------------
+
+@router.get("/app/people", response_class=HTMLResponse)
+def people_page(request: Request, db: Session = Depends(get_db)):
+    """§21 C7.1: teammates across the viewer's teams with presence · speed and Message. Never machines or agents."""
+    viewer = app_viewer(request, db, app_mode_ok=True)
+    if not viewer.app_mode:
+        raise not_found()  # the website keeps its Machines page (C5.8); People is the app window's
+    return render(request, "app_mode/people.html", viewer=viewer, **_directory(db, viewer))
+
+
+RECIPIENTS_REFRESH = 30  # §20.6 L3: the picker refetches on open, and at most every 30 s while open
+
+
+@router.get("/app/recipients")
+def recipients(request: Request, db: Session = Depends(get_db)):
+    """§21 C7.2 (and §20.1, §20.6 L1-L3): the people the viewer can message, for the picker. People only: an
+    opaque id ``p.<team>.<user>``, the name, the team (shown only with several teams), presence · speed, and hidden
+    match terms (name and email, never displayed, only in this JSON). Recent people first (up to 5, by their last
+    message's seq), then everyone alphabetically. ``no-store``; current teams and active members only."""
+    viewer = app_viewer(request, db, app_mode_ok=True)
+    if not viewer.app_mode:
+        raise not_found()
+    now = identity.now()
+    rows = queries.people_directory(db, viewer.user, _team_ids(viewer), now)
+    several = len(viewer.teams) > 1
+    recent = sorted((r for r in rows if r.last_seq), key=lambda r: r.last_seq, reverse=True)[:5]
+    recent_ids = {r.id for r in recent}
+
+    def item(r, group):
+        return {"id": r.id, "name": r.name, "team": r.team.name if several else None, "group": group,
+                "presence": r.presence.presence, "speed": r.presence.speed, "status": r.presence.text,
+                "match": [r.name.lower(), r.user.email.lower()]}
+
+    out = [item(r, "recent") for r in recent] + [item(r, "all") for r in rows if r.id not in recent_ids]
+    return JSONResponse({"recipients": out, "now": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                         "refresh": RECIPIENTS_REFRESH}, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/app/inbox")
+def set_inbox(request: Request, csrf_token: str = Form(""), team: str = Form(""), machine: str = Form(""),
+              agent: str = Form(""), choice: str = Form(""), deliver_waiting: str = Form(""), none: str = Form(""),
+              back: str = Form(""), db: Session = Depends(get_db)):
+    """§21 C7.3, C8.3: pick (or clear) the viewer's inbox in a team, from the hosted banner (app mode or website).
+    ``machine`` is one of the viewer's own machines (its handle; theirs alone, so nothing leaks), ``agent`` its
+    agent name, or both as ``choice`` = "machine|agent" (the banner's radio); ``deliver_waiting`` ("1") re-targets the
+    waiting messages. Through ``messaging.set_person_inbox``, which validates and locks (C1.1, M5)."""
+    if choice and "|" in choice:
+        machine, agent = choice.split("|", 1)
+    viewer = app_viewer(request, db, csrf_token, app_mode_ok=True)
+    teams = [t for t, _ in viewer.teams if t.slug == team] if team else [t for t, _ in viewer.teams][:1]
+    target = "/app/inbox" if back != "people" else "/app/people"
+    if not teams:
+        raise not_found()
+    try:
+        if none == "1":
+            messaging.clear_person_inbox(db, viewer.user, teams[0].id, via="app" if viewer.app_mode else "web")
+            result = {"stayed": 0}
+        else:
+            owned = db.scalar(select(Agent).where(Agent.owner_user_id == viewer.user.id, Agent.team_id == teams[0].id,
+                                                  Agent.handle == machine, Agent.revoked_at.is_(None))) \
+                if machine else None
+            if owned is None or not agent:
+                raise messaging.MessagingError(400, "inbox_invalid", "inbox_invalid")
+            result = messaging.set_person_inbox(db, viewer.user, teams[0].id, owned.id, agent,
+                                                deliver_waiting=deliver_waiting == "1",
+                                                via="app" if viewer.app_mode else "web")
+    except messaging.MessagingError as exc:
+        db.rollback()
+        if exc.code != "inbox_invalid":
+            raise
+        return redirect(request, f"{target}?notice=inbox-invalid")
+    db.commit()
+    stayed = int((result or {}).get("stayed") or 0)
+    return redirect(request, f"{target}?notice=inbox-set" + (f"&stayed={stayed}" if stayed else ""))
 
 
 @router.post("/app/agents", response_class=HTMLResponse)
@@ -1239,7 +1415,9 @@ def _team_page(request, db, viewer, team: Team, role: str, *, status: int = 200,
     is_owner = role == "owner"
     return render(
         request, "app/team.html", viewer=viewer, status=status, team=team, role=role, is_owner=is_owner,
-        members=queries.team_members(db, team), team_agents=queries.team_agents(db, team),
+        members=queries.team_members(db, team),
+        # §21 C5.8 (PR11): a member sees only their own machines here; a team owner sees every machine (no agents).
+        team_agents=[r for r in queries.team_agents(db, team) if is_owner or r.agent.owner_user_id == viewer.user.id],
         invitations=queries.open_invitations(db, team) if is_owner else [], **ctx,
     )
 

@@ -1,0 +1,26 @@
+{# §21 C7.3: until the viewer picks an inbox in a team, Inbox asks for one. Their own deliverable agents (only theirs:
+   the owner's own names are fine here), the suggested one pre-selected, so it takes at most two clicks: pick, then
+   Use as my inbox. With waiting messages, "Also deliver the N waiting messages", ticked. One form per team (H3). #}
+{% for b in banners|default([]) %}
+<section class="inbox-banner" aria-labelledby="inbox-banner-{{ b.team.slug }}">
+  <h2 id="inbox-banner-{{ b.team.slug }}">Pick the agent that receives your teammates' messages</h2>
+  {% if viewer.teams|length > 1 %}<p class="inbox-banner-team">In {{ b.team.name }}</p>{% endif %}
+  {% if b.candidates %}
+  <form method="post" action="{{ url('/app/inbox') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <input type="hidden" name="team" value="{{ b.team.slug }}">
+    <fieldset>
+      <legend class="sr-only">Your agents</legend>
+      {% for c in b.candidates %}
+      <label class="inbox-choice"><input type="radio" name="choice" value="{{ c.machine }}|{{ c.agent }}" required {% if loop.first %}checked{% endif %}>
+        <span><strong>{{ c.agent }}</strong> <span class="inbox-choice-meta">on {{ c.machine }}{% if c.suggested %} · suggested{% endif %}{% if not c.live %} · not running now{% endif %}</span></span></label>
+      {% endfor %}
+    </fieldset>
+    {% if b.waiting %}<label class="inbox-waiting"><input type="checkbox" name="deliver_waiting" value="1" checked> Also deliver the {{ b.waiting }} waiting message{{ '' if b.waiting == 1 else 's' }}</label>{% endif %}
+    <button class="{{ 'rc-btn' if viewer.app_mode else 'btn' }}" type="submit">{% if viewer.teams|length > 1 %}Use as my inbox in {{ b.team.name }}{% else %}Use as my inbox{% endif %}</button>
+  </form>
+  {% else %}
+  <p class="help">None of your agents can receive messages right now. Start one on this computer (This computer in the app, or <code>raincli login</code> on Linux), then come back here.</p>
+  {% endif %}
+</section>
+{% endfor %}

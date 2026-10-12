@@ -8,25 +8,23 @@
     {% if conversation_id %}<input type="hidden" name="conversation_id" value="{{ conversation_id }}">{% endif %}
     {% if parent %}<input type="hidden" name="in_reply_to" value="{{ parent.id }}">{% endif %}
     {% if fixed_to %}<input type="hidden" name="to" value="{{ fixed_to }}">
-    {% else %}
-    <div class="rc-field">
+    {% elif not conversation_id %}
+    {# §21 C7.2: people only. Without JavaScript a <select> of the same names, grouped by team when there are several;
+       app-picker.js turns it into the combobox (arrow keys, Enter, Esc, a removable chip). Never a handle. #}
+    <div class="rc-field rc-picker" data-picker data-recipients-url="{{ url('/app/recipients') }}" data-warning-url="{{ url('/app/person-warning') }}">
       <label for="to">To</label>
-      <input id="to" name="to" list="recipients" required maxlength="140" autocomplete="off" spellcheck="false" value="{{ form.to or '' }}" aria-describedby="to-help" data-recipient data-warning-url="{{ url('/app/recipient-warning') }}">
-      <p id="to-help" class="rc-help">A machine (<code>alice-laptop</code>), an agent on it (<code>alice-laptop/reviewer</code>) or a teammate (<code>@alice@example.com</code>).</p>
-      <datalist id="recipients">
-        {% for m in machines %}<option value="{{ m.agent.handle }}">{{ m.agent.handle }} · inbox</option>
-        {% for a in m.agents if a.deliverable %}<option value="{{ m.agent.handle }}/{{ a.name }}">{{ a.type }} · {{ a.reachability }}</option>{% endfor %}{% endfor %}
-        {% for team, person in people %}<option value="@{{ person.email }}">{{ person.display_name }}</option>{% endfor %}
-      </datalist>
-    </div>
-    {% if teams|length > 1 %}
-    <div class="rc-field">
-      <label for="team">Team</label>
-      <select id="team" name="team">{% for team, role in teams %}<option value="{{ team.slug }}" {% if form.team == team.slug %}selected{% endif %}>{{ team.name }}</option>{% endfor %}</select>
+      <select id="to" name="to" required>
+        <option value="">Pick a person</option>
+        {% set several = teams|length > 1 %}
+        {% for team, role in teams %}
+        {% if several %}<optgroup label="{{ team.name }}">{% endif %}
+        {% for p in people if p.team.id == team.id %}<option value="{{ p.id }}" {% if form.to == p.id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+        {% if several %}</optgroup>{% endif %}
+        {% endfor %}
+      </select>
     </div>
     {% endif %}
-    {% endif %}
-    {% if not fixed_to %}<div class="rc-warning-slot" data-recipient-warning>{% with warning=to_warning %}{% include "_sender_warning.html" %}{% endwith %}</div>{% endif %}
+    {% if not fixed_to and not conversation_id %}<div class="rc-warning-slot" data-recipient-warning>{% with warning=to_warning %}{% include "_sender_warning.html" %}{% endwith %}</div>{% endif %}
     {# One row (§19.7): "To: name", a textarea that grows from 1 to 8 lines, the clip and Send. Ctrl+Enter sends
        (app.js); without JavaScript it is a plain form with a Send button. #}
     <div class="rc-box rc-box-row1">

@@ -1,21 +1,15 @@
-"""Small app-mode presentation rules (protocol §20.3, §20.4): initials, the "via" line, the first-run step 1 and
-the toast handoff target. Display only: nothing here changes delivery, framing (C17) or what agents receive.
+"""Small app-mode presentation rules (protocol §20.3, §20.4, §21 C7.6): initials, the first-run step 1 (your inbox)
+and the toast handoff target. Display only. Labels themselves come from ``raincli_server.presentation``.
 """
 
 from __future__ import annotations
 
 import re
-import uuid
-from datetime import timedelta
 
-from sqlalchemy import select
+from raincli_server.models import Agent, Message, User
 
-from raincli_server import identity
-from raincli_server.models import Agent, AgentCredential, Conversation, Message, User
-
-CONNECTED_WITHIN = timedelta(hours=24)  # §20.4: step 1 shows done after a connection in the last 24 h
 _SUFFIX = re.compile(r"\s*\([^()]*\)\s*$")  # owners.displays' disambiguator, "Bob (bob)"
-_NEXT = re.compile(r"/app/(agents|archived|compose|conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+_NEXT = re.compile(r"/app/(people|agents|archived|compose|conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 
 
 def initials(name: str | None) -> str:
@@ -44,48 +38,29 @@ class People:
             agent = self.db.get(Agent, message.sender_agent_id)
             uid = agent.owner_user_id if agent else None
         if uid not in self._names:
+            from raincli_server import presentation
+
             user = self.db.get(User, uid) if uid else None
-            self._names[uid] = user.display_name if user else ""
+            self._names[uid] = presentation.display_name(user) if user else ""
         return self._names[uid]
 
 
-def shown_via(db, message: Message) -> str | None:
-    """P1 (§20.4, §20.6 L7): the stated agent name to show as "via …", or None. Hidden only when it equals,
-    byte for byte, the agent name of the sender's side of the conversation (the side whose machine sent it);
-    shown when they differ, or when that side is the machine's inbox (no agent name)."""
-    stated = message.sender_agent_name
-    if not stated:
-        return None
-    conv = db.get(Conversation, message.conversation_id)
-    if conv is not None:
-        for agent_id, name in ((conv.agent_a_id, conv.a_agent_name), (conv.agent_b_id, conv.b_agent_name)):
-            if agent_id is not None and agent_id == message.sender_agent_id and name is not None and name == stated:
-                return None
-    return stated
+def my_inbox(db, user: User, team) -> str | None:
+    """§21 C7.6: the viewer's own inbox agent in that team (their own agent name, shown only to them), or None."""
+    from raincli_server import presentation
 
-
-def connected_machine(db, user: User, team_ids: list[uuid.UUID], now=None) -> str | None:
-    """The handle of the viewer's machine that connected most recently within 24 h (first-run step 1), or None."""
-    if not team_ids:
+    if team is None:
         return None
-    now = now or identity.now()
-    row = db.execute(
-        select(Agent.handle, AgentCredential.last_used_at).join(AgentCredential, AgentCredential.agent_id == Agent.id)
-        .where(Agent.owner_user_id == user.id, Agent.team_id.in_(team_ids), Agent.revoked_at.is_(None),
-               AgentCredential.revoked_at.is_(None), AgentCredential.last_used_at > now - CONNECTED_WITHIN)
-        .order_by(AgentCredential.last_used_at.desc()).limit(1)
-    ).first()
-    return row[0] if row else None
+    inbox = presentation.inbox_of(db, team.id, user.id)
+    return inbox.agent_name if inbox is not None else None
 
 
 def handoff_next(value: str) -> str | None:
     """The page a handoff may continue to (§20.3): a toast's thread, exactly ``/app/conversations/<uuid>``, or one of
-    the fixed pages the window opens directly (Agents, Archived, New message), so Inbox's latest-conversation step
+    the fixed pages the window opens directly (People, Agents, Archived, New message), so Inbox's latest-conversation step
     (§20.6 M1) never runs first. Anything else is Inbox; the handoff never redirects off the app's own pages."""
     return value if _NEXT.fullmatch(value or "") else None
 
-
-P1 = False  # §20.4 P1 (the "via" line hidden on an exact match) is frozen for v0.5.5: shown_via isn't computed
 
 P2_SINCE = (0, 5, 5)  # §20.7: the first app window that tells its page it is hidden while hidden
 

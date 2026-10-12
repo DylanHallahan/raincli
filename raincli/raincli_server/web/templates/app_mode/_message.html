@@ -1,5 +1,5 @@
-{# One message in the app-mode thread (§19.7). Rendered by the page and by GET /app/live, which needs:
-   line, atts, conv_id, can_send and machine_inbox (show "to <recipient>" only there). #}
+{# One message in the app-mode thread (§19.7, §21 C7.5). Rendered by the page and by GET /app/live, which needs:
+   line, atts, conv_id, can_send and reply_only (your own agents' conversation: replies only, §21 C13 H2). The meta is "Jon" or "Jon · agent" (presentation); no handle, no "via". #}
 {% from "_state.html" import time %}
 {% set m = line.message %}
 <li class="rc-msg{{ ' rc-out' if line.outgoing else '' }}" id="m-{{ m.id }}" data-seq="{{ m.seq }}"{% if not line.outgoing and line.recipient.mine and line.recipient.endpoint.kind == 'person' and not m.acked_at %} data-unread{% endif %}>
@@ -8,9 +8,7 @@
   <div class="rc-msg-body">
     <div class="rc-who">
       <span><strong>{{ line.sender_name }}</strong> · {{ time(m.created_at) }}</span>
-      {% if m.sender_agent_name %}<span class="rc-via">via {{ m.sender_agent_name }} (stated by the machine)</span>{% endif %}{# P1 (§20.4) is frozen for v0.5.5: "via" shows as in v0.5.4; dormant: line.via (present.shown_via). #}
-      {% if machine_inbox %}<span>to {{ line.recipient_name }}</span>{% endif %}
-      {% if can_send %}<a class="rc-reply" href="{{ url('/app/conversations/' ~ conv_id) }}?reply_to={{ m.id }}#body">Reply<span class="sr-only"> to this message</span></a>{% endif %}
+      {% if can_send or (reply_only and not line.outgoing) %}<a class="rc-reply" href="{{ url('/app/conversations/' ~ conv_id) }}?reply_to={{ m.id }}#body">Reply<span class="sr-only"> to this message</span></a>{% endif %}
     </div>
     {% if m.kind == 'escalation' %}<p class="rc-needs"><strong>Escalation</strong> · this needs you.</p>{% endif %}
     <div class="rc-msg-content"><div class="md">{{ m.body|markdown }}</div></div>

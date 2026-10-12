@@ -1,13 +1,14 @@
 {% extends "base.html" %}
 {% from "_state.html" import state_badge, time %}
-{% block title %}{{ view.peer.display }} · {{ product_name }}{% endblock %}
+{% block title %}{{ view.name }} · {{ product_name }}{% endblock %}
 {% block main %}
 <section class="wrap wrap-thread page-pad">
   <p class="crumbs"><a href="{{ url('/app') }}">Inbox</a> <span aria-hidden="true">/</span> conversation</p>
   <div class="page-head">
     <div>
-      <h1 class="conv-title"><span class="handle">{{ view.me.display }}</span> <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> <span class="handle">{{ view.peer.display }}</span></h1>
-      <p class="muted">{{ view.peer.label }} · {{ view.team.name }} · {{ view.lines|length }} message{{ '' if view.lines|length == 1 else 's' }}{% if not view.peer.active %} · {{ view.peer.display }} is no longer active{% endif %}</p>
+      {# §21 C7.7: the person (or your own agents), never a handle. #}
+      <h1 class="conv-title">{% if view.kind == 'pair' %}You <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> {% endif %}{{ view.name }}</h1>
+      <p class="muted">{{ view.team.name }}{% if view.presence %} · {{ view.presence.text }}{% endif %} · {{ view.lines|length }} message{{ '' if view.lines|length == 1 else 's' }}{% if view.peer_user and not view.peer_user.is_active %} · {{ view.name }} is no longer active{% endif %}</p>
     </div>
     <div class="actions archive-actions">{% with btn_class="btn btn-quiet btn-small" %}{% include "_archive_controls.html" %}{% endwith %}</div>
   </div>
@@ -18,8 +19,7 @@
     {% for line in view.lines %}{% set m = line.message %}{% set outgoing = line.outgoing %}
     <li class="msg {{ 'msg-out' if outgoing else 'msg-in' }}" id="m-{{ m.id }}">
       <div class="msg-meta">
-        <span class="nowrap"><strong>{{ line.sender.display }}</strong> → <strong>{{ line.recipient.display }}</strong></span>
-        {% if m.sender_agent_name %}<span class="nowrap">· via {{ m.sender_agent_name }} (stated by the machine)</span>{% endif %}
+        <span class="nowrap"><strong>{{ 'You' if line.sender.mine and line.sender.endpoint.kind == 'person' else line.sender_name }}</strong> → <strong>{{ 'you' if line.recipient.mine and line.recipient.endpoint.kind == 'person' else line.recipient_name }}</strong></span>
         {% if m.kind == 'escalation' %}<span class="badge">Escalation</span>{% endif %}
         {% if m.in_reply_to %}<span class="nowrap">· <a href="#m-{{ m.in_reply_to }}">reply</a></span>{% endif %}
         <span class="nowrap">· {{ time(m.created_at) }}</span>
@@ -35,17 +35,19 @@
       </ul>
       {% endif %}
       <div class="msg-foot">
+        {# §21 C5.5, C13 H4: the state this viewer may see; the hold in presentation's words; never an event's detail,
+           and never a person's read time to someone else. #}
         {{ state_badge(line.shown_state) }}
-        {% set evs = view.events.get(m.id, []) %}
-        {% if line.hold_reason %}<span class="state-detail">{{ line.hold_reason|replace('_', ' ') }}</span>{% elif evs and evs[-1].detail %}<span class="state-detail">{{ evs[-1].detail }}</span>{% endif %}
-        <span class="msg-times">updated {{ time(m.delivery_updated_at) }}{% if m.acked_at %} · received {{ time(m.acked_at) }}{% endif %}</span>
-        {% if not outgoing and view.can_send %}<a class="btn btn-quiet btn-small reply-link" href="?reply_to={{ m.id }}#compose">Reply</a>{% endif %}
+        {% set evs = view.events.get(m.id, []) if outgoing else [] %}
+        {% if line.hold_text %}<span class="state-detail">{{ line.hold_text }}</span>{% endif %}
+        <span class="msg-times">updated {{ time(m.delivery_updated_at) }}{% if m.acked_at and (line.recipient.mine or line.recipient.endpoint.kind != 'person') %} · received {{ time(m.acked_at) }}{% endif %}</span>
+        {% if not outgoing and (view.can_send or view.kind == 'self') %}<a class="btn btn-quiet btn-small reply-link" href="?reply_to={{ m.id }}#compose">Reply</a>{% endif %}
       </div>
       {% if evs %}
       <details class="events">
         <summary>Delivery history ({{ evs|length }} event{{ '' if evs|length == 1 else 's' }})</summary>
         <ol>
-          {% for ev in evs %}<li>{{ state_badge(ev.state) }} {{ time(ev.created_at) }}{% if ev.detail %} · {{ ev.detail }}{% endif %}</li>{% endfor %}
+          {% for ev in evs %}<li>{{ state_badge(ev.state) }} {{ time(ev.created_at) }}</li>{% endfor %}
         </ol>
       </details>
       {% endif %}
@@ -56,9 +58,9 @@
   <span id="latest" class="thread-end"></span>
   <p class="new-messages-row"><a class="btn btn-quiet btn-small new-messages" href="#latest" data-new-messages hidden>New messages ↓</a></p>
 
-  {% if view.can_send %}
+  {% if view.can_send or (view.kind == 'self' and parent) %}
   <form id="compose" method="post" action="{{ url('/app/conversations/' ~ view.conversation.id ~ '/send') }}" enctype="multipart/form-data" class="card form composer">
-    <h2 class="h3">{% if parent %}Reply to {{ to_label }}{% else %}Send a message{% endif %}</h2>
+    <h2 class="h3">{% if parent %}Reply to {{ to_name }}{% else %}Send a message{% endif %}</h2>
     {% if error %}<p class="flash flash-error" role="alert">{{ error }}</p>{% endif %}
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <input type="hidden" name="message_id" value="{{ message_id }}">
@@ -67,14 +69,18 @@
     <blockquote class="quote">{{ parent.body[:300] }}{% if parent.body|length > 300 %}…{% endif %}</blockquote>
     <p class="small"><a href="{{ url('/app/conversations/' ~ view.conversation.id) }}#compose">Cancel reply</a></p>
     {% endif %}
-    <p class="muted small">As <strong>you ({{ viewer.user.display_name }})</strong> to <strong>{{ to_label }}</strong>. An agent's connector may hold it until its session is ready.</p>
+    <p class="muted small">As <strong>you ({{ viewer.user.display_name }})</strong> to <strong>{{ to_name }}</strong>.</p>
     <label for="body">Message</label>
     <textarea id="body" name="body" rows="5" maxlength="16000" required>{{ draft or '' }}</textarea>
     {% include "app/_attach_input.html" %}
     <div class="form-row"><span class="help">Markdown, up to 16,000 characters. The server can read message content.</span><button class="btn" type="submit">Send</button></div>
   </form>
+  {% elif view.kind == 'self' %}
+  <p class="card muted">Messages from your agents. Use Reply on one of them to answer it.</p>
+  {% elif view.kind == 'own_agents' %}
+  <p class="card muted">Your agents' earlier messages to each other, kept for reference.</p>
   {% else %}
-  <p class="card muted">You can't send in this conversation because {{ view.peer.display }} is no longer active.</p>
+  <p class="card muted">You can't send in this conversation because {{ view.name }} is no longer active.</p>
   {% endif %}
 </section>
 {% endblock %}

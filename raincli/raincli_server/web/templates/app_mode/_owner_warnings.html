@@ -3,14 +3,16 @@
    updating RainCLI), with a link to Agents, so a long list of machines never crowds the page. The website keeps its
    one line per machine (the shared _owner_warnings.html). #}
 {% if owner_warnings %}<div class="owner-warnings" aria-label="Your machines">
-{%- if owner_warnings|length == 1 %}{% with warning=owner_warnings[0] %}{% include "_sender_warning.html" %}{% endwith %}
+{%- if owner_warnings|length == 1 %}{% with warning=owner_warnings[0] %}{% include "_machine_warning.html" %}{% endwith %}
 {%- else %}
-{%- set off = owner_warnings|rejectattr('kind', 'equalto', 'not_picking_up')|list %}
+{%- set off = owner_warnings|selectattr('kind', 'in', ['never', 'not_connected'])|list %}
 {%- set stuck = owner_warnings|selectattr('kind', 'equalto', 'not_picking_up')|list %}
+{%- set old = owner_warnings|selectattr('kind', 'equalto', 'old_client')|list %}
 {%- macro names(ws) %}{% for w in ws %}<strong>{{ w.handle }}</strong>{{ ', ' if not loop.last }}{% endfor %}{% endmacro %}
 <p class="sender-warning" role="status" data-sender-warning>
-{%- if off %}{{ off|length }} of your machines {{ "isn't" if off|length == 1 else "aren't" }} connecting: {{ names(off) }}{% endif %}
-{%- if off and stuck %} · {{ stuck|length }} {{ "hasn't" if stuck|length == 1 else "haven't" }} picked up messages (update RainCLI): {{ names(stuck) }}
-{%- elif stuck %}{{ stuck|length }} of your machines haven't picked up messages (update RainCLI): {{ names(stuck) }}{% endif -%}
-. <a href="{{ url('/app/agents') }}">See them in Agents</a></p>
+{%- set parts = [] %}
+{%- if off %}{% set _ = parts.append(off|length ~ (" of your machines isn't connecting: " if off|length == 1 else " of your machines aren't connecting: ") ~ names(off)) %}{% endif %}
+{%- if stuck %}{% set _ = parts.append(stuck|length ~ (" hasn't" if stuck|length == 1 else " haven't") ~ " picked up messages (update RainCLI): " ~ names(stuck)) %}{% endif %}
+{%- if old %}{% set _ = parts.append(old|length ~ (" runs" if old|length == 1 else " run") ~ " an old RainCLI that doesn't confirm delivery; update " ~ ("it" if old|length == 1 else "them") ~ ": " ~ names(old)) %}{% endif %}
+{{- parts|join(' · ') }}. <a href="{{ url('/app/local/this-computer') }}">See This computer</a></p>
 {%- endif %}</div>{% endif %}

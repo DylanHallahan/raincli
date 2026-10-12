@@ -39,15 +39,15 @@
   </table>
   </div>
 
-  <h2>Agents in this team</h2>
+  <h2>{{ "Machines in this team" if is_owner else "Your machines in this team" }}</h2>
   {% if team_agents %}
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th scope="col">Agent</th><th scope="col">Owner</th><th scope="col">Connection</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+    <thead><tr><th scope="col">Machine</th><th scope="col">Owner</th><th scope="col">Connection</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
     <tbody>
       {% for row in team_agents %}
       <tr {% if not row.active %}class="is-revoked"{% endif %}>
-        <td data-label="Agent"><span class="handle">{{ row.agent.handle }}</span></td>
+        <td data-label="Machine"><span class="handle">{{ row.agent.handle }}</span></td>
         <td data-label="Owner">{{ row.owner_shown }}</td>
         <td data-label="Connection">{{ conn_badge(row.connection) }}</td>
         <td class="row-actions">

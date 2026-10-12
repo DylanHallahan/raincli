@@ -35,8 +35,9 @@ def test_home_page_offers_the_windows_download_and_headless_login(client):
     assert 'loginctl enable-linger "$USER"   # (may need an administrator)' in page
     assert f'href="{HEADLESS}"' in r.text and f'href="{WINDOWS_GUIDE}"' in r.text
     assert "download its config" in page  # the connector path stays documented
-    # Review 6 L3: the v0.5 wording, as in SETUP.md.
-    assert "They have no inbox: they deliver messages to your named agents, and messages to the machine itself stay stored." in page
+    # §21 (v0.6): people pick an inbox; no "named agents" wording.
+    assert "Pick one of their agents as your inbox, and your teammates' messages go to it." in page
+    assert "named agents" not in page
     assert "receive messages yet" not in page
     for word in NEVER:
         assert word not in page
@@ -61,8 +62,8 @@ def test_machines_page_puts_the_app_and_login_first(client, world):
     assert 'enable-linger "$USER"</code> (may need an administrator)' in page
     assert page.index('id="set-up"') < page.index('id="add-machine"')
     assert "For an inbox or connector setup" in page  # the config download is the alternative
-    # Review 6 L3: the v0.5 wording, as in SETUP.md.
-    assert "They have no inbox: they deliver messages to your named agents, and messages to the machine itself stay stored." in page
+    # §21 (v0.6): people pick an inbox; no "named agents" wording.
+    assert "Pick one of your agents as your inbox" in page and "named agents" not in page
     assert "receive messages yet" not in page
     for word in NEVER:
         assert word not in page

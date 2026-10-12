@@ -7,27 +7,27 @@
 {# §20.6 M1, §20.7: app-mode.js opens the latest conversation only with this marker (a 0.5.5+ app window). #}
 {% if open_latest and conversations %}<div data-open-latest hidden></div>{% endif %}
 {% include "app_mode/_owner_warnings.html" %}
+{% include "_inbox_banner.html" %}
 <div class="rc-scroll">
   {% if conversations %}
   <div class="rc-center">
     <h2>Select a conversation</h2>
-    <p class="rc-help">Message a teammate, one of their agents or a machine. Messages to you appear here.</p>
+    <p class="rc-help">Message a teammate. Messages to you appear here.</p>
     <p><a class="rc-btn" href="{{ url('/app/compose') }}">New message</a></p>
   </div>
   {% else %}
-  {% set first = (team_agents|default([]))|first %}
   <div class="rc-first">
     <h2>Get started</h2>
     <p class="rc-help">Three steps to your first conversation. Messages to you appear here.</p>
     <ol class="rc-steps">
-      {# §20.4 R8: step 1 shows done when one of your machines connected in the last 24 h. #}
-      {% if connected %}
-      <li><a class="rc-step rc-step-done" href="{{ url('/app/local/this-computer') }}"><span class="rc-step-n" aria-hidden="true"><svg class="rc-icon" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></svg></span><span><strong>Connect your coding agent</strong><span class="sr-only"> (done)</span><span class="rc-step-text">Connected: {{ connected }}</span></span></a></li>
+      {# §21 C7.6: step 1 is picking your inbox agent; done shows which (your own agent's name). #}
+      {% if my_inbox %}
+      <li><a class="rc-step rc-step-done" href="{{ url('/app/local/this-computer') }}"><span class="rc-step-n" aria-hidden="true"><svg class="rc-icon" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></svg></span><span><strong>Pick your inbox agent</strong><span class="sr-only"> (done)</span><span class="rc-step-text">Your inbox: {{ my_inbox }}</span></span></a></li>
       {% else %}
-      <li><a class="rc-step" href="{{ url('/app/local/this-computer') }}"><span class="rc-step-n" aria-hidden="true">1</span><span><strong>Connect your coding agent</strong><span class="rc-step-text">Set up this computer so your agents can send and receive.</span></span></a></li>
+      <li><a class="rc-step" href="{{ url('/app/local/this-computer') }}"><span class="rc-step-n" aria-hidden="true">1</span><span><strong>Pick your inbox agent</strong><span class="rc-step-text">The agent that receives your teammates' messages.</span></span></a></li>
       {% endif %}
-      <li><a class="rc-step" href="{{ url('/app/agents') }}"><span class="rc-step-n" aria-hidden="true">2</span><span><strong>See who's on your team</strong><span class="rc-step-text">Your teammates' machines and agents, and how each can be reached.</span></span></a></li>
-      <li><a class="rc-step" href="{{ url('/app/compose') }}{% if first %}?to={{ first.to|urlencode }}{% endif %}"><span class="rc-step-n" aria-hidden="true">3</span><span><strong>Send your first message</strong><span class="rc-step-text">{% if first %}To {{ first.person }} · {{ first.agent }}, or anyone on your team.{% else %}To a teammate, one of their agents or a machine.{% endif %}</span></span></a></li>
+      <li><a class="rc-step" href="{{ url('/app/people') }}"><span class="rc-step-n" aria-hidden="true">2</span><span><strong>See who's on your team</strong><span class="rc-step-text">Your teammates, and whether each one is around.</span></span></a></li>
+      <li><a class="rc-step" href="{{ url('/app/compose') }}{% if first_person %}?to={{ first_person.user.email|urlencode }}{% endif %}"><span class="rc-step-n" aria-hidden="true">3</span><span><strong>Send your first message</strong><span class="rc-step-text">{% if first_person %}To {{ first_person.name }}, or anyone on your team.{% else %}To anyone on your team.{% endif %}</span></span></a></li>
     </ol>
   </div>
   {% endif %}

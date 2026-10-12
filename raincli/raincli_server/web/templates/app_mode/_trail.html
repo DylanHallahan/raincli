@@ -16,8 +16,9 @@
     </span><svg class="rc-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><span class="sr-only">, delivery history</span></summary>
     <ol class="rc-history">
       <li>stored {{ time(line.message.created_at) }}</li>
-      {% if line.message.acked_at and not t.events|selectattr('state', 'equalto', 'received')|list %}<li>received {{ time(line.message.acked_at) }}</li>{% endif %}
-      {% for ev in t.events %}<li>{{ STATE_LABELS.get(ev.state, (ev.state,))[0]|lower }} {{ time(ev.created_at) }}{% if ev.detail %} · {{ ev.detail }}{% endif %}</li>{% endfor %}
+      {% if line.recipient.endpoint.kind != 'person' and line.message.acked_at and not t.events|selectattr('state', 'equalto', 'received')|list %}<li>received {{ time(line.message.acked_at) }}</li>{% endif %}
+      {# §21 C5.5: states and times only; an event's detail is never shown. #}
+      {% for ev in t.events %}<li>{{ STATE_LABELS.get(ev.state, (ev.state,))[0]|lower }} {{ time(ev.created_at) }}</li>{% endfor %}
     </ol>
   </details>
 </div>

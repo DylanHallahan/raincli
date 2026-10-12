@@ -4,10 +4,6 @@
 (function () {
   "use strict";
   var body = document.body;
-  var TEAM_KEY = "rc-team-open:";  // app.js's key for the Team section's open state, per viewer
-  // R7 (short windows: Team collapsed below 600 px tall, the list fade) is frozen for v0.5.5. Its code stays dormant
-  // behind this switch; true restores it (with the .rc-convs.rc-more rule in app-mode.css).
-  var R7 = false;
 
   // §20.6 M1 (P2): Inbox opens the latest conversation, the first in the list (ordered by last seq, archived ones
   // excluded), when the list is visible: above the app-mode breakpoint. Below it, Inbox shows the list. A toast
@@ -53,52 +49,13 @@
     }).observe(thread, {childList: true, subtree: true});
   }
 
-  // §20.4 R7: below 600 px tall the Team section starts collapsed, unless the viewer chose otherwise (a saved
-  // choice wins). The automatic close is not saved as a choice: its toggle event is stopped before app.js
-  // would store it.
-  var autoClosing = null;
-  function shortWindowTeam() {
-    if (window.innerHeight >= 600) return;
-    var details = document.querySelector("details[data-team]");
-    if (!details || !details.open) return;
-    var saved = null;
-    try { saved = localStorage.getItem(TEAM_KEY + details.getAttribute("data-team")); } catch (e) { saved = null; }
-    if (saved !== null) return;
-    autoClosing = details;
-    details.open = false;
-  }
-
-  // §20.4 R7: an overflowing conversation list fades at its bottom edge while there is more below.
-  function listFade() {
-    var list = document.querySelector(".rc-list .rc-convs");
-    if (!list) return;
-    var update = function () { list.classList.toggle("rc-more", list.scrollHeight - list.scrollTop - list.clientHeight > 4); };
-    if (!list.hasAttribute("data-fade")) {
-      list.setAttribute("data-fade", "");
-      list.addEventListener("scroll", update, {passive: true});
-    }
-    update();
-  }
-
   document.addEventListener("toggle", function (event) {
     var target = event.target;
-    if (target === autoClosing) {  // R7: not the viewer's choice
-      autoClosing = null;
-      event.stopImmediatePropagation();
-      return;
-    }
     if (target.matches && target.matches("details.rc-trail-box")) {
       var summary = target.querySelector(":scope > summary");
       if (summary) summary.setAttribute("aria-expanded", target.open ? "true" : "false");
     }
   }, true);
-  if (R7) {
-    document.addEventListener("rc-list-updated", function () {  // live.js swapped the list
-      shortWindowTeam();
-      listFade();
-    });
-    window.addEventListener("resize", listFade);
-  }
 
   // The shell is the window (the "everything at the top" bug). Two guards, both silent no-ops normally:
   // - the height fallback: if <body> doesn't measure innerHeight (a host's stale 100%/100vh), set --rc-app-h, a CSS
@@ -188,10 +145,6 @@
   if (openLatest()) return;
   trailToggles(document);
   watchThread();
-  if (R7) {
-    shortWindowTeam();
-    listFade();
-  }
   // Focus may arrive after this script runs (early in a navigation, or a window shown later): try again then.
   composerReady();
   window.addEventListener("load", composerReady);

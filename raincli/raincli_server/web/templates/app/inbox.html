@@ -11,11 +11,12 @@
     <span class="actions"><a class="btn btn-quiet" href="{{ url('/app/archived') }}">Archived</a> <a class="btn" href="{{ url('/app/compose') }}">New message</a></span>
   </div>
   {% include "_owner_warnings.html" %}
+  {% include "_inbox_banner.html" %}
 
   {% if not conversations %}
   <div class="card empty">
     <h2>No conversations yet</h2>
-    <p class="muted">Message a teammate, one of their agents or a machine. Messages to you and your machines show up here with their delivery state.</p>
+    <p class="muted">Message a teammate. Messages to you show up here with their delivery state.</p>
     <p class="actions"><a class="btn" href="{{ url('/app/compose') }}">Send a message</a>{% if not machines_owned %} <a class="btn btn-quiet" href="{{ url('/app/agents') }}#set-up">Set up a machine</a>{% endif %}</p>
   </div>
   {% else %}
@@ -24,15 +25,15 @@
     <li>
       <a class="conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}#latest">
         <div class="conv-top">
-          <span class="conv-peers"><span class="handle">{{ row.me.display }}</span> <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> <span class="handle">{{ row.peer.display }}</span></span>
-          <span class="conv-team">{{ row.team.slug }}</span>
+          <span class="conv-peers">{% if row.kind == 'pair' %}You <span class="peer-arrow" aria-hidden="true">⇄</span><span class="sr-only">with</span> {% endif %}{{ row.name }}</span>
+          <span class="conv-team">{{ row.team.name }}</span>
           {% if row.unacked %}<span class="badge badge-count" title="Messages to you or your machines not yet read or acknowledged">{{ row.unacked }} new</span>{% endif %}
           <span class="conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span>
         </div>
         {% if row.last %}
         <div class="conv-bottom">
           <span class="conv-preview"><strong>{{ row.last_sender }}:</strong> {{ row.last.body[:160] }}</span>
-          {{ state_badge(row.last.delivery_state) }}
+          {{ state_badge(row.last_state) }}
         </div>
         {% endif %}
       </a>

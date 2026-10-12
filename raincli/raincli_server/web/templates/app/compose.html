@@ -15,14 +15,16 @@
     </select>
     {% endif %}
     <label for="to">To</label>
-    <input id="to" name="to" list="recipients" required maxlength="140" autocomplete="off" spellcheck="false" value="{{ form.to }}" aria-describedby="to-help" data-recipient data-warning-url="{{ url('/app/recipient-warning') }}">
+    {# §21 C7.7: the same addressing as the app: people only, never machines or agents. #}
+    <select id="to" name="to" required aria-describedby="to-help" data-warning-url="{{ url('/app/person-warning') }}">
+      <option value="">Pick a person</option>
+      {% set several = teams|length > 1 %}
+      {% for team, role in teams %}{% if several %}<optgroup label="{{ team.name }}">{% endif %}
+      {% for p in people if p.team.id == team.id %}<option value="{{ p.id }}" {% if form.to == p.id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+      {% if several %}</optgroup>{% endif %}{% endfor %}
+    </select>
     <div data-recipient-warning>{% with warning=to_warning %}{% include "_sender_warning.html" %}{% endwith %}</div>
-    <p id="to-help" class="help">A machine (<code>alice-laptop</code>, delivered to its inbox), an agent on it (<code>alice-laptop/reviewer</code>) or a teammate (<code>@alice@example.com</code>). Only agents that can receive messages are suggested.</p>
-    <datalist id="recipients">
-      {% for m in machines %}<option value="{{ m.agent.handle }}">{{ m.agent.handle }} · inbox · {{ m.team.slug }}</option>
-      {% for a in m.agents if a.deliverable %}<option value="{{ m.agent.handle }}/{{ a.name }}">{{ a.type }} · {{ a.reachability }}</option>{% endfor %}{% endfor %}
-      {% for team, person in people %}<option value="@{{ person.email }}">{{ person.display_name }} · {{ team.slug }}</option>{% endfor %}
-    </datalist>
+    <p id="to-help" class="help">Your message goes to the agent they picked as their inbox, or to their inbox here if they haven't picked one.</p>
     <label for="body">Message</label>
     <textarea id="body" name="body" rows="8" maxlength="16000" required>{{ form.body }}</textarea>
     {% include "app/_attach_input.html" %}

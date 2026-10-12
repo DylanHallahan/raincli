@@ -71,24 +71,7 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-list .rc-day:first-child { padding-top: 0; }
 .rc-day-h { margin: 0; font-size: var(--rc-fs-xs); font-weight: 600; color: var(--rc-muted); text-transform: none; letter-spacing: 0; }
 
-/* §19.5 Team section */
-.rc-team { border-top: 1px solid var(--rc-border); padding-top: var(--rc-s-2); flex: none; }
-.rc-team summary { display: flex; align-items: center; gap: var(--rc-s-2); padding: var(--rc-s-1) var(--rc-s-3); border-radius: var(--rc-radius-sm);
-  cursor: pointer; color: var(--rc-muted); font-size: var(--rc-fs-xs); font-weight: 600; list-style: none; }
-.rc-team summary::-webkit-details-marker { display: none; }
-.rc-team summary::before { content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
-  transform: rotate(-45deg); transition: transform var(--rc-dur) var(--rc-ease); }
-.rc-team[open] summary::before { transform: rotate(45deg); }
-.rc-team summary:hover { background: var(--rc-surface); color: var(--rc-text); }
-.rc-team-title { flex: 1; }
-.rc-team-count { font-weight: 400; }
-.rc-list .rc-team-list { flex: none; max-height: 30vh; overflow-y: auto; margin-top: 2px; }
-.rc-team-agent { display: flex; align-items: center; gap: var(--rc-s-2); padding: 6px var(--rc-s-3); border-radius: var(--rc-radius-sm);
-  color: var(--rc-text); text-decoration: none; font-size: var(--rc-fs-sm); }
-:where(.app-mode) a.rc-team-agent:hover { background: var(--rc-surface); color: var(--rc-text); }
-.rc-team-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rc-dot.rc-busy { background: var(--rc-warn); }
-@media (prefers-reduced-motion: reduce) { .rc-team summary::before { transition: none; } }
 
 /* §19.5 first run */
 .rc-first { max-width: 520px; margin: var(--rc-s-8) auto; display: grid; gap: var(--rc-s-3); }
@@ -298,14 +281,9 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-main-head > .rc-archive { flex: none; }
 .rc-archive .rc-btn { padding: var(--rc-s-1) var(--rc-s-3); font-size: var(--rc-fs-sm); }
 
-/* Short windows (the inbox bug, v0.5.4 hotfix). In a window shorter than the app's 520 px minimum (150% scaling on a
-   small screen, maximized) the conversation list kept shrinking while the Team section and the footer kept their
-   size. Now the list keeps about three rows; the Team section may shrink and its list scrolls. The footer stays. */
+/* Short windows (the inbox bug, v0.5.4 hotfix): the list keeps about three rows; the footer stays. §21 C7.6: there
+   is no Team section, so the conversation list uses the full column. */
 .rc-list .rc-convs { min-height: 204px; }
-/* overflow: clip with a margin, not hidden: the Team summary's keyboard focus ring (2 px + 2 px offset) stays whole. */
-.rc-team { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: clip; overflow-clip-margin: 4px; }
-.rc-team > summary { flex: none; }
-.rc-list .rc-team-list { flex: 0 1 auto; min-height: 0; }
 /* The owner notice: one combined line for several machines; the block is capped and scrolls as a backstop. */
 .owner-warnings { max-height: 30vh; overflow-y: auto; flex: none; }
 .app-mode .sender-warning a { color: inherit; text-decoration: underline; }
@@ -349,17 +327,45 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .app-mode .rc-main-head > .rc-archive { height: var(--rc-app-head-row); align-self: start; }
 @media (max-width: 1000px) { .app-mode .rc-main-head { padding: 0 var(--rc-s-3); } }
 
-/* R7 (frozen for v0.5.5, with app-mode.js's R7 switch): an overflowing conversation list fades at its bottom edge.
-.rc-convs.rc-more::after { content: ""; position: sticky; bottom: 0; height: var(--rc-app-fade-h);
-  margin-top: calc(-1 * var(--rc-app-fade-h)); background: linear-gradient(to bottom, transparent, var(--rc-bg));
-  pointer-events: none; } */
 
 /* R8: "To:" stays on the first line, top-aligned with the text, while the composer grows. */
 .rc-box-row1 .rc-to { align-self: flex-start; line-height: calc(var(--rc-fs-base) * var(--rc-lh)); padding-top: var(--rc-s-1); }
-/* R8's Team-pinned empty state is frozen for v0.5.5 (the Team section sits as in v0.5.4):
-.rc-list > .rc-empty { flex: 1; } */
 /* R8: first-run step 1 done: a check mark and muted text. */
 .rc-step-done strong, .rc-step-done .rc-step-text { color: var(--rc-muted); }
 .rc-step-done .rc-step-n { border-color: var(--rc-ok); color: var(--rc-ok); }
 .rc-step-done .rc-step-n .rc-icon { width: 14px; height: 14px; stroke-width: 2.5; }
 @media (prefers-reduced-motion: reduce) { .rc-chevron { transition: none; } }
+
+/* §21 C7.2: the people picker (app-picker.js) on New message. */
+.rc-picker { position: relative; }
+.rc-picker-input { width: 100%; }
+.rc-picker-list { position: absolute; z-index: 5; left: 0; right: 0; top: 100%; margin: var(--rc-s-1) 0 0; padding: var(--rc-s-1);
+  list-style: none; max-height: 320px; overflow-y: auto; background: var(--rc-bg); border: 1px solid var(--rc-border);
+  border-radius: var(--rc-radius); box-shadow: var(--rc-shadow-sm); }
+.rc-picker-group { padding: var(--rc-s-2) var(--rc-s-2) 2px; font-size: var(--rc-fs-xs); font-weight: 600; color: var(--rc-muted); }
+.rc-picker-option { display: flex; align-items: baseline; gap: var(--rc-s-2); padding: 6px var(--rc-s-2); border-radius: var(--rc-radius-sm);
+  cursor: pointer; }
+.rc-picker-option[aria-selected="true"], .rc-picker-option:hover { background: var(--rc-surface-2); }
+.rc-picker-name { font-weight: 600; color: var(--rc-text); }
+.rc-picker-meta, .rc-picker-none { color: var(--rc-muted); font-size: var(--rc-fs-sm); }
+.rc-picker-none { padding: var(--rc-s-2); }
+.rc-chip-picked { display: inline-flex; align-items: center; gap: var(--rc-s-1); padding: 2px var(--rc-s-1) 2px var(--rc-s-3);
+  border-radius: var(--rc-radius-pill); background: var(--rc-accent-soft); color: var(--rc-text); font-weight: 600; }
+.rc-chip-remove { border: 0; background: transparent; color: var(--rc-muted); font: inherit; cursor: pointer; width: 24px; height: 24px;
+  border-radius: var(--rc-radius-pill); }
+.rc-chip-remove:hover { background: var(--rc-surface-2); color: var(--rc-text); }
+
+/* §21 C7.3: the inbox banner on Inbox until an inbox is picked (shared markup with the website). */
+.app-mode .inbox-banner { margin: var(--rc-s-4) var(--rc-s-5) 0; padding: var(--rc-s-4); border: 1px solid var(--rc-border);
+  border-radius: var(--rc-radius-lg); background: var(--rc-surface); }
+.app-mode .inbox-banner h2 { margin: 0 0 var(--rc-s-2); font-size: var(--rc-fs-lg); }
+.app-mode .inbox-banner fieldset { border: 0; margin: 0 0 var(--rc-s-3); padding: 0; display: grid; gap: var(--rc-s-1); }
+.app-mode .inbox-choice { display: flex; align-items: center; gap: var(--rc-s-2); padding: 6px var(--rc-s-2); border-radius: var(--rc-radius-sm); }
+.app-mode .inbox-choice:hover { background: var(--rc-surface-2); }
+.app-mode .inbox-choice-meta, .app-mode .inbox-banner-team { color: var(--rc-muted); font-size: var(--rc-fs-sm); }
+.app-mode .inbox-waiting { display: flex; align-items: center; gap: var(--rc-s-2); margin-bottom: var(--rc-s-3); }
+
+/* §21 C7.1: People. The dot follows presence. */
+.rc-dot.rc-presence-dot-ready { background: var(--rc-ok); }
+.rc-dot.rc-presence-dot-busy { background: var(--rc-warn); }
+.rc-people .rc-team-name { color: var(--rc-muted); }

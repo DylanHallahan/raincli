@@ -87,23 +87,10 @@
       list.insertBefore(head, item);
     });
   }
-  function teamKey(details) { return "rc-team-open:" + details.getAttribute("data-team"); }
-  function teamState(root) {
-    Array.prototype.forEach.call(root.querySelectorAll("details[data-team]"), function (details) {
-      var saved = null;
-      try { saved = localStorage.getItem(teamKey(details)); } catch (e) { saved = null; }
-      if (saved === "0") details.open = false;
-      else if (saved === "1") details.open = true;
-      details.addEventListener("toggle", function () {
-        try { localStorage.setItem(teamKey(details), details.open ? "1" : "0"); } catch (e) { /* convenience only */ }
-      });
-    });
-  }
   function enhanceList() {
     var root = document.querySelector(".rc-list");
     if (!root) return;
     dayGroups(root);
-    teamState(root);
   }
   enhanceList();
   document.addEventListener("rc-list-updated", enhanceList);
@@ -125,32 +112,32 @@
     });
   });
 
-  // The sender warning on the compose page (§19.6): once a machine or agent is chosen, say whether it is
-  // connecting and picking up. Display only.
-  document.querySelectorAll("input[data-recipient][data-warning-url]").forEach(function (input) {
-    var slot = input.form && input.form.querySelector("[data-recipient-warning]");
-    if (!slot || !window.fetch || !window.DOMParser) return;
-    var last = input.value, pending = null;
+  // The warning about a person's inbox on the compose page (§21 C7.4): once a person is picked (the people <select>,
+  // or the picker that replaces it), say whether their inbox is set up and connected. Display only; the server answers
+  // the same empty fragment for anyone who isn't a teammate.
+  document.querySelectorAll("[data-recipient-warning]").forEach(function (slot) {
+    var form = slot.closest("form");
+    var picker = form && form.querySelector("[data-warning-url]");
+    if (!picker || !window.fetch || !window.DOMParser) return;
+    // Looked up each time: app-picker.js replaces the <select> with its own field after this runs.
+    function field() { return form.querySelector('[name="to"]:not([disabled])') || {value: ""}; }
+    var last = field().value;
     function check() {
-      var value = input.value.trim();
+      var value = field().value.trim();
       if (value === last) return;
       last = value;
-      var team = input.form.querySelector('select[name="team"]');
-      fetch(input.getAttribute("data-warning-url") + "?to=" + encodeURIComponent(value) +
-            (team ? "&team=" + encodeURIComponent(team.value) : ""),
+      fetch(picker.getAttribute("data-warning-url") + "?to=" + encodeURIComponent(value),
             {credentials: "same-origin", cache: "no-store"})
         .then(function (r) { return r.ok ? r.text() : ""; })
         .then(function (html) {
-          if (input.value.trim() !== value) return;  // typed on since
+          if (field().value.trim() !== value) return;  // changed since
           var doc = new DOMParser().parseFromString("<!doctype html><body>" + html, "text/html");
           while (slot.firstChild) slot.removeChild(slot.firstChild);
           Array.prototype.forEach.call(doc.body.childNodes, function (n) { slot.appendChild(document.importNode(n, true)); });
         }, function () { /* quietly: the warning is a convenience */ });
     }
-    input.addEventListener("change", check);
-    var teamSelect = input.form.querySelector('select[name="team"]');
-    if (teamSelect) teamSelect.addEventListener("change", function () { last = null; check(); });
-    input.addEventListener("input", function () { clearTimeout(pending); pending = setTimeout(check, 400); });
+    form.addEventListener("change", function (event) { if (event.target.name === "to") check(); });
+    form.addEventListener("rc-recipient-picked", check);
   });
 
   // Conversations open at the newest message (protocol §16.19 item 4). An #m-<id> anchor wins. On a reload

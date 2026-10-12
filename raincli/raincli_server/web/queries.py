@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from raincli_server import identity, messaging, security
+from raincli_server import identity, messaging, presentation, security
 from raincli_server.models import (
     Agent,
     AgentCredential,
@@ -147,6 +147,15 @@ def team_machines(db: Session, user: User, team_ids: list[uuid.UUID]) -> list[Ag
     return sorted(rows, key=lambda r: r.agent.owner_user_id != user.id)  # stable: keeps the query order
 
 
+def visible_machines(db: Session, user: User, teams: list[tuple[Team, str]]) -> list[AgentRow]:
+    """§21 C5.8 (PR11): the website Machines page. A member sees only their own machines; a team owner also sees
+    every machine of the teams they own (the template shows those without agents, sessions or presence)."""
+    team_ids = [t.id for t, _ in teams]
+    owned_teams = {t.id for t, role in teams if role == "owner"}
+    return [r for r in team_machines(db, user, team_ids)
+            if r.agent.owner_user_id == user.id or r.team.id in owned_teams]
+
+
 def team_agents(db: Session, team: Team) -> list[AgentRow]:
     return _agent_rows(db, Agent.team_id == team.id)
 
@@ -229,9 +238,21 @@ class Side:
 
     @property
     def display(self) -> str:
+        """The person (§21 C5.1): "You" for the viewer's own person side, else their name. Never a handle."""
         if self.endpoint.kind == "person":
-            return "You" if self.mine else self.endpoint.user.display_name
-        return self.endpoint.label()
+            return "You" if self.mine else presentation.display_name(self.endpoint.user)
+        return self.user_name
+
+    @property
+    def user_name(self) -> str:
+        user = self.endpoint.user if self.endpoint.kind == "person" else None
+        if user is None and self.endpoint.agent is not None:
+            from raincli_server.models import User as _User
+            from sqlalchemy.orm import object_session
+
+            db = object_session(self.endpoint.agent)
+            user = db.get(_User, self.endpoint.agent.owner_user_id) if db is not None else None
+        return presentation.display_name(user) if user is not None else "a teammate"
 
     @property
     def active(self) -> bool:
@@ -252,8 +273,11 @@ class ConversationRow:
     unacked: int = 0
     archived: bool = False  # §17.2: the effective state (§17.3 A1)
     archived_by: str = ""  # "Archived by <endpoint>" (§17.3 A8)
-    name: str = ""  # §19.4: owner · agent, owner · inbox, or the person (worked out on the server)
-    last_sender_name: str = ""  # §20.4 R8: the app list's machine-inbox preview names its sender as the thread does
+    name: str = ""  # §21 C5.1: the other person, or "From your agents" / "Your agents" (presentation)
+    last_sender_name: str = ""  # §21 C5.1: "Jon" or "Jon · agent"
+    peer_user: User | None = None  # the other person (None for your own agents' conversations)
+    kind: str = "pair"
+    last_state: str = ""  # the last message's state as the viewer may see it (§21 C13 H4)
 
 
 @dataclass
@@ -267,11 +291,13 @@ class MessageLine:
     recipient_name: str = ""
     trail: object = None  # thread.Trail, only for the viewer's own messages (§19.7)
     initials: str = ""  # §20.4 R8: from the person behind the sender (present.initials)
-    via: str | None = None  # §20.4 P1: the stated agent name to show as "via …", or None (present.shown_via)
+    state: str = ""  # §21 C13 H4: the delivery state this viewer may see
+    hold_text: str = ""  # §21 C5.5: "held: …" in presentation's words, for the website
 
     @property
     def shown_state(self) -> str:
-        return "held" if self.message.delivery_state == "stored" and self.hold_reason else self.message.delivery_state
+        state = self.state or self.message.delivery_state
+        return "held" if state == "stored" and self.hold_reason else state
 
 
 @dataclass
@@ -287,10 +313,12 @@ class ConversationView:
     archived: bool = False
     archived_by: str = ""
     newest_seq: int = 0  # the archive form sends it as archived_through_seq (§17.3 A1)
-    name: str = ""  # §19.4: owner · agent, owner · inbox, or the person
-    address: str = ""  # the header's second line: handle/agent, handle or the person's email
-    presence: object = None  # thread.HeaderPresence for an agent peer (§19.3), else None
-    warning: object = None  # thread.Warning for a machine or agent peer (§19.6), else None
+    name: str = ""  # §21 C5.1: the other person, or "From your agents" / "Your agents"
+    address: str = ""  # §21 C7.5: the header's second line is the team only
+    presence: object = None  # thread.HeaderPresence: the person's presence · speed (§21 C5.4), else None
+    warning: object = None  # thread.Warning about the person's inbox (§21 C7.4), else None
+    peer_user: User | None = None
+    kind: str = "pair"
 
     @property
     def messages(self) -> list[Message]:
@@ -298,7 +326,11 @@ class ConversationView:
 
     @property
     def can_send(self) -> bool:
-        return self.peer.active and not (self.peer.endpoint.kind == "person" and self.peer.mine)
+        """A pair conversation with an active teammate. Your own agents' conversations take replies only (§21 C13
+        H2), from a message's Reply link."""
+        if self.kind != "pair":
+            return False
+        return self.peer_user is not None and self.peer_user.is_active
 
 
 def _owned_ids(db: Session, user: User, team_ids: list[uuid.UUID]) -> dict[uuid.UUID, Agent]:
@@ -323,12 +355,41 @@ def _sides(db: Session, conv: Conversation, user: User, owned: dict) -> tuple[Si
     return (a, b) if a.mine else (b, a)
 
 
+def viewer_state(db: Session, user: User, m: Message) -> str:
+    """A message's delivery state as ``user`` may see it (§21 C13 H4): for a message delivered in another person's
+    app, held while they have no inbox, else received; never their read state."""
+    shared = getattr(messaging, "view_state", None)
+    if shared is not None:
+        state, hold, _ = shared(db, user, m)
+        return "held" if state == "stored" and hold else state
+    if m.recipient_user_id is not None and m.recipient_user_id != user.id and \
+            m.delivery_state in ("stored", "held", "received") and m.sender_user_id != m.recipient_user_id:
+        return "held" if presentation.inbox_of(db, m.team_id, m.recipient_user_id) is None else "received"
+    return m.delivery_state
+
+
 def _visible(user: User, owned: dict):
+    """§21: the viewer's person conversations. A row merged into another (``merged_into``) is never listed or opened
+    by its own id; its old URL redirects (``final_conversation_id``)."""
     ids = list(owned)
     clauses = [Conversation.a_user_id == user.id, Conversation.b_user_id == user.id]
     if ids:
         clauses += [Conversation.agent_a_id.in_(ids), Conversation.agent_b_id.in_(ids)]
-    return or_(*clauses)
+    return and_(or_(*clauses), Conversation.merged_into.is_(None))
+
+
+def final_conversation_id(db: Session, conversation_id: object) -> uuid.UUID | None:
+    """§21 C1.6: an old conversation id resolved through ``merged_into`` to its end (at most 16 hops), else the id
+    itself. Authorization is then checked on the FINAL conversation (C13 L2)."""
+    cid = parse_uuid(conversation_id) if not isinstance(conversation_id, uuid.UUID) else conversation_id
+    for _ in range(16):
+        if cid is None:
+            return None
+        nxt = db.scalar(select(Conversation.merged_into).where(Conversation.id == cid))
+        if nxt is None:
+            return cid
+        cid = nxt
+    return cid
 
 
 def _mine_as_recipient(user: User, owned: dict):
@@ -339,13 +400,14 @@ def _mine_as_recipient(user: User, owned: dict):
 
 
 def _archived_by(db: Session, conv: Conversation, user: User, owned: dict) -> str:
+    """"Archived by you" or by the person (§21 C13 M3: through presentation, never a handle)."""
     endpoint = messaging.endpoint_for_key(db, conv.archived_by_key)
     if endpoint is None:
         return ""
-    mine = (endpoint.kind == "person" and endpoint.user.id == user.id) or \
-        (endpoint.kind != "person" and endpoint.agent.id in owned)
-    display = Side(endpoint, mine).display
-    return "you" if display == "You" else display  # "Archived by you"
+    person = presentation.person_of(db, endpoint)
+    if person is not None and person.id == user.id:
+        return "you"
+    return presentation.display_name(person) if person is not None else "a teammate"
 
 
 def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
@@ -384,14 +446,14 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
         if (archived == "exclude" and is_archived) or (archived == "only" and not is_archived):
             continue
         last = lasts.get(conv.id)
-        sender = Side(messaging.sender_endpoint(db, last), False).display if last else ""
-        if last is not None and last.sender_user_id == user.id:
-            sender = "You"
+        sender_name = names.sender(messaging.sender_endpoint(db, last)) if last else ""
+        sender = "You" if last is not None and last.sender_user_id == user.id else sender_name
+        who = presentation.conversation_peer(db, user, conv)
         rows.append(ConversationRow(conversation=conv, team=team, me=me, peer=peer, last=last,
                                     last_sender=sender, count=count, unacked=unacked, archived=is_archived,
                                     archived_by=_archived_by(db, conv, user, owned) if is_archived else "",
-                                    name=names.endpoint(peer.endpoint),
-                                    last_sender_name=names.sender(messaging.sender_endpoint(db, last)) if last else ""))
+                                    name=who.label, last_sender_name=sender_name, peer_user=who.user,
+                                    kind=who.kind, last_state=viewer_state(db, user, last) if last else ""))
     rows.sort(key=lambda r: (r.last.seq if r.last else 0), reverse=True)
     return rows
 
@@ -448,6 +510,22 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
             return held[-1].detail if held else None
         return None
 
+    def view(m: Message, recipient_ep) -> tuple[str, str | None, str | None]:
+        """(state, raw hold code, route) as this viewer may see it (§21 C13 H4, M3). The shared
+        ``messaging.view_state`` when core provides it; until then the same rule here."""
+        shared = getattr(messaging, "view_state", None)
+        if shared is not None:
+            return shared(db, user, m)
+        route = getattr(m, "route", None)
+        if m.recipient_user_id is not None and m.recipient_user_id != user.id:
+            # A message delivered in a person's app: never their read state. Held "no_inbox" while they have no
+            # inbox in that team, otherwise received.
+            if m.delivery_state in ("stored", "held", "received") and m.sender_user_id != m.recipient_user_id:
+                if presentation.inbox_of(db, m.team_id, m.recipient_user_id) is None:
+                    return "stored", "no_inbox", route
+                return "received", None, route
+        return m.delivery_state, hold_of(m), route
+
     lines = []
     for m in messages:
         sender_ep, recipient_ep = messaging.sender_endpoint(db, m), messaging.recipient_endpoint(db, m)
@@ -456,12 +534,15 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
         # The viewer's own message: one they sent as a person (to anyone, their own machines included), or one a
         # machine of theirs sent to someone else. A machine of theirs writing to them is incoming.
         outgoing = m.sender_user_id == user.id or (sender.mine and not recipient.mine)
-        hold = hold_of(m)
+        state, hold, route = view(m, recipient_ep)
+        person = names.person(recipient_ep)
         lines.append(MessageLine(
             m, sender, recipient, outgoing=outgoing, hold_reason=hold,
             sender_name=names.sender(sender_ep), recipient_name=names.endpoint(recipient_ep),
-            trail=thread.trail_for(m, recipient_ep, events.get(m.id, []), hold) if outgoing else None,
-            initials=present.initials(people.of(m)), via=present.shown_via(db, m) if present.P1 else None))
+            trail=thread.trail_for(m, recipient_ep, events.get(m.id, []), state, hold, person, route)
+            if outgoing else None,
+            initials=present.initials(people.of(m)), state=state,
+            hold_text=(presentation.held_line(hold, person, route) or "") if outgoing and hold else ""))
     return lines, events
 
 
@@ -483,13 +564,14 @@ def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], convers
     lines, events = message_lines(db, user, owned, messages, names)
     newest_seq = newest[0].seq if newest else 0
     is_archived = messaging.is_archived(conv, newest_seq)
+    who = presentation.conversation_peer(db, user, conv)
     return ConversationView(conversation=conv, team=team, me=me, peer=peer, lines=lines, events=events,
                             attachments=attachment_meta(db, [m.id for m in messages]), truncated=truncated,
                             archived=is_archived, newest_seq=newest_seq,
                             archived_by=_archived_by(db, conv, user, owned) if is_archived else "",
-                            name=names.endpoint(peer.endpoint), address=thread.address(peer.endpoint),
-                            presence=thread.header_presence(db, peer.endpoint),
-                            warning=thread.endpoint_warning(db, peer.endpoint))
+                            name=who.label, address=team.name, peer_user=who.user, kind=who.kind,
+                            presence=thread.header_presence(db, team.id, who.user),
+                            warning=thread.person_warning(db, team.id, who.user))
 
 
 def ack_viewed(db: Session, user: User, view: ConversationView) -> int:
@@ -549,73 +631,67 @@ def pending_for_user(db: Session, user: User, team_ids: list[uuid.UUID]) -> int:
     ) or 0
 
 
-# The directory and the recipient picker (§16.2, §16.9) ------------------------------------
+# People (§21 C5.3, C7.1, C7.2) ---------------------------------------------------------------
 
 @dataclass
-class PickerAgent:
-    name: str
-    type: str
-    status: str
-    role: str | None
-    reachability: str | None
-    ambiguous: bool
-    source: str
+class PersonRow:
+    """A teammate as the viewer sees them: name, email, team, and presence · speed from their inbox. Never a
+    machine or an agent."""
 
-    @property
-    def deliverable(self) -> bool:
-        return self.reachability in ("instant", "next-turn") and not self.ambiguous
-
-    @property
-    def reason(self) -> str:
-        return "ambiguous" if self.ambiguous else "listed only"
-
-
-@dataclass
-class PickerMachine:
-    agent: Agent
+    user: User
     team: Team
-    owner: User
-    agents: list[PickerAgent]
-    owner_shown: str = ""
+    presence: object  # presentation.PersonPresence
+    last_seq: int = 0  # the newest message between the viewer and them in that team (recent first)
+
+    @property
+    def name(self) -> str:
+        return presentation.display_name(self.user)
+
+    @property
+    def id(self) -> str:
+        """§21 C7.2: the picker's opaque id, ``p.<team>.<user>``."""
+        return f"p.{self.team.id}.{self.user.id}"
 
 
-def team_directory(db: Session, user: User, team_ids: list[uuid.UUID]
-                   ) -> tuple[list[PickerMachine], list[tuple[Team, User]]]:
-    """Active machines with their live agents, and the people of the viewer's teams."""
-    from raincli_server.presence import live_machine_agents
-
+def people_directory(db: Session, user: User, team_ids: list[uuid.UUID], now: datetime | None = None
+                     ) -> list[PersonRow]:
+    """The viewer's teammates across their teams (active members, the viewer excluded), one row per (team,
+    person), alphabetical, each with their recency with the viewer."""
     if not team_ids:
-        return [], []
+        return []
     rows = db.execute(
-        select(Agent, Team, User).join(Team, Team.id == Agent.team_id).join(User, User.id == Agent.owner_user_id)
-        .where(Agent.team_id.in_(team_ids), Agent.revoked_at.is_(None)).order_by(Team.name, Agent.handle)
-    ).all()
-    live = live_machine_agents(db, [a.id for a, _, _ in rows])
-    machines = [PickerMachine(agent, team, owner, [
-        PickerAgent(m.name, m.type, m.status, m.role, m.reachability, m.ambiguous, m.source)
-        for m in live.get(agent.id, [])]) for agent, team, owner in rows]
-    _show_owners(db, machines)
-    people = list(db.execute(
         select(Team, User).join(Membership, Membership.team_id == Team.id).join(User, User.id == Membership.user_id)
         .where(Team.id.in_(team_ids), User.is_active.is_(True), User.id != user.id)
-        .order_by(Team.name, User.display_name)
-    ).all())
-    return machines, people
+        .order_by(func.lower(User.display_name), User.email, Team.name)
+    ).all()
+    recent: dict = {}
+    for team_id, a, b, last in db.execute(
+        select(Conversation.team_id, Conversation.a_user_id, Conversation.b_user_id, func.max(Message.seq))
+        .join(Message, and_(Message.conversation_id == Conversation.id, Message.team_id == Conversation.team_id))
+        .where(Conversation.team_id.in_(team_ids), Conversation.kind == "pair",
+               or_(Conversation.a_user_id == user.id, Conversation.b_user_id == user.id))
+        .group_by(Conversation.team_id, Conversation.a_user_id, Conversation.b_user_id)
+    ):
+        other = b if a == user.id else a
+        recent[(team_id, other)] = max(last or 0, recent.get((team_id, other), 0))
+    return [PersonRow(u, t, presentation.person_presence(db, t.id, u, now), recent.get((t.id, u.id), 0))
+            for t, u in rows]
 
 
-def endpoint_from_text(text: str) -> object:
-    """The §16.1 CLI form to the API form: ``handle``, ``handle/agent`` or ``@email``."""
-    text = text.strip()
-    if text.startswith("@"):
-        return {"person": text[1:]}
-    if "/" in text:
-        handle, name = text.split("/", 1)
-        return {"machine": handle, "agent": name}
-    return {"machine": text}
-
-
-def endpoint_text(endpoint: messaging.Endpoint) -> str:
-    return endpoint.label()
+def person_by_id(db: Session, user: User, team_ids: list[uuid.UUID], value: str) -> tuple[Team, User] | None:
+    """A picker id ``p.<team>.<user>`` re-resolved and checked again (§20.6 L1): a current team of the viewer and an
+    active member, never the viewer. Never trusted as given."""
+    parts = (value or "").split(".")
+    if len(parts) != 3 or parts[0] != "p":
+        return None
+    tid, uid = parse_uuid(parts[1]), parse_uuid(parts[2])
+    if tid is None or uid is None or tid not in team_ids or uid == user.id:
+        return None
+    row = db.execute(
+        select(Team, User).join(Membership, Membership.team_id == Team.id).join(User, User.id == Membership.user_id)
+        .where(Team.id == tid, User.id == uid, User.is_active.is_(True))
+    ).first()
+    return tuple(row) if row else None
 
 
 # Sending --------------------------------------------------------------------
@@ -634,8 +710,6 @@ _FRIENDLY = {
     "forbidden": "You can't send that message.",
     "id_conflict": "That message id was already used for a different message. Reload and try again.",
     "inbox_full": "The recipient's inbox is full: too many messages are waiting to be acknowledged.",
-    "routing_inbox_only": "That machine accepts messages only at its inbox. Send to the machine instead.",
-    "unknown_agent": "That agent isn't known on that machine. Check the name, or send to the machine.",
     "rate_limited": "You're sending too fast. Wait a moment and try again.",
 }
 
@@ -652,12 +726,8 @@ def send_as_person(
             in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments or None, quotas=quotas,
         )
     except messaging.MessagingError as exc:
-        if exc.code == "not_deliverable":
-            reason = (exc.extra or {}).get("reason", "listed_only")
-            text = ("That agent can't receive messages: its name is used by more than one agent on that machine."
-                    if reason == "ambiguous" else
-                    "That agent can't receive messages: it is listed but has no name RainCLI can deliver to.")
-            raise SendError(exc.code, text) from exc
+        if exc.code in ("address_people", "ambiguous_person"):
+            raise SendError(exc.code, exc.message) from exc  # presentation's own words (§21 C2)
         # "invalid" messages from the service name the problem (and attachment) without leaking data.
         text = _FRIENDLY.get(exc.code) or (exc.message[:1].upper() + exc.message[1:300] + ".")
         raise SendError(exc.code, text) from exc
