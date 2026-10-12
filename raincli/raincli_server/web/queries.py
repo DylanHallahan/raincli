@@ -393,7 +393,7 @@ def _archived_by(db: Session, conv: Conversation, user: User, owned: dict) -> st
     person = presentation.person_of(db, endpoint)
     if person is not None and person.id == user.id:
         return "you"
-    return presentation.display_name(person) if person is not None else "a teammate"
+    return presentation.name_in_team(db, conv.team_id, person) if person is not None else "a teammate"
 
 
 def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
@@ -432,7 +432,7 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
         if (archived == "exclude" and is_archived) or (archived == "only" and not is_archived):
             continue
         last = lasts.get(conv.id)
-        sender_name = names.sender(messaging.sender_endpoint(db, last)) if last else ""
+        sender_name = names.sender(messaging.sender_endpoint(db, last), conv.team_id) if last else ""
         sender = "You" if last is not None and last.sender_user_id == user.id else sender_name
         who = presentation.conversation_peer(db, user, conv)
         rows.append(ConversationRow(conversation=conv, team=team, me=me, peer=peer, last=last,
@@ -536,10 +536,10 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
         # machine of theirs sent to someone else. A machine of theirs writing to them is incoming.
         outgoing = m.sender_user_id == user.id or (sender.mine and not recipient.mine)
         state, hold, route = view(m, recipient_ep)
-        person = names.person(recipient_ep)
+        person = names.person(recipient_ep, m.team_id)
         lines.append(MessageLine(
             m, sender, recipient, outgoing=outgoing, hold_reason=hold,
-            sender_name=names.sender(sender_ep), recipient_name=names.endpoint(recipient_ep),
+            sender_name=names.sender(sender_ep, m.team_id), recipient_name=names.endpoint(recipient_ep, m.team_id),
             trail=thread.trail_for(m, recipient_ep, events.get(m.id, []), state, hold, person, route)
             if outgoing else None,
             initials=present.initials(people.of(m)), state=state,
@@ -676,13 +676,10 @@ def people_directory(db: Session, user: User, team_ids: list[uuid.UUID], now: da
     ):
         other = b if a == user.id else a
         recent[(team_id, other)] = max(last or 0, recent.get((team_id, other), 0))
-    from raincli_server import owners
-
     # §18.1 item 7 for people: the person is the address now, so names that read alike in a team (a Cyrillic "Воb"
-    # beside "Bob") are told apart on People and in the picker.
-    shown = {t.id: owners.displays(db, t.id) for t in {t for t, _ in rows}}
+    # beside "Bob") are told apart on People and in the picker (presentation.name_in_team).
     return [PersonRow(u, t, presentation.person_presence(db, t.id, u, now), recent.get((t.id, u.id), 0),
-                      shown[t.id].get(u.id, ""))
+                      presentation.name_in_team(db, t.id, u))
             for t, u in rows]
 
 

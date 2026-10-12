@@ -958,7 +958,7 @@ def _reply_name(db: Session, viewer: auth.Viewer, parent: Message) -> str:
 
     other = messaging.recipient_endpoint(db, parent) if parent.sender_user_id == viewer.user.id else \
         messaging.sender_endpoint(db, parent)
-    return thread.Names(db).person(other)
+    return thread.Names(db).person(other, parent.team_id)
 
 
 def _typed_recipient(db: Session, viewer: auth.Viewer, text: str, team_slug: str):

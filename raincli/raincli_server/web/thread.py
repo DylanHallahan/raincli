@@ -45,30 +45,30 @@ def rejected_words(name: str) -> str:
 # Names (§21 C5.1) ----------------------------------------------------------------------------------
 
 class Names:
-    """Shown names, worked out once per endpoint per request, all through ``presentation.person_label``."""
+    """Shown names, worked out once per endpoint per team per request, all through ``presentation``: look-alike
+    names in a team are told apart (``person_label(..., team_id=)``, §18.1 item 7)."""
 
     def __init__(self, db: Session):
         self.db = db
         self._cache: dict = {}
 
-    def _label(self, ep: messaging.Endpoint, sender: bool) -> str:
-        key = (ep.key, sender)
+    def _label(self, ep: messaging.Endpoint, sender: bool, team_id) -> str:
+        key = (ep.key, sender, team_id)
         if key not in self._cache:
-            self._cache[key] = presentation.person_label(self.db, ep, sender=sender)
+            self._cache[key] = presentation.person_label(self.db, ep, sender=sender, team_id=team_id)
         return self._cache[key]
 
-    def endpoint(self, ep: messaging.Endpoint) -> str:
+    def endpoint(self, ep: messaging.Endpoint, team_id=None) -> str:
         """A recipient or a conversation side: the person ("Jon"), whatever machine or agent it is."""
-        return self._label(ep, False)
+        return self._label(ep, False, team_id)
 
-    def sender(self, ep: messaging.Endpoint) -> str:
+    def sender(self, ep: messaging.Endpoint, team_id=None) -> str:
         """The meta line's name: "Jon", or "Jon · agent" for what Jon's machine sent."""
-        return self._label(ep, True)
+        return self._label(ep, True, team_id)
 
-    def person(self, ep: messaging.Endpoint) -> str:
+    def person(self, ep: messaging.Endpoint, team_id=None) -> str:
         """The person's name alone, for hold reasons ("waiting for Sam to pick an inbox")."""
-        user = presentation.person_of(self.db, ep)
-        return presentation.display_name(user) if user is not None else "a teammate"
+        return self._label(ep, False, team_id)
 
 
 # The delivery trail (§19.7, §21 C7.5) --------------------------------------------------------------
@@ -211,7 +211,7 @@ def person_warning(db: Session, team_id: uuid.UUID, person: User | None, now: da
     for a day; or it hasn't picked up a message for a day. It names only the person and a date."""
     if person is None or not person.is_active:
         return None
-    name = presentation.display_name(person)
+    name = presentation.name_in_team(db, team_id, person)
     inbox = presentation.inbox_of(db, team_id, person.id)
     machine = db.get(Agent, inbox.agent_id) if inbox is not None else None
     if machine is None or machine.revoked_at is not None:
