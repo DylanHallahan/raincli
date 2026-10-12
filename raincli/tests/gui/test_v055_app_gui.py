@@ -220,45 +220,6 @@ def test_headers_have_one_height_and_presence_and_archive_share_a_line(team, bro
 
 # R7: short windows (criteria 22-23) --------------------------------------------------------------------------
 
-@pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
-def test_team_starts_collapsed_below_600_tall_unless_the_viewer_chose(team, browser):
-    key = "rc-team-open:" + str(team["users"]["Maya"].id)
-    context, page = open_app(browser, team, team["maya"], **size(760, 520))
-    assert page.locator("details.rc-team").evaluate("d => d.open") is False
-    page.wait_for_timeout(200)
-    assert page.evaluate(f"localStorage.getItem('{key}')") is None  # the automatic close is not a choice
-    page.set_viewport_size({"width": 760, "height": 700})
-    page.reload()
-    assert page.locator("details.rc-team").evaluate("d => d.open") is True  # tall: open
-    page.set_viewport_size({"width": 760, "height": 520})
-    page.evaluate(f"localStorage.setItem('{key}', '1')")
-    page.reload()
-    assert page.locator("details.rc-team").evaluate("d => d.open") is True  # the viewer's choice wins
-    context.close()
-
-
-@pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
-def test_an_overflowing_list_fades_at_the_bottom_with_no_custom_scrollbar(team, browser):
-    from raincli_server import identity
-
-    for target in ({"person": "jon@example.test"}, {"person": "jon@example.test"},
-                   {"person": "sam@example.test"}, {"person": "priya@example.test"}):
-        person_send(team, team["maya"], target, "hello")
-    for i in range(6):  # and six more teammates: ten conversations
-        user = identity.create_user(team["session"], f"p{i}@example.test", f"Person {i}", "correct horse battery")
-        identity.add_member(team["session"], _team_of(team), user)
-        team["session"].commit()
-        person_send(team, team["maya"], {"person": f"p{i}@example.test"}, f"hello {i}")
-    context, page = open_app(browser, team, team["maya"], **size(760, 520))
-    convs = page.locator(".rc-convs")
-    assert convs.evaluate("l => l.scrollHeight > l.clientHeight")
-    assert "rc-more" in convs.get_attribute("class")
-    convs.evaluate("l => { l.scrollTop = l.scrollHeight; }")
-    page.wait_for_function("() => !document.querySelector('.rc-convs').classList.contains('rc-more')")
-    assert page.locator(".rc-day", has_text="Today").count() == 1
-    css = (STATIC / "app-mode.css").read_text("utf-8")
-    assert "::-webkit-scrollbar" not in css and "scrollbar-color" not in css and "scrollbar-width" not in css
-    context.close()
 
 
 def _team_of(team):
@@ -283,8 +244,10 @@ def test_the_to_label_stays_top_aligned_with_the_first_line(team, browser):
     context.close()
 
 
-def test_previews_say_you_only_for_your_own_and_keep_a_machine_inboxs_sender(team, browser):
-    person_send(team, team["maya"], {"person": "jon@example.test"}, "mine")
+def test_previews_say_you_only_for_your_own(team, browser):
+    """§20.4 R8 under §21: one conversation per person; "You:" only when your own message is the last one."""
+    person_send(team, team["maya"], {"person": "priya@example.test"}, "mine")
+    person_send(team, team["maya"], {"person": "jon@example.test"}, "to Jon")
     jon_writes(team, "from Jon the person")
     api(team["base"], "/api/v1/messages", {"id": str(uuid.uuid4()), "to": {"person": "maya@example.test"},
                                           "body": "from Sam's machine"}, team["machines"]["sam-server"][1])
@@ -292,24 +255,12 @@ def test_previews_say_you_only_for_your_own_and_keep_a_machine_inboxs_sender(tea
     previews = {page.locator(".rc-conv-name").nth(i).inner_text(): page.locator(".rc-conv-preview").nth(i).inner_text()
                 for i in range(page.locator(".rc-conv").count())}
     clean = {k: v.replace("Last message from\n", "").replace("Last message:\n", "") for k, v in previews.items()}
-    assert clean["Jon · api-agent"] == "You: mine"
+    assert set(clean) == {"Priya", "Jon", "Sam"}  # one row per person, never "Jon · api-agent" or "Sam · inbox"
+    assert clean["Priya"] == "You: mine"
     assert clean["Jon"] == "from Jon the person"
-    assert clean["Sam · inbox"].endswith(": from Sam's machine") and clean["Sam · inbox"].startswith("Sam")
+    assert clean["Sam"] == "from Sam's machine"
     context.close()
 
-
-@pytest.mark.skip(reason="frozen for v0.5.5 (R7/P1/Team/M3)")
-def test_the_team_section_is_pinned_at_the_bottom_with_or_without_conversations(team, browser):
-    def team_gap(page):
-        return page.evaluate("""() => { const t = document.querySelector('details.rc-team').getBoundingClientRect(),
-            w = document.querySelector('.rc-list .rc-whoami').getBoundingClientRect(); return w.top - t.bottom; }""")
-    context, page = open_app(browser, team, team["maya"], **size(1180, 780))
-    empty_gap = team_gap(page)
-    context.close()
-    person_send(team, team["maya"], {"person": "jon@example.test"}, "hi")
-    context, page = open_app(browser, team, team["maya"], **size(1180, 780))
-    assert abs(team_gap(page) - empty_gap) <= 1 and empty_gap < 20
-    context.close()
 
 
 # 29: tokens, no inline styles, AA ----------------------------------------------------------------------------
@@ -334,19 +285,3 @@ def test_no_inline_styles_and_the_new_parts_pass_aa(team, browser):
 
 
 # The frozen items are off: v0.5.4's behaviour holds (P1, R7, the Team tooltip) -------------------------------
-
-def test_v0_5_4_behaviour_holds_for_the_frozen_items(team, browser):
-    """P1, R7 and the Team work are frozen for v0.5.5: "via" shows even when it equals the conversation's agent, the
-    Team section stays open in a short window with no list fade, and the Team tooltip names the handle."""
-    ask = person_send(team, team["maya"], {"person": "jon@example.test"}, "Can you check?")
-    api(team["base"], "/api/v1/messages", {"id": str(uuid.uuid4()), "to": {"person": "maya@example.test"},
-                                          "from_agent": "api-agent", "body": "Done.", "in_reply_to": ask["id"]},
-        team["machines"]["jon-laptop"][1])
-    context, page = open_app(browser, team, team["maya"], path=conv_path(ask), **size(760, 520))
-    assert "via api-agent (stated by the machine)" in page.locator(".rc-thread").inner_text()
-    assert page.locator("details.rc-team").evaluate("d => d.open") is True  # no R7 collapse below 600 px tall
-    assert "rc-more" not in (page.locator(".rc-convs").get_attribute("class") or "")
-    tip = page.locator(".rc-team-agent", has_text="Jon · api-agent").get_attribute("title")
-    assert tip == "New message to Jon · api-agent (jon-laptop/api-agent)"
-    context.close()
-
