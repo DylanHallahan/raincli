@@ -682,8 +682,10 @@ def direct_children(hwnd):
 
 def screen_pixels(hwnd, path):
     """v0.5.6: what the user sees. The window is put on top and its client area copied from the SCREEN (BitBlt of
-    the desktop DC; PrintWindow can return blank for composited WebView2 content). Saved as a 32-bit BMP; returns
-    ``{"w", "h", "white_rows"}``, a row counting as white when 98% of its sampled pixels are near-white."""
+    the desktop DC; PrintWindow can return blank for composited WebView2 content), moved first so that all of it
+    is on screen (off-screen pixels read black). Saved as a 32-bit BMP; returns ``{"w", "h", "blank_rows",
+    "white_rows"}``: a blank row is one colour across (a window showing nothing, white or the form's grey, is all
+    blank rows; the page's nav, list and borders break every row), a white row 98% near-white."""
     import ctypes
     import struct
     from ctypes import wintypes
@@ -695,6 +697,7 @@ def screen_pixels(hwnd, path):
                     ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
     user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
     keep = 0x0001 | 0x0002 | 0x0040  # SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0001 | 0x0004)  # to the top left (SWP_NOSIZE | SWP_NOZORDER)
     user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, keep)  # HWND_TOPMOST
     time.sleep(1.5)
     try:
@@ -702,7 +705,10 @@ def screen_pixels(hwnd, path):
         user32.GetClientRect(hwnd, ctypes.byref(rect))
         user32.ClientToScreen(hwnd, ctypes.byref(origin))
         w, h = rect.right - rect.left, rect.bottom - rect.top
+        sw, sh = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
         check(w > 0 and h > 0, f"the window has no client area ({w}x{h})")
+        check(origin.x >= 0 and origin.y >= 0 and origin.x + w <= sw and origin.y + h <= sh,
+              f"the window's client area {w}x{h} at {origin.x},{origin.y} is not all on the {sw}x{sh} screen")
         screen = user32.GetDC(0)
         mem = gdi32.CreateCompatibleDC(screen)
         bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
@@ -722,12 +728,13 @@ def screen_pixels(hwnd, path):
         f.write(b"BM" + struct.pack("<IHHI", 54 + len(data), 0, 0, 54))
         f.write(struct.pack("<IiiHHIIiiII", 40, w, -h, 1, 32, 0, len(data), 0, 0, 0, 0))
         f.write(data)
-    stride, step, white = w * 4, max(1, w // 400), 0
+    stride, step, blank, white = w * 4, max(1, w // 400), 0, 0
     for row in range(h):
         line = data[row * stride:(row + 1) * stride]
         px = [(line[i], line[i + 1], line[i + 2]) for i in range(0, stride, 4 * step)]
-        white += sum(1 for b, g, r in px if b > 240 and g > 240 and r > 240) / len(px) > 0.98
-    return {"w": w, "h": h, "white_rows": white}
+        blank += all(abs(a - b) <= 6 for p in px for a, b in zip(p, px[0]))
+        white += sum(1 for b, g, r in px if b > 235 and g > 235 and r > 235) / len(px) > 0.98
+    return {"w": w, "h": h, "blank_rows": blank, "white_rows": white}
 
 
 # Display scaling (brief v0.5.5 shot 13): a real per-monitor scale on the runner, set live the way Settings > Display
@@ -1326,12 +1333,16 @@ def part_d(app, server, installers, password, observer, menu, work):
             pixels = screen_pixels(hwnd, ARTIFACTS / f"d5h-{label}-screen.bmp")
             lines = [line.strip() for line in (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace")
                      .splitlines() if "page visibility" in line][-2:]
-            say(f"D5h {label}: child windows {children}; screen pixels {pixels['white_rows']}/{pixels['h']} white rows; "
+            say(f"D5h {label}: child windows {children}; screen pixels {pixels['blank_rows']}/{pixels['h']} blank rows "
+                f"({pixels['white_rows']} white); "
                 f"app log: {lines}")
-            check(children and all(visible for _, visible in children),
-                  f"{label}: the WebView2 control is not visible (child windows {children})")
-            check(pixels["white_rows"] < 0.9 * pixels["h"],
-                  f"{label}: the window is white ({pixels['white_rows']} of {pixels['h']} rows)")
+            problems = []  # both checked, so each one is seen to catch the white window on its own
+            if pixels["blank_rows"] >= 0.9 * pixels["h"]:
+                problems.append(f"the window shows nothing ({pixels['blank_rows']} of {pixels['h']} rows one colour, "
+                                f"{pixels['white_rows']} white)")
+            if not (children and all(visible for _, visible in children)):
+                problems.append(f"the WebView2 control is not visible (child windows {children})")
+            check(not problems, f"{label}: " + "; ".join(problems))
         painted(hwnd, "hidden-start-shown")
         import ctypes
         ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE: closed to the tray
@@ -1341,7 +1352,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         focus_window(hwnd)
         painted(hwnd, "tray-reopen")
         say("PASS: D5h. after a hidden start then show, and after a close to the tray and a reopen, the WebView2 control "
-            "is visible and the window shows the page (screen pixels, not white)")
+            "is visible and the window shows the page (screen pixels, not blank)")
         # The relaunch below is a real launch (--open) that must open the latest conversation; a fresh CDP port
         # for the captures, independent of the hidden start's DevTools session.
         app.quit()
