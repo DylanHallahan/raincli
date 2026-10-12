@@ -57,8 +57,13 @@ class Scan:
         page.on("response", on_response)
 
     def snapshot(self, page, label):
+        # Attribute values inside the owner-only parts (owner warnings, the inbox banner) are wrapped in the same
+        # markup, so the owner scan strips them with their part; the teammate scan reads everything.
         dom = page.evaluate("""() => document.documentElement.outerHTML + ' ' + document.title + ' ' +
-            Array.from(document.querySelectorAll('*')).flatMap((e) => Array.from(e.attributes, (a) => a.value)).join(' ')""")
+            Array.from(document.querySelectorAll('*')).map((e) => {
+              const values = Array.from(e.attributes, (a) => a.value).join(' ');
+              return e.closest('.owner-warnings, .inbox-banner') ? '<section class="inbox-banner">' + values + '</section>' : values;
+            }).join(' ')""")
         self.texts.append((label, dom))
 
     def leaks(self, strings, allow=lambda label, text: text):
@@ -135,9 +140,10 @@ def _website_pages(scan, page, base, seed):  # noqa: F811
 
 def _own_allowed(label, text):
     """C5.1: the owner's own handles and agent names appear only on their own pages (This computer, the website
-    Machines and team pages, owner warnings, the inbox setting); remove those parts before scanning."""
-    if "/app/agents" in label or "/app/teams/" in label or "/app/team" in label or "this-computer" in label:
+    Machines, team and account pages, owner warnings, the inbox setting); remove those parts before scanning."""
+    if any(own in label for own in ("/app/agents", "/app/teams/", "/app/team", "this-computer", "/app/account")):
         return ""
+    text = text.replace('\\"', '"').replace("\\n", "\n").replace("\\u003c", "<").replace("\\u003e", ">")  # JSON-escaped HTML
     text = re.sub(r'<div class="owner-warnings".*?</div>', "", text, flags=re.S)
     text = re.sub(r'<section class="inbox-banner".*?</section>', "", text, flags=re.S)
     return text
@@ -154,7 +160,8 @@ def test_a_member_never_sees_a_teammates_machine_or_agent(live, browser, v06_see
             context.close()
     assert len(scan.texts) > 60
     assert scan.leaks(TEAMMATE_STRINGS) == []
-    assert scan.leaks(OWN_STRINGS, _own_allowed) == []  # her own only on her own pages
+    own = scan.leaks(OWN_STRINGS, _own_allowed)
+    assert own == [], [(label, found) for label, found in own][:5]  # her own only on her own pages
 
 
 def test_a_teammate_never_sees_the_members_machines_or_agents(live, browser, v06_seed):  # noqa: F811
