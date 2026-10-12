@@ -108,7 +108,7 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
     @api.get("/person/inbox")
     async def person_inbox(request: Request, after: int = Query(0, ge=0, le=2**63 - 1),
                            limit: int = Query(100, ge=1, le=2**63 - 1), wait: float = Query(0, ge=0),
-                           include_acked: bool = Query(False)):
+                           include_acked: bool = Query(False), routed: int = Query(0, ge=0, le=1)):
         wait = min(wait, MAX_WAIT_SECONDS)
         limit = min(limit, messaging.INBOX_LIMIT_MAX)
 
@@ -116,7 +116,7 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
             with session_scope(sessionmaker()) as session:
                 auth = authenticate(session, request, "person:read", count=count)
                 msgs, cursor = messaging.person_inbox(session, auth.user, after=after, limit=limit,
-                                                      include_acked=include_acked)
+                                                      include_acked=include_acked, routed=bool(routed))
                 keys = (("person", auth.person_session.id), ("user", auth.user.id))
                 return {"messages": messaging.messages_json(session, msgs, reader_user=auth.user), "cursor": cursor}, keys
         return await polls.long_poll(request, api.state.poll_slots, wait, POLL_INTERVAL, poll)

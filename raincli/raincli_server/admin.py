@@ -175,6 +175,15 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--team", required=True, metavar="SLUG")
     c.add_argument("--handle", required=True)
 
+    c = sub.add_parser("set-inbox", help="operator: set (or --clear) a person's inbox in a team, without checking that "
+                                          "the agent is live (support and tests; people pick their own)")
+    c.add_argument("--team", required=True, metavar="SLUG")
+    c.add_argument("--email", required=True)
+    c.add_argument("--handle", help="one of that person's machines in the team")
+    c.add_argument("--agent", help="the agent name on that machine")
+    c.add_argument("--no-deliver-waiting", action="store_true")
+    c.add_argument("--clear", action="store_true", help="remove the inbox (messages wait in the app again)")
+
     c = sub.add_parser("list-agents", help="list agents (never shows tokens)")
     c.add_argument("--team", metavar="SLUG")
 
@@ -264,6 +273,25 @@ def _dispatch(args, session: Session, env, stdin, stdout, stderr, prompt) -> Non
         agent = _agent(session, _team(session, args.team), args.handle)
         identity.revoke_agent(session, agent)
         print(f"revoked agent {agent.handle} and all its credentials", file=stdout)
+    elif cmd == "set-inbox":
+        from raincli_server import messaging
+        team, user = _team(session, args.team), _user(session, args.email)
+        if args.clear:
+            result = messaging.clear_person_inbox(session, user, team.id)
+        else:
+            if not args.handle or not args.agent:
+                raise AdminError("set-inbox needs --handle and --agent (or --clear)")
+            machine = _agent(session, team, args.handle)
+            try:
+                result = messaging.set_person_inbox(session, user, team.id, machine.id, args.agent,
+                                                    deliver_waiting=not args.no_deliver_waiting, via="api",
+                                                    check_live=False)
+            except messaging.MessagingError as exc:
+                raise AdminError(f"{exc.code}: {exc.message}") from None
+        inbox = result["inbox"]
+        print(f"inbox of {user.email} in {team.slug}: "
+              + (f"{inbox['agent']} on {inbox['machine']}" if inbox else "none")
+              + f" (moved {result['moved']}, delivered waiting {result['delivered_waiting']})", file=stdout)
     elif cmd == "list-agents":
         stmt = (select(Agent, Team, User).join(Team, Team.id == Agent.team_id)
                 .join(User, User.id == Agent.owner_user_id).order_by(Team.slug, Agent.handle))

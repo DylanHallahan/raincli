@@ -33,9 +33,14 @@ TTL_SECONDS = 120  # presence freshness, as presence.TTL_SECONDS
 
 # Event details a client may report (§21 C5.5): fixed codes only, never free text.
 EVENT_CODES = frozenset({
+    # holds (INV §1.4)
     "busy", "blocked", "offline", "next_turn", "target_ambiguous", "sender_blocked", "approval_required",
-    "delivered", "expired_offline", "too_large_for_hook", "too_large_for_command_line", "client_update_needed",
-    "no_inbox",
+    "expired_offline", "too_large_for_hook", "too_large_for_command_line", "client_update_needed", "no_inbox",
+    "owner_unreachable",
+    # outcomes the v0.5.x and v0.6 connectors report (runner.report_code, ops.reject)
+    "delivered", "submission_uncertain", "rejected", "declined", "target_mismatch", "agent_not_ready",
+    "herdr_timeout", "herdr_failed", "handover_failed", "handover_missing", "claimed_without_receipt",
+    "next_turn_emitted",
 })
 
 # Raw hold codes to the coarse groups teammates see (§21 C5.5, C13 M3).

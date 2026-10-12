@@ -110,3 +110,17 @@ def test_look_alike_names_are_told_apart(session, v06_seed):  # noqa: F811
     assert pres.conversation_peer(session, v06_seed["people"]["Maya"], v06_seed["conversations"]["jon"]).label == a
     names = {p["email"]: p["display_name"] for p in pres.people_json(session, nw.id)}
     assert names["jon@example.test"] != names["robert@example.test"]
+
+
+def test_every_code_a_v05_or_v06_connector_reports_is_accepted():
+    """The connectors report these (runner.report_code, ops.reject, the hold reasons); refusing one would leave the
+    sender without the state."""
+    reported = {"delivered", "submission_uncertain", "rejected", "declined", "target_mismatch", "agent_not_ready",
+                "herdr_timeout", "herdr_failed", "handover_failed", "handover_missing", "claimed_without_receipt",
+                "next_turn_emitted", "busy", "blocked", "offline", "next_turn", "target_ambiguous", "expired_offline",
+                "too_large_for_hook", "too_large_for_command_line", "owner_unreachable", "approval_required",
+                "sender_blocked"}
+    assert reported <= pres.EVENT_CODES
+    for code in reported:  # and every one reads as a person's inbox state, never an agent or session word
+        text = pres.hold_text(code, "Jon")
+        assert text.startswith(("Jon", "waiting for")) and "agent " not in text
