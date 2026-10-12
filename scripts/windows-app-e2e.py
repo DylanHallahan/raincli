@@ -663,6 +663,73 @@ def focus_window(hwnd):
     user32.SetForegroundWindow(hwnd)
 
 
+def direct_children(hwnd):
+    """The window's direct child windows as ``[(class name, visible)]``: the WebView2 WinForms control is one."""
+    import ctypes
+    from ctypes import wintypes
+    user32, found = ctypes.windll.user32, []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(child, _):
+        if user32.GetParent(child) == hwnd:
+            name = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(child, name, 256)
+            found.append((name.value, bool(user32.IsWindowVisible(child))))
+        return True
+    user32.EnumChildWindows(hwnd, each, 0)
+    return found
+
+
+def screen_pixels(hwnd, path):
+    """v0.5.6: what the user sees. The window is put on top and its client area copied from the SCREEN (BitBlt of
+    the desktop DC; PrintWindow can return blank for composited WebView2 content). Saved as a 32-bit BMP; returns
+    ``{"w", "h", "white_rows"}``, a row counting as white when 98% of its sampled pixels are near-white."""
+    import ctypes
+    import struct
+    from ctypes import wintypes
+
+    class BIH(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", ctypes.c_long), ("biHeight", ctypes.c_long),
+                    ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", ctypes.c_long),
+                    ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
+    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+    keep = 0x0001 | 0x0002 | 0x0040  # SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+    user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, keep)  # HWND_TOPMOST
+    time.sleep(1.5)
+    try:
+        rect, origin = wintypes.RECT(), wintypes.POINT(0, 0)
+        user32.GetClientRect(hwnd, ctypes.byref(rect))
+        user32.ClientToScreen(hwnd, ctypes.byref(origin))
+        w, h = rect.right - rect.left, rect.bottom - rect.top
+        check(w > 0 and h > 0, f"the window has no client area ({w}x{h})")
+        screen = user32.GetDC(0)
+        mem = gdi32.CreateCompatibleDC(screen)
+        bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
+        gdi32.SelectObject(mem, bmp)
+        gdi32.BitBlt(mem, 0, 0, w, h, screen, origin.x, origin.y, 0x00CC0020)  # SRCCOPY
+        info = BIH(ctypes.sizeof(BIH), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+        buf = (ctypes.c_ubyte * (w * h * 4))()
+        gdi32.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(info), 0)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mem)
+        user32.ReleaseDC(0, screen)
+    finally:
+        user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, keep)  # HWND_NOTOPMOST
+    data = bytes(buf)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"BM" + struct.pack("<IHHI", 54 + len(data), 0, 0, 54))
+        f.write(struct.pack("<IiiHHIIiiII", 40, w, -h, 1, 32, 0, len(data), 0, 0, 0, 0))
+        f.write(data)
+    stride, step, white = w * 4, max(1, w // 400), 0
+    for row in range(h):
+        line = data[row * stride:(row + 1) * stride]
+        px = [(line[i], line[i + 1], line[i + 2]) for i in range(0, stride, 4 * step)]
+        white += sum(1 for b, g, r in px if b > 240 and g > 240 and r > 240) / len(px) > 0.98
+    return {"w": w, "h": h, "white_rows": white}
+
+
 # Display scaling (brief v0.5.5 shot 13): a real per-monitor scale on the runner, set live the way Settings > Display
 # does (DisplayConfigSetDeviceInfo, relative steps from the recommended scale), at 1920x1080 so 150% is allowed.
 _DPI_STEPS = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500]
@@ -1250,6 +1317,31 @@ def part_d(app, server, installers, password, observer, menu, work):
                   .splitlines() if "webview2 process failed" in line]
         say(f"D5h: shown and focused, the window read the message; WebView2 processes {before_show} -> {after_show}; "
             f"DevTools answers: {devtools_answer(f'127.0.0.1:{port}')}; process failures logged: {failed}")
+        # v0.5.6, the white window: the page said visible and focused, but v0.5.5 left the WebView2 WinForms control
+        # hidden after a hidden start, so the window showed nothing but white. Checked natively (the control's own
+        # window) and in real pixels, after the hidden start's show and after a close to the tray and a reopen.
+        def painted(hwnd, label):
+            time.sleep(3)
+            children = direct_children(hwnd)
+            pixels = screen_pixels(hwnd, ARTIFACTS / f"d5h-{label}-screen.bmp")
+            lines = [line.strip() for line in (app.root / "app-lock" / "app.log").read_text("utf-8", errors="replace")
+                     .splitlines() if "page visibility" in line][-2:]
+            say(f"D5h {label}: child windows {children}; screen pixels {pixels['white_rows']}/{pixels['h']} white rows; "
+                f"app log: {lines}")
+            check(children and all(visible for _, visible in children),
+                  f"{label}: the WebView2 control is not visible (child windows {children})")
+            check(pixels["white_rows"] < 0.9 * pixels["h"],
+                  f"{label}: the window is white ({pixels['white_rows']} of {pixels['h']} rows)")
+        painted(hwnd, "hidden-start-shown")
+        import ctypes
+        ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE: closed to the tray
+        wait_for("the window to close to the tray", lambda: app_window(app_pids(app.root)) is None, timeout=30, interval=1)
+        app.stub("--open")
+        hwnd = wait_for("the reopened app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
+        focus_window(hwnd)
+        painted(hwnd, "tray-reopen")
+        say("PASS: D5h. after a hidden start then show, and after a close to the tray and a reopen, the WebView2 control "
+            "is visible and the window shows the page (screen pixels, not white)")
         # The relaunch below is a real launch (--open) that must open the latest conversation; a fresh CDP port
         # for the captures, independent of the hidden start's DevTools session.
         app.quit()
