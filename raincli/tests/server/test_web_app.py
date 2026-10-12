@@ -471,21 +471,27 @@ def test_inbox_and_conversation_show_delivery_state(client, world, session):
     session.commit()
     login(client)
     inbox = client.get("/app")
-    assert "bob-agent" in inbox.text and "Held" in inbox.text
+    assert "Bob" in inbox.text and "bob-agent" not in inbox.text and "Held" in inbox.text  # §21: people
     conv = client.get(f"/app/conversations/{msg.conversation_id}")
     assert conv.status_code == 200
     assert "Can you &lt;b&gt;review&lt;/b&gt;?" in conv.text and "<b>review</b>" not in conv.text
-    assert "approval_required" in conv.text and "state-held" in conv.text and "UTC" in conv.text
-    assert "Acme · 1 message" in conv.text and "Team Acme" not in conv.text
+    # §21 C5.5: the state, never an event's detail; the header's second line is the team (with presence).
+    assert "approval_required" not in conv.text and "state-held" in conv.text and "UTC" in conv.text
+    assert re.search(r"Acme · [^<]*1 message", conv.text) and "Team Acme" not in conv.text
 
 
 def test_compose_as_the_person_and_reply(client, world, session):
-    """§16.9: the website sends as the person; there is no "send as one of your agents" choice."""
+    """§16.9: the website sends as the person; there is no "send as one of your agents" choice. Alice has no inbox
+    here (§21 C3.2), so Bob's reply is delivered in her app and viewing it on the website acks it."""
+    from raincli_server.models import PersonInbox
+
+    session.query(PersonInbox).filter(PersonInbox.user_id == world["users"]["alice"].id).delete()
+    session.commit()
     login(client)
     page = client.get("/app/compose")
     assert 'name="from_agent"' not in page.text and "Sent as <strong>you (Alice)</strong>" in page.text
     mid = str(uuid.uuid4())
-    data = {"csrf_token": csrf_of(page.text), "message_id": mid, "to": "bob-agent", "body": "Hi Bob\r\nline two"}
+    data = {"csrf_token": csrf_of(page.text), "message_id": mid, "to": "bob@example.test", "body": "Hi Bob\r\nline two"}
     r = client.post("/app/conversations/new/send", data=data, follow_redirects=False)
     assert r.status_code == 303 and "notice=sent" in r.headers["location"]
     stored = session.get(Message, uuid.UUID(mid))
@@ -504,7 +510,7 @@ def test_compose_as_the_person_and_reply(client, world, session):
     with TestClient(client.app) as bob:
         login(bob, email="bob@example.test")
         conv = bob.get(f"/app/conversations/{stored.conversation_id}?reply_to={mid}")
-        assert "Reply to @alice@example.test" in conv.text
+        assert "Reply to Alice" in conv.text and "@alice@example.test" not in conv.text
         r = bob.post(f"/app/conversations/{stored.conversation_id}/send", data={
             "csrf_token": csrf_of(conv.text), "message_id": str(uuid.uuid4()), "body": "On it",
             "in_reply_to": mid}, follow_redirects=False)
@@ -524,7 +530,7 @@ def test_compose_endpoints_and_cross_team_recipients(client, world, session):
     login(client)
     csrf = csrf_of(client.get("/app/compose").text)
     sent = {}
-    for to in ("bob-agent", "@bob@example.test"):
+    for to in ("bob@example.test", "@bob@example.test", "Bob"):
         r = client.post("/app/conversations/new/send", data={
             "csrf_token": csrf, "message_id": str(uuid.uuid4()), "to": to, "body": "hi"}, follow_redirects=False)
         assert r.status_code == 303, to
@@ -534,7 +540,7 @@ def test_compose_endpoints_and_cross_team_recipients(client, world, session):
         r = client.post("/app/conversations/new/send", data={
             "csrf_token": csrf, "message_id": str(uuid.uuid4()), "to": to, "body": "hi"})
         assert r.status_code == 400, to
-    assert session.scalar(select(func.count()).select_from(Message)) == 2
+    assert session.scalar(select(func.count()).select_from(Message)) == 3
 
 
 def test_compose_capacity_and_invalid_body(client, world, session, settings):
@@ -542,7 +548,7 @@ def test_compose_capacity_and_invalid_body(client, world, session, settings):
         add_message(session, world["agents"]["bob"], world["agents"]["alice"], body=f"m{i}")
     login(client, email="bob@example.test")
     csrf = csrf_of(client.get("/app/compose").text)
-    base = {"csrf_token": csrf, "from_agent": str(world["agents"]["bob"].id), "to": "alice-agent"}
+    base = {"csrf_token": csrf, "from_agent": str(world["agents"]["bob"].id), "to": "alice@example.test"}
     r = client.post("/app/conversations/new/send", data={**base, "message_id": str(uuid.uuid4()), "body": "more"})
     assert r.status_code == 429 and "inbox is full" in r.text
     r = client.post("/app/conversations/new/send", data={**base, "message_id": str(uuid.uuid4()), "body": "  "})
@@ -563,7 +569,7 @@ def _send_with_files(client, conversation, sender, to, files, body="see attached
 def test_compose_upload_and_download(client, world, session):
     login(client)
     content = "# Plan\r\n\nünïcode  \n".encode()
-    r, mid = _send_with_files(client, "new", world["agents"]["alice"], "bob-agent",
+    r, mid = _send_with_files(client, "new", world["agents"]["alice"], "bob@example.test",
                               [("files", ("plan.md", content, "text/markdown")),
                                ("files", ("notes.md", b"two", "text/markdown"))])
     assert r.status_code == 303
@@ -588,7 +594,7 @@ def test_compose_upload_and_download(client, world, session):
     assert "sandbox" in h["content-security-policy"]
 
     # Reply in the existing conversation with an attachment.
-    r, _ = _send_with_files(client, conv_id, world["agents"]["alice"], "bob-agent",
+    r, _ = _send_with_files(client, conv_id, world["agents"]["alice"], "bob@example.test",
                             [("files", ("more.md", b"# more", "text/markdown"))])
     assert r.status_code == 303
 
@@ -597,9 +603,9 @@ def test_attachment_download_authorization(client, world, session, app):
     from fastapi.testclient import TestClient
 
     login(client)
-    r, mid = _send_with_files(client, "new", world["agents"]["alice"], "bob-agent",
+    r, mid = _send_with_files(client, "new", world["agents"]["alice"], "bob@example.test",
                               [("files", ("a.md", b"# a", "text/markdown"))])
-    other_r, other_mid = _send_with_files(client, "new", world["agents"]["alice"], "bob-agent",
+    other_r, other_mid = _send_with_files(client, "new", world["agents"]["alice"], "bob@example.test",
                                           [("files", ("b.md", b"# b", "text/markdown"))])
     att = session.scalar(select(Attachment).where(Attachment.message_id == uuid.UUID(mid)))
     href = f"/app/messages/{mid}/attachments/{att.id}"
@@ -621,7 +627,7 @@ def test_attachment_download_authorization(client, world, session, app):
 @pytest.mark.parametrize("name", ["../x.md", "a/b.md", ".x.md", "notes.txt", "con.md"])
 def test_compose_rejects_bad_attachment_name(client, world, session, name):
     login(client)
-    r, _ = _send_with_files(client, "new", world["agents"]["alice"], "bob-agent",
+    r, _ = _send_with_files(client, "new", world["agents"]["alice"], "bob@example.test",
                             [("files", (name, b"# x", "text/markdown"))])
     assert r.status_code == 400 and "filename must be a plain .md name" in r.text
     assert session.scalar(select(func.count()).select_from(Message)) == 0
@@ -638,7 +644,7 @@ def test_compose_rejects_bad_attachment_sets(client, world, session):
         [("files", ("big.md", b"x" * (256 * 1024 + 1), "text/markdown"))],
     ]
     for files in cases:
-        r, _ = _send_with_files(client, "new", alice, "bob-agent", files)
+        r, _ = _send_with_files(client, "new", alice, "bob@example.test", files)
         assert r.status_code == 400, files[0][1][0]
     assert session.scalar(select(func.count()).select_from(Message)) == 0
     assert session.scalar(select(func.count()).select_from(Attachment)) == 0
@@ -982,7 +988,7 @@ def test_every_web_html_redirect_and_error_response_is_no_store(client, world, s
                       data={"csrf_token": csrf, "token": re.search(r'value="(rca_[^"]+)"', token_page.text).group(1)}))
     check(client.post(f"/app/agents/{agent_id}/rotate", data={"csrf_token": csrf}))
     check(client.post("/app/conversations/new/send", data={
-        "csrf_token": csrf, "message_id": str(uuid.uuid4()), "from_agent": str(agent_id), "to": "bob-agent",
+        "csrf_token": csrf, "message_id": str(uuid.uuid4()), "from_agent": str(agent_id), "to": "bob@example.test",
         "body": "hi"}, follow_redirects=False))
     check(client.post("/app/teams/acme/invitations", data={"csrf_token": csrf}))
     check(client.post(f"/app/agents/{agent_id}/revoke", data={"csrf_token": csrf}, follow_redirects=False))
@@ -1036,8 +1042,12 @@ def _machine_sessions(html: str, handle: str) -> list[str]:
 
 def test_machines_page_lists_agents_with_inbox_first_and_no_keys(client, world, session):
     from raincli_server import presence
-    from raincli_server.models import MachineAgent
+    from raincli_server.models import AgentPresence, MachineAgent
 
+    # The world fixture gives each machine its inbox agent (§21); this test starts from a machine with none.
+    session.query(MachineAgent).filter(MachineAgent.agent_id == world["agents"]["alice"].id).delete()
+    session.query(AgentPresence).filter(AgentPresence.agent_id == world["agents"]["alice"].id).delete()
+    session.commit()
     login(client)
     page = client.get("/app/agents").text
     assert "Your machines" in page and "Your team's machines" in page  # Alice owns acme (§21 C5.8)
