@@ -16,7 +16,7 @@
 <body>
   <nav class="rc-nav" aria-label="RainCLI">
     <button type="button" data-open="inbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z"/></svg>Inbox</button>
-    <button type="button" data-open="agents"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3 3-5 6-5s6 2 6 5M17 11a3 3 0 0 0 0-6M21 20c0-2-1-4-3-4.5"/></svg>Agents</button>
+    <button type="button" data-open="people"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3 3-5 6-5s6 2 6 5M17 11a3 3 0 0 0 0-6M21 20c0-2-1-4-3-4.5"/></svg>People</button>
     <button type="button" data-open="this-computer"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>This computer</button>
     <span class="spacer"></span>
     <button type="button" data-open="settings" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6a7 7 0 0 0 0 2.4l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z"/></svg>Settings</button>
@@ -25,6 +25,15 @@
     <div class="panel">
       <h1>Settings</h1>
       <p class="message" id="message" role="status"></p>
+      <section class="card" aria-labelledby="inbox-title">
+        <h2 id="inbox-title">Your inbox</h2>
+        <div class="row"><strong id="inbox-status">…</strong><button class="btn btn-quiet" type="button" data-open="this-computer">Change on This computer</button></div>
+      </section>
+      <section class="card" aria-labelledby="notify-title">
+        <h2 id="notify-title">Notifications</h2>
+        <div class="choice"><input type="checkbox" id="notify-all"><label for="notify-all">Notify me about every message</label></div>
+        <p class="muted small">Otherwise RainCLI notifies you only about what needs you: messages teammates write by hand, messages waiting because you have no inbox, messages held for your approval, escalations, and an inbox that has been offline for more than an hour.</p>
+      </section>
       <section class="card" aria-labelledby="routing-title">
         <h2 id="routing-title">Who can message this computer's agents</h2>
         <div class="choice"><input type="radio" name="routing" id="routing-all" value="all"><label for="routing-all">Any named agent here, under the trust rules below</label></div>

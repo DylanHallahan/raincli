@@ -11,9 +11,11 @@ Three private files sit beside the agent config:
   (``rotate_app_install_token``); a rotation ends handoff codes and app-mode web sessions
   bound to the old one.
 - ``notifications/``: the runtime's notification feed (§16.10): ``queue.json`` holds
-  ``{id, kind, at}`` entries for messages to the person, kept for 7 days and at most 500
-  (§16.12 C14), written by the runtime only; ``taken.json`` is how far the app has read,
-  written by the app only. No body is ever written there.
+  ``{id, kind, at}`` entries for messages to the person and to their own machines (§21 PR6),
+  each with the facts the app's toast rule needs (``from_kind``, an approval ``hold``,
+  ``waiting``), kept for 7 days and at most 500 (§16.12 C14), written by the runtime only;
+  ``taken.json`` is how far the app has read and ``settings.json`` the app's "Notify me about
+  every message" choice, both written by the app only. No body or name is ever written there.
 
 No function here puts a token in an error message or a return value other than the ones
 named for it (``load_session``, ``app_install_token``).
@@ -283,11 +285,15 @@ class PersonClient:
     def me(self):
         return self.api.request("GET", "/person/me")[1]
 
-    def inbox(self, *, after=0, wait=0, include_acked=False, limit=100):
+    def inbox(self, *, after=0, wait=0, include_acked=False, limit=100, routed=False):
+        """``routed`` (§21 PR6, the app's toasts): also the messages routed to this person's own machines
+        (their inbox, replies to their agents). A v0.5 server ignores it."""
         from .api import MAX_WAIT
         wait = max(0, min(int(wait), MAX_WAIT))
         query = {"after": int(after), "limit": int(limit), "wait": wait,
                  "include_acked": "true" if include_acked else "false"}
+        if routed:
+            query["routed"] = 1
         data = self.api.request("GET", "/person/inbox", query=query,
                                 timeout=max(self.api.timeout, wait + 15))[1]
         self.poll_backoff = self.api.retry_after if not data["messages"] else None  # §18.1 item 4
@@ -392,7 +398,14 @@ def endpoint_label(endpoint):
     return str(endpoint.get("machine") or "?")
 
 
-# -- the notification feed (§16.10, §16.12 C14) -------------------------------------------------------
+# -- the notification feed (§16.10, §16.12 C14, §21 PR6) ------------------------------------------------
+
+NOTIFY_SETTINGS = "settings.json"
+INBOX_OFFLINE_AFTER = 3600  # PR6: "your inbox offline for more than an hour"
+INBOX_CHECK_EVERY = 60  # seconds between checks of the person's own presence (GET /people)
+APPROVAL_HOLDS = ("approval_required", "sender_blocked", "approval")  # raw codes, and the coarse one (C13 M3)
+FROM_KINDS = ("app", "agent")
+
 
 def _iso(ts):
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -411,9 +424,18 @@ def _read_json(path, default):
 def _queue(agent_config):
     data = _read_json(notify_dir(agent_config) / "queue.json", {})
     entries = [e for e in data.get("entries", []) if isinstance(e, dict) and isinstance(e.get("seq"), int)]
+    offline = data.get("inbox_offline") if isinstance(data.get("inbox_offline"), dict) else {}
+    since = offline.get("since")
     return {"cursor": data.get("cursor", 0) if isinstance(data.get("cursor"), int) else 0,
             "session": data.get("session") if isinstance(data.get("session"), str) else None,
-            "seq": data.get("seq", 0) if isinstance(data.get("seq"), int) else 0, "entries": entries}
+            "seq": data.get("seq", 0) if isinstance(data.get("seq"), int) else 0, "entries": entries,
+            "inbox_offline": {"since": since if isinstance(since, (int, float)) and not isinstance(since, bool)
+                              else None, "notified": offline.get("notified") is True}}
+
+
+def _write_queue(agent_config, queue):
+    ensure_private_dir(str(notify_dir(agent_config)))
+    atomic_write_json(str(notify_dir(agent_config) / "queue.json"), queue)
 
 
 def _prune(entries, now):
@@ -421,9 +443,31 @@ def _prune(entries, now):
     return keep[-NOTIFY_KEEP_COUNT:]
 
 
-def append_notifications(agent_config, messages, cursor, session_id, now=None):
-    """The runtime's side: append ``{id, kind, at}`` for each new message and keep the
-    cursor. Only the runtime writes ``queue.json``. Returns the number added."""
+def _person_of(endpoint):
+    return str(endpoint["person"]).lower() if isinstance(endpoint, dict) and isinstance(endpoint.get("person"), str) \
+        else None
+
+
+def message_facts(message, to_person=None):
+    """What the app's toast rule (§21 PR6) needs from a person-API message, and nothing else (C14):
+
+    - ``from_kind``: ``app`` (a teammate wrote it by hand) or ``agent``; None from a server before v0.6;
+    - ``hold``: ``approval`` when it is held for the person's approval, else None;
+    - ``waiting``: it waits in the person's app because they have no inbox (``no_inbox``). The person's own
+      read of such a message shows no hold, so it is also recognised as addressed to the person themselves
+      (``to_person``: the ids the poll without ``routed`` returned) and not sent by them or their machines:
+      a new message keeps ``recipient_user_id`` only while the person has no inbox in that team (C3, C6)."""
+    from_kind = message.get("from_kind") if message.get("from_kind") in FROM_KINDS else None
+    hold = message.get("hold_reason")
+    own = _person_of(message.get("from_endpoint")) is not None \
+        and _person_of(message.get("from_endpoint")) == _person_of(message.get("to_endpoint"))
+    waiting = hold == "no_inbox" or (to_person is not None and message.get("id") in to_person and not own)
+    return {"from_kind": from_kind, "hold": "approval" if hold in APPROVAL_HOLDS else None, "waiting": bool(waiting)}
+
+
+def append_notifications(agent_config, messages, cursor, session_id, now=None, to_person=None):
+    """The runtime's side: append ``{id, kind, at}`` and the toast facts (``message_facts``) for each
+    new message, and keep the cursor. Only the runtime writes ``queue.json``. Returns the number added."""
     now = time.time() if now is None else now
     queue = _queue(agent_config)
     known = {e.get("id") for e in queue["entries"]}
@@ -438,17 +482,44 @@ def append_notifications(agent_config, messages, cursor, session_id, now=None):
             continue
         kind = message.get("kind") if message.get("kind") in ("message", "escalation") else "message"
         queue["seq"] += 1
-        queue["entries"].append({"seq": queue["seq"], "id": mid, "kind": kind, "at": _iso(now), "t": now})
+        queue["entries"].append({"seq": queue["seq"], "id": mid, "kind": kind, "at": _iso(now), "t": now,
+                                 **message_facts(message, to_person)})
         known.add(mid)
         added += 1
     queue.update(cursor=int(cursor), session=session_id, entries=_prune(queue["entries"], now))
-    ensure_private_dir(str(notify_dir(agent_config)))
-    atomic_write_json(str(notify_dir(agent_config) / "queue.json"), queue)
+    _write_queue(agent_config, queue)
+    return added
+
+
+def record_inbox_presence(agent_config, presence, now=None):
+    """PR6: one ``inbox_offline`` entry when the person's inbox has been ``offline`` for more than an hour,
+    re-armed when it is back (any other presence, ``no_inbox`` included). ``presence`` None (not known)
+    changes nothing. Returns whether an entry was added."""
+    now = time.time() if now is None else now
+    queue = _queue(agent_config)
+    state = dict(queue["inbox_offline"])
+    added = False
+    if presence is None:
+        return False
+    if presence == "offline":
+        state["since"] = now if state["since"] is None else state["since"]
+        if not state["notified"] and now - state["since"] > INBOX_OFFLINE_AFTER:
+            queue["seq"] += 1
+            queue["entries"].append({"seq": queue["seq"], "id": str(uuid.uuid4()), "kind": "inbox_offline",
+                                     "at": _iso(now), "t": now})
+            state["notified"] = added = True
+    else:
+        state = {"since": None, "notified": False}
+    if state != queue["inbox_offline"] or added:
+        queue.update(inbox_offline=state, entries=_prune(queue["entries"], now))
+        _write_queue(agent_config, queue)
     return added
 
 
 def take_notifications(agent_config=None, now=None):
-    """The app's side: new entries ``{id, kind, at}``, oldest first, each returned once."""
+    """The app's side: new entries ``{id, kind, at, from_kind, hold, waiting}``, oldest first, each
+    returned once. ``kind`` is ``message``, ``escalation`` or ``inbox_offline``; an entry written before
+    v0.6 has ``from_kind`` None."""
     now = time.time() if now is None else now
     queue = _queue(agent_config)
     taken = _read_json(notify_dir(agent_config) / "taken.json", {}).get("seq", 0)
@@ -459,23 +530,52 @@ def take_notifications(agent_config=None, now=None):
     if fresh:
         ensure_private_dir(str(notify_dir(agent_config)))
         atomic_write_json(str(notify_dir(agent_config) / "taken.json"), {"seq": fresh[-1]["seq"]})
-    return [{"id": e["id"], "kind": e["kind"], "at": e["at"]} for e in fresh]
+    return [{"id": e["id"], "kind": e["kind"], "at": e["at"],
+             "from_kind": e.get("from_kind") if e.get("from_kind") in FROM_KINDS else None,
+             "hold": "approval" if e.get("hold") == "approval" else None, "waiting": e.get("waiting") is True}
+            for e in fresh]
+
+
+def notify_all(agent_config=None):
+    """The app's "Notify me about every message" setting (§21 PR6): off unless chosen."""
+    return _read_json(notify_dir(agent_config) / NOTIFY_SETTINGS, {}).get("notify_all") is True
+
+
+def set_notify_all(agent_config, value):
+    """Save the setting (the app's side; a bool only)."""
+    if not isinstance(value, bool):
+        raise UsageError("notify_all is true or false")
+    ensure_private_dir(str(notify_dir(agent_config)))
+    atomic_write_json(str(notify_dir(agent_config) / NOTIFY_SETTINGS), {"notify_all": value})
+    return value
 
 
 class NotificationFeed:
-    """The runtime's long-poll of ``/person/inbox`` (§16.10). It runs only while this
-    machine has a person session, re-reads ``person.json`` after every failure, and
-    never acks: viewing a message is what acks it."""
+    """The runtime's long-poll of ``/person/inbox?routed=1`` (§16.10, §21 PR6). It runs only while
+    this machine has a person session, re-reads ``person.json`` after every failure, and never acks:
+    viewing a message is what acks it. Every ``INBOX_CHECK_EVERY`` seconds it also reads the
+    person's own presence (``GET /people`` with the machine credential, this machine's team) for the
+    "inbox offline for more than an hour" toast."""
 
-    def __init__(self, agent_config, *, client_factory=None, sleep=None, now=time.time, log=None):
+    def __init__(self, agent_config, *, client_factory=None, machine_factory=None, sleep=None, now=time.time,
+                 log=None):
         self.agent_config = agent_config
         self.client_factory = client_factory or (lambda: PersonClient.for_config(agent_config, max_attempts=1))
+        self.machine_factory = machine_factory or self._machine_client
         self.stop = threading.Event()
         self.sleep = sleep or self.stop.wait
         self.now = now
         self.log = log or (lambda text: None)
         self.failures = 0
         self.backoff = None
+        self._checked = None
+        self._email = None
+        self._check_error = None
+
+    def _machine_client(self):
+        from .api import ApiClient
+        config = load_config(self.agent_config or default_config_path())
+        return ApiClient(config.api_url, config.token, timeout=15, max_attempts=1)
 
     def session_id(self):
         token = load_session(self.agent_config)
@@ -489,9 +589,39 @@ class NotificationFeed:
         queue = _queue(self.agent_config)
         cursor = queue["cursor"] if queue["session"] == session else 0
         client = self.client_factory()
-        messages, new_cursor = client.inbox(after=cursor, wait=wait)
+        messages, new_cursor = client.inbox(after=cursor, wait=wait, routed=True)
         self.backoff = getattr(client, "poll_backoff", None)
-        return append_notifications(self.agent_config, messages, new_cursor, session, self.now())
+        to_person = None
+        if messages:  # which of them are addressed to the person themselves (no inbox): one quick read
+            direct, _ = client.inbox(after=cursor, wait=0)
+            to_person = {m.get("id") for m in direct if isinstance(m, dict)}
+        return append_notifications(self.agent_config, messages, new_cursor, session, self.now(), to_person)
+
+    def check_inbox(self):
+        """At most every ``INBOX_CHECK_EVERY`` seconds: the person's own presence from ``GET /people``
+        (``ready``, ``busy``, ``offline`` or ``no_inbox``, C5.4) into ``record_inbox_presence``. Returns
+        whether a toast entry was added, or None when it is not time yet."""
+        now = self.now()
+        if self._checked is not None and now - self._checked < INBOX_CHECK_EVERY:
+            return None
+        self._checked = now
+        if self._email is None:
+            self._email = owner_email(self.agent_config)
+        people = self.machine_factory().request("GET", "/people")[1].get("people") or []
+        mine = next((p for p in people if isinstance(p, dict) and isinstance(p.get("email"), str)
+                     and p["email"].lower() == self._email), None)
+        return record_inbox_presence(self.agent_config, mine.get("presence") if mine else None, now)
+
+    def _check_inbox(self):
+        try:
+            self.check_inbox()
+            self._check_error = None
+        except Exception as exc:  # noqa: BLE001 - an old server (no /people) or offline: no offline toast
+            line = f"notification feed: inbox check {type(exc).__name__}" + (
+                f" {exc.code}" if isinstance(exc, ApiError) else "")
+            if line != self._check_error:  # once per change, not every minute
+                self.log(line)
+            self._check_error = line
 
     def run(self):
         while not self.stop.is_set():
@@ -500,7 +630,9 @@ class NotificationFeed:
                 self.failures = 0
                 if added is None:
                     self.sleep(FEED_BACKOFF[1] // 10)
-                elif self.backoff:
+                    continue
+                self._check_inbox()
+                if self.backoff:
                     self.sleep(self.backoff)  # an empty answer with Retry-After (§18.1 item 4)
             except (ApiError, ConfigError, OSError) as exc:
                 self.failures += 1
@@ -512,4 +644,3 @@ class NotificationFeed:
         thread = threading.Thread(target=self.run, name="raincli-notification-feed", daemon=True)
         thread.start()
         return thread
-

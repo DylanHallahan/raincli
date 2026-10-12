@@ -5,7 +5,7 @@
   is read and under a per-run path secret that is never logged (§18.2 item 2). They talk to the app only
   through ``Api`` (js_api), with a nonce passed per load to exactly that origin and path, and every call is
   checked against the window's current URL (``policy.NonceGate``).
-- **Hosted pages** (inbox, threads, agents) come from the service in app mode, signed in through a
+- **Hosted pages** (inbox, threads, people) come from the service in app mode, signed in through a
   single-use handoff. The window shows only the service origin and the local origin, and
   ``/app/local/<page>`` shows the bundled page (``policy.Navigation``). Only a validated ``https:`` or
   ``mailto:`` link leaves the app, re-serialized, to the default browser or mail program; everything else
@@ -34,8 +34,9 @@ from urllib.parse import quote
 from ..config import Secret
 from . import policy
 
-# §20.3: the pages a handoff may go straight to (the server checks the same list): a thread, Agents, Archived, New message.
-_HANDOFF_NEXT = re.compile(r"/app/(agents|archived|compose|conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+# §20.3: the pages a handoff may go straight to (the server checks the same list): a thread, People (§21 C9.6; Agents
+# kept for an older server), Archived, New message.
+_HANDOFF_NEXT = re.compile(r"/app/(people|agents|archived|compose|conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 
 LOCAL_DIR = Path(__file__).resolve().parent / "local"
 TITLE = "RainCLI"
@@ -186,6 +187,36 @@ class Api:
         except Exception as exc:  # noqa: BLE001 - shown on the page (the Codex version gate, a refused path)
             return _result(False, f"Could not {'connect' if connecting else 'disconnect'}: {exc}")
         return _result(message=note or ("Connected." if connecting else "Disconnected."), state=state)
+
+    # The person's inbox on This computer (§21 C9.1): only ever from the user's click.
+
+    def inbox(self, nonce):
+        self._guard(nonce)
+        try:
+            return {"ok": True, **self._app.services.inbox()}
+        except Exception as exc:  # noqa: BLE001 - offline, or an older server
+            log.warning("inbox read failed: %s", type(exc).__name__)
+            return _result(False, "Couldn't read your inbox. Check the connection and try again.")
+
+    def set_inbox(self, nonce, agent, deliver_waiting=True):
+        self._guard(nonce)
+        try:
+            message = self._app.services.set_inbox(agent, deliver_waiting is not False)
+        except Exception as exc:  # noqa: BLE001 - shown on the page (the server's inbox_invalid names this machine)
+            return _result(False, f"Not changed: {exc}")
+        return _result(message=message)
+
+    def clear_inbox(self, nonce):
+        self._guard(nonce)
+        try:
+            return _result(message=self._app.services.clear_inbox())
+        except Exception as exc:  # noqa: BLE001
+            return _result(False, f"Not changed: {exc}")
+
+    def dismiss_inbox_notice(self, nonce):
+        self._guard(nonce)
+        self._app.services.dismiss_inbox_notice()
+        return _result()
 
     def forget_device(self, nonce):
         """§18.1 item 2: drop this install's recognised-device token; the next sign-in starts afresh."""
@@ -583,8 +614,8 @@ class AppWindow:
         if section in ("this-computer", "settings"):
             self.load(self.local_url(section))
             return _result()
-        if section == "agents":
-            return _result(self.open_hosted("/app/agents"))
+        if section in ("people", "agents"):  # §21 C9.6: the rail's People; "agents" from an older page
+            return _result(self.open_hosted("/app/people"))
         return _result(self.open_hosted("/app/inbox"))
 
     def retry(self):

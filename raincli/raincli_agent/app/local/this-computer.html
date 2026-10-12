@@ -16,7 +16,7 @@
 <body>
   <nav class="rc-nav" aria-label="RainCLI">
     <button type="button" data-open="inbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z"/></svg>Inbox</button>
-    <button type="button" data-open="agents"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3 3-5 6-5s6 2 6 5M17 11a3 3 0 0 0 0-6M21 20c0-2-1-4-3-4.5"/></svg>Agents</button>
+    <button type="button" data-open="people"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3 3-5 6-5s6 2 6 5M17 11a3 3 0 0 0 0-6M21 20c0-2-1-4-3-4.5"/></svg>People</button>
     <button type="button" data-open="this-computer" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>This computer</button>
     <span class="spacer"></span>
     <button type="button" data-open="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6a7 7 0 0 0 0 2.4l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z"/></svg>Settings</button>
@@ -36,6 +36,26 @@
           <dt>Routing</dt><dd id="routing">…</dd>
           <dt>Last report</dt><dd><time id="last-report">—</time></dd>
         </dl>
+      </section>
+      <section class="card" aria-labelledby="inbox-title">
+        <h2 id="inbox-title">Your inbox</h2>
+        <p class="muted small">Teammates message you, not your agents. The agent you pick here receives their messages for you.</p>
+        <div class="row">
+          <strong id="inbox-status">…</strong>
+          <button class="btn btn-quiet hidden" type="button" id="inbox-change" aria-expanded="false" aria-controls="inbox-picker">Change</button>
+        </div>
+        <div class="row hidden" id="inbox-stayed">
+          <span id="inbox-stayed-text"></span>
+          <button class="btn btn-quiet" type="button" id="inbox-stayed-dismiss">Dismiss</button>
+        </div>
+        <div class="hidden" id="inbox-picker">
+          <ul class="list" id="inbox-candidates"></ul>
+          <p class="muted small hidden" id="inbox-none">No agent on this computer can be your inbox yet. Connect Codex or Claude Code below, or start an agent, then check again.</p>
+          <div class="choice hidden" id="inbox-waiting-row"><input type="checkbox" id="inbox-waiting" checked><label for="inbox-waiting" id="inbox-waiting-label"></label></div>
+          <p class="muted small">To use an agent on another of your computers, pick it on that computer, or from the banner in your Inbox.</p>
+          <div class="row hidden" id="inbox-clear-row"><button class="btn btn-quiet" type="button" id="inbox-clear">Stop using an inbox</button></div>
+        </div>
+        <p class="message" id="inbox-message" role="status"></p>
       </section>
       <section class="card" aria-labelledby="agents-title">
         <h2 id="agents-title">Agents on this computer</h2>

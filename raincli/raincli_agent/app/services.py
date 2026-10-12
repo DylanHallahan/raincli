@@ -85,6 +85,7 @@ class Services:
         self._log = log or (lambda text: None)  # app-lock\\app.log: outcomes only, never data
         self._paths = paths  # () -> (agent_config, runtime_config), from app.json or the defaults
         self._open_file = open_file or getattr(os, "startfile", None)
+        self._stayed = 0  # "N messages are with your previous inbox", shown until dismissed (C6.3)
 
     # -- configuration ------------------------------------------------------------------------------
 
@@ -276,8 +277,86 @@ class Services:
                 "conversation_id": message.get("conversation_id")}
 
     def notifications(self):
-        """New entries ``{id, kind, at}`` from the runtime's notification queue (§16.10), oldest first."""
+        """New entries ``{id, kind, at, from_kind, hold, waiting}`` from the runtime's notification queue
+        (§16.10, §21 PR6), oldest first."""
         return _person().take_notifications(self.agent_config)
+
+    def notify_all(self):
+        """"Notify me about every message" (§21 PR6), off by default; stored beside the notification queue."""
+        try:
+            return _person().notify_all(self.agent_config)
+        except Exception:  # noqa: BLE001 - not signed in yet: the default
+            return False
+
+    # -- the person's inbox (§21 C8.1, C9.1, C13 H3 and L4) ------------------------------------------------
+
+    def _person_teams(self):
+        """How many teams the person is in (their person session's ``/person/me``); 1 when it can't be read."""
+        try:
+            teams = _person().PersonClient.for_config(self.agent_config, timeout=8, max_attempts=1).me()["teams"]
+            return max(1, len(teams)) if isinstance(teams, list) else 1
+        except Exception:  # noqa: BLE001 - no person session, or offline: one team's wording
+            return 1
+
+    def inbox(self):
+        """This computer's inbox picker, from ``GET /api/v1/me/inbox`` with the machine credential. Only
+        agents on THIS machine are offered (C13 L4: this credential can't pick another machine's). With
+        several teams the wording names this machine's team (C13 H3). Returns names and counts only."""
+        client = self._client(timeout=8)
+        me = client.me()["agent"]
+        handle, team = me["handle"], me["team"]["name"]
+        data = client.request("GET", "/me/inbox")[1]
+        several = self._person_teams() > 1
+        current = data.get("inbox") if isinstance(data.get("inbox"), dict) else None
+        waiting = data.get("waiting") if isinstance(data.get("waiting"), int) and data.get("waiting") > 0 else 0
+        candidates = [{"agent": c["agent"], "live": c.get("live") is True, "suggested": c.get("suggested") is True,
+                       "current": bool(current and current.get("machine") == handle
+                                       and current.get("agent") == c["agent"])}
+                      for c in data.get("candidates") or []
+                      if isinstance(c, dict) and c.get("machine") == handle and isinstance(c.get("agent"), str)]
+        where = f" in {team}" if several else ""
+        if current is None:
+            status = f"No inbox yet{where}"
+        else:
+            place = "this computer" if current.get("machine") == handle else str(current.get("machine"))
+            status = f"Your inbox{where}: {current.get('agent')} on {place}"
+        return {"team": team, "several_teams": several, "status": status,
+                "inbox": None if current is None else {"agent": current.get("agent"),
+                                                       "here": current.get("machine") == handle},
+                "candidates": candidates, "use_label": f"Use as my inbox{where}", "waiting": waiting,
+                "waiting_label": _waiting_label(waiting) if waiting else None,
+                "stayed": self._stayed, "stayed_label": _stayed_label(self._stayed) if self._stayed else None}
+
+    def set_inbox(self, agent, deliver_waiting=True):
+        """``PUT /api/v1/me/inbox`` for an agent on this machine. Returns the sentence for the page."""
+        if not isinstance(agent, str) or not 1 <= len(agent) <= 64 or agent.startswith("-") or agent != agent.strip():
+            raise ServiceError("pick an agent on this computer")
+        client = self._client()
+        handle = client.me()["agent"]["handle"]
+        result = client.request("PUT", "/me/inbox", body={"machine": handle, "agent": agent,
+                                                          "deliver_waiting": deliver_waiting is not False})[1]
+        stayed = result.get("stayed") if isinstance(result.get("stayed"), int) else 0
+        self._stayed = stayed if stayed > 0 else 0
+        delivered = result.get("delivered_waiting") if isinstance(result.get("delivered_waiting"), int) else 0
+        moved = result.get("moved") if isinstance(result.get("moved"), int) else 0
+        text = f"Your inbox is now {agent} on this computer."
+        if moved > 0:
+            text += f" {_count(moved)} moved to it."
+        if delivered > 0:
+            text += f" {_count(delivered, 'waiting message')} delivered to it."
+        return text
+
+    def clear_inbox(self):
+        """``PUT /api/v1/me/inbox {"none": true}``: teammates' messages wait in the app (C6.4)."""
+        result = self._client().request("PUT", "/me/inbox", body={"none": True})[1]
+        self._stayed = 0
+        moved = result.get("moved") if isinstance(result.get("moved"), int) else 0
+        return "You have no inbox now: teammates' messages wait in your app." + (
+            (" 1 message went back to your app." if moved == 1 else f" {moved} messages went back to your app.")
+            if moved > 0 else "")
+
+    def dismiss_inbox_notice(self):
+        self._stayed = 0
 
     # -- status and settings ---------------------------------------------------------------------------------
 
@@ -319,10 +398,12 @@ class Services:
             routing = self._client(timeout=8).request("GET", "/routing")[1]["routing"]
         except Exception:  # noqa: BLE001
             pass
-        return {"routing": routing, "update_mode": winapp.update_mode(self.root) if self.root else None, **trust}
+        return {"routing": routing, "update_mode": winapp.update_mode(self.root) if self.root else None,
+                "notify_all": self.notify_all(), **trust}
 
     def save_settings(self, change):
-        """One change at a time: routing (§16.5), trust (§16.12 C5) or update mode (§14)."""
+        """One change at a time: routing (§16.5), trust (§16.12 C5), update mode (§14) or notifications
+        (§21 PR6)."""
         from ..runtime import winapp
         if not isinstance(change, dict) or len(change) != 1:
             raise ServiceError("one setting at a time")
@@ -338,6 +419,12 @@ class Services:
                 raise ServiceError("updates are automatic or manual")
             winapp.configure(self.root, mode=value)
             return f"Saved: updates are {value}."
+        if key == "notify_all":
+            if not isinstance(value, bool):
+                raise ServiceError("notify me about every message is on or off")
+            _person().set_notify_all(self.agent_config, value)
+            return "Saved: " + ("you'll be notified about every message." if value
+                                else "you'll be notified only about messages that need you.")
         if key in ("trust_mode", "trust_add", "trust_remove"):
             from .. import trust
             if key == "trust_mode":
@@ -419,6 +506,18 @@ class Services:
                 self._open_file(str(path))  # the user's own private log
                 return True
         return False
+
+
+def _count(n, what="message"):
+    return f"1 {what} was" if n == 1 else f"{n} {what}s were"
+
+
+def _waiting_label(n):
+    return "Also deliver the waiting message" if n == 1 else f"Also deliver the {n} waiting messages"
+
+
+def _stayed_label(n):
+    return "1 message is with your previous inbox" if n == 1 else f"{n} messages are with your previous inbox"
 
 
 def _trust_settings(runtime_config):
