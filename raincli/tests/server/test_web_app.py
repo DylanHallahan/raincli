@@ -670,8 +670,8 @@ def rooted(settings, engine):
 def test_root_path_prefixes_links_redirects_and_cookie(rooted, world, session):
     home = rooted.get("/raincli/")
     assert home.status_code == 200
-    assert 'href="/raincli/login"' in home.text and 'href="/raincli/static/app.css?v=' in home.text
-    assert 'src="/raincli/static/app.js?v=' in home.text
+    assert 'href="/raincli/login"' in home.text and 'href="/raincli/static/site.css?v=' in home.text
+    assert 'src="/raincli/static/site.js?v=' in home.text
     assert rooted.get("/raincli/static/app.css").status_code == 200
     r = rooted.get("/raincli/app/agents", follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == "/raincli/login?next=/app/agents"
@@ -716,9 +716,11 @@ def test_inbox_agent_block_on_agents_and_token_pages_without_tokens(client, worl
     assert token not in block and "rca_" not in block
 
 
-def test_public_page_mentions_inbox_agent_and_direct_alternative(client):
+def test_public_page_links_connector_setups_to_the_setup_guide(client):
+    # Website Phase B moved the inbox-agent recommendation to the setup guide; the homepage links to it.
     html = client.get("/").text
-    assert "Recommended: a dedicated inbox agent" in html and "direct mode" in html
+    assert "Inbox and connector setups" in html and "deliver messages to an inbox agent" in html
+    assert "Recommended: a dedicated inbox agent" not in html
 
 
 # Fix round 1: member removal (MED-4) and invitation secrecy (MED-3) ------------------------
@@ -836,14 +838,19 @@ def test_static_urls_carry_current_content_hash(client, world):
     import raincli_server.web as web
 
     static_dir = Path(web.__file__).parent / "static"
-    pages = [client.get("/").text, client.get("/login").text]
+    def check(names, pages):
+        for name in names:
+            digest = hashlib.sha256((static_dir / name).read_bytes()).hexdigest()[:12]
+            for html in pages:
+                assert f"/static/{name}?v={digest}" in html, name
+                assert f'/static/{name}"' not in html  # never an unversioned URL
+
+    # The homepage has its own layout (website Phase B); the other pages keep base.html.
+    check(("site.css", "demo.css", "site.js", "demo.js", "tokens.css", "favicon.ico"), [client.get("/").text])
+    pages = [client.get("/login").text]
     login(client)
     pages.append(client.get("/app").text)
-    for name in ("app.css", "app.js", "mark.svg", "favicon.ico"):
-        digest = hashlib.sha256((static_dir / name).read_bytes()).hexdigest()[:12]
-        for html in pages:
-            assert f"/static/{name}?v={digest}" in html, name
-            assert f'/static/{name}"' not in html  # never an unversioned URL
+    check(("app.css", "app.js", "mark.svg", "favicon.ico"), pages)
 
 
 def test_static_responses_are_immutable_and_html_is_not_cached(client):
@@ -990,9 +997,9 @@ def test_every_web_html_redirect_and_error_response_is_no_store(client, world, s
 def test_hashed_static_urls_return_immutable(client):
     html = client.get("/").text
     urls = re.findall(r'(?:href|src)="(/static/[^"?]+\?v=[0-9a-f]{12})"', html)
-    assert {u.split("?")[0] for u in urls} == {"/static/app.css", "/static/app.js", "/static/mark.svg",
-                                               "/static/favicon.ico", "/static/tokens.css",
-                                               "/static/localtime.js"}
+    assert {u.split("?")[0] for u in urls} == {"/static/tokens.css", "/static/site.css", "/static/demo.css",
+                                               "/static/site.js", "/static/demo.js", "/static/favicon.ico",
+                                               "/static/mark.svg"}
     for url in urls:
         r = client.get(url)
         assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=31536000, immutable"

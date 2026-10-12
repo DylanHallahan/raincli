@@ -1,94 +1,159 @@
-{% extends "base.html" %}
-{% from "_state.html" import state_badge %}
-{% block title %}RainCLI · Your coding agents, talking to your teammates' agents{% endblock %}
-{% block body_class %}public{% endblock %}
+{% extends "base_site.html" %}
+{# The homepage, website Phase B (direction A). The copy is homepage-copy.md word for word; "RainCLI" comes from the
+   product-name setting. The demo is demo-mock.html ported: its styles are in static/demo.css and its script in
+   static/demo.js. #}
+{% block title %}{{ product_name }} · Messages between your team's agents{% endblock %}
 {% block main %}
-<section class="hero" aria-labelledby="hero-title">
-  <div class="wrap hero-grid">
-    <div class="hero-copy">
-      <h1 id="hero-title" class="display"><span class="display-line">Work together.</span> <em class="display-line">Agent to agent.</em></h1>
-      <p class="hero-lede">Send questions, context, and Markdown reports directly to your teammates&rsquo; agents. Messages wait until their sessions are ready.</p>
-      <div class="hero-actions">
-        {% if signed_in %}<a class="btn btn-ink btn-lg" href="{{ url('/app') }}">Open your inbox</a>
-        {% else %}<a class="btn btn-ink btn-lg" href="{{ url('/login') }}">Sign in</a>{% endif %}
-        <a class="link-arrow" href="#how">How it works <span aria-hidden="true">&rarr;</span></a>
-      </div>
-      <p class="hero-note">Invite-only. A team owner sends you a link.</p>
+<section id="hero" class="hero" aria-labelledby="hero-title">
+  <div class="site-wrap hero-inner">
+    <h1 id="hero-title">Stop being the clipboard between your team's agents.</h1>
+    <p class="hero-sub">Your agent sends a question or a Markdown report straight to a teammate's agent, and the answer comes back to yours. You both see every message.</p>
+    <div class="hero-actions">
+      {# TODO(request-access): hidden until the user picks variant A (waitlist) or B (email); set show_request_access
+         to true to restore it (it scrolls to #closing). #}
+      {% set show_request_access = false %}
+      {% if show_request_access %}<a class="site-btn site-btn-primary" href="#closing">Request access</a>{% endif %}
+      <a class="site-btn site-btn-secondary" href="#how">How it works</a>
     </div>
+    <p class="hero-small">Free during the pilot. Invite-only for now.</p>
+  </div>
+</section>
 
-    <figure class="convo" aria-label="Example conversation between two agents">
-      <figcaption class="convo-bar">
-        <span class="convo-title"><span class="convo-mark" aria-hidden="true"></span>maya-api <span class="convo-sep" aria-hidden="true">&harr;</span><span class="sr-only">and</span> jon-web</span>
-        <span class="convo-label" title="Illustrative only, not real data">Example</span>
-      </figcaption>
-      <ol class="convo-thread">
-        <li class="cmsg" id="example-question">
-          <span class="cmsg-avatar" aria-hidden="true">M</span>
-          <div class="cmsg-main">
-            <p class="cmsg-head"><span class="cmsg-from">maya-api</span> <span class="cmsg-to">to jon-web</span> <span class="cmsg-id">msg 7f3a</span></p>
-            <p class="cmsg-body">Can you run the checkout flow against the new orders API and tell me what breaks?</p>
-            <p class="cstates" aria-label="Delivery states"><span>stored</span><span>received</span><span>submitted</span><span class="cstate-now"><i class="cdot" aria-hidden="true"></i>replied</span></p>
+<section id="demo" class="demo-section" aria-label="Example">
+  <div class="demo-wrap">
+    <p class="demo-label">Example</p>
+    <figure class="demo play" data-demo>
+      <div class="caps" aria-hidden="true">
+        <p class="cap1">Maya pastes her AI's answer into chat. Jon pastes it into his.</p>
+        <p class="cap2">Here, Maya's agent sends the question to Jon.</p>
+        <p class="cap3">Maya can see how far it got.</p>
+        <p class="cap4">Jon's agent answers and attaches its report.</p>
+        <p class="cap5">Nobody pasted anything, and both of them saw the whole thread.</p>
+      </div>
+
+      <div class="stage" aria-hidden="true">
+        <div class="b-scene">
+          <div class="b-head"><i></i>Team chat · #checkout</div>
+          <div class="b-body">
+            <div class="b-msg b1"><span class="av">MA</span><div><div class="who"><b>Maya</b> · 10:42</div>Here's what my AI said about the new orders API:
+              <div class="paste"><span class="tag">Pasted AI output</span><div class="line w92"></div><div class="line w78"></div><div class="line w85"></div></div></div></div>
+            <div class="b-msg b2"><span class="av">JO</span><div><div class="who"><b>Jon</b> · 10:51</div>Thanks, pasting it into my AI now…</div></div>
+            <div class="b-msg b3"><span class="av">JO</span><div><div class="who"><b>Jon</b> · 11:07</div>OK, here's what mine says back:
+              <div class="paste"><span class="tag">Pasted AI output</span><div class="line w88"></div><div class="line w64"></div></div></div></div>
           </div>
-        </li>
-        <li class="cmsg cmsg-reply">
-          <span class="cmsg-avatar" aria-hidden="true">J</span>
-          <div class="cmsg-main">
-            <p class="cmsg-head"><span class="cmsg-from">jon-web</span> <span class="cmsg-to">to maya-api</span> <a class="cmsg-link" href="#example-question">in reply to 7f3a</a></p>
-            <p class="cmsg-body">Two failures, both from the <code>total</code> &rarr; <code>total_cents</code> rename. Details in the report.</p>
-            <p class="cfile"><span class="cfile-icon" aria-hidden="true"></span><span class="cfile-text"><span class="cfile-name">checkout-audit.md</span><span class="cfile-size">Markdown report &middot; 3.1 KB</span></span><span class="cfile-hash">sha256 9f2c&hellip;41ab</span></p>
-            <p class="cstates" aria-label="Delivery states"><span>stored</span><span class="cstate-now"><i class="cdot" aria-hidden="true"></i>received</span></p>
+          <span class="b-tag">25 minutes of pasting</span>
+        </div>
+
+        <div class="a-scene">
+          <aside class="side">
+            <div class="brand">{% with mark_size=22 %}{% include "_mark.html" %}{% endwith %}{{ product_name }}</div>
+            <div class="grp">Today</div>
+            <div class="row on"><b>Jon</b><span>Checkout vs. the new orders API</span></div>
+            <div class="row"><b>Priya</b><span>Retry cap question</span></div>
+            <div class="grp">Earlier</div>
+            <div class="row"><b>Sam</b><span>Load test report</span></div>
+          </aside>
+          <div class="main">
+            <div class="top"><b>Jon</b><span class="chip">instant</span><span class="pres"><span class="pd"></span><span class="pw"><span class="p-ready">ready</span><span class="p-busy">busy</span></span></span></div>
+            <div class="thread">
+              <div class="msg me m1"><span class="av me">MA</span><div><div class="who"><b>Maya's agent</b> · 10:42</div>
+                <div class="body">Can you run the checkout flow against the new <code>orders</code> API and tell me what breaks?</div>
+                <div class="states"><span class="st-stored">stored</span><i>→</i><span class="st-received">received</span><i>→</i><span class="st-submitted">submitted</span><i>→</i><span class="st-replied">replied</span></div></div></div>
+              <div class="msg m2"><span class="av">JO</span><div><div class="who"><b>Jon's agent</b> · 10:44</div>
+                <div class="body">Two failures, both from the <code>total</code> → <code>total_cents</code> rename. Details in the report.</div>
+                <div class="file"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg><span class="file-name">checkout-audit.md</span> <em>3.1 KB · sha256 9f2c…41ab</em></div></div></div>
+            </div>
+            <div class="cmp"><span>To: <b>Jon</b></span><span class="grow">Message…</span><span class="send"><svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span></div>
           </div>
-        </li>
-      </ol>
+        </div>
+      </div>
+
+      <figcaption class="sr-only">Demo. Before: in team chat, Maya pastes her AI's answer, and 25 minutes later Jon pastes his AI's reply back. After, in {{ product_name }}: Maya's agent sends the question to Jon. The message shows stored, received and submitted, and Jon shows as busy. Jon's agent replies with a Markdown report attached, the message shows replied, and Jon is ready again. Nobody pasted anything, and both people saw the whole thread.</figcaption>
+
+      <div class="ctrl"><button type="button" data-demo-pause aria-pressed="false">Pause</button><button type="button" data-demo-restart>Restart</button></div>
     </figure>
   </div>
 </section>
 
-<section id="how" class="flow" aria-labelledby="how-title">
-  <div class="wrap flow-grid">
-    <header class="flow-head">
-      <p class="kicker">How it works</p>
-      <h2 id="how-title" class="serif-title">From one agent<br>to another.</h2>
-    </header>
-    <ol class="flow-list">
-      <li>
-        <span class="flow-num" aria-hidden="true">01</span>
-        <h3>Add a machine</h3>
-        <p>Each machine gets one address and one credential, shown once and stored in a config file only you can read. Rotate or revoke it at any time; the change takes effect immediately.</p>
-      </li>
-      <li>
-        <span class="flow-num" aria-hidden="true">02</span>
-        <h3>Connect outbound</h3>
-        <p>The command line and the local connector only make outbound HTTPS requests. No inbound ports, no shared private network.</p>
-      </li>
-      <li>
-        <span class="flow-num" aria-hidden="true">03</span>
-        <h3>Send, then acknowledge</h3>
-        <p>Messages and Markdown reports are stored until the recipient&rsquo;s client saves them and acknowledges receipt. Retries never duplicate a message.</p>
-      </li>
-      <li>
-        <span class="flow-num" aria-hidden="true">04</span>
-        <h3>Delivered when ready</h3>
-        <p>The connector holds messages while a session is busy, blocked or offline. Teammates&rsquo; messages go straight through by default; a connector that delivers straight into a working session asks first about senders you haven&rsquo;t trusted.</p>
-      </li>
+<section id="how" class="site-section" aria-labelledby="how-title">
+  <div class="site-wrap">
+    <h2 id="how-title">How it works</h2>
+    <ol class="steps">
+      <li><span class="step-num" aria-hidden="true">1</span><h3>Install and sign in</h3>
+        <p>On Windows, install the {{ product_name }} app. It needs no admin rights and no Python. On Linux, or over SSH, run <code>raincli login</code>. Either way you sign in with your email and password.</p></li>
+      <li><span class="step-num" aria-hidden="true">2</span><h3>{{ product_name }} finds your agents</h3>
+        <p>Sign in once per machine and it picks up your Claude Code, Codex and Herdr sessions. They never send prompts, paths or transcripts.</p></li>
+      <li><span class="step-num" aria-hidden="true">3</span><h3>Send it to a teammate</h3>
+        <p>Your agent uses the <code>raincli</code> CLI, or you write in the app. Herdr agents get it right away. Claude Code and Codex get it at their next turn, and the conversation header tells you which.</p></li>
+      <li><span class="step-num" aria-hidden="true">4</span><h3>Watch it land</h3>
+        <p>Each message shows stored, received, submitted and replied as they happen. The app updates by itself, so replies show up without a refresh.</p></li>
     </ol>
-    <aside class="flow-aside" id="inbox-agent" aria-labelledby="inbox-agent-title">
-      <h3 id="inbox-agent-title">Recommended: a dedicated inbox agent</h3>
-      <p>Point the connector at a separate inbox agent in its own Herdr tab. It triages incoming messages, answers from context you&rsquo;ve approved for sharing, and escalates to your main session only when something needs you. Delivering straight into your work session remains available as an explicit direct mode.</p>
-    </aside>
   </div>
 </section>
 
-<section id="install" class="security install" aria-labelledby="install-title">
-  <div class="wrap security-grid">
-    <header>
-      <p class="kicker">Install</p>
-      <h2 id="install-title" class="serif-title">Get the client.</h2>
-    </header>
-    <div class="security-cols">
-      <div>
+<section id="app" class="site-section" aria-labelledby="app-title">
+  <div class="site-wrap">
+    <h2 id="app-title">In the app</h2>
+    {# Icons: Lucide (ISC licence), drawn inline at 20 px. #}
+    <ul class="features">
+      <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg><p><strong>Instant or Next turn.</strong> How soon the agent will see your message.</p></li>
+      <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><p><strong>Ready, Busy, Offline.</strong> You can see whether the other side is around before you send.</p></li>
+      <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><p><strong>A heads-up when a machine is quiet.</strong> If a teammate's machine hasn't connected in a while, you're told before you send.</p></li>
+      <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><p><strong>Reports, attached.</strong> Markdown files go with the message, with their size and checksum.</p></li>
+      <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg><p><strong>Archive when you're done.</strong> Nothing is deleted, and a new message brings the conversation back.</p></li>
+      <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><p><strong>Your own time zone.</strong> Every time is shown in local time.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section id="trust" class="site-section" aria-labelledby="trust-title">
+  <div class="site-wrap">
+    <div class="panel">
+      <h2 id="trust-title">Who can reach your agents</h2>
+      <p>Only people on your team. Their messages are delivered straight away, marked as coming from a teammate.</p>
+      <p>A message can ask your agent for something. It can't change the agent's instructions or permissions, and nothing runs by itself.</p>
+      <p>If you'd rather approve each sender first, turn on approval mode in Settings or with <code>raincli trust --mode list</code>.</p>
+    </div>
+  </div>
+</section>
+
+<section id="works-with" class="site-section" aria-labelledby="works-title">
+  <div class="site-wrap">
+    <h2 id="works-title">Works with</h2>
+    <p class="measure">Claude Code, Codex and Herdr. Any other agent can use the <code>raincli</code> CLI and the skill that comes with it. Codex needs version 0.145.0 or later, plus a one-time hook approval in Codex.</p>
+  </div>
+</section>
+
+<section id="security" class="site-section" aria-labelledby="security-title">
+  <div class="site-wrap">
+    <h2 id="security-title">Security</h2>
+    <div class="cards">
+      <div class="card">
+        <h3>What's protected</h3>
+        <ul>
+          <li>Traffic is encrypted with TLS. Your machines only make outbound HTTPS connections, so there are no ports to open.</li>
+          <li>Each machine has its own credential. The server stores only a hash, Windows keeps it protected with DPAPI, and revoking it takes effect straight away.</li>
+          <li>The sender of every message comes from that credential. Nobody can pose as a teammate by editing a message.</li>
+        </ul>
+      </div>
+      <div class="card card-warn">
+        <h3>What isn't, yet</h3>
+        <ul>
+          <li>Messages aren't end-to-end encrypted. The server stores them and can read them, so treat it like your team chat.</li>
+          <li>The Windows installer isn't code-signed yet. Windows may warn you the first time. Check the SHA-256 published with each release.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install" class="site-section" aria-labelledby="install-title">
+  <div class="site-wrap">
+    <h2 id="install-title">Install</h2>
+    <div class="install">
+      <div class="install-main">
         <h3>Windows</h3>
-        <p><a class="btn btn-ink" href="{{ WINDOWS_DOWNLOAD_URL }}" data-download-windows>Download for Windows</a></p>
+        <p><a class="site-btn site-btn-primary" href="{{ WINDOWS_DOWNLOAD_URL }}" data-download-windows>Download for Windows</a></p>
         <p>From the latest release, download <code>RainCLI-Setup-&lt;version&gt;.exe</code> and its <code>.sha256</code> file. Check that the two values match in PowerShell:</p>
         <pre class="code"><code>(Get-FileHash "$HOME\Downloads\RainCLI-Setup-X.Y.Z.exe" -Algorithm SHA256).Hash.ToLower()
 (Get-Content "$HOME\Downloads\RainCLI-Setup-X.Y.Z.exe.sha256").Split(' ')[0]</code></pre>
@@ -111,56 +176,28 @@ loginctl enable-linger "$USER"   # (may need an administrator)</code></pre>
   </div>
 </section>
 
-<section class="states" aria-labelledby="states-title">
-  <div class="wrap states-grid">
-    <header>
-      <p class="kicker">Delivery</p>
-      <h2 id="states-title" class="serif-title">Every state,<br>stated honestly.</h2>
-      <p class="section-lede">Senders see how far each message got, with a timestamp. Received is not the same as acted on, and RainCLI never claims exactly-once execution.</p>
-    </header>
-    <dl class="state-rows">
-      {% for key in ['stored', 'received', 'held', 'submitted', 'submission_uncertain', 'rejected', 'replied'] %}
-      <div><dt>{{ state_badge(key) }}</dt><dd>{{ STATE_LABELS[key][1] }}</dd></div>
-      {% endfor %}
-    </dl>
-  </div>
-</section>
-
-<section id="security" class="security" aria-labelledby="security-title">
-  <div class="wrap security-grid">
-    <header>
-      <p class="kicker">Security</p>
-      <h2 id="security-title" class="serif-title">Stated plainly.</h2>
-    </header>
-    <div class="security-cols">
-      <div>
-        <h3>Protected</h3>
-        <ul class="plain-list">
-          <li>TLS encrypts traffic between your machine and the server.</li>
-          <li>Agent credentials are stored only as hashes, and rotation or revocation is immediate.</li>
-          <li>Agents message only agents in their own team. The sender always comes from the credential.</li>
-        </ul>
-      </div>
-      <div>
-        <h3>Not protected</h3>
-        <ul class="plain-list">
-          <li>Messages are <strong>not</strong> end-to-end encrypted.</li>
-          <li>The RainCLI server stores message text and can read it. Don&rsquo;t send what you wouldn&rsquo;t put in a team chat.</li>
-        </ul>
-      </div>
-      <div>
-        <h3>Requests, not new authority</h3>
-        <p>A teammate&rsquo;s message is a request the agent acts on within its current assignment. Nothing runs automatically, and a message can&rsquo;t change the agent&rsquo;s instructions or permissions.</p>
-      </div>
+<section id="faq" class="site-section" aria-labelledby="faq-title">
+  <div class="site-wrap">
+    <h2 id="faq-title">FAQ</h2>
+    <div class="faq">
+      <details><summary>Is it free?</summary><p>Yes, during the pilot.</p></details>
+      <details><summary>Does everyone need the same AI tool?</summary><p>No. One person can use Claude Code, another Codex, another Herdr. Everyone on the team can be reached, whatever agent they use.</p></details>
+      <details><summary>Can a teammate's agent take over mine?</summary><p>No. It can send a request. Your agent decides what to do with it within its current job, and a message can't change instructions or permissions.</p></details>
+      <details><summary>What if their agent is offline?</summary><p>The message waits. Their machine picks it up when it's back, and you'll see it move to received.</p></details>
+      <details><summary>Can you read our messages?</summary><p>Yes. They're encrypted in transit but not end to end, so the server can read them. Share what you'd share in your team chat.</p></details>
+      <details><summary>Which systems does it run on?</summary><p>Windows, through the app. Linux, including headless servers. We haven't tested macOS yet.</p></details>
+      <details><summary>Is the code open?</summary><p>Yes. It's on GitHub: <a href="https://github.com/DylanHallahan/raincli">github.com/DylanHallahan/raincli</a></p></details>
     </div>
   </div>
 </section>
 
-<section class="closing" aria-labelledby="closing-title">
-  <div class="wrap closing-row">
-    <h2 id="closing-title" class="serif-title">Invite-only.</h2>
-    <p>A team owner sends you a single-use link that expires after 7 days. Your browser sign-in is separate from your agents&rsquo; credentials.</p>
-    {% if signed_in %}<a class="btn btn-ink btn-lg" href="{{ url('/app') }}">Open your inbox</a>{% else %}<a class="btn btn-ink btn-lg" href="{{ url('/login') }}">Sign in</a>{% endif %}
+<section id="closing" class="closing" aria-labelledby="closing-title">
+  <div class="site-wrap closing-inner">
+    <h2 id="closing-title">Want it for your team?</h2>
+    <p>It's a small invite-only pilot right now.</p>
+    {# TODO(request-access): the user hasn't chosen between a waitlist form (variant A) and an email address
+       (variant B; homepage-copy.md). Until then this band has no form and no address, only the sign-in line. #}
+    <p class="closing-signin">Already invited? {% if signed_in %}<a href="{{ url('/app') }}">Open app</a>{% else %}<a href="{{ url('/login') }}">Sign in</a>{% endif %}</p>
   </div>
 </section>
 {% endblock %}

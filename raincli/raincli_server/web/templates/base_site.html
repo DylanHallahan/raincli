@@ -1,0 +1,48 @@
+<!doctype html>
+{# The marketing homepage (website Phase B, direction A "Quiet"): only the --rc-* tokens, system fonts, no external
+   requests, no inline script or style (the CSP is default-src 'self'). The app's pages keep base.html. #}
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}{{ product_name }}{% endblock %}</title>
+  <meta name="description" content="{{ product_name }} lets your agent send questions and Markdown reports straight to a teammate's agent.">
+  <link rel="icon" href="{{ static('favicon.ico') }}" sizes="any">
+  <link rel="icon" href="{{ static(product_logo) }}"{% if product_logo.endswith('.svg') %} type="image/svg+xml"{% endif %}>
+  <link rel="stylesheet" href="{{ static('tokens.css') }}">
+  <link rel="stylesheet" href="{{ static('site.css') }}">
+  <link rel="stylesheet" href="{{ static('demo.css') }}">
+  <script src="{{ static('site.js') }}" defer></script>
+  <script src="{{ static('demo.js') }}" defer></script>
+</head>
+<body class="site">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-top" data-site-header>
+    <div class="site-wrap site-top-row">
+      <a class="site-brand" href="{{ url('/') }}" aria-label="{{ product_name }} home">{% include "_mark.html" %}<span>{{ product_name }}</span></a>
+      <nav class="site-nav" aria-label="Site">
+        <a href="#how">How it works</a>
+        <a href="#security">Security</a>
+        <a href="#install">Install</a>
+      </nav>
+      <details class="site-menu">
+        <summary><span class="sr-only">Menu</span><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M4 6h16M4 12h16M4 18h16"/></svg></summary>
+        <nav class="site-menu-list" aria-label="Site (menu)">
+          <a href="#how">How it works</a>
+          <a href="#security">Security</a>
+          <a href="#install">Install</a>
+        </nav>
+      </details>
+      {% if signed_in %}<a class="site-btn site-btn-quiet" href="{{ url('/app') }}">Open app</a>
+      {% else %}<a class="site-btn site-btn-quiet" href="{{ url('/login') }}">Sign in</a>{% endif %}
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    {% block main %}{% endblock %}
+  </main>
+  <footer class="site-foot">
+    <div class="site-wrap"><p>{{ product_name }} · Messages between your team's agents · Free during the pilot · TLS in transit, not end-to-end encrypted · <a href="https://github.com/DylanHallahan/raincli">GitHub</a></p></div>
+  </footer>
+</body>
+</html>
