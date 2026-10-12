@@ -5,16 +5,16 @@ This guide adds one of your machines to your team on `https://raincli.com`. You 
 **The default path:**
 - a **managed install**, where the client runs through a stable **launcher** and takes **automatic updates**;
 - the **runtime**, started at login, which supervises the connector and lists the machine's coding agents for your team;
-- one **inbox** agent that receives your team's messages: a Herdr agent (`instant`) or a Claude Code session through hooks (`next-turn`).
+- one **inbox** agent, which you pick, that receives your teammates' messages: a Herdr agent (`instant`) or a Claude Code session through hooks (`next-turn`).
 
-A **machine** is one RainCLI handle with one credential. Teammates message the handle, and the connector delivers each message to the machine's inbox agent. Your other coding agents on the machine appear on the website's **Machines** page and in `raincli agents`, and a teammate can message one of them by name (`handle/agent`): a named Herdr agent gets it at once, a Claude Code or Codex session with RainCLI hooks at its next turn. See [Messages to your agents and to you](#messages-to-your-agents-and-to-you).
+Teammates message **people**, never machines or agents. A message to you goes to the agent you picked as your **inbox** in that team (one per team), and a reply goes back to the agent that asked. A **machine** is one RainCLI handle with one credential; its coding agents appear to **you** on the website's **Machines** page and on This computer, and you pick your inbox from them. Teammates see you and your availability, never your machines or agents. See [Messages, your inbox and replies](#messages-your-inbox-and-replies).
 
 The steps are split between your **agent**, which runs commands, and **you**, which covers the browser, credentials and approvals. Your agent should run each command itself and stop to ask you where a step says **You**.
 
 **Pick your path:**
 - **Windows:** install the **RainCLI app** and sign in with your email and password in its window, which then shows your inbox and agents. See the [Windows guide](docs/windows-client.md#the-raincli-app). The rest of this guide is not needed for that.
 - **A headless Linux machine** (a server or anything you reach over SSH) that should report its agents and take updates: do step 1, then [sign in with `raincli login`](#headless-linux-raincli-login).
-- **A machine whose inbox agent receives team messages:** follow steps 1–7 below. Machines signed in with the app or `raincli login` have no inbox: they deliver messages to your named agents, and messages to the machine itself stay stored.
+- **A machine whose inbox agent receives team messages:** follow steps 1–7 below. Machines signed in with the app or `raincli login` deliver to the agent you pick as your inbox (on This computer, the hosted Inbox banner, or `raincli inbox set`) and to your agents' replies.
 
 The shell commands below are for Linux. For the Python client on native Windows, see the [PowerShell section](docs/windows-client.md#python-client-existing-and-advanced-installs) of the Windows guide.
 
@@ -64,7 +64,7 @@ raincli config init --api-url https://raincli.com --token-file ~/Downloads/rainc
 raincli whoami                                           # verify the expected handle and team
 # Only after verification succeeds:
 rm ~/Downloads/raincli-<handle>.json
-raincli agents                                           # teammates' machines, and the agents on each
+raincli people                                           # the people in your team, with presence and speed
 ```
 
 ## 4. Choose the inbox (You)
@@ -75,7 +75,7 @@ The inbox is the one agent on this machine that receives your team's messages. C
 | --- | --- | --- | --- |
 | **Herdr agent** (recommended with Herdr) | `instant` | As soon as the agent is idle | Herdr |
 | **Claude Code session** through hooks | `next-turn` | **Only when that session is next used**: at its next start or the next prompt you type in it | Claude Code hooks (step 6); Claude Code only |
-| **None** (CLI only) | — | Never automatically; read them with `raincli inbox --all` | Nothing |
+| **None** (CLI only) | — | Never automatically; messages to you wait in the app and in `raincli me inbox` | Nothing |
 
 **Next-turn delivery waits until the session is next used.** A message to an idle Claude Code session that nobody touches waits, durably queued, until someone starts the session or types a prompt in it. Teammates see `next-turn` next to your inbox, and a waiting message shows to its sender as `held` with the reason `next_turn`, so they know not to expect an immediate answer. Choose Herdr if messages should be handled while you're away. The next-turn inbox can be a Claude Code session or, with Codex 0.145.0 or later and its hooks trusted in `/hooks`, a Codex session (`"inbox": {"hook": "codex", "name": "<session name>"}`).
 
@@ -249,10 +249,14 @@ How the hooks behave:
 
 **What reaches the server:** a name, a type (`claude`, `codex`, `gemini`, `cursor`, `opencode` or `other`), a status (`working`, `idle`, `blocked`, `offline` or `unknown`), whether it is the inbox, and an opaque key derived with a per-machine secret. **Never** paths, working directories, prompts, titles, transcripts, pane ids or process ids.
 
-## 7. Try it
+## 7. Pick your inbox and try it
+
+Once the runtime runs, the inbox you configured shows on this machine; pick it as **your** inbox in this team (you can also do this on This computer in the app, or on the Inbox banner on the website):
 
 ```bash
-raincli send --to <teammate-handle> --body 'Hello from setup.' --id "$(python3 -c 'import uuid; print(uuid.uuid4())')"
+raincli inbox show                                       # your inbox in this team, the agents you can pick, and waiting messages
+raincli inbox set <inbox-agent-name>                     # messages waiting for you are delivered there too (--no-deliver-waiting)
+raincli send <teammate-email-or-name> --body 'Hello from setup.' --id "$(python3 -c 'import uuid; print(uuid.uuid4())')"
 raincli conversations
 ```
 
@@ -282,7 +286,7 @@ loginctl enable-linger "$USER"                                     # keep user s
 raincli runtime status --config ~/.config/raincli/runtime.json
 ```
 
-In machine mode the runtime reports `ready`, the client version and update state, and this machine's coding agents (Herdr, hooks and the process scan; no inbox) every 30 seconds, and it installs the versions your team's operator pushes, automatically, exactly as described in [Updates](#updates). It delivers teammates' messages to your named agents (see below). In machine mode, targets older than v0.4.0 are refused, and once it has delivered to a named agent, targets and rollbacks older than v0.5.0 are refused too, because an older client would not see those messages. Messages to the machine itself (no agent named) are stored on the server.
+In machine mode the runtime reports `ready`, the client version and update state, and this machine's coding agents (Herdr, hooks and the process scan; no inbox) every 30 seconds, and it installs the versions your team's operator pushes, automatically, exactly as described in [Updates](#updates). It delivers your teammates' messages to the agent you pick as your inbox (`raincli inbox set <agent>`, This computer, or the hosted Inbox banner) and replies to your agents (see below). In machine mode, targets older than v0.4.0 are refused, and once it has delivered to a named agent, targets and rollbacks older than v0.5.0 are refused too, because an older client would not see those messages.
 
 To sign the machine out:
 
@@ -293,34 +297,41 @@ raincli logout --local-only    # only delete the local credential and config (th
 
 If the server can't be reached, `logout` keeps the local credential and exits non-zero. Queues are never deleted. Signing out also ends your person session.
 
-## Messages to your agents and to you
+## Messages, your inbox and replies
 
-A teammate (or their agent) can address a machine (`handle`), one named agent on it (`handle/agent`), or a person (`@email`):
+**Address people, by email or by their name in your team.** A machine handle or `handle/agent` is refused with "Address people: send to *Name* (*email*)"; a name two teammates share lists both, so you can use the email.
 
 ```bash
-raincli send bob-desktop/reviewer --body-file - --from-agent planner   # body from stdin; --from-agent: which of your agents writes
-raincli agents                                                         # each agent's reachability: instant, next-turn or listed
+raincli send jon@example.com --body-file - --from-agent planner   # body from stdin; --from-agent: which of your agents writes
+raincli people                                                    # Ready · Instant, Busy · Next turn, Offline, No inbox yet
+raincli reply MSG_ID --body-file -                                # goes back to the agent that asked
 ```
 
-- **Delivery** follows each agent's reachability: `instant` (a named Herdr agent, prompted when idle), `next-turn` (a Claude Code or Codex session with RainCLI hooks, handed over at its next turn; Codex runs the hooks only after you trust them once in its `/hooks` view), or `listed` (only listed, so it can't receive). A name two live agents share is ambiguous and refused. A refused message is never quietly sent to the machine instead: the sender is told the machine handle to use.
+- **Your inbox** (one per team): the agent that receives your teammates' messages. Pick it on This computer in the app, on the hosted Inbox banner, or with `raincli inbox set <agent>` (`--machine <handle>` for one of your other machines, with a person session). Until you pick one, messages to you wait in the app (their senders see "waiting for *you* to pick an inbox"); when you pick, the waiting ones are delivered too unless you untick that (`--no-deliver-waiting`). `raincli inbox show` shows your inbox, the agents you can pick, and how many are waiting; `raincli inbox clear` stops using one.
+- **Changing your inbox** moves the messages the server still holds to the new one; messages your previous inbox already picked up stay there, and the app says how many.
+- **Replies come back to the agent that asked:** a reply to a message your agent sent (with `--from-agent`) returns to that agent while it is live; otherwise it goes to your inbox. Whoever replies addresses nobody: `raincli reply` names only the message.
+- **Your inbox acts for you.** It receives what your teammates write to you; what it does next with your other agents is up to you and your instructions.
+- **Delivery** follows the inbox's reachability: `instant` (a named Herdr agent, prompted when idle) or `next-turn` (a Claude Code or Codex session with RainCLI hooks, handed over at its next turn; Codex runs the hooks only after you trust them once in its `/hooks` view). An agent that is only `listed` can't be your inbox.
 - **A message held** for an agent that is busy, offline or not ready waits on this machine; after 14 days offline it is rejected (`expired_offline`). A handover shows how long it waited.
-- **Who may reach your named agents** (`raincli trust`): in `team` mode (the default) any member of your team; in `list` mode only the senders you trust, and others wait until you approve them. You and your own other machines are always trusted (the server marks those messages). **On a machine with sensitive work, use `list` mode** (`raincli trust --mode list`), so a teammate's message reaches its agents only once you trust or approve the sender.
+- **Who may reach your agents** (`raincli trust`): in `team` mode (the default) any member of your team; in `list` mode only the people you trust, and others wait until you approve them. You are always trusted. **On a machine with sensitive work, use `list` mode** (`raincli trust --mode list`), so a teammate's message reaches your agents only once you trust or approve the sender.
 
 ```bash
 raincli trust                                  # show the mode and the lists
 raincli trust --mode list                      # or team
-raincli trust add bob-desktop                  # a machine, or a person: raincli trust add @bob@example.com
-raincli trust remove bob-desktop
+raincli trust add bob@example.com              # a person, by email
+raincli trust remove bob@example.com
 raincli me approve MSG_ID --always             # deliver one held message, and trust its sender from now on
-raincli routing --inbox-only                   # only this machine's inbox receives; --all allows named agents again
+raincli routing --inbox-only                   # everything for this machine goes to its own inbox agent; --all is the default
 ```
+
+**Your own agents can write to you:** an escalation, or an agent reporting back, lands in your "From your agents" conversation in the app, and you can answer it there. Agents never message your other machines directly; teammates never see this conversation.
 
 **Messages to you as a person** use the person session that `raincli login` stores (or `raincli login --person` adds to a machine already signed in):
 
 ```bash
 raincli me inbox [--watch] [--json]            # unread messages to you; --watch waits for new ones (never marks them read)
 raincli me read MSG_ID                         # show one; reading marks it read
-raincli me send @carol@example.com --body-file note.md --attach report.md   # or a handle, or handle/agent
+raincli me send carol@example.com --body-file note.md --attach report.md   # or Carol, her name in your team
 raincli me reply MSG_ID --body-file -
 raincli me fetch MSG_ID --attachment 1 --to ~/Downloads
 raincli me sign-out                            # end the person session; the machine stays signed in
@@ -341,7 +352,9 @@ raincli me conversations --archived            # the same for you as a person: m
 
 ## What teammates see
 
-On the website's **Machines** page (every machine in your teams, yours first) and in `raincli agents`, each machine shows its agents with the **inbox first**, then each agent's name, type and status, the inbox's reachability (`instant` or `next-turn`), and the machine's client version and update state. `raincli agents` prints the client version, update mode, update state and any error on the machine's line, and marks scan entries "(detected, status unknown)". The list covers reports from the last 120 seconds.
+Teammates see **people**: your name, your team, and your inbox's availability with its speed ("Ready · Instant", "Busy · Next turn", "Offline", or "No inbox yet"), in the app's People page, the picker and `raincli people`. They never see your machines, your agents' names or types, or their sessions. Messages show "*Name*" when you wrote them in the app and "*Name* · agent" when one of your agents sent them.
+
+**You** see your own machines and their agents on the website's **Machines** page (team owners also see every team machine with its owner, client version, update state and last connection, without agent lists) and on This computer in the app: each agent's name, type, status and reachability (`instant` or `next-turn`), and the machine's client version and update state. The list covers reports from the last 120 seconds.
 
 Each handle also keeps its **session availability**:
 
@@ -353,7 +366,7 @@ Each handle also keeps its **session availability**:
 | `offline` | The connector is stopped, the agent was not found, or no report arrived in the last 120 seconds |
 | `unknown` | Nothing has ever been reported, or the runtime could not read the agent's state |
 
-Availability and the agent list are **advisory**: availability doesn't mean a message was received, submitted or read; use the delivery states (`received`, `submitted` and so on) for that. A sender always addresses the handle, and the connector rechecks its own mapping before it submits anything.
+Availability and the agent list are **advisory**: availability doesn't mean a message was received, submitted or read; use the delivery states (`received`, `submitted` and so on) for that. A sender always addresses the person, and the connector rechecks its own mapping before it submits anything.
 
 ## Updates
 

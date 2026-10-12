@@ -373,22 +373,25 @@ def register(sub, parser_class):
     sign_out.add_argument("--local-only", action="store_true", help="delete it here without revoking it")
     sign_out.set_defaults(func=cmd_me_sign_out)
 
-    trust = sub.add_parser("trust", help="who may reach this machine's named agents (team or list)",
-                           description="Trust for messages to this machine's named agents (§16.12 C5). In team "
-                                       "mode (the default) any member of your team reaches them; in list mode only "
-                                       "trusted senders do and others wait for raincli me approve. You are always "
-                                       "trusted.")
+    trust = sub.add_parser("trust", help="who may reach your agents on this machine (team or list)",
+                           description="Trust for messages to your agents on this machine (§16.12 C5, §21): your "
+                                       "inbox agent and replies to your agents. In team mode (the default) any "
+                                       "member of your team reaches them; in list mode only the people you trust do, "
+                                       "and others wait for raincli me approve. You are always trusted.")
     trust.add_argument("action", nargs="?", choices=("add", "remove"))
-    trust.add_argument("sender", nargs="?", metavar="MACHINE|@EMAIL")
+    trust.add_argument("sender", nargs="?", metavar="EMAIL", help="a person's email (an older machine handle "
+                                                                    "is still accepted)")
     trust.add_argument("--mode", choices=("list", "team"))
     trust.add_argument("--runtime-config", metavar="PATH", help="machine runtime config (default: beside --config)")
     trust.add_argument("--json", action="store_true", help="print JSON")
     trust.set_defaults(func=_checked_trust)
 
-    routing = sub.add_parser("routing", help="whether teammates may message this machine's named agents")
+    routing = sub.add_parser("routing", help="whether this machine takes messages only at its own inbox agent")
     which = routing.add_mutually_exclusive_group()
-    which.add_argument("--all", action="store_true", help="named agents and the inbox (the default)")
-    which.add_argument("--inbox-only", action="store_true", help="only this machine's inbox")
+    which.add_argument("--all", action="store_true",
+                       help="your picked inbox agent and replies to your agents reach them by name (the default)")
+    which.add_argument("--inbox-only", action="store_true",
+                       help="everything for this machine goes to its own inbox agent")
     routing.add_argument("--json", action="store_true", help="print JSON")
     routing.set_defaults(func=cmd_routing)
 
