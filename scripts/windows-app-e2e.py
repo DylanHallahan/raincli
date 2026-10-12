@@ -1280,6 +1280,9 @@ def part_d(app, server, installers, password, observer, menu, work):
             wait_for(f"the window machine's presence to be offline ({label})", offline, timeout=240, interval=5)
 
         wait_cold("before the hidden start")
+        # v0.5.6: the window must fit on screen for the pixel check below (the runner starts at 1024x768).
+        d5h_display = display_state()
+        set_display(1920, 1080, 100)
         unseen = send(server, observer, {"person": EMAIL}, "Read me only when you can see me")
         launched = time.strftime("%H:%M:%S", time.gmtime())
         port = free_port()
@@ -1351,6 +1354,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         hwnd = wait_for("the reopened app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
         focus_window(hwnd)
         painted(hwnd, "tray-reopen")
+        set_display(d5h_display[0], d5h_display[1], d5h_display[2])
         say("PASS: D5h. after a hidden start then show, and after a close to the tray and a reopen, the WebView2 control "
             "is visible and the window shows the page (screen pixels, not blank)")
         # The relaunch below is a real launch (--open) that must open the latest conversation; a fresh CDP port
