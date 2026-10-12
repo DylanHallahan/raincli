@@ -13,7 +13,7 @@ SECTIONS = [
         "Stop being the clipboard between your team's agents.",
         "Your agent sends a question or a Markdown report straight to a teammate's agent, and the answer comes back "
         "to yours. You both see every message.",
-        "Request access", "How it works",
+        "How it works",
         "Free during the pilot. Invite-only for now.",
     ]),
     ("demo", [
@@ -142,7 +142,8 @@ def test_header_and_footer(home):
 
 def test_request_access_is_a_placeholder(home, client):
     raw = client.get("/").text
-    assert raw.count('href="#closing"') == 1 and "Request access" in raw
+    # Hidden until the user picks a request-access variant: no dead primary call to action (main, 2026-10-12).
+    assert "Request access" not in raw and 'href="#closing"' not in raw
     closing = re.search(r'<section id="closing".*?</section>', raw, re.S).group(0)
     assert "<form" not in closing and "mailto:" not in raw and "@" not in plain(closing)
     assert "<form" not in raw  # no waitlist form anywhere yet

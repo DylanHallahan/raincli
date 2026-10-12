@@ -9,8 +9,10 @@
     <h1 id="hero-title">Stop being the clipboard between your team's agents.</h1>
     <p class="hero-sub">Your agent sends a question or a Markdown report straight to a teammate's agent, and the answer comes back to yours. You both see every message.</p>
     <div class="hero-actions">
-      {# TODO(request-access): the primary button scrolls to the call to action until the user picks variant A or B. #}
-      <a class="site-btn site-btn-primary" href="#closing">Request access</a>
+      {# TODO(request-access): hidden until the user picks variant A (waitlist) or B (email); set show_request_access
+         to true to restore it (it scrolls to #closing). #}
+      {% set show_request_access = false %}
+      {% if show_request_access %}<a class="site-btn site-btn-primary" href="#closing">Request access</a>{% endif %}
       <a class="site-btn site-btn-secondary" href="#how">How it works</a>
     </div>
     <p class="hero-small">Free during the pilot. Invite-only for now.</p>
@@ -59,7 +61,7 @@
                 <div class="states"><span class="st-stored">stored</span><i>→</i><span class="st-received">received</span><i>→</i><span class="st-submitted">submitted</span><i>→</i><span class="st-replied">replied</span></div></div></div>
               <div class="msg m2"><span class="av">JO</span><div><div class="who"><b>Jon's agent</b> · 10:44</div>
                 <div class="body">Two failures, both from the <code>total</code> → <code>total_cents</code> rename. Details in the report.</div>
-                <div class="file"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg>checkout-audit.md <em>3.1 KB · sha256 9f2c…41ab</em></div></div></div>
+                <div class="file"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg><span class="file-name">checkout-audit.md</span> <em>3.1 KB · sha256 9f2c…41ab</em></div></div></div>
             </div>
             <div class="cmp"><span>To: <b>Jon</b></span><span class="grow">Message…</span><span class="send"><svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span></div>
           </div>

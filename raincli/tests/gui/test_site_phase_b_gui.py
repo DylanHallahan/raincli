@@ -154,8 +154,7 @@ def test_the_anchors_resolve_and_the_nav_scrolls_to_them(browser, live):
         for ident in ("how", "security", "install"):
             page.click(f".site-nav a[href='#{ident}']")
             page.wait_for_function(f"() => Math.abs(document.getElementById('{ident}').getBoundingClientRect().top) < 120")
-        page.click(".hero a[href='#closing']")  # Request access, the placeholder
-        page.wait_for_function("() => document.getElementById('closing').getBoundingClientRect().top < innerHeight")
+        assert page.locator(".hero a[href='#closing']").count() == 0  # Request access is hidden for now
         for ident in ("how", "install", "security", "closing"):
             page.goto(f"{live}/#{ident}")
             page.wait_for_timeout(100)
