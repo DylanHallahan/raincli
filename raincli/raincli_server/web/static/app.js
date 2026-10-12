@@ -27,7 +27,7 @@
     if (!field) return;
     var status = document.getElementById(button.getAttribute("data-copy-status"));
     var fallback = function () {
-      field.focus();
+      field.focus({preventScroll: document.body.classList.contains("app-mode")});  // app mode: never scroll the document
       field.select();
       if (status) status.textContent = "Text selected. Press Ctrl+C or Command+C to copy.";
     };
@@ -171,9 +171,10 @@
     }
     function position() { return scroller ? scroller.scrollTop : window.scrollY; }
     function setPosition(top) { if (scroller) { scroller.scrollTop = top; } else { window.scrollTo(0, top); } }
+    // In app mode the thread scrolls inside its own scroller; scrollIntoView would also scroll the document.
     function toNewest() {
       var last = lastMessage();
-      if (last) last.scrollIntoView({block: "end"});
+      if (last && scroller) { scroller.scrollTop = scroller.scrollHeight; } else if (last) { last.scrollIntoView({block: "end"}); }
       if (more) more.hidden = true;
     }
     function remember() {
@@ -187,7 +188,10 @@
     var reload = !!(nav && (nav.type === "reload" || nav.type === "back_forward"));
     var hash = location.hash;
     var anchored = /^#m-[0-9a-fA-F-]+$/.test(hash) && document.getElementById(hash.slice(1));
-    if (anchored) {
+    if (anchored && scroller) {
+      var box = scroller.getBoundingClientRect(), at = anchored.getBoundingClientRect();
+      scroller.scrollTop += at.top - box.top - Math.max(0, (box.height - at.height) / 2);
+    } else if (anchored) {
       anchored.scrollIntoView({block: "center"});
     } else if (reload && saved && !saved.near && typeof saved.top === "number") {
       setPosition(saved.top);

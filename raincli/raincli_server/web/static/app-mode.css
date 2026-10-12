@@ -4,11 +4,27 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 html, body { height: 100%; }
+/* The shell is exactly the window (the "everything at the top" bug). One grid row of exactly the body's height:
+   without it the implicit auto row grew with a long thread, the document overflowed, and a scrollIntoView or
+   #anchor scrolled the whole viewport up. 100% wins over 100vh (a stale viewport unit in the host); --rc-app-h is
+   app-mode.js's fallback when the measured height still differs. overflow: clip (hidden as the fallback) on html
+   and body, so the document has nothing to scroll even programmatically. */
+html:has(body.app-mode) { overflow: hidden; overflow: clip; }
 body.app-mode {
   margin: 0; background: var(--rc-bg); color: var(--rc-text); font: var(--rc-fs-base)/var(--rc-lh) var(--rc-font);
-  display: grid; grid-template-columns: var(--rc-nav-width) var(--rc-rail-width) minmax(0, 1fr); height: 100vh;
-  overflow: hidden;
+  display: grid; grid-template-columns: var(--rc-nav-width) var(--rc-rail-width) minmax(0, 1fr);
+  height: 100vh; height: var(--rc-app-h, 100%); min-height: 0;
+  grid-template-rows: minmax(0, 1fr); grid-auto-rows: 0;
+  overflow: hidden; overflow: clip;
 }
+/* Anything else a host or extension puts directly in <body> leaves the grid flow (positioned, not hidden: unknown
+   content stays visible), so it can't add a row or shift nav, list and main out of their columns. */
+body.app-mode > :not(.rc-nav):not(.rc-list):not(.rc-main):not(script):not(template) { position: absolute; }
+/* The root cause (cli-builder's diagnosis): .sr-only text is position: absolute, and with no positioned ancestor its
+   containing block was the initial one, so every message's hidden "to this message" escaped .rc-scroll's clip and
+   made the document thousands of pixels tall; the #latest fragment then scrolled the root. Every pane and scroll
+   container is a containing block, so nothing positioned leaves its clip. */
+.rc-nav, .rc-list, .rc-main, .rc-scroll, .rc-list ul, .owner-warnings { position: relative; }
 body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr); }
 .app-mode h1, .app-mode h2, .app-mode h3 { font-weight: var(--rc-fw-heading); letter-spacing: -.01em; line-height: var(--rc-lh-tight); }
 :where(.app-mode) a { color: var(--rc-accent); }
@@ -19,7 +35,7 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 
 /* Navigation */
 .rc-nav { background: var(--rc-surface); border-right: 1px solid var(--rc-border); display: flex; flex-direction: column;
-  align-items: center; gap: var(--rc-s-1); padding: var(--rc-s-3) 0; }
+  align-items: center; gap: var(--rc-s-1); padding: var(--rc-s-3) 0; min-height: 0; overflow-y: auto; }
 .rc-nav .rc-logo { width: 28px; height: 28px; margin-bottom: var(--rc-s-3); }
 .rc-nav a { width: 52px; padding: var(--rc-s-2) 0; border-radius: var(--rc-radius); color: var(--rc-muted); text-decoration: none;
   font-size: var(--rc-fs-xs); text-align: center; display: flex; flex-direction: column; align-items: center; gap: 2px;
@@ -95,7 +111,7 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-main-head h2 { margin: 0; font-size: var(--rc-fs-md); }
 .rc-main-head p { margin: 0; color: var(--rc-muted); font-size: var(--rc-fs-sm); }
 .rc-pill { font-size: var(--rc-fs-xs); padding: 2px var(--rc-s-2); border-radius: var(--rc-radius-pill); background: var(--rc-accent-soft); color: var(--rc-accent); font-weight: 600; }
-.rc-scroll { flex: 1; overflow-y: auto; padding: var(--rc-s-5); }
+.rc-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: var(--rc-s-5); }
 .rc-thread { list-style: none; margin: 0 auto; padding: 0; max-width: var(--rc-thread-max); display: flex; flex-direction: column; gap: var(--rc-s-5); }
 .rc-msg { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: var(--rc-s-3); }
 .rc-msg.rc-out .rc-msg-content { background: var(--rc-out-bg); border-radius: var(--rc-radius); padding: var(--rc-s-2) var(--rc-s-3); }

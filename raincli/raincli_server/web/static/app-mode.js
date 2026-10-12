@@ -100,6 +100,35 @@
     window.addEventListener("resize", listFade);
   }
 
+  // The shell is the window (the "everything at the top" bug). Two guards, both silent no-ops normally:
+  // - the height fallback: if <body> doesn't measure innerHeight (a host's stale 100%/100vh), set --rc-app-h, a CSS
+  //   custom property through CSSOM (the CSP allows it; templates carry no style attributes), which app-mode.css uses;
+  // - the scroll guard: the document never scrolls in app mode (only the panes do); if anything scrolled it, put it
+  //   back to 0.
+  var shell = {heightFix: false, scrollGuard: false};
+  function fitShell() {
+    var height = window.innerHeight;
+    if (!height || Math.abs(body.getBoundingClientRect().height - height) <= 2) return;
+    document.documentElement.style.setProperty("--rc-app-h", height + "px");
+    shell.heightFix = true;
+  }
+  function unscroll() {
+    var doc = document.scrollingElement || document.documentElement;
+    if (!doc.scrollTop && !doc.scrollLeft) return;
+    doc.scrollTop = 0;
+    doc.scrollLeft = 0;
+    shell.scrollGuard = true;
+  }
+  function settleShell() { fitShell(); unscroll(); }
+  settleShell();
+  window.addEventListener("load", settleShell);
+  window.addEventListener("resize", settleShell);
+  window.addEventListener("pageshow", settleShell);
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") settleShell(); });
+  document.addEventListener("focusin", unscroll);
+  window.addEventListener("scroll", unscroll, {passive: true});
+  window.addEventListener("hashchange", unscroll);
+
   if (openLatest()) return;
   trailToggles(document);
   watchThread();

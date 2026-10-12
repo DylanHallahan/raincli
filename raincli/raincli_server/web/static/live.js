@@ -70,7 +70,9 @@
     });
     if (!added) return;
     if (follow) {
-      added.scrollIntoView({block: "end"});
+      // Inside the thread's scroller only: scrollIntoView would also scroll the document (the shell bug).
+      if (scroller) { scroller.scrollTop += added.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom; }
+      else { added.scrollIntoView({block: "end"}); }
       if (more) more.hidden = true;
     } else if (more) {
       more.hidden = false;  // the existing "New messages ↓" control (§16.19 item 4)
