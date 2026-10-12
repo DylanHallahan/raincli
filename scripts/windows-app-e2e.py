@@ -1198,12 +1198,12 @@ def part_d(app, server, installers, password, observer, menu, work):
         window.close()
         app.quit()
         def wait_cold(label):
-            """A cold start (review recheck R1): the window machine's presence report has aged out (the presence
-            TTL, 120 s), so P2 can only come from the window's own User-Agent version (§20.7)."""
+            """A start as at logon (review recheck R1): the window machine's presence is offline (quitting publishes an
+            offline report), so P2 can only come from the window's own User-Agent version (§20.7)."""
             def offline():
                 row = entry(server, observer, WINDOW_MACHINE) or {}
                 return (row.get("presence") or {}).get("status") in ("offline", "unknown")
-            wait_for(f"the window machine's presence to age out ({label})", offline, timeout=240, interval=5)
+            wait_for(f"the window machine's presence to be offline ({label})", offline, timeout=240, interval=5)
 
         wait_cold("before the hidden start")
         unseen = send(server, observer, {"person": EMAIL}, "Read me only when you can see me")
@@ -1268,7 +1268,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         for scheme in ("light", "dark"):
             themed_shot(page, scheme, f"after-win-10-opened-latest-{scheme}-1180x780")
         page.emulate_media(color_scheme="null")
-        say(f"PASS: D5h. from cold starts (presence aged out): started hidden ({visibility}, no focus), the latest "
+        say(f"PASS: D5h. from starts with the presence offline (as at logon): started hidden ({visibility}, no focus), the latest "
             "conversation was open and nothing was read after 10 s; shown and focused, it read the message; a cold "
             "--open opened the latest conversation, selected, and read it")
 

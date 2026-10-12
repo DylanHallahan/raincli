@@ -154,7 +154,8 @@ def _inbox(alice_app, version=None, ua=None):
 
 @pytest.mark.parametrize("version, opens", [("0.5.3", False), ("0.5.4", False), ("0.5.5", True), ("0.5.6", True),
                                             ("0.6.0", True), ("1.0.0", True), (None, False), ("garbage", False),
-                                            ("0.5", False), ("0.5.5-beta", False)])
+                                            ("0.5", False), ("0.5.5-beta", False),
+                                            ("0.\u0665.5", False), ("\uff10.5.5", False)])  # non-ASCII digits
 def test_inbox_opens_the_latest_only_for_a_0_5_5_window(client, world, alice_app, version, opens):  # noqa: F811
     bob_reports(client, world)
     person_send(client, alice_app["person"], BOB_AGENT, "hello")

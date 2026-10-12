@@ -15,7 +15,7 @@ HANDOFF_CODE_PREFIX = "rch_"
 # ever keeps sha256(token) (lowercase hex), never the token, and never logs the User-Agent.
 _APP_UA_TOKEN = re.compile(r"(?:^|\s)RainCLIApp/([A-Za-z0-9_-]{32,128})(?=\s|$)")
 # §20.7: the app window also sends "RainCLIAppVersion/<x.y.z>", its own version, beside the install token.
-_APP_UA_VERSION = re.compile(r"(?:^|\s)RainCLIAppVersion/(\d{1,4})\.(\d{1,5})\.(\d{1,6})(?=\s|$)")
+_APP_UA_VERSION = re.compile(r"(?:^|\s)RainCLIAppVersion/([0-9]{1,4})\.([0-9]{1,5})\.([0-9]{1,6})(?=\s|$)")  # ASCII digits only
 INSTALL_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 HANDLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,39}$")
