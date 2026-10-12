@@ -50,7 +50,8 @@ def test_the_ratchet_raises_the_floor_and_survives_a_reinstall(tmp_path):
     (state / security.RATCHET_FILE).write_text(json.dumps({"min_safe": "0.5.9"}))  # a later release ran here
     assert security.effective_min(state) == (0, 5, 9)
     d = driver(tmp_path, state)
-    d.consider({"version": "v0.5.5", "allow_downgrade": True, "set_at": "t"})
+    # Above the running version, below the ratcheted floor (not the running version itself, which is no update).
+    d.consider({"version": "v0.5.8", "allow_downgrade": True, "set_at": "t"})
     assert d.data["error"] == "below_min_safe"
     assert security.record(state) == (0, 5, 9)  # recording never lowers it
     assert json.loads((state / security.RATCHET_FILE).read_text()) == {"min_safe": "0.5.9"}
@@ -59,7 +60,7 @@ def test_the_ratchet_raises_the_floor_and_survives_a_reinstall(tmp_path):
     assert security.record(fresh) == security.MIN_SAFE
     # A reinstall of this release reads the same record again.
     again = driver(tmp_path, state)
-    again.consider({"version": "v0.5.5", "allow_downgrade": True, "set_at": "t2"})
+    again.consider({"version": "v0.5.8", "allow_downgrade": True, "set_at": "t2"})
     assert again.data["error"] == "below_min_safe"
 
 
