@@ -1757,9 +1757,17 @@ This section covers app mode only. The website's pages are unchanged until D4. D
   - while the app window is hidden, its WebView2 control is invisible (`CoreWebView2Controller.IsVisible` false), so the page is hidden and unfocused: it polls nothing and acknowledges nothing;
   - showing the window makes the control visible and gives it focus;
   - this covers the hidden start and closing to the tray.
-- **P2's gate (server):**
-  - Inbox marks the page for P2 only when the person session's app machine reports client **0.5.5 or later** (`AgentPresence.client_version`). A missing or unparsable report means no P2;
-  - without the mark, Inbox behaves as in v0.5.4: nothing is opened, so a hidden older window reads nothing;
-  - the rest of §20.6 M1 (the breakpoint, "latest", the toast) is unchanged.
-- **Tests:** a server test for 0.5.3, 0.5.4, 0.5.5, missing and unparsable; the window unit tests; and the e2e D5h (a hidden start: `hasFocus` false, `visibilityState` `hidden`, nothing acknowledged after 10 s; shown and focused: the latest conversation opens and is read).
+- **P2's gate (server), on the window's own version:**
+  - **The token:** the app window sends `RainCLIAppVersion/<x.y.z>`, its own version, in its User-Agent. It sits beside `RainCLIApp/<install token>` (§16.14 S3), only on requests to the service origin, and never in the global User-Agent.
+  - **The rule:** Inbox marks the page for P2 only in app mode and only when that version is **0.5.5 or later**. A missing, unparsable or repeated token means no P2.
+  - **Not presence:** the gate doesn't use the machine's presence report. A cold or logon launch decides from its very first page, before the runtime's first report; a gate on presence would race it.
+  - **A spoofed version** only changes the user's own window.
+  - **Without the mark,** Inbox behaves as in v0.5.4: nothing is opened, so a hidden older window reads nothing.
+  - **Unchanged:** the rest of §20.6 M1 (the breakpoint, "latest", the toast).
+- **Tests:**
+  - **server:** UA versions 0.5.3, 0.5.4, 0.5.5 and later, missing, garbage and repeated, no presence row, and a website session;
+  - **the window unit tests;**
+  - **the e2e D5h, from a cold start** (the presence report aged out):
+    - `--background`: `hasFocus` false, `visibilityState` `hidden`, the latest conversation already open, and nothing acknowledged after 10 s; shown and focused, it is read;
+    - `--open`: the latest conversation opens and is read.
 

@@ -55,7 +55,7 @@ def seed(live, session):
     for handle in ("maya-laptop", "priya-app"):
         machines[handle] = (session.scalar(select(Agent).where(Agent.handle == handle)), tokens[handle])
     for handle, agents in (("maya-laptop", [entry("laptop-agent", "a" * 32)]), ("priya-app", [])):
-        # The apps run 0.5.5 (§20.7: Inbox opens the latest conversation only for 0.5.5 or later).
+        # The apps run 0.5.5 and report so, as the running app does.
         api(live, "/api/v1/presence", {"status": "ready", "agents": agents,
                                        "client": {"version": "0.5.5", "update_mode": "automatic",
                                                   "update_state": "current"}}, tokens[handle], method="PUT")
@@ -114,6 +114,7 @@ def stack(browser, paths, out):
 def test_capture_the_v055_set(seed, browser_pw):
     OUT.mkdir(parents=True, exist_ok=True)
     cam = Camera(browser_pw, seed["base"], seed["persons"]["Maya"])
+    cam.agent += " RainCLIAppVersion/0.5.5"  # §20.7: a 0.5.5 window, so Inbox opens the latest conversation
     saved = []
 
     def shoot(n, screen, path, sizes=(BIG,), act=None, crop=None):

@@ -634,13 +634,16 @@ def test_user_agent_carries_the_install_token_to_the_service_only(tmp_path):
         req = types.SimpleNamespace(Uri=url, Headers=types.SimpleNamespace(SetHeader=headers.__setitem__))
         requested.handlers[0](None, types.SimpleNamespace(Request=req))
         return headers
-    assert request(SERVICE + "/app/inbox") == {"User-Agent": "Mozilla/5.0 Edg/131.0 RainCLIApp/install-token-1"}
+    version = raincli_agent.__version__  # §20.7: the window's own version rides beside the token
+    assert request(SERVICE + "/app/inbox") == {
+        "User-Agent": f"Mozilla/5.0 Edg/131.0 RainCLIApp/install-token-1 RainCLIAppVersion/{version}"}
     for other in (LOCAL + "settings.html", "https://example.org/", "http://raincli.example/app/inbox",
                   "https://raincli.example:8443/app/inbox", "https://raincli.example.evil.example/"):
-        assert "RainCLIApp/" not in str(request(other)), other
+        assert "RainCLIApp" not in str(request(other)), other
     app.services.install_token = "install-token-2"  # sign-in or sign-out rotated it
     app.refresh_install_token()
-    assert request(SERVICE + "/x") == {"User-Agent": "Mozilla/5.0 Edg/131.0 RainCLIApp/install-token-2"}
+    assert request(SERVICE + "/x") == {
+        "User-Agent": f"Mozilla/5.0 Edg/131.0 RainCLIApp/install-token-2 RainCLIAppVersion/{version}"}
     # A new service origin (signed in to another server) gets its filter before its first navigation.
     app.services.service_url = lambda: "https://other.example"
     app.refresh_navigation()

@@ -110,7 +110,7 @@ def team(live, session):
     for name, machine in (("maya", "maya-app"), ("jon", "jon-app")):
         login = api(live, "/api/v1/app/login", {"email": f"{name}@example.test", "password": PASSWORD,
                                                 "machine_name": machine, "person_session": True})
-        # The app's own machine reports its client, as the running app does (§20.7: P2 needs 0.5.5 or later).
+        # The app's own machine reports its client, as the running app does.
         api(live, "/api/v1/presence", {"status": "ready", "client": {**CLIENT, "version": "0.5.5"}}, login["token"],
             method="PUT")
         apps[name] = login["person_session"]
@@ -137,7 +137,7 @@ def settle_url(page, quiet=0.3, timeout=10):
 
 def open_app(browser, team, person, path="/app/inbox", **options):
     probe = browser.new_page()
-    agent = probe.evaluate("navigator.userAgent") + " RainCLIApp/" + APP_TOKEN
+    agent = probe.evaluate("navigator.userAgent") + " RainCLIApp/" + APP_TOKEN + " RainCLIAppVersion/0.5.5"  # §20.7: a 0.5.5 window
     probe.close()
     context = browser.new_context(user_agent=agent, **options)
     page = context.new_page()

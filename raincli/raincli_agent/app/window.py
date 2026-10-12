@@ -281,8 +281,12 @@ class AppWindow:
         self.install_token = self.services.app_install_token()
 
     def user_agent(self, base):
-        """The webview's own User-Agent plus ``RainCLIApp/<app_install_token>`` (§16.14 S3)."""
-        return f"{base} RainCLIApp/{self.install_token}" if self.install_token else base
+        """The webview's own User-Agent plus ``RainCLIApp/<app_install_token>`` (§16.14 S3) and
+        ``RainCLIAppVersion/<version>`` (§20.7: the server opens the latest conversation only for a window that keeps
+        its page hidden while hidden, 0.5.5 or later). Both go to the service origin only, never the global UA."""
+        from raincli_agent import __version__
+
+        return f"{base} RainCLIApp/{self.install_token} RainCLIAppVersion/{__version__}" if self.install_token else base
 
     def create(self):
         """The window, hidden until ``show``; the first page is a local one."""

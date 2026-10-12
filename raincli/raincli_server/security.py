@@ -14,6 +14,8 @@ HANDOFF_CODE_PREFIX = "rch_"
 # §16.14 S3: the app's webview sends "RainCLIApp/<app_install_token>" in its User-Agent; the server only
 # ever keeps sha256(token) (lowercase hex), never the token, and never logs the User-Agent.
 _APP_UA_TOKEN = re.compile(r"(?:^|\s)RainCLIApp/([A-Za-z0-9_-]{32,128})(?=\s|$)")
+# §20.7: the app window also sends "RainCLIAppVersion/<x.y.z>", its own version, beside the install token.
+_APP_UA_VERSION = re.compile(r"(?:^|\s)RainCLIAppVersion/(\d{1,4})\.(\d{1,5})\.(\d{1,6})(?=\s|$)")
 INSTALL_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 HANDLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,39}$")
@@ -171,6 +173,17 @@ def app_install_hash(user_agent: str | None) -> str | None:
     if len(found) != 1:
         return None
     return hashlib.sha256(found[0].encode("ascii")).hexdigest()
+
+
+def app_version(user_agent: str | None) -> tuple[int, int, int] | None:
+    """The one ``RainCLIAppVersion/<x.y.z>`` in a User-Agent (the app window's own version, §20.7), or None when
+    there is none, more than one, or it isn't x.y.z."""
+    if not user_agent or len(user_agent) > 1024:
+        return None
+    found = _APP_UA_VERSION.findall(user_agent)
+    if len(found) != 1:
+        return None
+    return tuple(int(part) for part in found[0])
 
 
 def same_install(expected: str | None, user_agent: str | None) -> bool:

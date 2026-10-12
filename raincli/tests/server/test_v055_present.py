@@ -143,48 +143,47 @@ def test_the_owner_notice_sits_at_the_top_of_the_list_on_every_page(client, worl
         assert listing.index("owner-warnings") < listing.index("rc-convs"), path
 
 
-# §20.7: P2 only for an app whose hidden window keeps its page hidden (client 0.5.5 or later) -----------------
+# §20.7: P2 only for an app window whose own User-Agent says 0.5.5 or later ---------------------------------------
 
-def _report_client(client, token, version):
-    r = client.put("/api/v1/presence", headers=auth(token), json={
-        "status": "ready", "client": {"version": version, "update_mode": "automatic", "update_state": "current"}})
-    assert r.status_code == 200, r.text
+def _inbox(alice_app, version=None, ua=None):
+    from test_app_mode import WEBVIEW_UA
+
+    agent = ua or (WEBVIEW_UA + (f" RainCLIAppVersion/{version}" if version else ""))
+    return alice_app["webview"].get("/app/inbox", headers={"User-Agent": agent}).text
 
 
-@pytest.mark.parametrize("version, opens", [("0.5.3", False), ("0.5.4", False), ("0.5.5", True), ("0.6.0", True),
-                                            ("1.0.0", True), (None, False), ("garbage", False)])
-def test_inbox_opens_the_latest_only_for_a_0_5_5_app(client, world, alice_app, session, version, opens):  # noqa: F811
-    from raincli_server.models import AgentPresence, PersonSession
+@pytest.mark.parametrize("version, opens", [("0.5.3", False), ("0.5.4", False), ("0.5.5", True), ("0.5.6", True),
+                                            ("0.6.0", True), ("1.0.0", True), (None, False), ("garbage", False),
+                                            ("0.5", False), ("0.5.5-beta", False)])
+def test_inbox_opens_the_latest_only_for_a_0_5_5_window(client, world, alice_app, version, opens):  # noqa: F811
+    bob_reports(client, world)
+    person_send(client, alice_app["person"], BOB_AGENT, "hello")
+    assert ("data-open-latest" in _inbox(alice_app, version)) is opens
+
+
+def test_the_version_needs_no_presence_report(client, world, alice_app, session):  # noqa: F811
+    """A cold or logon launch: the window's first page decides from its own User-Agent, before any presence report
+    (review recheck R1)."""
+    from raincli_server.models import AgentPresence
 
     bob_reports(client, world)
     person_send(client, alice_app["person"], BOB_AGENT, "hello")
-    if version == "garbage":  # can't be reported through the API: as if stored by an older server
-        _report_client(client, alice_app["token"], "0.5.5")
-        machine = session.query(PersonSession).one().machine_agent_id
-        session.execute(update(AgentPresence).where(AgentPresence.agent_id == machine).values(client_version="x.y"))
-        session.commit()
-    elif version is not None:
-        _report_client(client, alice_app["token"], version)
-    page = alice_app["webview"].get("/app/inbox").text
-    assert ("data-open-latest" in page) is opens
-
-
-def test_a_stale_0_5_5_report_opens_nothing(client, world, alice_app, session):  # noqa: F811
-    """Review L1: after a rollback the old row still says 0.5.5 until the older runtime reports; past the presence
-    TTL it no longer counts."""
-    from raincli_server.models import AgentPresence, PersonSession
-
-    bob_reports(client, world)
-    person_send(client, alice_app["person"], BOB_AGENT, "hello")
-    _report_client(client, alice_app["token"], "0.5.5")
-    assert "data-open-latest" in alice_app["webview"].get("/app/inbox").text
-    machine = session.query(PersonSession).one().machine_agent_id
-    session.execute(update(AgentPresence).where(AgentPresence.agent_id == machine)
-                    .values(seen_at=identity.now() - timedelta(seconds=121)))
+    session.query(AgentPresence).delete()
     session.commit()
-    assert "data-open-latest" not in alice_app["webview"].get("/app/inbox").text
+    assert "data-open-latest" in _inbox(alice_app, "0.5.5")
+
+
+def test_two_version_tokens_or_a_website_session_open_nothing(client, world, alice_app):  # noqa: F811
+    from test_app_mode import WEBVIEW_UA
+
+    bob_reports(client, world)
+    person_send(client, alice_app["person"], BOB_AGENT, "hello")
+    assert "data-open-latest" not in _inbox(alice_app, ua=WEBVIEW_UA + " RainCLIAppVersion/0.5.5 RainCLIAppVersion/0.5.6")
+    with TestClient(client.app) as site:  # the website, even with a 0.5.5 version in its User-Agent
+        login(site)
+        page = site.get("/app/inbox", headers={"User-Agent": "Mozilla/5.0 RainCLIAppVersion/0.5.5"}).text
+    assert "data-open-latest" not in page
 
 
 def test_no_marker_without_a_conversation(client, world, alice_app):  # noqa: F811
-    _report_client(client, alice_app["token"], "0.5.5")
-    assert "data-open-latest" not in alice_app["webview"].get("/app/inbox").text
+    assert "data-open-latest" not in _inbox(alice_app, "0.5.5")

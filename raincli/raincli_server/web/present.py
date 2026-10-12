@@ -11,7 +11,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from raincli_server import identity
-from raincli_server.models import Agent, AgentCredential, AgentPresence, Conversation, Message, PersonSession, User
+from raincli_server.models import Agent, AgentCredential, Conversation, Message, User
 
 CONNECTED_WITHIN = timedelta(hours=24)  # §20.4: step 1 shows done after a connection in the last 24 h
 _SUFFIX = re.compile(r"\s*\([^()]*\)\s*$")  # owners.displays' disambiguator, "Bob (bob)"
@@ -87,29 +87,19 @@ def handoff_next(value: str) -> str | None:
 
 P1 = False  # §20.4 P1 (the "via" line hidden on an exact match) is frozen for v0.5.5: shown_via isn't computed
 
-P2_SINCE = (0, 5, 5)  # §20.7: the first client whose hidden window tells its page it is hidden
+P2_SINCE = (0, 5, 5)  # §20.7: the first app window that tells its page it is hidden while hidden
 
 
-def opens_latest(db, viewer, now=None) -> bool:
-    """§20.7: Inbox opens the latest conversation (P2) only in an app whose window keeps its page hidden while the
-    window is hidden: the person session's machine reports client 0.5.5 or later, and reported within the presence
-    TTL. Older clients (a hidden start would read the latest conversation), a stale, missing or unparsable report,
-    or the website: no P2."""
-    from raincli_server.presence import version_tuple
-
-    from raincli_server.presence import TTL_SECONDS
+def opens_latest(viewer, user_agent: str | None) -> bool:
+    """§20.7: Inbox opens the latest conversation (P2) only in an app window that keeps its page hidden while the
+    window is hidden: one whose own User-Agent says RainCLIAppVersion 0.5.5 or later. An older window (a hidden start
+    would read the latest conversation), a missing or unparsable version, or the website: no P2. The page request
+    itself carries it, so a cold or logon launch decides at once, without waiting for a presence report. A spoofed
+    version only changes the user's own window, which is acceptable."""
+    from raincli_server.security import app_version
 
     session = getattr(viewer, "web_session", None)
-    if session is None or not session.person_session_id:
+    if session is None or not session.person_session_id:  # app mode only (a person session's window)
         return False
-    person = db.get(PersonSession, session.person_session_id)
-    row = db.get(AgentPresence, person.machine_agent_id) if person is not None else None
-    # Fresh too (within the presence TTL): after a rollback the old row still says 0.5.5 until the older runtime
-    # reports, and that window would get P2 (review L1). Gating on the window's own User-Agent is a later step.
-    if row is None or row.seen_at <= (now or identity.now()) - timedelta(seconds=TTL_SECONDS):
-        return False
-    try:
-        return version_tuple(row.client_version or "") >= P2_SINCE
-    except ValueError:
-        return False
-
+    version = app_version(user_agent)
+    return version is not None and version >= P2_SINCE

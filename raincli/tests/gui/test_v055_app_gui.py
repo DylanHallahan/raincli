@@ -25,7 +25,7 @@ def open_app(browser, team, person, path=None, init_script=None, setup=None, nex
     """A fresh 'webview' profile signed in through the handoff; ``init_script`` and ``setup(context)`` apply from the
     handoff on. Inbox may move on to the latest conversation by itself (§20.6 M1)."""
     probe = browser.new_page()
-    agent = probe.evaluate("navigator.userAgent") + " RainCLIApp/" + APP_TOKEN
+    agent = probe.evaluate("navigator.userAgent") + " RainCLIApp/" + APP_TOKEN + " RainCLIAppVersion/0.5.5"  # §20.7: a 0.5.5 window
     probe.close()
     context = browser.new_context(user_agent=agent, **options)
     if init_script:

@@ -102,7 +102,7 @@ INSTALL_HASH = hashlib.sha256(APP_TOKEN.encode()).hexdigest()
 def app_user_agent(browser):
     probe = browser.new_page()
     try:
-        return probe.evaluate("navigator.userAgent") + " RainCLIApp/" + APP_TOKEN
+        return probe.evaluate("navigator.userAgent") + " RainCLIApp/" + APP_TOKEN + " RainCLIAppVersion/0.5.5"  # §20.7: a 0.5.5 window
     finally:
         probe.close()
 
@@ -129,7 +129,7 @@ def person_send(base, person, to, body):
 
 
 def app_reports(base, token, version="0.5.5"):
-    """The app's own machine reports its client, as the running app does (§20.7: P2 needs 0.5.5 or later)."""
+    """The app's own machine reports its client, as the running app does."""
     body = {"status": "ready", "client": {"version": version, "update_mode": "automatic", "update_state": "current"}}
     request = urllib.request.Request(base + "/api/v1/presence", data=json.dumps(body).encode(), method="PUT",
                                      headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})

@@ -1197,6 +1197,15 @@ def part_d(app, server, installers, password, observer, menu, work):
         # there (its poll), before the hidden start this step is about.
         window.close()
         app.quit()
+        def wait_cold(label):
+            """A cold start (review recheck R1): the window machine's presence report has aged out (the presence
+            TTL, 120 s), so P2 can only come from the window's own User-Agent version (§20.7)."""
+            def offline():
+                row = entry(server, observer, WINDOW_MACHINE) or {}
+                return (row.get("presence") or {}).get("status") in ("offline", "unknown")
+            wait_for(f"the window machine's presence to age out ({label})", offline, timeout=240, interval=5)
+
+        wait_cold("before the hidden start")
         unseen = send(server, observer, {"person": EMAIL}, "Read me only when you can see me")
         launched = time.strftime("%H:%M:%S", time.gmtime())
         port = free_port()
@@ -1244,9 +1253,14 @@ def part_d(app, server, installers, password, observer, menu, work):
         # The relaunch below is a real launch (--open) that must open the latest conversation; a fresh CDP port
         # for the captures, independent of the hidden start's DevTools session.
         app.quit()
+        wait_cold("before --open")
+        unseen_open = send(server, observer, {"person": EMAIL}, "Read me when the window opens")
         window = WindowCDP(pw, open_window_cdp(app))
         page = window.page(INBOX, timeout=180)
         page.wait_for_url(f"**/app/conversations/{conversation}*", timeout=60000)
+        wait_for("the cold --open window to read the latest conversation",
+                 lambda: api(server, observer, f"/api/v1/messages/{unseen_open}")["message"]["delivery_state"] != "stored",
+                 timeout=60, interval=1)
         check(conversation in url_of(page), f"launch did not open the latest conversation: {url_of(page)}")
         current = page.locator(".rc-conv[aria-current=page]")
         check(current.count() == 1 and conversation in (current.get_attribute("href") or ""),
@@ -1254,8 +1268,9 @@ def part_d(app, server, installers, password, observer, menu, work):
         for scheme in ("light", "dark"):
             themed_shot(page, scheme, f"after-win-10-opened-latest-{scheme}-1180x780")
         page.emulate_media(color_scheme="null")
-        say(f"PASS: D5h. started hidden ({visibility}, no focus): nothing read after 10 s; "
-            "shown and focused, the window was on the latest conversation, selected, and read the message")
+        say(f"PASS: D5h. from cold starts (presence aged out): started hidden ({visibility}, no focus), the latest "
+            "conversation was open and nothing was read after 10 s; shown and focused, it read the message; a cold "
+            "--open opened the latest conversation, selected, and read it")
 
         # D5i. v0.5.5 (brief shot 13): one pass at a REAL 150% display scale (1920x1080, the per-monitor scale set
         # live as Settings does). The app is restarted so its window is created at 150%: pywebview scales the window

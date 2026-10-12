@@ -523,7 +523,7 @@ def _app_inbox(request: Request, db: Session, viewer: auth.Viewer, team_ids, row
     return render(request, "app_mode/inbox.html", viewer=viewer, conversations=rows,
                   owner_warnings=extras["list_owner_warnings"],
                   connected=present.connected_machine(db, viewer.user, team_ids),
-                  open_latest=present.opens_latest(db, viewer), **extras)
+                  open_latest=present.opens_latest(viewer, request.headers.get("user-agent")), **extras)
 
 
 @router.get("/app/conversations/{conversation_id}", response_class=HTMLResponse)
