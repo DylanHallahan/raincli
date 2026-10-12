@@ -197,16 +197,41 @@ class ApiClient:
         return self.request("GET", "/me")[1]
 
     def agents(self):
+        """The caller's own machines (v0.6, §21 C13 M2); teammates are people, in :meth:`people`."""
         return self.request("GET", "/agents")[1]["agents"]
+
+    def people(self):
+        """``GET /people`` (§21 C5.3): the team's people with presence and speed, never machines or agents."""
+        return self.request("GET", "/people")[1]["people"]
+
+    def my_inbox(self):
+        """``GET /me/inbox`` (§21 C8.1): ``{inbox, candidates, waiting}`` for the credential's owner."""
+        return self.request("GET", "/me/inbox")[1]
+
+    def set_my_inbox(self, agent, *, machine=None, deliver_waiting=True):
+        """``PUT /me/inbox`` (§21 C8.1): pick an agent on THIS machine (C13 L4). Returns
+        ``{inbox, moved, stayed, delivered_waiting}``."""
+        body = {"agent": agent, "deliver_waiting": bool(deliver_waiting)}
+        if machine is not None:
+            body["machine"] = machine
+        return self.request("PUT", "/me/inbox", body=body)[1]
+
+    def clear_my_inbox(self):
+        """``PUT /me/inbox {"none": true}``: no inbox; messages to you wait in your app."""
+        return self.request("PUT", "/me/inbox", body={"none": True})[1]
 
     def send(self, to, body, *, message_id=None, conversation_id=None, in_reply_to=None,
              attachments=None, from_agent=None, kind=None):
         """Send a message. Returns ``(message, created)``.
 
-        The id is fixed before the first attempt, so every retry is the same
-        idempotent request.
+        ``to`` is a person (§21 C2): ``{"person": email}``, ``{"person_name": name}`` or the text
+        forms. A reply (``in_reply_to``) passes ``to=None``: the key is then omitted and the server
+        chooses the recipient (§21 C4). The id is fixed before the first attempt, so every retry is
+        the same idempotent request.
         """
-        payload = {"id": str(message_id or uuid.uuid4()), "to": to, "body": body}
+        payload = {"id": str(message_id or uuid.uuid4()), "body": body}
+        if to is not None:
+            payload["to"] = to
         if conversation_id:
             payload["conversation_id"] = conversation_id
         if in_reply_to:
