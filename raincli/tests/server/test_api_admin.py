@@ -135,3 +135,23 @@ def test_migration_downgrade_upgrade_roundtrip():
         with server.connect() as conn:
             conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         server.dispose()
+
+
+def test_admin_set_inbox_for_an_old_machine(database_url, engine, tmp_path):
+    """§21 operator: set a person's inbox without the live-agent check (an old client reports no agents), then
+    clear it; the machine must be theirs, in that team."""
+    assert run(database_url, "create-user", "--email", "s@example.test", "--name", "S", stdin_text="support pass 12\n")[0] == 0
+    assert run(database_url, "create-user", "--email", "t@example.test", "--name", "T", stdin_text="support pass 12\n")[0] == 0
+    assert run(database_url, "create-team", "--slug", "sup", "--name", "Sup", "--owner", "s@example.test")[0] == 0
+    assert run(database_url, "add-member", "--team", "sup", "--email", "t@example.test")[0] == 0
+    for owner, handle in (("s@example.test", "old-pc"), ("t@example.test", "t-pc")):
+        assert run(database_url, "register-agent", "--team", "sup", "--owner", owner, "--handle", handle,
+                   "--out", str(tmp_path / f"{handle}.json"))[0] == 0
+    code, out, errs = run(database_url, "set-inbox", "--team", "sup", "--email", "s@example.test", "--handle", "old-pc",
+                          "--agent", "inbox")
+    assert code == 0 and "inbox on old-pc" in out, errs
+    code, _, errs = run(database_url, "set-inbox", "--team", "sup", "--email", "s@example.test", "--handle", "t-pc",
+                        "--agent", "inbox")
+    assert code == 1 and "inbox_invalid" in errs  # not her machine
+    code, out, _ = run(database_url, "set-inbox", "--team", "sup", "--email", "s@example.test", "--clear")
+    assert code == 0 and ": none" in out

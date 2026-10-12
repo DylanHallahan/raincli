@@ -1331,7 +1331,7 @@ def inbox_json(session: Session, row: PersonInbox | None) -> dict | None:
 
 
 def set_person_inbox(session: Session, user: User, team_id: uuid.UUID, machine_id: uuid.UUID, agent_name: str, *,
-                     deliver_waiting: bool = True, via: str) -> dict:
+                     deliver_waiting: bool = True, via: str, check_live: bool = True) -> dict:
     """Pick ``(machine, agent_name)`` as ``user``'s inbox in the team (C6, C8). Unacked messages at the previous
     inbox move to the new one; the waiting messages are delivered too when ``deliver_waiting``. Idempotent: the
     same inbox again moves nothing. Returns ``{inbox, moved, stayed, delivered_waiting}``; the caller commits."""
@@ -1343,7 +1343,7 @@ def set_person_inbox(session: Session, user: User, team_id: uuid.UUID, machine_i
             or machine.owner_user_id != user.id or machine.revoked_at is not None:
         raise _inbox_invalid(machine if machine is not None and machine.owner_user_id == user.id else None)
     if not isinstance(agent_name, str) or not valid_agent_name(agent_name) or agent_name.startswith("-") \
-            or not _accepted_inbox_name(session, machine, agent_name):
+            or (check_live and not _accepted_inbox_name(session, machine, agent_name)):  # operator: check_live=False
         raise _inbox_invalid(machine)
     row = _lock_inbox_row(session, user.id, team_id, write=True)
     if row is not None and (row.agent_id, row.agent_name) == (machine.id, agent_name):
