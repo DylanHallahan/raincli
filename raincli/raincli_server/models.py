@@ -265,6 +265,12 @@ class AgentCredential(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+# A self or own_agents conversation is one person on both sides, with the keys p:<id> and self:<id>.
+OWN_SHAPE = ("(kind = 'pair') = (b_key NOT LIKE 'self:%') AND (kind = 'pair' OR ("
+             "agent_a_id IS NULL AND agent_b_id IS NULL AND a_user_id = b_user_id "
+             "AND a_key = 'p:' || a_user_id::text AND b_key = 'self:' || a_user_id::text))")
+
+
 class Conversation(Base):
     """A thread between exactly two endpoints (§16.6). Each side is a machine, an agent on a machine
     (machine plus name) or a person. ``a_key``/``b_key`` are canonical endpoint keys (``m:<id>``,
@@ -288,8 +294,23 @@ class Conversation(Base):
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     archived_by_key: Mapped[str | None] = mapped_column(String(160))
     archived_through_seq: Mapped[int | None] = mapped_column(BigInteger)
+    # §21 (migration 0010). ``kind``: ``pair`` (two people), ``self`` (a person's own agents writing to them,
+    # "From your agents", one per team and person) or ``own_agents`` (migrated machine-to-machine history of one
+    # person, private and archived; nothing new lands there). ``self`` and ``own_agents`` rows have the keys
+    # ``p:<id>`` and ``self:<id>``. ``merged_into``: where this conversation's messages went (a lookup by its id
+    # follows the chain). ``premerge_is_default``: the default mark before the merge, for the downgrade.
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="pair", server_default="pair")
+    merged_into: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", name="fk_conversations_merged_into"))
+    premerge_is_default: Mapped[bool | None] = mapped_column(Boolean)
     __table_args__ = (
         CheckConstraint("a_key < b_key", name="ck_conversations_order"),
+        CheckConstraint("kind IN ('pair','self','own_agents')", name="ck_conversations_kind"),
+        CheckConstraint(OWN_SHAPE, name="ck_conversations_own_shape"),
+        Index("uq_conversations_self", "team_id", "a_user_id", unique=True, postgresql_where=text("kind = 'self'")),
+        Index("uq_conversations_own_agents", "team_id", "a_user_id", unique=True,
+              postgresql_where=text("kind = 'own_agents'")),
+        Index("ix_conversations_merged_into", "merged_into", postgresql_where=text("merged_into IS NOT NULL")),
         CheckConstraint("(archived_at IS NULL) = (archived_by_key IS NULL) AND "
                         "(archived_at IS NULL) = (archived_through_seq IS NULL)", name="ck_conversations_archived"),
         *(Index(f"ix_conversations_{c}_active", c, postgresql_where=text("archived_at IS NULL"))
@@ -318,6 +339,12 @@ class Message(Base):
     # Migration 0008: the conversation a message was moved out of (it had another team), so a retried send
     # naming that conversation is still the same payload.
     moved_from_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # §21 (migration 0010). The conversation before the person-pair merge (for the downgrade); ``redeliver``: set
+    # when the message is re-targeted, so the new recipient's poll returns it below its cursor, cleared on ack;
+    # ``route``: how the recipient was chosen (``inbox``, ``reply``, ``person`` or ``self``), NULL before 0010.
+    premerge_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    redeliver: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    route: Mapped[str | None] = mapped_column(String(8))
     in_reply_to: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("messages.id"))
     # Endpoints (§16.1): a machine (agent id), an agent on a machine (agent id plus name) or a person.
     sender_agent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id"))
@@ -352,6 +379,30 @@ class Message(Base):
         Index("ix_messages_recipient_user_seq", "recipient_user_id", "seq"),
         Index("ix_messages_sender_user", "sender_user_id"),
         Index("ix_messages_conversation_seq", "conversation_id", "seq"),
+        CheckConstraint("route IN ('inbox','reply','person','self')", name="ck_messages_route"),
+        Index("ix_messages_redeliver_agent", "recipient_agent_id", "seq",
+              postgresql_where=text("redeliver AND acked_at IS NULL")),
+        Index("ix_messages_redeliver_user", "recipient_user_id", "seq",
+              postgresql_where=text("redeliver AND acked_at IS NULL")),
+    )
+
+
+class PersonInbox(Base):
+    """The (machine, agent name) that receives a person's teammates' messages in one team (§21, PR7 per team).
+    The machine is the person's own, in that team, not revoked."""
+
+    __tablename__ = "person_inboxes"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), nullable=False)
+    agent_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    set_via: Mapped[str] = mapped_column(String(8), nullable=False)
+    __table_args__ = (
+        CheckConstraint("set_via IN ('app','web','cli','api')", name="ck_person_inboxes_set_via"),
+        CheckConstraint("char_length(agent_name) BETWEEN 1 AND 64 AND agent_name NOT LIKE '-%'",
+                        name="ck_person_inboxes_agent_name"),
+        Index("ix_person_inboxes_agent", "agent_id"),
     )
 
 
