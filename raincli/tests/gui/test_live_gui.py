@@ -59,12 +59,32 @@ def poll_now(page):
     page.evaluate("() => window.rcLive && window.rcLive.poll()")
 
 
+BOB = {"person": "bob@example.test"}  # §21: people are addressed
+
+
+def pick_inbox(base, token, agent):
+    """§21 C8.1: a machine's owner picks one of its agents as their inbox (a machine credential may pick only its
+    own agents, C13 L4)."""
+    request = urllib.request.Request(base + "/api/v1/me/inbox", method="PUT",
+                                     data=json.dumps({"agent": agent}).encode(),
+                                     headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
+    urllib.request.urlopen(request, timeout=15).read()
+
+
 @pytest.fixture
-def agent_thread(people):
-    """Alice writes to Bob's reviewer agent, which Bob's machine reports as instant and idle."""
+def agent_thread(people, session):
+    """Alice writes to Bob, whose inbox is the reviewer agent his machine reports as instant and idle. Alice has no
+    inbox (§21 C3.2), so what Bob's agent sends her is delivered in her app: the read state these tests are about."""
+    from raincli_server.models import PersonInbox
+
+    session.query(PersonInbox).filter(PersonInbox.user_id == people["world"]["users"]["alice"].id).delete()
+    session.commit()
     put_presence(people["base"], people["bob"]["token"], [REVIEWER])
-    first = person_send(people["base"], people["alice"]["person_session"],
-                        {"machine": "bob-laptop", "agent": "reviewer"}, "Can you run the checkout flow?")
+    pick_inbox(people["base"], people["bob"]["token"], "reviewer")
+    # The machine's routing poll (§16.12 C1): it takes named messages, so nothing waits for an update.
+    urllib.request.urlopen(urllib.request.Request(people["base"] + "/api/v1/inbox?routing=1&wait=0", headers={
+        "Authorization": "Bearer " + people["bob"]["token"]}), timeout=15).read()
+    first = person_send(people["base"], people["alice"]["person_session"], BOB, "Can you run the checkout flow?")
     return {**people, "first": first, "cid": first["conversation_id"]}
 
 
@@ -96,8 +116,8 @@ def test_meta_line_names_and_reply_on_hover_and_focus(agent_thread, browser):
     context, page = open_thread(browser, p, p["cid"])
     theirs = page.locator(f"#m-{reply['id']}")
     who = theirs.locator(".rc-who").inner_text()
-    assert who.startswith("Bob · reviewer · ") and " to " not in who  # name · local time; no "to" here
-    assert "via reviewer (stated by the machine)" in who  # P1 is frozen for v0.5.5: "via" shows as in v0.5.4
+    assert who.startswith("Bob · agent · ") and " to " not in who  # §21 PR4: the person · agent · local time
+    assert "via" not in who and "reviewer" not in who  # no agent name, no "via" (P1 deleted)
     link = theirs.locator(".rc-reply")
     assert float(link.evaluate("e => getComputedStyle(e).opacity")) == 0
     theirs.hover()
@@ -106,10 +126,11 @@ def test_meta_line_names_and_reply_on_hover_and_focus(agent_thread, browser):
     link.focus()  # reachable by keyboard, and visible once focused
     page.wait_for_function("e => getComputedStyle(e).opacity === '1'", arg=link.element_handle())
     context.close()
-    # "to <recipient>" only in machine-inbox conversations.
-    inbox = person_send(p["base"], p["alice"]["person_session"], {"machine": "bob-laptop"}, "to the inbox")
-    context, page = open_thread(browser, p, inbox["conversation_id"])
-    assert "to Bob · inbox" in page.locator(f"#m-{inbox['id']} .rc-who").inner_text()
+    # What Bob writes in the app is "Bob", not "Bob · agent" (PR4).
+    by_hand = person_send(p["base"], p["bob"]["person_session"], {"person": "alice@example.test"}, "by hand")
+    context, page = open_thread(browser, p, by_hand["conversation_id"])
+    who = page.locator(f"#m-{by_hand['id']} .rc-who").inner_text()
+    assert who.startswith("Bob · ") and "agent" not in who
     context.close()
 
 
@@ -142,24 +163,29 @@ def test_the_trail_for_each_recipient_kind_and_none_on_incoming(agent_thread, br
     page.locator(f'[data-trail="{p["first"]["id"]}"] summary').click()
     assert "submitted" in page.locator(f'[data-trail="{p["first"]["id"]}"] details ol').inner_text()
     context.close()
+    # §21 C3.2, C6.1: with no inbox, a message waits in the person's app, held until they pick one; no chip.
+    request = urllib.request.Request(p["base"] + "/api/v1/me/inbox", method="PUT", data=json.dumps({"none": True}).encode(),
+                                     headers={"Content-Type": "application/json", "Authorization": "Bearer " + p["bob"]["token"]})
+    urllib.request.urlopen(request, timeout=15).read()
     person = person_send(p["base"], p["alice"]["person_session"], {"person": "bob@example.test"}, "Hi Bob")
     context, page = open_thread(browser, p, person["conversation_id"])
-    assert steps(page, person["id"])[0] == ["stored", "received", "replied"]
-    assert page.locator("[data-live-header] .rc-chip").count() == 0  # a person: no chip
+    assert steps(page, person["id"])[0] == ["stored", "held: waiting for Bob to pick an inbox"]
+    assert page.locator("[data-live-header] .rc-chip").count() == 0
+    assert "No inbox yet" in page.locator("[data-live-header]").inner_text()
     context.close()
 
 
 def test_held_uncertain_and_rejected_show_their_reason(agent_thread, browser, artifacts):
     p = agent_thread
     msgs = [p["first"]] + [person_send(p["base"], p["alice"]["person_session"],
-                                       {"machine": "bob-laptop", "agent": "reviewer"}, f"m{i}") for i in range(2)]
+                                       BOB, f"m{i}") for i in range(2)]
     for m, (state, detail) in zip(msgs, (("held", "approval_required"), ("submission_uncertain", None),
                                          ("rejected", None))):
         ack(p["base"], p["bob"]["token"], m["id"])
         event(p["base"], p["bob"]["token"], m["id"], state, detail)
     context, page = open_thread(browser, p, p["cid"])
     held, uncertain, rejected = (page.locator(f'[data-trail="{m["id"]}"]') for m in msgs)
-    assert "held: waiting for approval" in held.inner_text() and "rc-trail-warn" in held.get_attribute("class")
+    assert "held: waiting for Bob's approval" in held.inner_text() and "rc-trail-warn" in held.get_attribute("class")
     assert "uncertain:" in uncertain.inner_text() and "rc-trail-warn" in uncertain.get_attribute("class")
     assert "rejected:" in rejected.inner_text() and "rc-trail-danger" in rejected.get_attribute("class")
     assert held.locator(".rc-tstep", has_text="submitted").count() == 0  # the outcome replaces the rest
@@ -178,7 +204,7 @@ def test_header_chip_and_presence_follow_the_live_directory(agent_thread, browse
     put_presence(p["base"], p["bob"]["token"], [{**REVIEWER, "status": "working"}])
     poll_now(page)
     page.wait_for_function("() => document.querySelector('[data-live-header]').innerText.includes('Busy')")
-    assert "working at its last report" in header.locator(".rc-presence").get_attribute("title")
+    assert "session" not in header.inner_text().lower()  # §21 C5.4: the person's presence · speed, no session words
     from raincli_server.models import Agent, AgentPresence, MachineAgent
     bob = session.query(Agent).filter_by(handle="bob-laptop").one()
     old = __import__("raincli_server").identity.now() - timedelta(seconds=125)
@@ -196,22 +222,28 @@ def test_header_chip_and_presence_follow_the_live_directory(agent_thread, browse
 # 9. The sender warning --------------------------------------------------------------------------------------------
 
 def test_the_sender_warning_on_compose_and_in_the_thread(people, browser, session):
+    """§21 C7.4: the warning is about a person's inbox, by name; picking the person shows it."""
     from raincli_server import identity
-    from raincli_server.models import Team, User
+    from raincli_server.models import PersonInbox, Team, User
 
     team = session.query(Team).filter_by(slug="acme").one()
     bob = session.query(User).filter_by(email="bob@example.test").one()
-    identity.register_agent(session, team, bob, "old-laptop")  # never connected
+    machine, _ = identity.register_agent(session, team, bob, "old-laptop")  # never connected
+    session.query(PersonInbox).filter(PersonInbox.user_id == bob.id).delete()
+    session.add(PersonInbox(user_id=bob.id, team_id=team.id, agent_id=machine.id, agent_name="reviewer", set_via="app"))
     session.commit()
+    expected = "Bob's inbox hasn't connected yet. They'll see your message in their app."
     context, page = open_app(browser, people["base"], people["alice"]["person_session"])
     page.goto(people["base"] + "/app/compose")
-    page.fill("#to", "old-laptop")
+    page.click("#to")
+    page.fill("#to", "Bob")
+    page.wait_for_selector(".rc-picker-option")
+    page.press("#to", "Enter")
     page.wait_for_selector("[data-recipient-warning] .sender-warning")
-    assert page.inner_text("[data-recipient-warning]").strip() == "old-laptop has never connected."
-    page.fill("#to", "@bob@example.test")
-    page.wait_for_function("() => !document.querySelector('[data-recipient-warning] .sender-warning')")
+    assert page.inner_text("[data-recipient-warning]").strip() == expected
+    assert "old-laptop" not in page.content()
     context.close()
-    with browser.new_context() as website:  # the website compose page, in its own look
+    with browser.new_context() as website:  # the website compose page, in its own look (no JavaScript picker)
         site = website.new_page()
         site.goto(people["base"] + "/login")
         site.fill("#email", "alice@example.test")
@@ -219,9 +251,9 @@ def test_the_sender_warning_on_compose_and_in_the_thread(people, browser, sessio
         site.click("button[type=submit]")
         site.wait_for_url("**/app**")
         site.goto(people["base"] + "/app/compose")
-        site.fill("#to", "old-laptop")
+        site.select_option("#to", label="Bob")
         site.wait_for_selector("[data-recipient-warning] .sender-warning")
-
+        assert site.inner_text("[data-recipient-warning]").strip() == expected
 
 # 10-13. Polling, read state, scrolling and motion ------------------------------------------------------------------
 
@@ -443,25 +475,40 @@ def test_step_tooltips_are_local_also_when_inserted_live(agent_thread, browser):
     context.close()
 
 
-def test_the_list_swap_keeps_focus_and_scroll(agent_thread, browser):
-    """F3: a Team agent keeps keyboard focus, and the Team list its scroll, when presence changes the list."""
+def test_the_list_swap_keeps_focus_and_scroll(agent_thread, browser, session):
+    """F3: a conversation link keeps keyboard focus, and the list its scroll, when a new message changes the list.
+    (v0.5's version used the Team list, which §21 C7.6 removed.)"""
+    from raincli_server import identity
+    from raincli_server.models import Conversation, Message, Team, User
+
     p = agent_thread
-    agents = [{**REVIEWER, "key": f"{i:032x}", "name": f"agent-{i:02d}"} for i in range(30)]
-    put_presence(p["base"], p["bob"]["token"], agents)
+    team = session.query(Team).filter_by(slug="acme").one()
+    alice = session.query(User).filter_by(email="alice@example.test").one()
+    for i in range(30):
+        other = identity.create_user(session, f"mate{i:02d}@example.test", f"Mate {i:02d}", "correct horse battery")
+        identity.add_member(session, team, other)
+        lo, hi = sorted((alice, other), key=lambda u: f"p:{u.id}")
+        conv = Conversation(id=uuid.uuid4(), team_id=team.id, a_user_id=lo.id, b_user_id=hi.id, a_key=f"p:{lo.id}",
+                            b_key=f"p:{hi.id}", kind="pair", is_default=True)
+        session.add(conv)
+        session.flush()
+        session.add(Message(id=uuid.uuid4(), team_id=team.id, conversation_id=conv.id, body=f"hello {i}",
+                            kind="message", route="person", sender_user_id=other.id, recipient_user_id=alice.id,
+                            delivery_state="stored"))
+    session.commit()
     context, page = open_thread(browser, p, p["cid"], viewport={"width": 1180, "height": 600})
-    poll_now(page)
-    page.wait_for_function("() => document.querySelectorAll('.rc-team-agent').length >= 30")
-    team = page.locator(".rc-team-list")
-    assert team.evaluate("e => e.scrollHeight > e.clientHeight")
-    target = page.locator(".rc-team-agent").nth(12)
+    convs = page.locator(".rc-list .rc-convs")
+    assert convs.evaluate("e => e.scrollHeight > e.clientHeight")
+    target = page.locator(".rc-convs .rc-conv").nth(12)
     href = target.get_attribute("href")
     target.focus()
-    team.evaluate("e => { e.scrollTop = 200; }")  # after focusing, which scrolls it into view
-    put_presence(p["base"], p["bob"]["token"], [{**a, "status": "working"} for a in agents])
+    convs.evaluate("e => { e.scrollTop = 200; }")  # after focusing, which scrolls it into view
+    before = page.evaluate("() => document.querySelector('.rc-list').outerHTML")
+    machine_send(p["base"], p["bob"]["token"], {"person": "alice@example.test"}, "a new message", p["cid"])
     poll_now(page)
-    page.wait_for_function("() => document.querySelector('.rc-team-list [data-presence=\"busy\"]')")
+    page.wait_for_function("(before) => document.querySelector('.rc-list').outerHTML !== before", arg=before)
     assert page.evaluate("() => document.activeElement.getAttribute('href')") == href
-    assert page.locator(".rc-team-list").evaluate("e => e.scrollTop") == 200
+    assert page.locator(".rc-list .rc-convs").evaluate("e => e.scrollTop") == 200
     context.close()
 
 
@@ -471,9 +518,12 @@ def test_an_unchanged_warning_is_not_replaced(agent_thread, browser, session):
     from raincli_server.models import Agent, AgentCredential
 
     p = agent_thread
-    bob = session.query(Agent).filter_by(handle="bob-laptop").one()
-    session.execute(update(AgentCredential).where(AgentCredential.agent_id == bob.id)
-                    .values(last_used_at=identity.now() - timedelta(days=3)))
+    from raincli_server.models import AgentPresence
+
+    bob = session.query(Agent).filter_by(handle="bob-laptop").one()  # Bob's inbox (agent_thread)
+    old = identity.now() - timedelta(days=3)
+    session.execute(update(AgentCredential).where(AgentCredential.agent_id == bob.id).values(last_used_at=old))
+    session.execute(update(AgentPresence).where(AgentPresence.agent_id == bob.id).values(seen_at=old))
     session.commit()
     context, page = open_thread(browser, p, p["cid"])
     page.wait_for_selector("[data-live-warning] .sender-warning")
