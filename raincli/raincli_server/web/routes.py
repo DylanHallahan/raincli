@@ -715,9 +715,26 @@ async def live_ack(request: Request, db: Session = Depends(get_db)):
 
 # TEMP layout diagnostic (the "everything at the top" shell bug; remove when it is closed). app-mode.js posts at most
 # three reports per page load: numbers and short class names, never ids, URLs or text. One INFO line each.
-LAYOUT_DIAG = True
+def _layout_diag_on(environ=None) -> bool:
+    """RAINCLI_LAYOUT_DIAG: on unless it is "0" (main can switch it off without a code change; read at start)."""
+    import os
+
+    return (os.environ if environ is None else environ).get("RAINCLI_LAYOUT_DIAG", "1").strip() != "0"
+
+
+LAYOUT_DIAG = _layout_diag_on()
 LAYOUT_DIAG_MAX_BODY = 4096
-LAYOUT_DIAG_PER_WINDOW, LAYOUT_DIAG_WINDOW = 10, 600.0  # per app session: 10 reports per 10 minutes
+LAYOUT_DIAG_PER_WINDOW, LAYOUT_DIAG_WINDOW = 10, 600.0  # per app session and per server process: 10 per 10 minutes
+LAYOUT_DIAG_CHILDREN = ("nav.rc-nav", "section.rc-list", "main.rc-main")
+
+
+def _layout_anomaly(layout: dict) -> bool:
+    """Only an anomaly is logged (as app-mode.js only sends one): the document scrolled, a guard fired, body
+    children other than the nav, the list (absent on no-list pages) and main, or a pane short of the window."""
+    panes = (layout["nav_bottom"], layout["list_bottom"], layout["main_bottom"], layout["compose_bottom"])
+    return (layout["doc_scroll_top"] != 0 or layout["height_fix"] or layout["scroll_guard"]
+            or not 2 <= layout["children_n"] <= 3 or any(c not in LAYOUT_DIAG_CHILDREN for c in layout["children"])
+            or any(b is not None and abs(b - layout["inner_h"]) > 2 for b in panes))
 _PRINTABLE = re.compile(r"[\x20-\x7e]*")
 _INT = (-100_000, 10_000_000)
 
@@ -822,6 +839,8 @@ async def layout_diag(request: Request, db: Session = Depends(get_db)):
     if (not isinstance(layout, dict) or set(layout) != set(LAYOUT_DIAG_FIELDS)
             or not all(check(layout[key]) for key, check in LAYOUT_DIAG_FIELDS.items())):
         return bad(400, "invalid")
+    if not _layout_anomaly(layout):
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})  # a healthy window: no line
     person = db.get(PersonSession, viewer.web_session.person_session_id)
     machine = db.get(Agent, person.machine_agent_id) if person is not None else None
     version = security.app_version(request.headers.get("user-agent"))

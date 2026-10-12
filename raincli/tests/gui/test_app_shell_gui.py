@@ -242,7 +242,9 @@ def test_a_page_loaded_hidden_or_at_almost_no_height_is_whole_when_shown(long_th
         context.close()
 
 
-def test_the_temp_layout_diagnostic_posts_the_expected_keys_at_most_three_times(agent_thread, browser):  # noqa: F811
+def test_the_temp_layout_diagnostic_sends_only_anomalies_with_the_expected_keys(agent_thread, browser):  # noqa: F811
+    """A healthy window sends nothing; an anomaly (an injected body child with a non-ASCII class name) is sent with
+    exactly the schema's keys, the odd characters mapped to "?", at most 3 times, and the server accepts it."""
     import json
 
     from raincli_server.web import routes
@@ -259,6 +261,10 @@ def test_the_temp_layout_diagnostic_posts_the_expected_keys_at_most_three_times(
 
     context, page = open_thread(browser, p, p["cid"], viewport={"width": 910, "height": 512}, setup=setup)
     try:
+        page.wait_for_timeout(500)
+        assert posts == []  # healthy: the load check sent nothing
+        page.evaluate("""() => { const d = document.createElement('div'); d.className = 'x\u00e9\u2603 host';
+                                 document.body.appendChild(d); }""")
         for size in ((910, 460), (1000, 600), (910, 512)):
             page.set_viewport_size({"width": size[0], "height": size[1]})
             page.wait_for_timeout(150)
@@ -266,14 +272,15 @@ def test_the_temp_layout_diagnostic_posts_the_expected_keys_at_most_three_times(
             page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
             page.wait_for_timeout(150)
         page.wait_for_timeout(500)
-        # The handoff page (Inbox) is a page load too; count the conversation page's reports.
         mine = [b for b in posts if b["layout"]["page"] == "conversation"]
-        assert 1 <= len(mine) <= 3, posts
+        assert 1 <= len(mine) <= 2, posts  # load (healthy, unsent) + first resize + first show: at most 3 checks
         events = [b["layout"]["event"] for b in mine]
-        assert len(set(events)) == len(events) and set(events) <= {"load", "show", "resize"}, events
-        for body in posts:
-            assert set(body) == {"csrf_token", "layout"} and set(body["layout"]) == set(routes.LAYOUT_DIAG_FIELDS)
-            assert all("/" not in str(v) or k == "dpr" for k, v in body["layout"].items() if isinstance(v, str))
+        assert len(set(events)) == len(events) and set(events) <= {"show", "resize"}, events
+        for body in mine:
+            layout = body["layout"]
+            assert set(body) == {"csrf_token", "layout"} and set(layout) == set(routes.LAYOUT_DIAG_FIELDS)
+            assert layout["children_n"] == 4 and "div.x??.host" in layout["children"], layout["children"]
+            assert all(32 <= ord(ch) <= 126 for c in layout["children"] for ch in c)
         assert statuses and all(s == 204 for s in statuses), statuses
     finally:
         context.close()

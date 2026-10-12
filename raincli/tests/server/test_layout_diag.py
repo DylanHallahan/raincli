@@ -17,9 +17,12 @@ LAYOUT = {
     "event": "load", "page": "conversation", "inner_w": 910, "inner_h": 512, "client_h": 512, "dpr": 1.5,
     "children_n": 3, "children": ["nav.rc-nav", "section.rc-list", "main.rc-main"], "grid_rows": "512px",
     "body_height": "512px", "nav_bottom": 512, "list_bottom": 512, "main_bottom": 512, "compose_bottom": 512,
-    "doc_scroll_top": 0, "doc_scroll_h": 512, "doc_client_h": 512, "nav_scroll_h": 512, "nav_client_h": 512,
+    "doc_scroll_top": 643, "doc_scroll_h": 512, "doc_client_h": 512, "nav_scroll_h": 512, "nav_client_h": 512,
     "visibility": "visible", "height_fix": False, "scroll_guard": False,
 }
+
+
+HEALTHY = {**LAYOUT, "doc_scroll_top": 0}  # LAYOUT is an anomaly (the document scrolled), as the client sends
 
 
 class Lines(logging.Handler):
@@ -129,3 +132,32 @@ def test_the_rate_limit_is_per_session(alice_app, diag):  # noqa: F811
 def test_the_switch_turns_it_off(alice_app, diag, monkeypatch):  # noqa: F811
     monkeypatch.setattr(routes, "LAYOUT_DIAG", False)
     assert post(alice_app["webview"], csrf_of_app(alice_app["webview"])).status_code == 404 and diag.lines == []
+
+
+def test_a_healthy_window_is_accepted_but_not_logged(alice_app, diag):  # noqa: F811
+    webview = alice_app["webview"]
+    csrf = csrf_of_app(webview)
+    for healthy in (HEALTHY,
+                    {**HEALTHY, "children_n": 2, "children": ["nav.rc-nav", "main.rc-main"], "list_bottom": None},
+                    {**HEALTHY, "list_bottom": None, "compose_bottom": None},  # narrow breakpoint, Inbox
+                    {**HEALTHY, "nav_bottom": 510, "main_bottom": 514}):  # within 2 px
+        assert post(webview, csrf, healthy).status_code == 204
+    assert diag.lines == []
+
+
+@pytest.mark.parametrize("anomaly", [
+    {"doc_scroll_top": 1}, {"height_fix": True}, {"scroll_guard": True}, {"children_n": 4},
+    {"children_n": 1, "children": ["main.rc-main"]}, {"children": ["nav.rc-nav", "div.injected", "main.rc-main"]},
+    {"main_bottom": 98}, {"compose_bottom": 509}, {"nav_bottom": 515}, {"list_bottom": 400},
+])
+def test_each_anomaly_is_logged(alice_app, diag, anomaly):  # noqa: F811
+    webview = alice_app["webview"]
+    assert post(webview, csrf_of_app(webview), {**HEALTHY, **anomaly}).status_code == 204
+    assert len(diag.lines) == 1 and diag.lines[0].startswith("layout-diag machine=alice-laptop ")
+
+
+def test_the_switch_reads_the_environment():
+    assert routes._layout_diag_on({}) is True
+    assert routes._layout_diag_on({"RAINCLI_LAYOUT_DIAG": "1"}) is True
+    assert routes._layout_diag_on({"RAINCLI_LAYOUT_DIAG": " 0 "}) is False
+    assert routes._layout_diag_on({"RAINCLI_LAYOUT_DIAG": "0"}) is False

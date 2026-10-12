@@ -129,17 +129,26 @@
   window.addEventListener("scroll", unscroll, {passive: true});
   window.addEventListener("hashchange", unscroll);
 
-  // TEMP layout diagnostic (remove when the shell bug is closed). At most three reports per page load (on load, on
-  // the first show, on the first resize), measured after the shell guards ran. Numbers and short class names only:
-  // no ids, URLs or text. The server answers 204 and logs one line; failures are ignored.
+  // TEMP layout diagnostic (remove when the shell bug is closed). Checked at most three times per page load (on load,
+  // on the first show, on the first resize), after the shell guards ran, and sent ONLY for an anomaly: the document
+  // scrolled, a guard fired, unexpected body children, or a pane not reaching the window's bottom. A healthy window
+  // sends nothing. Numbers and short class names only: no ids, URLs or text. Failures are ignored.
   (function () {
     var live = body.getAttribute("data-live-url"), csrf = body.getAttribute("data-csrf");
     if (!live || !csrf || !window.fetch) return;
     var url = live.replace(/\/app\/live$/, "/app/layout-diag"), sent = {}, count = 0;
-    function cut(text, n) { return String(text || "").slice(0, n); }
-    function bottom(selector) {
-      var el = document.querySelector(selector);
-      return el ? Math.round(el.getBoundingClientRect().bottom) : null;
+    // Printable ASCII only (anything else becomes "?"), then trimmed: an odd class name can't spoil a report.
+    function cut(text, n) { return String(text || "").replace(/[^\x20-\x7e]/g, "?").slice(0, n); }
+    function bottom(selector) {  // null when absent or not rendered (the list below the narrow breakpoint)
+      var el = document.querySelector(selector), rect = el && el.getBoundingClientRect();
+      return rect && rect.height ? Math.round(rect.bottom) : null;
+    }
+    var EXPECTED = ["nav.rc-nav", "section.rc-list", "main.rc-main"];
+    function anomalous(d) {
+      var panes = [d.nav_bottom, d.list_bottom, d.main_bottom, d.compose_bottom];
+      return d.doc_scroll_top !== 0 || d.height_fix || d.scroll_guard ||
+        d.children_n < 2 || d.children_n > 3 || d.children.some(function (c) { return EXPECTED.indexOf(c) < 0; }) ||
+        panes.some(function (b) { return b !== null && Math.abs(b - d.inner_h) > 2; });
     }
     function report(event) {
       if (sent[event] || count >= 3) return;
@@ -165,8 +174,9 @@
           nav_scroll_h: nav ? nav.scrollHeight : null, nav_client_h: nav ? nav.clientHeight : null,
           visibility: cut(document.visibilityState, 16), height_fix: shell.heightFix, scroll_guard: shell.scrollGuard
         };
+        if (!anomalous(data)) return;
         fetch(url, {method: "POST", credentials: "same-origin", keepalive: true,
-                    headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf},
+                    headers: {"Content-Type": "application/json"},
                     body: JSON.stringify({csrf_token: csrf, layout: data})}).catch(function () {});
       });
     }
