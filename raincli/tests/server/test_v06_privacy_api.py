@@ -32,15 +32,16 @@ APP_PAGES = "the /app pages are tests/gui/test_v06_privacy_pages.py (web, C13 M7
 
 
 def _routes(app):
+    """Every ``(method, path)`` the app serves, mounted sub-apps included."""
     out = set()
     for app_route in getattr(app, "routes", []):
         mounted = getattr(app_route, "app", None)
         prefix = getattr(app_route, "path", "")
         for route in getattr(mounted, "routes", []) if mounted is not None and hasattr(mounted, "routes") else []:
-            if isinstance(route, APIRoute) and "GET" in route.methods:
-                out.add(prefix + route.path)
-        if isinstance(app_route, APIRoute) and "GET" in app_route.methods:
-            out.add(app_route.path)
+            if isinstance(route, APIRoute):
+                out |= {(m, prefix + route.path) for m in route.methods if m != "HEAD"}
+        if isinstance(app_route, APIRoute):
+            out |= {(m, app_route.path) for m in app_route.methods if m != "HEAD"}
     return out
 
 
@@ -118,8 +119,104 @@ def test_api_fields_are_coarse_for_non_owners(client, v06_seed):  # noqa: F811
     assert all(set(r["peer_endpoint"]) == {"person", "display_name"} for r in rows)
 
 
-def test_every_api_get_route_is_scanned_or_exempted(app):
-    routes = {r for r in _routes(app) if r.startswith("/api/v1")}
-    unknown = routes - COVERED - set(EXEMPT)
-    assert unknown == set(), f"not in the privacy scan: {sorted(unknown)}"
+# Mutating routes, each driven (and its response scanned) by _drive_mutations, or exempted with a reason.
+DRIVEN = {
+    ("POST", "/api/v1/messages"), ("POST", "/api/v1/messages/{message_id}/ack"),
+    ("POST", "/api/v1/messages/{message_id}/events"), ("POST", "/api/v1/conversations/{conversation_id}/archive"),
+    ("POST", "/api/v1/conversations/{conversation_id}/unarchive"), ("POST", "/api/v1/person/send"),
+    ("POST", "/api/v1/person/messages/{message_id}/ack"),
+    ("POST", "/api/v1/person/conversations/{conversation_id}/archive"),
+    ("POST", "/api/v1/person/conversations/{conversation_id}/unarchive"),
+    ("PUT", "/api/v1/me/inbox"), ("PUT", "/api/v1/person/me/inbox"),
+}
+MUTATING_EXEMPT = {
+    ("PUT", "/api/v1/presence"): "the caller's own machine report; the reply names only it",
+    ("PUT", "/api/v1/routing"): "the caller's own machine's routing policy",
+    ("POST", "/api/v1/app/login"): "machine sign-in; name_taken is an accepted exception (§21)",
+    ("POST", "/api/v1/app/sign-out"): "the caller's own sign-out; no other endpoint in the reply",
+    ("POST", "/api/v1/person/sign-out"): "the caller's own session",
+    ("POST", "/api/v1/app/handoff"): "a single-use URL for the caller",
+}
+
+
+def _drive_mutations(client, seed, *, machine, person, peer_person_token, peer_machine_token, peer_email):
+    """Every mutating API call a member makes, as (label, text) pairs: sends, acks, events, archive and unarchive,
+    the inbox setting. The member is ``machine``/``person``; the peer answers so there is something to ack."""
+    import uuid as _uuid
+    mt, pt = seed["machine_tokens"][machine], seed["person_tokens"][person]
+    out = []
+
+    def record(label, r):
+        out.append((label, f"{r.status_code} {json.dumps(dict(r.headers))} {r.text}"))
+        return r
+    sent = record("send", client.post("/api/v1/messages", headers=auth(mt), json={
+        "id": str(_uuid.uuid4()), "to": peer_email, "body": "x"})).json()["message"]
+    record("person send", client.post("/api/v1/person/send", headers=auth(pt), json={
+        "id": str(_uuid.uuid4()), "to": peer_email, "body": "y", "team": "northwind"}))
+    back = client.post("/api/v1/messages", headers=auth(peer_machine_token), json={
+        "id": str(_uuid.uuid4()), "body": "z", "in_reply_to": sent["id"]}).json()["message"]
+    by_hand = client.post("/api/v1/person/send", headers=auth(peer_person_token), json={
+        "id": str(_uuid.uuid4()), "body": "w", "in_reply_to": sent["id"]}).json()["message"]
+    record("ack", client.post(f"/api/v1/messages/{back['id']}/ack", headers=auth(mt)))
+    record("event", client.post(f"/api/v1/messages/{back['id']}/events", headers=auth(mt),
+                                json={"state": "submitted", "detail": "delivered"}))
+    record("person ack", client.post(f"/api/v1/person/messages/{by_hand['id']}/ack", headers=auth(pt)))
+    conv = sent["conversation_id"]
+    for kind, token, prefix in (("machine", mt, ""), ("person", pt, "/person")):
+        record(f"{kind} archive", client.post(f"/api/v1{prefix}/conversations/{conv}/archive", headers=auth(token)))
+        record(f"{kind} unarchive", client.post(f"/api/v1{prefix}/conversations/{conv}/unarchive",
+                                               headers=auth(token)))
+    record("put inbox", client.put("/api/v1/me/inbox", headers=auth(mt), json={"none": True}))
+    record("put person inbox", client.put("/api/v1/person/me/inbox", headers=auth(pt),
+                                          json={"team": "northwind", "none": True}))
+    return out
+
+
+def test_mutating_calls_never_show_a_teammates_machine_or_agent(client, v06_seed):  # noqa: F811
+    for machine, person, peer, peer_email, strings in (("maya", "Maya", "Jon", "jon@example.test", TEAMMATE_STRINGS),
+                                                      ("jon", "Jon", "Maya", "maya@example.test", OWN_STRINGS)):
+        peer_key = peer.lower()
+        leaks = [(label, _leaks(text, strings)) for label, text in _drive_mutations(
+            client, v06_seed, machine=machine, person=person, peer_person_token=v06_seed["person_tokens"][peer],
+            peer_machine_token=v06_seed["machine_tokens"][peer_key], peer_email=peer_email)]
+        assert [leak for leak in leaks if leak[1]] == [], machine
+
+
+def _sender_snapshot(client, seed, token_kind, sender):
+    """Everything the sender can fetch over the API, as one comparable structure (the poll's own cursor aside)."""
+    token = seed["machine_tokens"][sender] if token_kind == "machine" else seed["person_tokens"][sender]
+    paths = (["/api/v1/conversations?archived=include", "/api/v1/inbox?routing=1&include_acked=true", "/api/v1/people"]
+             if token_kind == "machine" else
+             ["/api/v1/person/conversations?archived=include", "/api/v1/person/inbox?include_acked=true&routed=1",
+              "/api/v1/person/me/inbox?team=northwind"])
+    convs = [str(c.id) for c in seed["conversations"].values()]
+    paths += ([f"/api/v1/conversations/{c}/messages" for c in convs] if token_kind == "machine"
+              else [f"/api/v1/person/conversations/{c}" for c in convs])
+    return {p: client.get(p, headers=auth(token)).json() for p in paths}
+
+
+def test_no_read_receipt_anything_the_sender_can_fetch_is_unchanged(client, v06_seed):  # noqa: F811
+    """PR5, C13 H4, build review H1/H2: the recipient reading a message (to them in the app, or routed to their
+    inbox) changes nothing the sender can fetch over the API."""
+    import uuid as _uuid
+    maya_m, maya_p = v06_seed["machine_tokens"]["maya"], v06_seed["person_tokens"]["Maya"]
+    to_sam = client.post("/api/v1/person/send", headers=auth(maya_p), json={
+        "id": str(_uuid.uuid4()), "to": "sam@example.test", "body": "read me", "team": "northwind"}).json()["message"]
+    to_jon = client.post("/api/v1/messages", headers=auth(maya_m), json={
+        "id": str(_uuid.uuid4()), "to": "jon@example.test", "body": "to jon's inbox"}).json()["message"]
+    before = {k: _sender_snapshot(client, v06_seed, k, s) for k, s in (("machine", "maya"), ("person", "Maya"))}
+    for token, mid in ((v06_seed["person_tokens"]["Sam"], to_sam["id"]), (v06_seed["person_tokens"]["Jon"], to_jon["id"])):
+        assert client.post(f"/api/v1/person/messages/{mid}/ack", headers=auth(token)).status_code == 200
+    after = {k: _sender_snapshot(client, v06_seed, k, s) for k, s in (("machine", "maya"), ("person", "Maya"))}
+    assert after == before
+
+
+def test_every_api_route_is_scanned_or_exempted(app):
+    routes = {r for r in _routes(app) if r[1].startswith("/api/v1")}
+    gets = {p for m, p in routes if m == "GET"}
+    unknown_gets = gets - COVERED - set(EXEMPT)
+    assert unknown_gets == set(), f"GET routes not in the privacy scan: {sorted(unknown_gets)}"
+    mutating = {r for r in routes if r[0] != "GET"}
+    unknown = mutating - DRIVEN - set(MUTATING_EXEMPT)
+    assert unknown == set(), f"mutating routes not in the privacy scan: {sorted(unknown)}"
     assert re.match(r"^the /app pages", APP_PAGES)

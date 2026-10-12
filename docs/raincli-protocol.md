@@ -1823,7 +1823,7 @@ A message to person P in team T is stored as follows, decided once, at send time
 - **Replies (`in_reply_to = X`).** The target comes from X, not from `to`, and is decided once, at send time:
   1. **X was sent by a machine with a stated `from_agent` S,** and S is live now (the machine's presence and that agent's directory row fresh within 120 s, `instant` or `next-turn`, not ambiguous, exactly one): the reply goes to `(X's machine, S)`, route `reply`.
   2. **Otherwise:** to the X sender person's inbox (§21.3).
-  3. **X was sent by a machine with no stated name:** to that machine, route `reply`.
+  3. **X was sent by a machine with no stated name:** to that machine, route `reply`, when it takes machine-endpoint messages (it reports an inbox agent, `role = inbox`, or accepts only its inbox). Otherwise, to the X sender person's inbox (§21.3), or waiting in their app.
   4. **X was sent by a person:** to that person's inbox (§21.3).
   - **The replier is X's own sender:** the target is X's recipient person, resolved now.
   - **X's sending machine is revoked** but the person is still a member: their inbox.
@@ -1832,12 +1832,13 @@ A message to person P in team T is stored as follows, decided once, at send time
   - **The conversation** is X's (after `merged_into`), and X is marked `replied`.
   - **A target that disappears later** is handled by the client as before: held `offline`, then rejected after 14 days.
 - **Waiting messages (no inbox).**
-  - **The waiting set:** messages to P with `recipient_user_id = P` and route `person`, unacked, not sent by P or P's machines, and not answered. "Answered" means a later message (greater `seq`) from P exists in the same conversation.
+  - **The waiting set:** messages to P with `recipient_user_id = P` and route `person`, not sent by P or P's machines, and not answered, whether or not P has read them. "Answered" means a later message (greater `seq`) from P exists in the same conversation.
   - **Picking an inbox** offers "Also deliver the N waiting messages", on by default. If accepted, those messages are re-targeted to the inbox endpoint in the same transaction. If declined, they stay in the app.
 - **Changing the inbox.**
   - **Moved:** unacked route-`inbox` messages at the previous inbox endpoint move to the new one, except messages already marked `replied`.
   - **Stayed:** acked messages remain with the previous inbox.
-  - **The response** has `moved`, `stayed` (acked, not replied, at the previous inbox) and `delivered_waiting`. The app shows "N messages are with your previous inbox" while `stayed > 0`, until dismissed.
+  - **The response** has `moved`, `stayed` (messages the previous inbox picked up that are still in progress: `received` or `held`) and `delivered_waiting`. The app shows "N messages are with your previous inbox" while `stayed > 0`, until dismissed.
+  - **A known small window:** when the inbox changes between two agents on the same machine, a message that machine's connector fetched but hasn't acked yet keeps the target it was fetched with.
   - **The same inbox again** changes nothing (`moved = 0`).
 - **Removing the inbox** (explicitly, by revoking its machine, or by leaving the team): unacked route-`inbox` messages there go back to waiting for the person in their app (route `person`).
 - **Redelivery.** Every re-target sets `messages.redeliver`, and an ack clears it.
@@ -1874,18 +1875,17 @@ A message to person P in team T is stored as follows, decided once, at send time
   - `owner_unreachable` and `no_inbox`.
 
   Pages never render a raw detail. Event lists shown to anyone but the recipient machine's owner carry neither `reported_by` nor `detail`.
-- **No read receipt.** For a message to a person (`recipient_user_id`), everyone but that person sees:
+- **No read receipt.** A person's own read state is `messages.person_seen_at`, set when they see a message in the app, on the website or through the person API. It is used only in that person's views and unread counts. `acked_at` is a machine's pickup only, so a message a person has read is still delivered to an inbox they pick later. Reading writes no event and changes nothing anyone else can fetch. For a message to a person (`recipient_user_id`), everyone but that person sees:
   - held `no_inbox` while the person has no inbox in that team, otherwise `received` (`replied` once they replied);
   - no `acked_at`;
-  - `delivery_updated_at` equal to `created_at`, until replied.
-
-  The person sees their own read state.
+  - `delivery_updated_at` equal to `created_at`, until replied;
+  - a trail derived from these states, never from events.
 - **Conversations:**
   - `peer`, `peer_endpoint` and `archived_by` are people;
   - a person's `self` conversation is "From your agents", and their `own_agents` conversation is "Your agents".
 - **Directory:**
   - `GET /api/v1/people` returns the team's people: `display_name`, `email`, `team`, `presence` (`ready`, `busy`, `offline` or `no_inbox`) and `speed` (`instant`, `next_turn` or null).
-  - **Presence and speed** come from the person's inbox only: the inbox agent's directory row; on the machine path (§21.3), the machine's own presence. Both must be fresh within 120 s.
+  - **Presence and speed** come from the person's inbox only. On the named path: the inbox agent's directory row, fresh within 120 s, together with the machine's presence; otherwise `offline`. On the machine path (§21.3): the machine's own presence word, fresh within 120 s; the speed is the inbox agent's when its row is fresh, else `next_turn`.
   - `GET /api/v1/agents` returns only the caller's own machines, in the per-machine shape of §16.
 - **Website Machines:** a member sees their own machines. A team owner also sees every team machine's handle, owner, client version, update state and last-connected time; no agents, sessions or presence words.
 - **Old-client warning:** when the machine concerned has never reported a client version, the wording changes:
@@ -1915,7 +1915,7 @@ A message to person P in team T is stored as follows, decided once, at send time
   - `person_inboxes`, primary key `(user_id, team_id)`;
   - `conversations.kind` (`pair`, `self` or `own_agents`). `self` and `own_agents` rows have one person on both sides, with the keys `p:<id>` and `self:<id>`, one of each per team and person, and only `self` rows are a default;
   - `conversations.merged_into`, plus the downgrade's scratch columns `premerge_is_default` and `premerge_archive`;
-  - `messages.redeliver`, `messages.route` and `messages.premerge_conversation_id`.
+  - `messages.redeliver`, `messages.route`, `messages.person_seen_at` (filled from `acked_at` for messages to a person) and `messages.premerge_conversation_id`.
 - **The merge.** Every endpoint maps to its person (a machine, or an agent on it, maps to the machine's owner). In each team, conversations with messages merge as follows:
   - **two people:** one `pair` conversation. An existing default person-to-person row is reused and counts as a source;
   - **a person and their own machine:** their `self` conversation;
@@ -1929,7 +1929,8 @@ A message to person P in team T is stored as follows, decided once, at send time
   - merged messages go back, and the sources' default marks and the reused rows' archive state are restored;
   - a message sent after the upgrade whose endpoints are not its conversation's two keys moves to the default conversation of its own endpoints, created if needed;
   - `self`, `own_agents` and empty created rows are then deleted. A created person-pair row holding later messages stays as an ordinary person-to-person conversation;
-  - re-targets made after the upgrade are not undone.
+  - re-targets made after the upgrade are not undone;
+  - a person's reads made after the upgrade become their `acked_at`.
 
 ### 21.10 Endpoints
 - **Machine credential:**
@@ -1942,7 +1943,7 @@ A message to person P in team T is stored as follows, decided once, at send time
 - **Hosted:** `POST /app/inbox` (the banner and the picker).
 - **Operator:** `raincli-server admin set-inbox --team SLUG --email EMAIL (--handle H --agent NAME [--no-deliver-waiting] | --clear)` sets or clears a person's inbox without the live-agent check, for support.
 
-### 21.11 Clients (v0.6.0)
+### 21.11 Client v0.6.0 (applies with the v0.6.0 client release)
 - **The C17 frame:** only the From and To lines change.
   - **From:** `From: "<Name>" <<email>> | sent by "<Name>" in the app | team <team>`, or `| sent by "<Name>"'s agent | team <team>`, from `from_kind`. The name is in JSON string form wherever it appears.
   - **To:** `To: you, as <Name>'s inbox`, where `<Name>` is this machine's owner (from `/me`). The held-age suffix stays.

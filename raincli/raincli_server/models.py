@@ -345,6 +345,9 @@ class Message(Base):
     # ``route``: how the recipient was chosen (``inbox``, ``reply``, ``person`` or ``self``), NULL before 0010.
     premerge_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     redeliver: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # §21 H2: when the recipient PERSON saw it in their app (their own read state and unread counts only); acked_at
+    # is the machine's pickup.
+    person_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     route: Mapped[str | None] = mapped_column(String(8))
     in_reply_to: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("messages.id"))
     # Endpoints (§16.1): a machine (agent id), an agent on a machine (agent id plus name) or a person.

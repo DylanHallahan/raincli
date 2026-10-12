@@ -160,7 +160,8 @@ def test_a_reply_to_a_person_and_to_a_machine_with_no_name(client, session, v06_
     plain = _ask(client, v06_seed, from_agent=None)
     reply = machine_send(client, v06_seed["machine_tokens"]["jon"], None, "re", in_reply_to=plain)
     msg = stored(session, reply.json()["message"]["id"])
-    assert (msg.recipient_agent_id, msg.recipient_agent_name, msg.route) == (v06_seed["machines"]["maya"].id, None, "reply")
+    # Maya's machine is in machine mode (no inbox path), so the reply goes to Maya: no inbox, so her app (M1 review).
+    assert (msg.recipient_user_id, msg.route) == (v06_seed["people"]["Maya"].id, "person")
 
 
 def test_reply_edge_cases(client, session, v06_seed):  # noqa: F811
@@ -355,3 +356,72 @@ def test_the_apps_feed_sees_messages_routed_to_your_inbox(client, v06_seed):  # 
     own = machine_send(client, jon_machine, "maya@example.test", "from jon's agent").json()["message"]["id"]
     again = client.get("/api/v1/person/inbox", headers=auth(jon_person), params={"routed": 1}).json()["messages"]
     assert own not in {m["id"] for m in again}
+
+
+# Build review H2, M1, L1 ---------------------------------------------------------------------------------------
+
+def test_picking_an_inbox_delivers_read_and_unread_waiting_messages_alike(client, session, v06_seed):  # noqa: F811
+    """H2: reading a waiting message in the app changes nothing the sender sees, before or after an inbox is picked;
+    read and unread waiting messages are both delivered to the new inbox, and stay read in the person's app."""
+    jon, sam_p, sam_m = v06_seed["machine_tokens"]["jon"], v06_seed["person_tokens"]["Sam"], v06_seed["machine_tokens"]["sam"]
+    read = machine_send(client, jon, "sam@example.test", "one").json()["message"]["id"]
+    unread = machine_send(client, jon, "sam@example.test", "two").json()["message"]["id"]
+    assert client.post(f"/api/v1/person/messages/{read}/ack", headers=auth(sam_p)).status_code == 200
+
+    def jon_view(mid):
+        m = client.get(f"/api/v1/messages/{mid}", headers=auth(jon)).json()["message"]
+        return {k: v for k, v in m.items() if k not in ("id", "body", "seq", "created_at", "delivery_updated_at")}
+    assert jon_view(read) == jon_view(unread)
+    session.add(MachineAgent(agent_id=v06_seed["machines"]["sam"].id, key="herdr:zq-agent-sam", name="zq-agent-sam",
+                             type="claude", status="idle", reachability="instant", source="herdr",
+                             seen_at=identity.now()))
+    session.commit()
+    put = client.put("/api/v1/me/inbox", headers=auth(sam_m), json={"agent": "zq-agent-sam"}).json()
+    assert put["delivered_waiting"] == 3  # both of Jon's, and the seed's "Hello Sam" from Maya
+    for mid in (read, unread):
+        msg = stored(session, mid)
+        assert (msg.recipient_agent_name, msg.route, msg.redeliver, msg.acked_at) == ("zq-agent-sam", "inbox", True, None)
+    assert jon_view(read) == jon_view(unread)
+    # The inbox fetches both; Sam's app keeps "one" read and "two" unread.
+    fetched = {m["id"] for m in poll(client, sam_m, after=10_000)["messages"]}
+    assert {read, unread} <= fetched
+    assert stored(session, read).person_seen_at is not None and stored(session, unread).person_seen_at is None
+
+
+def test_a_reply_to_a_machine_mode_sender_with_no_name_goes_to_the_person(client, session, v06_seed):  # noqa: F811
+    """M1: a machine with no inbox path (machine mode: no role=inbox agent, not inbox-only) never takes
+    machine-endpoint messages, so a reply to its unnamed message goes to the person's inbox, else their app."""
+    ask = machine_send(client, v06_seed["machine_tokens"]["maya"], "jon@example.test", "no name").json()["message"]["id"]
+    reply = machine_send(client, v06_seed["machine_tokens"]["jon"], None, "answer", in_reply_to=ask)
+    msg = stored(session, reply.json()["message"]["id"])
+    assert (msg.recipient_user_id, msg.recipient_agent_id, msg.route) == (v06_seed["people"]["Maya"].id, None, "person")
+    # With an inbox, it goes there.
+    session.add(PersonInbox(user_id=v06_seed["people"]["Maya"].id, team_id=v06_seed["teams"]["northwind"].id,
+                            agent_id=v06_seed["machines"]["maya"].id, agent_name="zq-agent-maya-notes", set_via="app"))
+    session.commit()
+    reply2 = machine_send(client, v06_seed["machine_tokens"]["jon"], None, "answer 2", in_reply_to=ask)
+    msg2 = stored(session, reply2.json()["message"]["id"])
+    assert (msg2.recipient_agent_name, msg2.route) == ("zq-agent-maya-notes", "inbox")
+    # A machine with an inbox path (a reported inbox agent) still gets the reply itself.
+    session.add(MachineAgent(agent_id=v06_seed["machines"]["maya"].id, key="herdr:inbox", name="inbox", type="claude",
+                             status="idle", role="inbox", reachability="instant", source="herdr", seen_at=identity.now()))
+    session.commit()
+    reply3 = machine_send(client, v06_seed["machine_tokens"]["jon"], None, "answer 3", in_reply_to=ask)
+    msg3 = stored(session, reply3.json()["message"]["id"])
+    assert (msg3.recipient_agent_id, msg3.recipient_agent_name, msg3.route) == (v06_seed["machines"]["maya"].id, None, "reply")
+
+
+def test_stayed_counts_only_messages_still_in_progress(client, session, v06_seed):  # noqa: F811
+    """L1: "N messages are with your previous inbox" counts picked-up messages still received or held."""
+    maya_t, jon_t = v06_seed["machine_tokens"]["maya"], v06_seed["machine_tokens"]["jon"]
+    done, busy = (machine_send(client, maya_t, "jon@example.test", b).json()["message"]["id"] for b in ("done", "busy"))
+    for mid in (done, busy):
+        assert client.post(f"/api/v1/messages/{mid}/ack", headers=auth(jon_t)).status_code == 200
+    assert client.post(f"/api/v1/messages/{done}/events", headers=auth(jon_t),
+                       json={"state": "submitted", "detail": "delivered"}).status_code == 200
+    session.add(MachineAgent(agent_id=v06_seed["machines"]["jon"].id, key="herdr:zq-agent-jon-two",
+                             name="zq-agent-jon-two", type="claude", status="idle", reachability="instant",
+                             source="herdr", seen_at=identity.now()))
+    session.commit()
+    r = client.put("/api/v1/me/inbox", headers=auth(jon_t), json={"agent": "zq-agent-jon-two"}).json()
+    assert r["stayed"] == 1, r
