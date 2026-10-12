@@ -401,6 +401,7 @@ def conversation_head(db: Session, user: User, team_ids: list[uuid.UUID], conver
     cid = parse_uuid(conversation_id)
     if cid is None or not team_ids:
         return None
+    cid = messaging.final_conversation_id(db, cid)  # migration 0010: a merged id means where it went
     owned = _owned_ids(db, user, team_ids)
     row = db.execute(
         select(Conversation, Team).join(Team, Team.id == Conversation.team_id)

@@ -440,6 +440,8 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
     message_id = parse_uuid(id, "id")
     reply_to = parse_uuid(in_reply_to, "in_reply_to") if in_reply_to is not None else None
     conv_id = parse_uuid(conversation_id, "conversation_id") if conversation_id is not None else None
+    if conv_id is not None:  # an id merged by migration 0010 means the conversation it went into
+        conv_id = final_conversation_id(session, conv_id)
     if not security.valid_message_body(body):
         raise _invalid("body must be 1-16000 characters of plain text")
     if kind not in MESSAGE_KINDS:
@@ -799,8 +801,27 @@ def archive_json(session: Session, conv: Conversation, last_seq: int | None = No
             "archived_by": by.json() if by is not None else None}
 
 
+MERGE_CHAIN_LIMIT = 16  # merged_into hops followed before giving up (a chain is one hop after migration 0010)
+
+
+def final_conversation_id(session: Session, cid: uuid.UUID) -> uuid.UUID:
+    """The conversation an id now means: ``merged_into`` followed to its end (migration 0010). An id that was never
+    merged, or that does not exist, is returned as it is."""
+    seen = {cid}
+    for _ in range(MERGE_CHAIN_LIMIT):
+        nxt = session.scalar(select(Conversation.merged_into).where(Conversation.id == cid))
+        if nxt is None or nxt in seen:
+            return cid
+        seen.add(nxt)
+        cid = nxt
+    return cid
+
+
+resolve_conversation_id = final_conversation_id
+
+
 def _locked_conversation(session: Session, conversation_id: uuid.UUID | str) -> Conversation | None:
-    cid = parse_uuid(conversation_id, "conversation id", not_found=True)
+    cid = final_conversation_id(session, parse_uuid(conversation_id, "conversation id", not_found=True))
     # FOR UPDATE (§17.3 A1): a send holds KEY SHARE on this row from before it allocates its seq until it
     # commits, so an archive waits for sends in flight and its max(seq) never precedes an uncommitted lower
     # seq. Sends never write this row and never wait on each other here.
@@ -874,7 +895,7 @@ def conversation_json(session: Session, conv: Conversation, viewer_side: str | N
 
 
 def get_conversation(session: Session, agent: Agent, conversation_id: uuid.UUID | str) -> Conversation:
-    cid = parse_uuid(conversation_id, "conversation id", not_found=True)
+    cid = final_conversation_id(session, parse_uuid(conversation_id, "conversation id", not_found=True))
     conv = session.get(Conversation, cid)
     if conv is None or agent.id not in (conv.agent_a_id, conv.agent_b_id):
         raise MessagingError(404, "not_found", "conversation not found")
@@ -882,7 +903,7 @@ def get_conversation(session: Session, agent: Agent, conversation_id: uuid.UUID 
 
 
 def get_person_conversation(session: Session, user: User, conversation_id: uuid.UUID | str) -> Conversation:
-    cid = parse_uuid(conversation_id, "conversation id", not_found=True)
+    cid = final_conversation_id(session, parse_uuid(conversation_id, "conversation id", not_found=True))
     conv = session.get(Conversation, cid)
     if conv is None or user.id not in (conv.a_user_id, conv.b_user_id) or \
             session.get(Membership, (conv.team_id, user.id)) is None:
