@@ -94,3 +94,19 @@ def test_person_presence_from_the_inbox_only(session, v06_seed):  # noqa: F811
     ct = v06_seed["teams"]["contoso"].id
     assert pres.person_presence(session, ct, p["Lee"]).text == "Ready · Instant"
     assert pres.person_presence(session, ct, p["Jon"]).presence == "no_inbox"  # Jon's inbox is in northwind only
+
+
+def test_look_alike_names_are_told_apart(session, v06_seed):  # noqa: F811
+    """The person is the address: two members whose names read alike never show as the same person."""
+    from raincli_server import identity
+
+    nw = v06_seed["teams"]["northwind"]
+    twin = identity.create_user(session, "robert@example.test", "Jоn", "correct horse battery")  # Cyrillic о
+    identity.add_member(session, nw, twin)
+    session.commit()
+    jon = v06_seed["people"]["Jon"]
+    a, b = pres.name_in_team(session, nw.id, jon), pres.name_in_team(session, nw.id, twin)
+    assert a != b and a.startswith("Jon (") and "robert" in b
+    assert pres.conversation_peer(session, v06_seed["people"]["Maya"], v06_seed["conversations"]["jon"]).label == a
+    names = {p["email"]: p["display_name"] for p in pres.people_json(session, nw.id)}
+    assert names["jon@example.test"] != names["robert@example.test"]

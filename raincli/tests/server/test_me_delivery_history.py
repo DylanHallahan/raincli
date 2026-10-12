@@ -17,7 +17,8 @@ def test_new_machine_has_no_history(client, world):
 
 def test_a_message_recipient_has_history(client, world):
     tokens = world["tokens"]
-    assert send(client, tokens["alice"], "bob-agent").status_code in (200, 201)
+    # §21: Bob is addressed as a person; his inbox is on bob-agent, which receives the message.
+    assert send(client, tokens["alice"], "bob@example.test").status_code in (200, 201)
     assert history(client, tokens["bob"]) is True
     assert history(client, tokens["alice"]) is False  # sending is not delivery history
 

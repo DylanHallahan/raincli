@@ -12,14 +12,19 @@ from raincli_server.app import create_app
 from raincli_server.db import make_sessionmaker
 from raincli_server.models import Agent, Conversation, DeliveryEvent, Message
 
+# §21 (v0.6): teammates are addressed as people. Each person's inbox is their own machine's inbox (conftest).
+ALICE, BOB = "alice@example.test", "bob@example.test"
+
 
 def test_send_and_reply_between_two_agents(client, world):
     t_alice, t_bob = world["tokens"]["alice"], world["tokens"]["bob"]
-    r = send(client, t_alice, "bob-agent", "can you review PR 12?")
+    r = send(client, t_alice, BOB, "can you review PR 12?")
     assert r.status_code == 201, r.text
     m = r.json()["message"]
     assert r.json()["created"] is True
-    assert m["from"] == "alice-agent" and m["to"] == "bob-agent" and m["delivery_state"] == "stored"
+    # the sending machine sees its own handle; the teammate is a person (§21 C5.2)
+    assert m["from"] == "alice-agent" and m["to"] == "@" + BOB and m["delivery_state"] == "stored"
+    assert m["to_endpoint"] == {"person": BOB, "display_name": "Bob"} and m["from_kind"] == "agent"
     assert m["created_at"].endswith("Z") and m["acked_at"] is None and m["in_reply_to"] is None
 
     inbox = client.get("/api/v1/inbox", headers=auth(t_bob)).json()
@@ -31,7 +36,7 @@ def test_send_and_reply_between_two_agents(client, world):
     again = client.post(f"/api/v1/messages/{m['id']}/ack", headers=auth(t_bob)).json()
     assert again["acked"] is False and again["message"]["acked_at"] == a.json()["message"]["acked_at"]
 
-    reply = send(client, t_bob, "alice-agent", "done, LGTM", in_reply_to=m["id"])
+    reply = send(client, t_bob, ALICE, "done, LGTM", in_reply_to=m["id"])
     assert reply.status_code == 201, reply.text
     rm = reply.json()["message"]
     assert rm["conversation_id"] == m["conversation_id"] and rm["in_reply_to"] == m["id"]
@@ -40,7 +45,7 @@ def test_send_and_reply_between_two_agents(client, world):
     assert parent["delivery_state"] == "replied"
 
     convs = client.get("/api/v1/conversations", headers=auth(t_alice)).json()["conversations"]
-    assert len(convs) == 1 and convs[0]["peer"] == "bob-agent" and convs[0]["last_seq"] == rm["seq"]
+    assert len(convs) == 1 and convs[0]["peer"] == "Bob" and convs[0]["last_seq"] == rm["seq"]
     assert convs[0]["unacked"] == 1 and convs[0]["id"] == m["conversation_id"]
     thread = client.get(f"/api/v1/conversations/{m['conversation_id']}/messages", headers=auth(t_alice)).json()
     assert [x["id"] for x in thread["messages"]] == [m["id"], rm["id"]] and thread["cursor"] == rm["seq"]
@@ -51,8 +56,8 @@ def test_send_and_reply_between_two_agents(client, world):
 
 def test_reply_by_original_sender_does_not_mark_replied(client, world):
     t_alice = world["tokens"]["alice"]
-    m = send(client, t_alice, "bob-agent", "first").json()["message"]
-    r = send(client, t_alice, "bob-agent", "follow-up", in_reply_to=m["id"])
+    m = send(client, t_alice, BOB, "first").json()["message"]
+    r = send(client, t_alice, BOB, "follow-up", in_reply_to=m["id"])
     assert r.status_code == 201
     got = client.get(f"/api/v1/messages/{m['id']}", headers=auth(t_alice)).json()["message"]
     assert got["delivery_state"] == "stored"
@@ -60,19 +65,24 @@ def test_reply_by_original_sender_does_not_mark_replied(client, world):
 
 def test_reply_rules(client, world):
     t_alice, t_bob = world["tokens"]["alice"], world["tokens"]["bob"]
-    m = send(client, t_alice, "bob-agent").json()["message"]
-    assert send(client, t_bob, "bob-agent", in_reply_to=m["id"]).status_code == 400  # self
-    assert err(send(client, t_bob, "alice-agent", in_reply_to=str(uuid.uuid4()))) == "not_found"
-    assert err(send(client, t_bob, "alice-agent", in_reply_to=m["id"],
+    m = send(client, t_alice, BOB).json()["message"]
+    assert err(send(client, t_bob, BOB, in_reply_to=m["id"])) == "invalid"  # a reply must name the other person
+    assert err(send(client, t_bob, "bob-agent", in_reply_to=m["id"])) == "invalid"  # own machine is not the peer
+    # a machine handle is never an address (§21 C2.2): the teammate's handle maps to its person
+    refused = send(client, t_bob, "alice-agent")
+    assert err(refused) == "address_people"
+    assert refused.json()["error"]["message"] == "Address people: send to Alice (alice@example.test)"
+    assert err(send(client, t_bob, ALICE, in_reply_to=str(uuid.uuid4()))) == "not_found"
+    assert err(send(client, t_bob, ALICE, in_reply_to=m["id"],
                     conversation_id=str(uuid.uuid4()))) == "invalid"
     # explicit conversation_id without a reply must be this pair's conversation
-    assert send(client, t_bob, "alice-agent", conversation_id=m["conversation_id"]).status_code == 201
-    assert err(send(client, t_bob, "alice-agent", conversation_id=str(uuid.uuid4()))) == "invalid"
+    assert send(client, t_bob, ALICE, conversation_id=m["conversation_id"]).status_code == 201
+    assert err(send(client, t_bob, ALICE, conversation_id=str(uuid.uuid4()))) == "invalid"
 
 
 def test_offline_catch_up_with_cursor(client, world):
     t_alice, t_bob = world["tokens"]["alice"], world["tokens"]["bob"]
-    ids = [send(client, t_alice, "bob-agent", f"msg {i}").json()["message"]["id"] for i in range(4)]
+    ids = [send(client, t_alice, BOB, f"msg {i}").json()["message"]["id"] for i in range(4)]
     page = client.get("/api/v1/inbox?after=0&limit=2", headers=auth(t_bob)).json()
     assert [x["id"] for x in page["messages"]] == ids[:2]
     rest = client.get(f"/api/v1/inbox?after={page['cursor']}&limit=100", headers=auth(t_bob)).json()
@@ -91,16 +101,16 @@ def test_offline_catch_up_with_cursor(client, world):
 def test_idempotent_retry_and_id_conflict(client, world, engine):
     t_alice = world["tokens"]["alice"]
     mid = str(uuid.uuid4())
-    first = send(client, t_alice, "bob-agent", "same", id=mid)
-    retry = send(client, t_alice, "bob-agent", "same", id=mid)
+    first = send(client, t_alice, BOB, "same", id=mid)
+    retry = send(client, t_alice, BOB, "same", id=mid)
     assert first.status_code == 201 and retry.status_code == 200
     assert retry.json()["created"] is False and retry.json()["message"] == first.json()["message"]
     conv = first.json()["message"]["conversation_id"]
-    assert send(client, t_alice, "bob-agent", "same", id=mid, conversation_id=conv).status_code == 200
-    diff = send(client, t_alice, "bob-agent", "different body", id=mid)
+    assert send(client, t_alice, BOB, "same", id=mid, conversation_id=conv).status_code == 200
+    diff = send(client, t_alice, BOB, "different body", id=mid)
     assert diff.status_code == 409 and err(diff) == "id_conflict"
     # the same id from another agent is a conflict, never a read of someone else's message
-    other = send(client, world["tokens"]["bob"], "alice-agent", "same", id=mid)
+    other = send(client, world["tokens"]["bob"], ALICE, "same", id=mid)
     assert other.status_code == 409 and "message" not in other.json()
     with engine.connect() as c:
         assert c.execute(select(func.count()).select_from(Message)).scalar() == 1
@@ -121,7 +131,7 @@ def test_concurrent_duplicate_sends_store_one_row(world, engine, settings):
             alice = s.get(Agent, alice_id)
             barrier.wait()
             _, created = messaging.send_message(
-                s, alice, id=mid, to_handle="bob-agent", body=body, max_pending=settings.max_pending)
+                s, alice, id=mid, to_handle=BOB, body=body, max_pending=settings.max_pending)
             s.commit()
             results.append(created)
         except messaging.MessagingError as exc:
@@ -157,7 +167,7 @@ def test_concurrent_http_duplicates(client, world, engine):
     statuses = []
 
     def go():
-        statuses.append(send(client, world["tokens"]["alice"], "bob-agent", "x", id=mid).status_code)
+        statuses.append(send(client, world["tokens"]["alice"], BOB, "x", id=mid).status_code)
 
     threads = [threading.Thread(target=go) for _ in range(6)]
     for t in threads:
@@ -181,7 +191,7 @@ def test_concurrent_capacity_not_bypassed(world, engine, settings):
         try:
             alice = s.get(Agent, alice_id)
             barrier.wait()
-            messaging.send_message(s, alice, id=uuid.uuid4(), to_handle="bob-agent", body="x",
+            messaging.send_message(s, alice, id=uuid.uuid4(), to_handle=BOB, body="x",
                                    max_pending=settings.max_pending)
             s.commit()
             codes.append("ok")
@@ -203,7 +213,7 @@ def test_restart_keeps_data(settings, world):
     t_alice, t_bob = world["tokens"]["alice"], world["tokens"]["bob"]
     app1 = create_app(settings)
     with TestClient(app1) as c1:
-        mid = send(c1, t_alice, "bob-agent", "survives a restart").json()["message"]["id"]
+        mid = send(c1, t_alice, BOB, "survives a restart").json()["message"]["id"]
     app1.state.engine.dispose()
     app2 = create_app(settings)  # new app, new engine and connection pool
     try:
@@ -211,7 +221,7 @@ def test_restart_keeps_data(settings, world):
             inbox = c2.get("/api/v1/inbox", headers=auth(t_bob)).json()
             assert [m["id"] for m in inbox["messages"]] == [mid]
             assert inbox["messages"][0]["body"] == "survives a restart"
-            assert send(c2, t_alice, "bob-agent", "survives a restart", id=mid).status_code == 200
+            assert send(c2, t_alice, BOB, "survives a restart", id=mid).status_code == 200
     finally:
         app2.state.engine.dispose()
 
@@ -219,20 +229,20 @@ def test_restart_keeps_data(settings, world):
 def test_inbox_full_and_retry_of_existing_id(client, world, settings):
     t_alice = world["tokens"]["alice"]
     first_id = str(uuid.uuid4())
-    assert send(client, t_alice, "bob-agent", "m0", id=first_id).status_code == 201
+    assert send(client, t_alice, BOB, "m0", id=first_id).status_code == 201
     for i in range(1, settings.max_pending):
-        assert send(client, t_alice, "bob-agent", f"m{i}").status_code == 201
-    full = send(client, t_alice, "bob-agent", "one too many")
+        assert send(client, t_alice, BOB, f"m{i}").status_code == 201
+    full = send(client, t_alice, BOB, "one too many")
     assert full.status_code == 429 and err(full) == "inbox_full"
-    assert send(client, t_alice, "bob-agent", "m0", id=first_id).status_code == 200
+    assert send(client, t_alice, BOB, "m0", id=first_id).status_code == 200
     # acking frees capacity
     client.post(f"/api/v1/messages/{first_id}/ack", headers=auth(world["tokens"]["bob"]))
-    assert send(client, t_alice, "bob-agent", "fits now").status_code == 201
+    assert send(client, t_alice, BOB, "fits now").status_code == 201
 
 
 def test_events_only_after_ack_and_only_by_recipient(client, world, engine):
     t_alice, t_bob, t_eve = world["tokens"]["alice"], world["tokens"]["bob"], world["tokens"]["eve"]
-    mid = send(client, t_alice, "bob-agent").json()["message"]["id"]
+    mid = send(client, t_alice, BOB).json()["message"]["id"]
     url = f"/api/v1/messages/{mid}/events"
     r = client.post(url, json={"state": "held", "detail": "approval_required"}, headers=auth(t_bob))
     assert r.status_code == 409 and err(r) == "not_acked"
@@ -242,6 +252,9 @@ def test_events_only_after_ack_and_only_by_recipient(client, world, engine):
     assert err(client.post(url, json={"state": "replied"}, headers=auth(t_bob))) == "invalid"
     assert err(client.post(url, json={"state": "held", "x": 1}, headers=auth(t_bob))) == "invalid"
     assert err(client.post(url, json={"state": "held", "detail": "x" * 501}, headers=auth(t_bob))) == "invalid"
+    # §21 C5.5: detail is a code from the allowlist; free text is refused
+    assert err(client.post(url, json={"state": "held", "detail": "Bob's session is busy"},
+                           headers=auth(t_bob))) == "invalid"
     for state in ("held", "submitted"):
         r = client.post(url, json={"state": state, "detail": "busy"}, headers=auth(t_bob))
         assert r.status_code == 200 and r.json()["message"]["delivery_state"] == state
@@ -259,10 +272,10 @@ def test_me_and_agents(client, world):
                            "team": {"slug": "acme", "name": "Acme"}}
     assert me["credential"]["prefix"] == world["tokens"]["alice"][:12]
     assert sorted(me["credential"]["scopes"]) == ["messages:ack", "messages:read", "messages:send"]
+    # §21 C13 M2: /agents lists the caller's own machines only, in the old shape; teammates are in /people
     agents = client.get("/api/v1/agents", headers=auth(world["tokens"]["alice"])).json()["agents"]
-    assert agents == [{"handle": "alice-agent", "display_name": "alice-agent", "owner": "Alice", "active": True,
-                       "presence": {"status": "unknown", "seen_at": None, "expires_at": None},
-                       "machine": None, "routing": "all", "agents": []},
-                      {"handle": "bob-agent", "display_name": "bob-agent", "owner": "Bob", "active": True,
-                       "presence": {"status": "unknown", "seen_at": None, "expires_at": None},
-                       "machine": None, "routing": "all", "agents": []}]
+    assert [a["handle"] for a in agents] == ["alice-agent"]
+    assert {k: v for k, v in agents[0].items() if k != "agents"} == {
+        "handle": "alice-agent", "display_name": "alice-agent", "owner": "Alice", "active": True,
+        "presence": {"status": "unknown", "seen_at": None, "expires_at": None}, "machine": None, "routing": "all"}
+    assert "bob-agent" not in client.get("/api/v1/agents", headers=auth(world["tokens"]["alice"])).text

@@ -27,8 +27,13 @@ def put(client, token, body):
 
 
 def entry(client, token, handle):
+    """The caller's OWN machine entry: §21 C13 M2, ``/agents`` lists only the caller's machines."""
     rows = client.get("/api/v1/agents", headers=auth(token)).json()["agents"]
     return next(a for a in rows if a["handle"] == handle)
+
+
+def own(client, world, handle="alice-agent"):
+    return entry(client, world["tokens"]["alice"], handle)
 
 
 def test_report_is_stored_team_scoped_and_read_without_keys(client, world):
@@ -38,7 +43,7 @@ def test_report_is_stored_team_scoped_and_read_without_keys(client, world):
     r = put(client, world["tokens"]["alice"], body)
     assert r.status_code == 200, r.text
     assert set(r.json()) == {"presence", "target"} and r.json()["target"] is None
-    seen = entry(client, world["tokens"]["bob"], "alice-agent")
+    seen = own(client, world)
     assert seen["presence"]["status"] == "ready"
     assert seen["machine"] == {"client_version": "0.3.0", "update_mode": "automatic", "update_state": "current",
                                "error": None, "seen_at": seen["presence"]["seen_at"]}
@@ -47,13 +52,22 @@ def test_report_is_stored_team_scoped_and_read_without_keys(client, world):
     assert seen["agents"][0] == {"name": "raincli-inbox", "type": "claude", "status": "idle", "role": "inbox",
                                  "reachability": "instant", "source": "herdr", "ambiguous": False}
     assert all(set(a) == {"name", "type", "status", "role", "reachability", "source", "ambiguous"} for a in seen["agents"])
-    assert "a" * 32 not in client.get("/api/v1/agents", headers=auth(world["tokens"]["bob"])).text
-    # Bob has never reported: no machine block and no agents.
-    bob = entry(client, world["tokens"]["alice"], "bob-agent")
-    assert bob["machine"] is None and bob["agents"] == []
+    assert "a" * 32 not in client.get("/api/v1/agents", headers=auth(world["tokens"]["alice"])).text
+    # Bob has never reported: no machine block, only the fixture's seeded inbox row.
+    bob = entry(client, world["tokens"]["bob"], "bob-agent")
+    assert bob["machine"] is None and [a["name"] for a in bob["agents"]] == ["inbox"]
+    # §21 C13 M2: a teammate never sees Alice's machine or her directory; only Alice the person, in /people.
+    mate = client.get("/api/v1/agents", headers=auth(world["tokens"]["bob"]))
+    assert [a["handle"] for a in mate.json()["agents"]] == ["bob-agent"]
+    assert "alice-agent" not in mate.text and "raincli-inbox" not in mate.text and "gemini" not in mate.text
+    people = client.get("/api/v1/people", headers=auth(world["tokens"]["bob"]))
+    assert "alice-agent" not in people.text and "raincli-inbox" not in people.text
+    alice = next(p for p in people.json()["people"] if p["email"] == "alice@example.test")
+    assert set(alice) == {"display_name", "email", "team", "presence", "speed"}
     # Another team never sees Alice's handle or her directory.
-    other = client.get("/api/v1/agents", headers=auth(world["tokens"]["eve"])).text
-    assert "alice-agent" not in other and "raincli-inbox" not in other
+    for path in ("/api/v1/agents", "/api/v1/people"):
+        other = client.get(path, headers=auth(world["tokens"]["eve"])).text
+        assert "alice-agent" not in other and "raincli-inbox" not in other and "alice@example.test" not in other
 
 
 def test_snapshot_replaces_and_empty_list_clears(client, world, session):
@@ -68,7 +82,7 @@ def test_snapshot_replaces_and_empty_list_clears(client, world, session):
     put(client, token, {"status": "ready"})
     assert session.scalar(select(func.count()).select_from(MachineAgent).where(MachineAgent.agent_id == aid)) == 2
     put(client, token, {"status": "offline", "agents": []})
-    assert entry(client, world["tokens"]["bob"], "alice-agent")["agents"] == []
+    assert own(client, world)["agents"] == []
 
 
 def test_rejected_report_changes_nothing(client, world, session):
@@ -80,7 +94,7 @@ def test_rejected_report_changes_nothing(client, world, session):
     session.expire_all()
     row = session.get(AgentPresence, world["agents"]["alice"].id)
     assert row.status == "ready" and row.client_version == "0.3.0"
-    assert [a["name"] for a in entry(client, world["tokens"]["bob"], "alice-agent")["agents"]] == ["raincli-inbox"]
+    assert [a["name"] for a in own(client, world)["agents"]] == ["raincli-inbox"]
 
 
 @pytest.mark.parametrize("agents", [
@@ -142,8 +156,10 @@ def test_client_block_bounds_and_omission(client, world, session):
 def test_v020_body_stays_valid(client, world):
     r = put(client, world["tokens"]["alice"], {"status": "busy"})
     assert r.status_code == 200 and r.json()["presence"]["status"] == "busy" and r.json()["target"] is None
-    seen = entry(client, world["tokens"]["bob"], "alice-agent")
-    assert seen["presence"]["status"] == "busy" and seen["machine"] is None and seen["agents"] == []
+    seen = own(client, world)
+    # The omitted agents list leaves the directory alone: only the fixture's seeded inbox row.
+    assert seen["presence"]["status"] == "busy" and seen["machine"] is None
+    assert [a["name"] for a in seen["agents"]] == ["inbox"]
 
 
 def test_directory_rows_expire_after_ttl(client, world, session):
@@ -151,12 +167,12 @@ def test_directory_rows_expire_after_ttl(client, world, session):
     for row in session.scalars(select(MachineAgent)):
         row.seen_at -= timedelta(seconds=presence.TTL_SECONDS - 5)
     session.commit()
-    assert len(entry(client, world["tokens"]["bob"], "alice-agent")["agents"]) == 1
+    assert len(own(client, world)["agents"]) == 1
     for row in session.scalars(select(MachineAgent)):
         row.seen_at -= timedelta(seconds=5)
     session.get(AgentPresence, world["agents"]["alice"].id).seen_at -= timedelta(seconds=presence.TTL_SECONDS)
     session.commit()
-    seen = entry(client, world["tokens"]["bob"], "alice-agent")
+    seen = own(client, world)
     assert seen["agents"] == [] and seen["presence"]["status"] == "offline"
     assert seen["machine"]["client_version"] == "0.3.0"  # the last known version stays visible
 
@@ -164,9 +180,11 @@ def test_directory_rows_expire_after_ttl(client, world, session):
 def test_revoked_handle_returns_no_agents_and_cannot_report(client, world, session):
     token = world["tokens"]["alice"]
     put(client, token, {"status": "ready", "client": CLIENT, "agents": [INBOX]})
+    # Alice reads her machine list from a second machine of hers (§21 C13 M2: /agents is own machines only).
+    _, desk = identity.register_agent(session, world["teams"]["acme"], world["users"]["alice"], "alice-desk")
     identity.revoke_agent(session, world["agents"]["alice"])
     session.commit()
-    seen = entry(client, world["tokens"]["bob"], "alice-agent")
+    seen = entry(client, desk, "alice-agent")
     assert seen["active"] is False and seen["agents"] == [] and seen["machine"] is None
     assert seen["presence"]["status"] == "offline"
     assert put(client, token, {"status": "ready", "agents": [INBOX]}).status_code == 401
@@ -299,7 +317,7 @@ def test_client_status_lists_machines(database_url, client, world, session):
 def test_ordinary_names_are_accepted(client, world, name):
     r = put(client, world["tokens"]["alice"], {"status": "ready", "agents": [agent(name=name)]})
     assert r.status_code == 200, r.text
-    assert entry(client, world["tokens"]["bob"], "alice-agent")["agents"][0]["name"] == name
+    assert own(client, world)["agents"][0]["name"] == name
 
 
 def test_client_normalized_names_always_pass():
@@ -329,7 +347,7 @@ def test_contract_maximal_report_fits_the_body_limit(client, world):
     r = client.put("/api/v1/presence", headers={**auth(world["tokens"]["alice"]), "Content-Type": "application/json"},
                    content=raw)
     assert r.status_code == 200, r.text
-    assert len(entry(client, world["tokens"]["bob"], "alice-agent")["agents"]) == presence.MAX_AGENTS
+    assert len(own(client, world)["agents"]) == presence.MAX_AGENTS
     # The larger limit applies to PUT /presence only.
     big = b'{"status": "ready", "pad": "' + b"x" * (128 * 1024) + b'"}'
     r = client.put("/api/v1/presence", headers={**auth(world["tokens"]["alice"]), "Content-Type": "application/json"},

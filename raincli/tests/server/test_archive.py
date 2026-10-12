@@ -13,9 +13,14 @@ from api_helpers import auth, err, send
 from raincli_server import identity
 
 PASSWORD = "correct horse battery"
+# §21 (v0.6): teammates are addressed as people; each person's inbox is their own machine (conftest). New sends
+# land in the one person-pair conversation of (team, alice, bob), which either side's machine may read and archive.
+ALICE, BOB = "alice@example.test", "bob@example.test"
+P_ALICE = {"person": ALICE, "display_name": "Alice"}
+P_BOB = {"person": BOB, "display_name": "Bob"}
 
 
-def conv_of(client, token, to="bob-agent", body="hello"):
+def conv_of(client, token, to=BOB, body="hello"):
     r = send(client, token, to, body)
     assert r.status_code == 201, r.text
     return r.json()["message"]["conversation_id"], r.json()["message"]["id"]
@@ -56,12 +61,12 @@ def test_either_machine_archives_for_both_and_either_unarchives(client, world):
     assert r.status_code == 200
     conv = r.json()["conversation"]
     assert conv["id"] == cid and conv["archived"] is True and conv["archived_at"].endswith("Z")
-    assert conv["archived_by"] == {"machine": "alice-agent"} and conv["archived_through_seq"] > 0
-    assert conv["peer_endpoint"] == {"machine": "bob-agent"}
+    assert conv["archived_by"] == P_ALICE and conv["archived_through_seq"] > 0
+    assert conv["peer_endpoint"] == P_BOB and conv["peer"] == "Bob"
     for token in (alice, bob):  # one shared state: gone from both main lists
         assert cid not in listed(client, token)
         assert cid in listed(client, token, "only") and cid in listed(client, token, "include")
-        assert listed(client, token, "only")[cid]["archived_by"] == {"machine": "alice-agent"}
+        assert listed(client, token, "only")[cid]["archived_by"] == P_ALICE
     r = archive(client, bob, cid, undo=True)  # the other side restores it for both
     assert r.status_code == 200 and r.json()["conversation"]["archived_at"] is None
     for token in (alice, bob):
@@ -74,7 +79,7 @@ def test_archive_and_unarchive_are_idempotent(client, world):
     first = archive(client, alice, cid).json()["conversation"]
     again = archive(client, bob, cid)  # already archived: 200 with the current state, unchanged
     assert again.status_code == 200 and again.json()["conversation"]["archived_at"] == first["archived_at"]
-    assert again.json()["conversation"]["archived_by"] == {"machine": "alice-agent"}
+    assert again.json()["conversation"]["archived_by"] == P_ALICE
     assert archive(client, alice, cid, undo=True).status_code == 200
     r = archive(client, alice, cid, undo=True)
     assert r.status_code == 200 and r.json()["conversation"]["archived_at"] is None
@@ -86,7 +91,7 @@ def test_a_new_message_from_either_side_unarchives(client, world, sender):
     cid, _ = conv_of(client, alice)
     archive(client, alice, cid)
     assert cid not in listed(client, alice)
-    to = "bob-agent" if sender == "alice" else "alice-agent"
+    to = BOB if sender == "alice" else ALICE
     new_cid, _ = conv_of(client, world["tokens"][sender], to=to, body="back again")
     assert new_cid == cid
     for token in (alice, bob):
@@ -118,10 +123,11 @@ def test_delivery_is_never_affected(client, world):
 def test_outsiders_get_404_with_no_hint(client, world, session):
     alice, eve = world["tokens"]["alice"], world["tokens"]["eve"]
     cid, _ = conv_of(client, alice)
-    other_agent, other_token = identity.register_agent(session, world["teams"]["acme"], world["users"]["bob"],
-                                                       "bob-two")
+    carol = identity.create_user(session, "carol@example.test", "Carol", PASSWORD)
+    identity.add_member(session, world["teams"]["acme"], carol)
+    _, other_token = identity.register_agent(session, world["teams"]["acme"], carol, "carol-agent")
     session.commit()
-    for token in (eve, other_token):  # another team; the same team but not an endpoint
+    for token in (eve, other_token):  # another team; the same team but neither side's machine
         for undo in (False, True):
             r = archive(client, token, cid, undo=undo)
             assert r.status_code == 404 and err(r) == "not_found"
@@ -129,6 +135,12 @@ def test_outsiders_get_404_with_no_hint(client, world, session):
         r = archive(client, alice, bogus)
         assert r.status_code == 404 and err(r) == "not_found"
     assert listed(client, alice)[cid]["archived_at"] is None  # nothing changed
+    # §21 C13 M1: by contrast, any machine of a side's owner may read and archive the pair conversation
+    _, bob_two = identity.register_agent(session, world["teams"]["acme"], world["users"]["bob"], "bob-two")
+    session.commit()
+    assert cid in listed(client, bob_two)
+    assert archive(client, bob_two, cid).json()["conversation"]["archived_by"] == P_BOB
+    assert archive(client, bob_two, cid, undo=True).status_code == 200
     eve_person = person_session(client, "eve@example.test", "eve-laptop")
     r = archive(client, eve_person, cid, person=True)
     assert r.status_code == 404 and err(r) == "not_found"
@@ -145,8 +157,9 @@ def test_persons_archive_as_endpoints_and_as_owners(client, world):
     assert pid not in listed(client, bob_p, person=True) and pid in listed(client, bob_p, "only", person=True)
     assert archive(client, bob_p, pid, undo=True, person=True).status_code == 200
     assert pid in listed(client, alice_p, person=True)
-    # The person who owns a machine endpoint: alice owns alice-agent, bob owns bob-agent.
+    # Their machines' messages land in the same pair conversation (§21), which the people archive as its sides.
     mid, _ = conv_of(client, world["tokens"]["alice"])
+    assert mid == pid
     r = archive(client, alice_p, mid, person=True)
     assert r.status_code == 200 and r.json()["conversation"]["archived_by"]["person"] == "alice@example.test"
     assert mid not in listed(client, world["tokens"]["bob"])
@@ -198,7 +211,7 @@ def test_archived_through_seq_is_what_the_archiver_saw(client, world):
     alice, bob = world["tokens"]["alice"], world["tokens"]["bob"]
     cid, _ = conv_of(client, alice, body="one")
     seen = listed(client, alice)[cid]["last_seq"]
-    conv_of(client, bob, to="alice-agent", body="two, not yet seen by alice")
+    conv_of(client, bob, to=ALICE, body="two, not yet seen by alice")
     r = archive(client, alice, cid, through=seen)  # archived through what alice displayed
     assert r.status_code == 200 and r.json()["conversation"]["archived"] is False  # a newer one exists
     assert cid in listed(client, alice)
@@ -277,7 +290,7 @@ def test_an_archive_in_flight_makes_a_send_wait_then_the_send_unarchives(client,
     s_archive, s_send = sessions(app, 2)
     try:
         raced_archive(s_archive, bob, cid)
-        send = Background(lambda: (raced_send(s_send, alice, "bob-agent"), s_send.commit())[0])
+        send = Background(lambda: (raced_send(s_send, alice, BOB), s_send.commit())[0])
         assert send.blocked()  # KEY SHARE waits for the archive's FOR UPDATE
         s_archive.commit()
         msg = send.join()
@@ -297,7 +310,7 @@ def test_a_send_in_flight_makes_an_archive_wait_and_a_stale_position_keeps_it_li
     for through in (seen, None):
         s_send, s_archive = sessions(app, 2)
         try:
-            msg = raced_send(s_send, alice, "bob-agent")
+            msg = raced_send(s_send, alice, BOB)
             archived = Background(lambda: (raced_archive(s_archive, bob, cid, through), s_archive.commit()))
             assert archived.blocked()  # FOR UPDATE waits for the send's KEY SHARE
             s_send.commit()
@@ -320,8 +333,8 @@ def test_opposite_direction_sends_never_let_an_archive_skip_a_lower_seq(client, 
     cid, _ = conv_of(client, world["tokens"]["alice"])
     s_low, s_high, s_archive = sessions(app, 3)
     try:
-        low = raced_send(s_low, alice, "bob-agent", "lower seq, committed last")
-        high = Background(lambda: (raced_send(s_high, bob, "alice-agent", "higher seq"), s_high.commit())[0])
+        low = raced_send(s_low, alice, BOB, "lower seq, committed last")
+        high = Background(lambda: (raced_send(s_high, bob, ALICE, "higher seq"), s_high.commit())[0])
         assert not high.blocked(pause=5)  # opposite-direction sends run concurrently
         high = high.join()
         assert low.seq < high.seq and low.conversation_id == high.conversation_id == uuid.UUID(cid)

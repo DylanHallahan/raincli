@@ -83,17 +83,17 @@ def test_replace_without_delivery_history_rotates(client, world):
 def test_replace_refused_after_a_message_was_received(client, world, session):
     from api_helpers import send
 
-    from raincli_server.models import Agent, PersonInbox
-
     token = app_login(client).json()["token"]
-    # §21: a message reaches alice-laptop when it is Alice's inbox and a teammate messages her.
-    laptop = session.scalar(select(Agent).where(Agent.handle == "alice-laptop"))
-    session.query(PersonInbox).filter(PersonInbox.user_id == world["users"]["alice"].id).delete()
-    session.add(PersonInbox(user_id=world["users"]["alice"].id, team_id=world["teams"]["acme"].id, agent_id=laptop.id,
-                            agent_name="reviewer", set_via="app"))
-    session.commit()
-    sent = send(client, world["tokens"]["bob"], "alice@example.test")
-    assert sent.status_code == 201, sent.text
+    # §21: Bob addresses Alice, not her machine; so Alice first makes an agent on the laptop her inbox
+    # (without publishing an inbox role, which would be delivery history on its own).
+    report = {"status": "ready", "agents": [{"key": "2" * 32, "name": "notes", "type": "claude", "status": "idle",
+                                             "role": None, "reachability": "instant", "source": "herdr"}]}
+    assert client.put("/api/v1/presence", json=report, headers=auth(token)).status_code == 200
+    r = client.put("/api/v1/me/inbox", json={"agent": "notes"}, headers=auth(token))
+    assert r.status_code == 200, r.text
+    assert client.get("/api/v1/me", headers=auth(token)).json()["delivery_history"] is False
+    assert send(client, world["tokens"]["bob"], "alice@example.test").status_code == 201
+    assert client.get("/api/v1/me", headers=auth(token)).json()["delivery_history"] is True
     r = app_login(client, replace=True)
     assert r.status_code == 409 and err(r) == "name_in_use"
     r = app_login(client, replace=True, previous_token=token)  # proof of the credential still works

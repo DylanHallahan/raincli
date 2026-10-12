@@ -74,6 +74,17 @@ def display_name(user: User) -> str:
     return (user.display_name or "").strip() or user.email
 
 
+def name_in_team(db: Session, team_id: uuid.UUID | None, user: User) -> str:
+    """A person as their team sees them: their display name, with a distinguishing suffix when another member's
+    name reads alike (owners.displays, §18.1 item 7). The person is the address in v0.6, so look-alike names must
+    never show as the same person."""
+    if team_id is None:
+        return display_name(user)
+    from raincli_server import owners
+
+    return owners.displays(db, team_id, [user]).get(user.id) or display_name(user)
+
+
 def person_of(db: Session, endpoint: Endpoint) -> User | None:
     """The person an endpoint belongs to: the person, or the machine's owner."""
     if endpoint.kind == "person":
@@ -81,11 +92,12 @@ def person_of(db: Session, endpoint: Endpoint) -> User | None:
     return db.get(User, endpoint.agent.owner_user_id) if endpoint.agent is not None else None
 
 
-def person_label(db: Session, endpoint: Endpoint, *, sender: bool = False) -> str:
+def person_label(db: Session, endpoint: Endpoint, *, sender: bool = False, team_id: uuid.UUID | None = None) -> str:
     """PR4: "<Name>" for a person, "<Name> · agent" for a machine (or an agent on it) that SENT a message
-    (``sender=True``). A machine as a recipient is the person's inbox: "<Name>". The same for every viewer."""
+    (``sender=True``). A machine as a recipient is the person's inbox: "<Name>". The same for every viewer. Pass the
+    ``team_id`` to tell look-alike names apart (``name_in_team``)."""
     user = person_of(db, endpoint)
-    name = display_name(user) if user is not None else "a teammate"
+    name = name_in_team(db, team_id, user) if user is not None else "a teammate"
     return f"{name} · agent" if sender and endpoint.kind != "person" else name
 
 
@@ -153,9 +165,9 @@ class PersonResolution:
             return None
         if self.kind == "ambiguous":
             return 400, "ambiguous_person", error_text("ambiguous_person", text=display_name(self.people[0])), {
-                "people": [{"name": display_name(u), "email": u.email} for u in self.people]}
+                "people": [{"name": f"{display_name(u)} ({u.email})", "email": u.email} for u in self.people]}
         if self.kind == "address_people":
-            if self.mapped is not None:
+            if self.mapped is not None:  # the email is shown: look-alike names are told apart
                 return 400, "address_people", error_text("address_people", name=display_name(self.mapped),
                                                          email=self.mapped.email), {}
             return 400, "address_people", error_text("address_people"), {}
@@ -239,7 +251,7 @@ def conversation_peer(db: Session, viewer: User, conv: Conversation) -> Peer:
     a, b = _side_person(db, conv, "a"), _side_person(db, conv, "b")
     other = b if a == viewer.id else a
     user = db.get(User, other) if other is not None else None
-    return Peer(user, display_name(user) if user is not None else "a teammate", "pair")
+    return Peer(user, name_in_team(db, conv.team_id, user) if user is not None else "a teammate", "pair")
 
 
 # Presence and speed --------------------------------------------------------------------------------------------
@@ -299,11 +311,12 @@ def person_presence(db: Session, team_id: uuid.UUID, user: User, now: datetime |
     row = db.scalars(select(MachineAgent).where(MachineAgent.agent_id == inbox.agent_id,
                                                 MachineAgent.name == inbox.agent_name,
                                                 MachineAgent.ambiguous.is_(False))).first()
-    if row is not None and row.seen_at > fresh and row.reachability in ("instant", "next-turn"):
-        speed = "instant" if row.reachability == "instant" else "next_turn"
-        return PersonPresence(_WORDS.get(row.status, "ready"), speed)
-    if uses_inbox_mode(db, inbox):
-        return PersonPresence(_WORDS.get(machine.status, "ready"), "next_turn")
+    live = row is not None and row.seen_at > fresh and row.reachability in ("instant", "next-turn")
+    if uses_inbox_mode(db, inbox):  # the inbox-mode path: the machine's own presence (C5.4)
+        speed = ("instant" if row.reachability == "instant" else "next_turn") if live else "next_turn"
+        return PersonPresence(_WORDS.get(machine.status, "ready"), speed)
+    if live:
+        return PersonPresence(_WORDS.get(row.status, "ready"), "instant" if row.reachability == "instant" else "next_turn")
     return PersonPresence("offline", None)
 
 
@@ -314,11 +327,14 @@ def team_name(db: Session, team_id: uuid.UUID) -> str:
 
 def people_json(db: Session, team_id: uuid.UUID) -> list[dict]:
     """§21 C5.3: the team's active members as people, with presence and speed (PR13); never machines or agents."""
+    from raincli_server import owners
+
     team = team_name(db, team_id)
+    shown = owners.displays(db, team_id)
     out = []
     for user in db.scalars(_members(db, team_id).order_by(func.lower(User.display_name), User.email)):
         state = person_presence(db, team_id, user)
-        out.append({"display_name": display_name(user), "email": user.email, "team": team,
+        out.append({"display_name": shown.get(user.id) or display_name(user), "email": user.email, "team": team,
                     "presence": state.presence, "speed": state.speed})
     return out
 
