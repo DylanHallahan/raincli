@@ -68,8 +68,8 @@ def conv_path(message):
 # R4 / P2: the latest conversation (criteria 17-18) -------------------------------------------------------------
 
 def test_inbox_opens_the_latest_conversation_selected_with_the_composer_ready(team, browser):
-    person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "older")
-    latest = person_send(team, team["maya"], {"machine": "priya-desktop", "agent": "web-agent"}, "newest")
+    person_send(team, team["maya"], {"person": "jon@example.test"}, "older")
+    latest = person_send(team, team["maya"], {"person": "priya@example.test"}, "newest")
     context, page = open_app(browser, team, team["maya"], **size(1180, 780))
     assert page.url.endswith(conv_path(latest) + "#latest"), page.url
     current = page.locator(".rc-conv[aria-current=page]")
@@ -87,7 +87,7 @@ def test_below_the_breakpoint_and_with_no_conversations_inbox_stays(team, browse
     context, page = open_app(browser, team, team["maya"], **size(1180, 780))
     assert page.url.endswith("/app/inbox") and page.locator(".rc-steps").is_visible()  # first run
     context.close()
-    person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "hello")
+    person_send(team, team["maya"], {"person": "jon@example.test"}, "hello")
     context, page = open_app(browser, team, team["maya"], **size(600, 700))
     page.wait_for_timeout(300)
     assert page.url.endswith("/app/inbox") and page.locator("section.rc-list").is_visible()
@@ -170,7 +170,7 @@ def test_no_ring_for_mouse_programmatic_or_live_focus_and_a_rounded_ring_for_the
 # R5: the trail is the toggle (criterion 19) ------------------------------------------------------------------
 
 def test_the_trail_toggles_its_history_by_click_and_keyboard(team, browser):
-    mine = person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "trail me")
+    mine = person_send(team, team["maya"], {"person": "jon@example.test"}, "trail me")
     context, page = open_app(browser, team, team["maya"], **size(1180, 780))
     summary = page.locator(f'[data-trail="{mine["id"]}"] summary')
     history = page.locator(f'[data-trail="{mine["id"]}"] .rc-history')
@@ -200,9 +200,9 @@ def test_the_trail_toggles_its_history_by_click_and_keyboard(team, browser):
 # R6: one header height (criteria 20-21) ----------------------------------------------------------------------
 
 def test_headers_have_one_height_and_presence_and_archive_share_a_line(team, browser):
-    agent = person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "agent")
+    agent = person_send(team, team["maya"], {"person": "jon@example.test"}, "agent")
     person = person_send(team, team["maya"], {"person": "jon@example.test"}, "person")
-    inbox = person_send(team, team["maya"], {"machine": "sam-server"}, "inbox")
+    inbox = person_send(team, team["maya"], {"person": "sam@example.test"}, "inbox")
     for w, h in ((1180, 780), (760, 520)):
         heights = {}
         context, page = open_app(browser, team, team["maya"], **size(w, h))
@@ -241,8 +241,8 @@ def test_team_starts_collapsed_below_600_tall_unless_the_viewer_chose(team, brow
 def test_an_overflowing_list_fades_at_the_bottom_with_no_custom_scrollbar(team, browser):
     from raincli_server import identity
 
-    for target in ({"machine": "jon-laptop", "agent": "api-agent"}, {"person": "jon@example.test"},
-                   {"machine": "sam-server"}, {"machine": "priya-desktop", "agent": "web-agent"}):
+    for target in ({"person": "jon@example.test"}, {"person": "jon@example.test"},
+                   {"person": "sam@example.test"}, {"person": "priya@example.test"}):
         person_send(team, team["maya"], target, "hello")
     for i in range(6):  # and six more teammates: ten conversations
         user = identity.create_user(team["session"], f"p{i}@example.test", f"Person {i}", "correct horse battery")
@@ -272,7 +272,7 @@ def _team_of(team):
 # R8: the small details (criteria 24-27) ----------------------------------------------------------------------
 
 def test_the_to_label_stays_top_aligned_with_the_first_line(team, browser):
-    mine = person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "hi")
+    mine = person_send(team, team["maya"], {"person": "jon@example.test"}, "hi")
     context, page = open_app(browser, team, team["maya"], path=conv_path(mine), **size(1180, 780))
     page.fill("#body", "\n".join(f"line {i}" for i in range(6)))
     tops = page.evaluate("""() => { const to = document.querySelector('.rc-to').getBoundingClientRect(),
@@ -284,7 +284,7 @@ def test_the_to_label_stays_top_aligned_with_the_first_line(team, browser):
 
 
 def test_previews_say_you_only_for_your_own_and_keep_a_machine_inboxs_sender(team, browser):
-    person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "mine")
+    person_send(team, team["maya"], {"person": "jon@example.test"}, "mine")
     jon_writes(team, "from Jon the person")
     api(team["base"], "/api/v1/messages", {"id": str(uuid.uuid4()), "to": {"person": "maya@example.test"},
                                           "body": "from Sam's machine"}, team["machines"]["sam-server"][1])
@@ -306,7 +306,7 @@ def test_the_team_section_is_pinned_at_the_bottom_with_or_without_conversations(
     context, page = open_app(browser, team, team["maya"], **size(1180, 780))
     empty_gap = team_gap(page)
     context.close()
-    person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "hi")
+    person_send(team, team["maya"], {"person": "jon@example.test"}, "hi")
     context, page = open_app(browser, team, team["maya"], **size(1180, 780))
     assert abs(team_gap(page) - empty_gap) <= 1 and empty_gap < 20
     context.close()
@@ -315,7 +315,7 @@ def test_the_team_section_is_pinned_at_the_bottom_with_or_without_conversations(
 # 29: tokens, no inline styles, AA ----------------------------------------------------------------------------
 
 def test_no_inline_styles_and_the_new_parts_pass_aa(team, browser):
-    mine = person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "hi")
+    mine = person_send(team, team["maya"], {"person": "jon@example.test"}, "hi")
     api(team["base"], "/api/v1/presence", {"status": "ready", "agents": [], "client": CLIENT},
         team["machines"]["jon-laptop"][1], method="PUT")
     for scheme in ("light", "dark"):
@@ -338,7 +338,7 @@ def test_no_inline_styles_and_the_new_parts_pass_aa(team, browser):
 def test_v0_5_4_behaviour_holds_for_the_frozen_items(team, browser):
     """P1, R7 and the Team work are frozen for v0.5.5: "via" shows even when it equals the conversation's agent, the
     Team section stays open in a short window with no list fade, and the Team tooltip names the handle."""
-    ask = person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "Can you check?")
+    ask = person_send(team, team["maya"], {"person": "jon@example.test"}, "Can you check?")
     api(team["base"], "/api/v1/messages", {"id": str(uuid.uuid4()), "to": {"person": "maya@example.test"},
                                           "from_agent": "api-agent", "body": "Done.", "in_reply_to": ask["id"]},
         team["machines"]["jon-laptop"][1])

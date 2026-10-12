@@ -103,6 +103,12 @@ def team(live, session):
                                  ("sam-server", "ops-agent", "idle")):
         api(live, "/api/v1/presence", {"status": "ready", "agents": [entry(name, "a" * 32, status)], "client": CLIENT},
             machines[handle][1], method="PUT")
+    # §21: each teammate picks their agent as their inbox (with their machine's own credential, C13 L4), and the
+    # machine polls with routing once, so named delivery needs no update.
+    for handle, name, _ in (("jon-laptop", "api-agent", "idle"), ("priya-desktop", "web-agent", "working"),
+                            ("sam-server", "ops-agent", "idle")):
+        api(live, "/api/v1/me/inbox", {"agent": name}, machines[handle][1], method="PUT")
+        api(live, "/api/v1/inbox?routing=1&wait=0", None, machines[handle][1])
     session.execute(update(AgentPresence).where(AgentPresence.agent_id == machines["sam-server"][0].id)
                     .values(seen_at=AgentPresence.seen_at - timedelta(minutes=30)))
     session.commit()
@@ -158,7 +164,7 @@ def size(w, h):
 # Criterion 2: the list at the minimum window size and every larger one ----------------------------------------
 
 def test_the_list_shows_at_the_minimum_window_and_every_larger_size(team, browser):
-    conv = person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"},
+    conv = person_send(team, team["maya"], {"person": "jon@example.test"},
                        "A long first line so the preview has to be cut off at the edge of the list " * 3)
     person_send(team, team["jon"], {"person": "maya@example.test"}, "Unread one")
     pages = ["/app/inbox", f"/app/conversations/{conv['conversation_id']}", "/app/compose"]
@@ -180,7 +186,7 @@ def test_the_list_shows_at_the_minimum_window_and_every_larger_size(team, browse
 
 
 def test_below_the_breakpoint_inbox_shows_the_list_and_other_pages_the_main_pane(team, browser):
-    conv = person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "hello")
+    conv = person_send(team, team["maya"], {"person": "jon@example.test"}, "hello")
     context, page = open_app(browser, team, team["maya"], **size(600, 700))
     assert page.locator("section.rc-list").is_visible()
     assert not page.locator(".rc-main").is_visible()
@@ -193,67 +199,13 @@ def test_below_the_breakpoint_inbox_shows_the_list_and_other_pages_the_main_pane
 
 # Criterion 14: the Team section ----------------------------------------------------------------------------------
 
-def test_team_section_lists_presence_with_labels_tooltips_and_opens_new_message(team, browser):
-    for scheme in ("light", "dark"):
-        context, page = open_app(browser, team, team["maya"], color_scheme=scheme, **size(1180, 780))
-        agents = page.locator(".rc-team .rc-team-agent")
-        assert [t.strip() for t in page.locator(".rc-team-name").all_inner_texts()] == [
-            "Jon · api-agent", "Priya · web-agent", "Sam · ops-agent"]
-        dots = page.locator(".rc-team .rc-dot")
-        # §19.9 F7: the word with its claim-limiting qualifier reaches assistive technology.
-        assert [d.get_attribute("aria-label") for d in dots.all()] == [
-            "Ready, at its last report", "Busy, at its last report", "Offline, no report in the last two minutes"]
-        assert [d.get_attribute("role") for d in dots.all()] == ["img"] * 3
-        titles = [d.get_attribute("title") for d in dots.all()]
-        assert titles[0].startswith("Ready") and titles[1] == "Busy: the session was working at its last report."
-        assert titles[2].startswith("Offline")
-        colours = [d.evaluate("e => getComputedStyle(e).backgroundColor") for d in dots.all()]
-        tokens = page.evaluate("""() => { const s = getComputedStyle(document.documentElement), p = document.createElement('i');
-            document.body.append(p); const out = ['--rc-ok', '--rc-warn', '--rc-muted'].map(t => {
-            p.style.color = s.getPropertyValue(t); return getComputedStyle(p).color; }); p.remove(); return out; }""")
-        assert colours == tokens, (scheme, colours, tokens)
-        # The accessible name carries the presence word, not just the colour.
-        assert "Ready" in agents.first.evaluate("a => a.textContent + ' ' + [...a.querySelectorAll('[aria-label]')].map(e => e.getAttribute('aria-label')).join(' ')")
-        context.close()
-    context, page = open_app(browser, team, team["maya"], **size(1180, 780))
-    page.click(".rc-team-agent:has-text('Priya · web-agent')")
-    page.wait_for_url("**/app/compose?to=priya-desktop/web-agent")
-    assert page.locator("#to").input_value() == "priya-desktop/web-agent"
-    assert not page.errors
-    context.close()
-
-
-def test_team_collapsed_state_is_remembered_per_viewer(team, browser):
-    context, page = open_app(browser, team, team["maya"], **size(1180, 780))
-    maya_key = "rc-team-open:" + str(team["users"]["Maya"].id)
-    jon_key = "rc-team-open:" + str(team["users"]["Jon"].id)
-    page.evaluate(f"localStorage.setItem('{jon_key}', '0')")  # another viewer's choice in the same profile
-    page.reload()
-    assert page.locator("details.rc-team").evaluate("d => d.open") is True
-    page.click(".rc-team summary")
-    assert page.locator("details.rc-team").evaluate("d => d.open") is False
-    page.reload()
-    assert page.locator("details.rc-team").evaluate("d => d.open") is False
-    assert page.evaluate(f"localStorage.getItem('{maya_key}')") == "0"
-    # A list swap by live.js (rc-list-updated) keeps the closed state.
-    page.evaluate("""() => { const old = document.querySelector('.rc-list'); const fresh = old.cloneNode(true);
-        fresh.querySelector('details.rc-team').open = true; old.replaceWith(fresh);
-        document.dispatchEvent(new Event('rc-list-updated')); }""")
-    assert page.locator("details.rc-team").evaluate("d => d.open") is False
-    page.click(".rc-team summary")
-    page.reload()
-    assert page.locator("details.rc-team").evaluate("d => d.open") is True
-    assert not page.errors
-    context.close()
 
 
 def test_the_page_works_when_local_storage_throws(team, browser):
     context, page = open_app(browser, team, team["maya"], **size(1180, 780))
     context.add_init_script("Object.defineProperty(window, 'localStorage', {get() { throw new Error('blocked'); }});")
     page.reload()
-    assert page.locator("details.rc-team").evaluate("d => d.open") is True
-    page.click(".rc-team summary")
-    assert page.locator("details.rc-team").evaluate("d => d.open") is False
+    assert page.locator(".rc-list").is_visible() and page.locator(".rc-team").count() == 0  # §21: no Team section
     assert not page.errors
     context.close()
 
@@ -275,8 +227,8 @@ def test_day_groups_follow_the_viewers_zone_and_need_javascript(team, browser):
     # Ages (hours) whose labels differ between the two zones, plus a plain Earlier.
     ages = [h for h in range(1, 72) if _label(now - timedelta(hours=h), ZoneInfo(east), now)
             != _label(now - timedelta(hours=h), ZoneInfo(west), now)][:2] + [24 * 5]
-    targets = [{"machine": "jon-laptop", "agent": "api-agent"}, {"machine": "priya-desktop", "agent": "web-agent"},
-               {"machine": "sam-server", "agent": "ops-agent"}]
+    targets = [{"person": "jon@example.test"}, {"person": "priya@example.test"},
+               {"person": "sam@example.test"}]
     sent = []
     for target, hours in zip(targets, sorted(ages, reverse=True)):  # oldest first: the list is in send order
         m = person_send(team, team["maya"], target, f"{hours} hours ago")
@@ -311,29 +263,33 @@ def test_day_groups_follow_the_viewers_zone_and_need_javascript(team, browser):
 
 # Criterion 16: first run ---------------------------------------------------------------------------------------
 
-def test_first_run_inbox_shows_three_steps_with_the_first_teammate_agent(team, browser):
+def test_first_run_inbox_shows_three_steps_with_the_first_teammate(team, browser):
     for w, h in ((1180, 780), (760, 520), (600, 700)):
         context, page = open_app(browser, team, team["maya"], **size(w, h))
         steps = page.locator(".rc-steps .rc-step")
         assert steps.count() == 3 and steps.first.is_visible(), (w, h)
         assert [s.locator("strong").inner_text() for s in steps.all()] == [
-            "Connect your coding agent", "See who's on your team", "Send your first message"]
+            "Pick your inbox agent", "See who's on your team", "Send your first message"]  # §21 C7.6
         hrefs = [s.get_attribute("href") for s in steps.all()]
-        assert hrefs[0].endswith("/app/local/this-computer") and hrefs[1].endswith("/app/agents")
-        assert hrefs[2].endswith("/app/compose?to=jon-laptop/api-agent")
+        assert hrefs[0].endswith("/app/local/this-computer") and hrefs[1].endswith("/app/people")
+        assert hrefs[2].endswith("/app/compose?to=jon%40example.test")  # step 3 pre-fills a person
         context.close()
     context, page = open_app(browser, team, team["maya"], **size(1180, 780))
     page.click(".rc-step:has-text('Send your first message')")
-    assert page.locator("#to").input_value() == "jon-laptop/api-agent"
+    page.wait_for_selector(".rc-chip-picked:not([hidden])")  # the picker shows the person, pre-picked
+    assert "Jon" in page.locator(".rc-chip-picked").inner_text()
     context.close()
 
 
-def test_first_run_without_teammate_agents_opens_a_blank_new_message(team, browser):
-    from raincli_server import identity
+def test_first_run_without_teammates_opens_a_blank_new_message(team, browser):
+    """§21 C7.6: step 3 pre-fills a person; with no teammates it opens a blank New message."""
+    from raincli_server.models import Membership, Team, User
 
-    for agent, _ in team["machines"].values():
-        identity.revoke_agent(team["session"], agent)
-    team["session"].commit()
+    session = team["session"]
+    northwind = session.query(Team).filter_by(slug="northwind").one()
+    maya = session.query(User).filter_by(email="maya@example.test").one()
+    session.query(Membership).filter(Membership.team_id == northwind.id, Membership.user_id != maya.id).delete()
+    session.commit()
     context, page = open_app(browser, team, team["maya"], **size(1180, 780))
     assert page.locator(".rc-team").count() == 0
     assert page.locator(".rc-step").nth(2).get_attribute("href").endswith("/app/compose")
@@ -358,42 +314,21 @@ def test_the_list_uses_no_accent_avatars(team, browser):
 
 # Criterion 8, list side: the server's conversation names, also in the preview ---------------------------------
 
-def test_the_list_names_agent_conversations_owner_and_agent(team, browser):
-    ask = person_send(team, team["maya"], {"machine": "jon-laptop", "agent": "api-agent"}, "Can you check?")
+def test_the_list_names_people(team, browser):
+    ask = person_send(team, team["maya"], {"person": "jon@example.test"}, "Can you check?")
     api(team["base"], "/api/v1/messages", {"id": str(uuid.uuid4()), "to": {"person": "maya@example.test"},
                                           "from_agent": "api-agent", "body": "Two failures.", "in_reply_to": ask["id"]},
         team["machines"]["jon-laptop"][1])
-    person_send(team, team["maya"], {"machine": "priya-desktop", "agent": "web-agent"}, "Retry cap?")
+    person_send(team, team["maya"], {"person": "priya@example.test"}, "Retry cap?")
     context, page = open_app(browser, team, team["maya"], **size(1180, 780))
     names = [t.strip() for t in page.locator(".rc-conv-name").all_inner_texts()]
     previews = [t.strip() for t in page.locator(".rc-conv-preview").all_inner_texts()]
-    assert names == ["Priya · web-agent", "Jon · api-agent"]
+    assert names == ["Priya", "Jon"]  # §21 C5.1: people, never their agents
     # §20.4 R8: "You:" only for your own messages; otherwise the text alone.
     assert previews[0].endswith("You: Retry cap?") and previews[1].endswith("Two failures.")
-    assert "Jon · api-agent:" not in previews[1]
+    assert "api-agent" not in previews[1] and "Jon · agent:" not in previews[1]
     context.close()
 
 
 
 # §19.8 L3 (the Team dots) and L1 (no inline styles in the sidebar) ---------------------------------------------
-
-def test_team_blocked_is_busy_with_its_own_tooltip_and_unknown_has_no_word(team, browser):
-    agents = [entry("web-agent", "a" * 32, "working"), entry("qa-agent", "b" * 32, "blocked"),
-              entry("spare-agent", "c" * 32, "unknown")]
-    api(team["base"], "/api/v1/presence", {"status": "ready", "agents": agents, "client": CLIENT},
-        team["machines"]["priya-desktop"][1], method="PUT")
-    for scheme in ("light", "dark"):
-        context, page = open_app(browser, team, team["maya"], color_scheme=scheme, **size(1180, 780))
-        def item(name):
-            return page.locator(".rc-team-agent", has_text=name)
-        qa, web = item("Priya · qa-agent").locator(".rc-dot"), item("Priya · web-agent").locator(".rc-dot")
-        assert qa.get_attribute("aria-label") == "Busy, waiting for its user at its last report"  # §19.9 F7
-        assert web.get_attribute("aria-label").startswith("Busy, ")
-        assert qa.get_attribute("title") == "Busy: the session was waiting for its user at its last report."
-        assert web.get_attribute("title") == "Busy: the session was working at its last report."
-        spare = item("Priya · spare-agent")
-        assert spare.count() == 1 and spare.locator(".rc-dot").count() == 0
-        assert not any(w in spare.inner_text() for w in ("Ready", "Busy", "Offline"))
-        assert page.locator(".rc-list [style]").count() == 0  # no inline styles, also after app.js ran
-        assert not page.errors
-        context.close()
