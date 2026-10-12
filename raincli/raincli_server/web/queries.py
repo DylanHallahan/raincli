@@ -356,16 +356,10 @@ def _sides(db: Session, conv: Conversation, user: User, owned: dict) -> tuple[Si
 
 
 def viewer_state(db: Session, user: User, m: Message) -> str:
-    """A message's delivery state as ``user`` may see it (§21 C13 H4): for a message delivered in another person's
-    app, held while they have no inbox, else received; never their read state."""
-    shared = getattr(messaging, "view_state", None)
-    if shared is not None:
-        state, hold, _ = shared(db, user, m)
-        return "held" if state == "stored" and hold else state
-    if m.recipient_user_id is not None and m.recipient_user_id != user.id and \
-            m.delivery_state in ("stored", "held", "received") and m.sender_user_id != m.recipient_user_id:
-        return "held" if presentation.inbox_of(db, m.team_id, m.recipient_user_id) is None else "received"
-    return m.delivery_state
+    """A message's delivery state as ``user`` may see it (§21 C13 H4), through ``messaging.view_state``; one call per
+    conversation row (the list's last message), never per message."""
+    state, hold, _ = messaging.view_state(db, user, m)
+    return "held" if state == "stored" and hold else state
 
 
 def _visible(user: User, owned: dict):
@@ -379,17 +373,9 @@ def _visible(user: User, owned: dict):
 
 
 def final_conversation_id(db: Session, conversation_id: object) -> uuid.UUID | None:
-    """§21 C1.6: an old conversation id resolved through ``merged_into`` to its end (at most 16 hops), else the id
-    itself. Authorization is then checked on the FINAL conversation (C13 L2)."""
+    """§21 C1.6: an old conversation id resolved through ``merged_into`` to its end (``messaging``'s resolver)."""
     cid = parse_uuid(conversation_id) if not isinstance(conversation_id, uuid.UUID) else conversation_id
-    for _ in range(16):
-        if cid is None:
-            return None
-        nxt = db.scalar(select(Conversation.merged_into).where(Conversation.id == cid))
-        if nxt is None:
-            return cid
-        cid = nxt
-    return cid
+    return messaging.final_conversation_id(db, cid) if cid is not None else None
 
 
 def _mine_as_recipient(user: User, owned: dict):
@@ -520,21 +506,26 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
             inboxes[(team_id, user_id)] = presentation.inbox_of(db, team_id, user_id) is not None
         return inboxes[(team_id, user_id)]
 
+    def person_of(m: Message) -> uuid.UUID | None:
+        if m.sender_user_id is not None:
+            return m.sender_user_id
+        agent = db.get(Agent, m.sender_agent_id) if m.sender_agent_id else None
+        return agent.owner_user_id if agent is not None else None
+
     def view(m: Message, recipient_ep) -> tuple[str, str | None, str | None]:
-        """(state, raw hold code, route) as this viewer may see it (§21 C13 H4, M3). The shared
-        ``messaging.view_state`` when core provides it; until then the same rule here."""
-        shared = getattr(messaging, "view_state", None)
-        if shared is not None:
-            return shared(db, user, m)
+        """(state, raw hold code, route) as this viewer may see it: ``messaging.view_state``'s rules (§21 C13 H4,
+        M3), applied here with per-request caches so a poll costs the same however many messages are in view
+        (§19.1). tests/server/test_v06_web.py checks it against ``messaging.view_state`` message by message."""
         route = getattr(m, "route", None)
         if m.recipient_user_id is not None and m.recipient_user_id != user.id:
-            # A message delivered in a person's app: never their read state. Held "no_inbox" while they have no
-            # inbox in that team, otherwise received.
-            if m.delivery_state in ("stored", "held", "received") and m.sender_user_id != m.recipient_user_id:
-                if not has_inbox(m.team_id, m.recipient_user_id):
-                    return "stored", "no_inbox", route
-                return "received", None, route
-        return m.delivery_state, hold_of(m), route
+            if m.delivery_state == "replied":
+                return "replied", None, route
+            own = person_of(m) == m.recipient_user_id
+            if not own and not has_inbox(m.team_id, m.recipient_user_id):
+                return "held", "no_inbox", route
+            return "received", None, route
+        hold = hold_of(m)
+        return ("held" if m.delivery_state == "stored" and hold else m.delivery_state), hold, route
 
     lines = []
     for m in messages:

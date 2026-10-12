@@ -560,12 +560,6 @@ def _app_inbox(request: Request, db: Session, viewer: auth.Viewer, team_ids, row
 @router.get("/app/conversations/{conversation_id}", response_class=HTMLResponse)
 def conversation(request: Request, conversation_id: str, reply_to: str = "", db: Session = Depends(get_db)):
     viewer = app_viewer(request, db, app_mode_ok=True)
-    final = queries.final_conversation_id(db, conversation_id)
-    if final is not None and str(final) != conversation_id:  # §21 C1.6: an old (merged) id answers 302 to the final
-        query = ("?" + request.url.query) if request.url.query else ""
-        if queries.conversation_head(db, viewer.user, _team_ids(viewer), str(final)) is None:
-            raise not_found()  # C13 L2: unauthorized looks exactly like an unknown id
-        return redirect(request, f"/app/conversations/{final}{query}")
     view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id)
     if view is None:
         raise not_found()

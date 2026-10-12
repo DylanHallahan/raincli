@@ -284,3 +284,19 @@ def test_list_rev_ignores_a_teammates_presence(maya, session, v06_seed):  # noqa
     row.status = "busy"
     session.commit()
     assert maya.get("/app/live", params={"list_rev": first}).json()["list"] is None
+
+
+def test_the_pages_state_rules_are_messaging_view_state(session, v06_seed):  # noqa: F811
+    """queries.message_lines applies messaging.view_state's rules with per-request caches (§19.1 cost); they must
+    agree message by message, for every viewer."""
+    from raincli_server import messaging
+    from raincli_server.web import queries
+
+    msgs = list(session.query(Message).order_by(Message.seq))
+    for name in ("Maya", "Jon", "Sam", "Priya", "Olive"):
+        viewer = v06_seed["people"][name]
+        owned = queries._owned_ids(session, viewer, [t.id for t in v06_seed["teams"].values()])
+        lines, _ = queries.message_lines(session, viewer, owned, msgs)
+        for line in lines:
+            state, hold, route = messaging.view_state(session, viewer, line.message)
+            assert (line.state, line.hold_reason) == (state, hold), (name, line.message.body)
