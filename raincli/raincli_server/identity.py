@@ -308,6 +308,8 @@ def revoke_agent(session: Session, agent: Agent, actor: User | None = None) -> N
         .values(revoked_at=ts)
     )
     revoke_person_sessions(session, machine_id=agent.id)  # §16.3: revoking or signing out the machine
+    from raincli_server import messaging  # §21 C13 M5d: nobody's inbox any more; their messages wait again
+    messaging.clear_inboxes_on(session, agent)
     session.flush()
 
 

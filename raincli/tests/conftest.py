@@ -169,6 +169,15 @@ def world(session):
     a_alice, t_alice = identity.register_agent(session, acme, u_alice, "alice-agent")
     a_bob, t_bob = identity.register_agent(session, acme, u_bob, "bob-agent")
     a_eve, t_eve = identity.register_agent(session, globex, u_eve, "eve-agent")
+    # §21: people are addressed, never machines. Each person's inbox is their machine's own inbox agent, so a
+    # message to Alice or Bob reaches that machine's inbox (the inbox-mode path, C3.1a), as a send to the machine
+    # did before v0.6.
+    from raincli_server.models import MachineAgent, PersonInbox
+    for user, team, machine in ((u_alice, acme, a_alice), (u_bob, acme, a_bob), (u_eve, globex, a_eve)):
+        session.add(MachineAgent(agent_id=machine.id, key="inbox", name="inbox", type="claude", status="idle",
+                                 role="inbox", reachability="next-turn", source="herdr", seen_at=identity.now()))
+        session.add(PersonInbox(user_id=user.id, team_id=team.id, agent_id=machine.id, agent_name="inbox",
+                                set_via="api"))
     session.commit()
     return {
         "users": {"alice": u_alice, "bob": u_bob, "eve": u_eve},

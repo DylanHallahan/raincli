@@ -187,7 +187,15 @@ def resolve_person_text(db: Session, team_id: uuid.UUID, text: object, *, sender
         return PersonResolution("person", user=named[0])
     if len(named) > 1:
         return PersonResolution("ambiguous", people=named)
-    handle = value.split("/", 1)[0].strip()
+    return machine_refusal(db, team_id, value.split("/", 1)[0], sender=sender)
+
+
+def machine_refusal(db: Session, team_id: uuid.UUID, handle: object, *, sender: User | None = None
+                    ) -> PersonResolution:
+    """The ``address_people`` refusal for a machine or agent form (``{machine}``, ``{machine, agent}``, a typed
+    handle): it names the handle's person only for a teammate's non-revoked machine whose owner is an active
+    member; your own handle, and any handle that doesn't exist, get the generic text (C2.2, C13 L3)."""
+    handle = handle.strip() if isinstance(handle, str) else ""
     machine = db.scalars(select(Agent).where(Agent.team_id == team_id, Agent.handle == handle,
                                              Agent.revoked_at.is_(None))).first() if handle else None
     owner = db.scalars(_members(db, team_id).where(User.id == machine.owner_user_id)).first() \
@@ -302,3 +310,15 @@ def person_presence(db: Session, team_id: uuid.UUID, user: User, now: datetime |
 def team_name(db: Session, team_id: uuid.UUID) -> str:
     team = db.get(Team, team_id)
     return team.name if team is not None else ""
+
+
+def people_json(db: Session, team_id: uuid.UUID) -> list[dict]:
+    """§21 C5.3: the team's active members as people, with presence and speed (PR13); never machines or agents."""
+    team = team_name(db, team_id)
+    out = []
+    for user in db.scalars(_members(db, team_id).order_by(func.lower(User.display_name), User.email)):
+        state = person_presence(db, team_id, user)
+        out.append({"display_name": display_name(user), "email": user.email, "team": team,
+                    "presence": state.presence, "speed": state.speed})
+    return out
+

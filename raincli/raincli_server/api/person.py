@@ -15,14 +15,15 @@ from typing import Callable
 from fastapi import FastAPI, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from raincli_server import identity, messaging, security
+from raincli_server import identity, messaging, presentation, security
 from raincli_server import quotas
 from raincli_server.api import polls
 from raincli_server.db import session_scope
 from raincli_server.identity import PersonAuth
-from raincli_server.models import HandoffCode, Team
+from raincli_server.models import Agent, HandoffCode, Team
 
 HANDOFF_TTL = timedelta(seconds=60)
 PERSON_SEND_FIELDS = frozenset({"id", "to", "body", "conversation_id", "in_reply_to", "attachments", "kind", "team"})
@@ -89,8 +90,8 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
             raise ApiError(404, "not_found", "in_reply_to message not found")
         return team
 
-    def m(session: Session, msg) -> dict:
-        return messaging.message_json(session, msg)
+    def m(session: Session, msg, auth: PersonAuth) -> dict:
+        return messaging.message_json(session, msg, reader_user=auth.user)
 
     # Routes ------------------------------------------------------------------------
 
@@ -117,20 +118,20 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
                 msgs, cursor = messaging.person_inbox(session, auth.user, after=after, limit=limit,
                                                       include_acked=include_acked)
                 keys = (("person", auth.person_session.id), ("user", auth.user.id))
-                return {"messages": messaging.messages_json(session, msgs), "cursor": cursor}, keys
+                return {"messages": messaging.messages_json(session, msgs, reader_user=auth.user), "cursor": cursor}, keys
         return await polls.long_poll(request, api.state.poll_slots, wait, POLL_INTERVAL, poll)
 
     @api.post("/person/messages/{message_id}/ack")
     async def person_ack(request: Request, message_id: str):
         def work(session, auth: PersonAuth):
             msg, acked = messaging.person_ack(session, auth.user, message_id)
-            return {"message": m(session, msg), "acked": acked}
+            return {"message": m(session, msg, auth), "acked": acked}
         return await run(request, "person:read", work)
 
     @api.get("/person/messages/{message_id}")
     async def person_message(request: Request, message_id: str):
         def work(session, auth: PersonAuth):
-            return {"message": m(session, messaging.get_message_for_person(session, auth.user, message_id))}
+            return {"message": m(session, messaging.get_message_for_person(session, auth.user, message_id), auth)}
         return await run(request, "person:read", work)
 
     @api.get("/person/conversations")
@@ -164,14 +165,14 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
 
         def work(session, auth: PersonAuth):
             conv = messaging.archive_as_person(session, auth.user, conversation_id, True, through)
-            return {"conversation": messaging.conversation_json(session, conv, _side(conv, auth.user))}
+            return {"conversation": messaging.conversation_json(session, conv, auth.user)}
         return await run(request, "person:send", work, counted=False)
 
     @api.post("/person/conversations/{conversation_id}/unarchive")
     async def person_unarchive(request: Request, conversation_id: str):
         def work(session, auth: PersonAuth):
             conv = messaging.archive_as_person(session, auth.user, conversation_id, False)
-            return {"conversation": messaging.conversation_json(session, conv, _side(conv, auth.user))}
+            return {"conversation": messaging.conversation_json(session, conv, auth.user)}
         return await run(request, "person:send", work)
 
     @api.get("/person/conversations/{conversation_id}")
@@ -180,12 +181,46 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
                                   limit: int = Query(100, ge=1, le=2**63 - 1)):
         def work(session, auth: PersonAuth):
             conv = messaging.get_person_conversation(session, auth.user, conversation_id)
-            peer = messaging.conversation_endpoint(session, conv, "b" if conv.a_user_id == auth.user.id else "a")
             msgs, cursor = messaging.person_conversation_messages(session, auth.user, conv.id, after=after, limit=limit)
-            return {"conversation": {"id": str(conv.id), "peer": peer.label(), "peer_endpoint": peer.json(),
+            return {"conversation": {"id": str(conv.id), **messaging.peer_json(session, conv, auth.user),
                                      **messaging.archive_json(session, conv)},
-                    "messages": messaging.messages_json(session, msgs), "cursor": cursor}
+                    "messages": messaging.messages_json(session, msgs, reader_user=auth.user), "cursor": cursor}
         return await run(request, "person:read", work)
+
+    # §21 C8.2: the inbox setting. (``/person/inbox`` is the person's message pickup, so it lives under
+    # ``/person/me/inbox``.) A person may pick any of their machines in that team (C13 L4).
+    @api.get("/person/me/inbox")
+    async def person_my_inbox(request: Request, team: str | None = Query(None, max_length=40)):
+        def work(session, auth: PersonAuth):
+            chosen = choose_team(session, auth, team)
+            return {"team": chosen.slug,
+                    "inbox": messaging.inbox_json(session, presentation.inbox_of(session, chosen.id, auth.user.id)),
+                    "candidates": messaging.inbox_candidates(session, auth.user, chosen.id),
+                    "waiting": messaging.waiting_count(session, auth.user, chosen.id)}
+        return await run(request, "person:read", work)
+
+    @api.put("/person/me/inbox")
+    async def person_set_inbox(request: Request):
+        data = await json_body(request, "person:send")
+
+        def work(session, auth: PersonAuth):
+            if not isinstance(data, dict):
+                raise ApiError(400, "invalid", "request body must be a JSON object")
+            chosen = choose_team(session, auth, data.get("team"))
+            if {k: v for k, v in data.items() if k != "team"} == {"none": True}:
+                return messaging.clear_person_inbox(session, auth.user, chosen.id, via="api")
+            if set(data) - {"team", "machine", "agent", "deliver_waiting"} or not isinstance(data.get("machine"), str) \
+                    or not isinstance(data.get("agent"), str) or not isinstance(data.get("deliver_waiting", True), bool):
+                raise ApiError(400, "invalid", 'body must be {"machine", "agent", "deliver_waiting", "team"} '
+                                               'or {"none": true}')
+            machine = session.scalar(select(Agent).where(Agent.team_id == chosen.id, Agent.handle == data["machine"],
+                                                         Agent.owner_user_id == auth.user.id))
+            if machine is None:
+                raise messaging.MessagingError(400, "inbox_invalid", presentation.error_text(
+                    "inbox_invalid", machine="That machine"))
+            return messaging.set_person_inbox(session, auth.user, chosen.id, machine.id, data["agent"],
+                                              deliver_waiting=data.get("deliver_waiting", True), via="api")
+        return await run(request, "person:send", work, counted=False)
 
     @api.post("/person/send")
     async def person_send(request: Request):
@@ -207,7 +242,7 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
                 conversation_id=req.conversation_id, in_reply_to=req.in_reply_to,
                 max_pending=settings.max_pending, attachments=req.attachments,
                 quotas=quotas.Quotas.from_settings(settings), kind=req.kind)
-            return created, {"message": m(session, msg), "created": created}
+            return created, {"message": m(session, msg, auth), "created": created}
         created, body = await run(request, "person:send", work, counted=False)
         return JSONResponse(body, status_code=201 if created else 200)
 
