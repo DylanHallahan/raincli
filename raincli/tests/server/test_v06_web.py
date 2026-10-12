@@ -300,3 +300,69 @@ def test_the_pages_state_rules_are_messaging_view_state(session, v06_seed):  # n
         for line in lines:
             state, hold, route = messaging.view_state(session, viewer, line.message)
             assert (line.state, line.hold_reason) == (state, hold), (name, line.message.body)
+
+
+# The inbox banner and POST /app/inbox (§21 C7.3, C8.3) -----------------------------------------------------
+
+def _csrf_app(webview):
+    return re.search(r'data-csrf="([^"]+)"', webview.get("/app/inbox").text).group(1)
+
+
+def test_the_banner_offers_your_own_agents_and_the_waiting_messages(maya, v06_seed):  # noqa: F811
+    page = maya.get("/app/inbox").text
+    words = text(page)
+    assert "Pick the agent that receives your teammates' messages" in words
+    choices = re.findall(r'name="choice" value="([^"]+)"', page)
+    assert set(choices) == {"zq-handle-maya|zq-agent-maya-laptop", "zq-handle-maya|zq-agent-maya-notes"}
+    assert re.search(r'name="choice" value="[^"]+" required checked', page)  # one pre-selected: two clicks at most
+    assert "Also deliver the 1 waiting message" in words  # Jon's message written in the app
+    assert "Use as my inbox in Northwind" in words and "In Contoso" in words  # one per team (H3)
+    teammate_free(page, own_too=False)
+
+
+def test_picking_an_inbox_sets_it_delivers_waiting_and_hides_the_banner(maya, session, v06_seed):  # noqa: F811
+    from raincli_server.models import PersonInbox
+
+    r = maya.post("/app/inbox", data={"csrf_token": _csrf_app(maya), "team": "northwind",
+                                      "choice": "zq-handle-maya|zq-agent-maya-laptop", "deliver_waiting": "1"},
+                  follow_redirects=False)
+    assert r.status_code in (302, 303) and "notice=inbox-set" in r.headers["location"]
+    session.expire_all()
+    inbox = session.get(PersonInbox, (v06_seed["people"]["Maya"].id, v06_seed["teams"]["northwind"].id))
+    assert inbox.agent_name == "zq-agent-maya-laptop" and inbox.set_via == "app"
+    waiting = session.get(Message, v06_seed["messages"]["by_hand"].id)
+    assert waiting.recipient_agent_id == v06_seed["machines"]["maya"].id  # delivered to the new inbox
+    page = maya.get(r.headers["location"]).text
+    words = text(page)
+    assert "Your inbox is set." in words
+    assert "Use as my inbox in Northwind" not in words  # picked there
+    assert "In Contoso" in words and "None of your agents can receive messages right now" in words  # not there
+
+
+def test_an_inbox_on_someone_elses_machine_is_refused_quietly(maya, session, v06_seed):  # noqa: F811
+    from raincli_server.models import PersonInbox
+
+    for choice in ("zq-handle-jon|zq-agent-jon-api", "zq-handle-maya|no-such-agent", "nothing|x"):
+        r = maya.post("/app/inbox", data={"csrf_token": _csrf_app(maya), "team": "northwind", "choice": choice},
+                      follow_redirects=False)
+        assert r.status_code in (302, 303) and r.headers["location"].endswith("notice=inbox-invalid"), choice
+    assert session.get(PersonInbox, (v06_seed["people"]["Maya"].id, v06_seed["teams"]["northwind"].id)) is None
+    page = maya.get("/app/inbox?notice=inbox-invalid").text
+    assert "can't be your inbox" in text(page)
+    teammate_free(page, own_too=False)
+    assert maya.post("/app/inbox", data={"csrf_token": "wrong", "choice": "zq-handle-maya|zq-agent-maya-laptop"},
+                     follow_redirects=False).status_code == 403
+
+
+def test_the_website_banner_sets_the_inbox_too(client, session, v06_seed):  # noqa: F811
+    from raincli_server.models import PersonInbox
+
+    login(client, "maya@example.test", PASSWORD)
+    page = client.get("/app/inbox").text
+    assert "Pick the agent that receives your teammates' messages" in text(page)
+    r = client.post("/app/inbox", data={"csrf_token": csrf_of(page), "team": "northwind",
+                                        "choice": "zq-handle-maya|zq-agent-maya-notes"}, follow_redirects=False)
+    assert r.status_code in (302, 303)
+    session.expire_all()
+    inbox = session.get(PersonInbox, (v06_seed["people"]["Maya"].id, v06_seed["teams"]["northwind"].id))
+    assert inbox.agent_name == "zq-agent-maya-notes" and inbox.set_via == "web"
