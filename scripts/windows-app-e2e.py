@@ -1750,15 +1750,24 @@ def part_d(app, server, installers, password, observer, teammate, menu, work):
         # v0.6, not yet run on Windows.
         transcript = []
 
-        utf8 = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")  # "·" in "Ready · Instant"
+        import ctypes  # the frozen raincli.exe ignores PYTHON* variables and writes to a pipe in the ANSI code page
+        ansi = f"cp{ctypes.windll.kernel32.GetACP()}"
+
+        def text_of(raw):  # "·" in "Ready · Instant": cp1252 here, UTF-8 if a build ever writes that
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return raw.decode(ansi, errors="replace")
 
         def cli_step(*args):
-            result = app.cli(*args, check=False, timeout=120, env=utf8, encoding="utf-8", errors="replace")
-            transcript.append(f"$ raincli {' '.join(str(a) for a in args)}\n{result.stdout}{result.stderr}"
-                              f"[exit {result.returncode}]\n")
-            return result, result.stdout + result.stderr
+            result = subprocess.run([str(a) for a in (app.root / "bin" / "raincli.exe", *args)], capture_output=True,
+                                    timeout=120)
+            out, err = text_of(result.stdout), text_of(result.stderr)
+            transcript.append(f"$ raincli {' '.join(str(a) for a in args)}\n{out}{err}[exit {result.returncode}]\n")
+            return result, out + err
         people, people_text = cli_step("people")
-        check(people.returncode == 0 and TEAMMATE_NAME in people_text and not re.search(rf"{TEAMMATE}(?!@)", people_text),
+        check(people.returncode == 0 and TEAMMATE_NAME in people_text and not re.search(rf"{TEAMMATE}(?!@)", people_text)
+              and "\ufffd" not in people_text,
               f"raincli people: {SECRETS.scrub(people_text)[-1500:]}")
         shown, shown_text = cli_step("inbox", "show")
         check(shown.returncode == 0 and LAPTOP_AGENT in shown_text, f"raincli inbox show: {SECRETS.scrub(shown_text)[-1500:]}")
