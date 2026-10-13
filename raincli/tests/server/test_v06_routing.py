@@ -445,3 +445,29 @@ def test_unread_counts_your_agents_escalations_and_routed_messages(client, sessi
     assert to_jon in unread(v06_seed["people"]["Jon"])
     assert client.post(f"/api/v1/person/messages/{esc}/ack", headers=auth(v06_seed["person_tokens"]["Maya"])).status_code == 200
     assert esc not in unread(maya) and not messaging.is_unread_for(session, maya.id, stored(session, esc))
+
+
+# R1: the capacity cap never depends on read state ------------------------------------------------------------------
+
+def test_the_capacity_answer_is_the_same_before_and_after_the_person_reads(client, session, settings, v06_seed):  # noqa: F811
+    """§21 C13 H4, PR5: a person's cap (inbox_full) counts the messages waiting for them that they haven't answered,
+    never what they've read; answering frees it."""
+    maya, sam = v06_seed["person_tokens"]["Maya"], v06_seed["person_tokens"]["Sam"]
+    sent = []
+    while True:
+        r = person_send(client, maya, {"person": "sam@example.test"}, f"note {len(sent)}")
+        if r.status_code == 429:
+            break
+        assert r.status_code == 201, r.text
+        sent.append(r.json()["message"]["id"])
+        assert len(sent) <= settings.max_pending
+    full = (r.status_code, r.json())
+    assert full[1]["error"]["code"] == "inbox_full"
+    for mid in sent + [str(v06_seed["messages"]["to_sam"].id)]:
+        assert client.post(f"/api/v1/person/messages/{mid}/ack", headers=auth(sam)).status_code == 200
+    assert stored(session, sent[0]).person_seen_at is not None
+    again = person_send(client, maya, {"person": "sam@example.test"}, "after he read them")
+    assert (again.status_code, again.json()) == full  # reading changed nothing the sender can see
+    answer = person_send(client, sam, None, "got them", in_reply_to=sent[-1])
+    assert answer.status_code == 201, answer.text
+    assert person_send(client, maya, {"person": "sam@example.test"}, "after he answered").status_code == 201

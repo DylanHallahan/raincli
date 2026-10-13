@@ -128,6 +128,11 @@ def _snapshot(conn):
     return convs, msgs
 
 
+def _message_rows(conn):
+    """Every column of every message, by id."""
+    return {r["id"]: dict(r) for r in conn.execute(text("SELECT * FROM messages")).mappings()}
+
+
 def _count(conn, conv):
     return conn.execute(text("SELECT count(*) FROM messages WHERE conversation_id = :c"), {"c": conv}).scalar()
 
@@ -150,7 +155,14 @@ def test_0010_merges_by_person_pair_and_downgrades_exactly(scratch_db):
     command.upgrade(cfg, "0009")
     with db.begin() as conn:
         seed = _seed(conn)
+        # v0.5's read state was acked_at on messages to a person: one read before the upgrade, the rest unread.
+        to_people = [r.id for r in conn.execute(text(
+            "SELECT id FROM messages WHERE recipient_user_id IS NOT NULL ORDER BY seq"))]
+        assert len(to_people) >= 2
+        read_before, read_after = to_people[0], to_people[1]
+        conn.execute(text("UPDATE messages SET acked_at = now() - interval '2 days' WHERE id = :m"), {"m": read_before})
         before = _snapshot(conn)
+        rows_before = _message_rows(conn)
         sources = [*seed["jon"], *seed["self"], seed["own"], *seed["priya"], seed["lee"], seed["own_ct"],
                    seed["self_ct"]]
         counts = {c: _count(conn, c) for c in sources}
@@ -158,6 +170,14 @@ def test_0010_merges_by_person_pair_and_downgrades_exactly(scratch_db):
     maya = str(users["maya"])
 
     command.upgrade(cfg, "0010")
+    with db.begin() as conn:
+        # person_seen_at keeps the reads made before v0.6, and acked_at is untouched (R3).
+        seen = {r.id: (r.person_seen_at, r.acked_at) for r in conn.execute(text(
+            "SELECT id, person_seen_at, acked_at FROM messages WHERE recipient_user_id IS NOT NULL"))}
+        assert seen[read_before] == (rows_before[read_before]["acked_at"],) * 2
+        assert all(seen[m] == (None, None) for m in to_people[1:])
+        # Read in the app after the upgrade: only person_seen_at (as messaging.person_ack does).
+        conn.execute(text("UPDATE messages SET person_seen_at = now() WHERE id = :m"), {"m": read_after})
     with db.begin() as conn:
         # Maya and Jon: the existing person-to-person row is reused (and counted as a source); one source is
         # unarchived, so the merged thread is unarchived.
@@ -244,6 +264,10 @@ def test_0010_merges_by_person_pair_and_downgrades_exactly(scratch_db):
         later_esc = _msg(conn, nw, self_nw["id"], M(laptop), P(users["maya"]), "escalation, after", kind="escalation")
         later_priya = _msg(conn, nw, priya_target, P(users["priya"]), P(users["maya"]), "priya, after")
         conn.execute(text("UPDATE messages SET route = 'inbox', redeliver = true WHERE id = :m"), {"m": later_inbox.id})
+        conn.execute(text("UPDATE messages SET person_seen_at = now() - interval '1 hour' WHERE id = :m"),
+                     {"m": later_pair.id})  # sent and read after the upgrade
+        read_at = {m: conn.execute(text("SELECT person_seen_at FROM messages WHERE id = :m"), {"m": m}).scalar()
+                   for m in (read_after, later_pair.id)}
 
     command.downgrade(cfg, "0009")
     with db.begin() as conn:
@@ -258,6 +282,13 @@ def test_0010_merges_by_person_pair_and_downgrades_exactly(scratch_db):
         assert where[later_esc.id] == seed["self"][0] and where[later_priya.id] == priya_target
         assert set(by_id) == {r["id"] for r in before[0]} | {priya_target}
         assert conn.execute(text("SELECT to_regclass('person_inboxes')")).scalar() is None
+        # Reads made after the upgrade are copied back to acked_at; every other pre-existing row is byte-equal (R3).
+        rows_after = _message_rows(conn)
+        assert rows_after[later_pair.id]["acked_at"] == read_at[later_pair.id]
+        assert rows_after[read_after] == {**rows_before[read_after], "acked_at": read_at[read_after]}
+        for mid, row in rows_before.items():
+            if mid != read_after:
+                assert rows_after[mid] == row, mid
 
     command.upgrade(cfg, "0010")  # and up again, with nothing in the way
     with db.begin() as conn:

@@ -522,6 +522,8 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
         if m.recipient_user_id is not None and m.recipient_user_id != user.id:
             if m.delivery_state == "replied":
                 return "replied", None, route
+            if route is None:  # sent before v0.6: delivered in their app then (R4)
+                return "received", None, route
             own = person_of(m) == m.recipient_user_id
             if not own and not has_inbox(m.team_id, m.recipient_user_id):
                 return "held", "no_inbox", route
@@ -533,7 +535,7 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
         return ("held" if m.delivery_state == "stored" and hold else m.delivery_state), hold, route
 
     # H1: a message to a person is read in their app, and its events and times record that. Anyone else sees a
-    # history derived from their view only: stored, then replied (at the first reply's time, which they see too).
+    # history derived from their view only: replied (at the first reply's time, which they see too), after stored.
     to_others = [m for m in messages if m.recipient_user_id is not None and m.recipient_user_id != user.id]
     replied_at = dict(db.execute(  # replies follow in the same conversation: a range on its index (§19.9 F6)
         select(Message.in_reply_to, func.min(Message.created_at))
@@ -553,10 +555,9 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
         state, hold, route = view(m, recipient_ep)
         updated_at = m.delivery_updated_at
         if m.recipient_user_id is not None and m.recipient_user_id != user.id:
-            shown = [ShownEvent("stored", m.created_at)]
-            if state == "replied":
-                shown.append(ShownEvent("replied", replied_at.get(m.id)))
-            events[m.id] = shown
+            # The trail writes "stored" itself, as for every message (the website shows the state and its time);
+            # events add only what follows.
+            events[m.id] = [ShownEvent("replied", replied_at.get(m.id))] if state == "replied" else []
             updated_at = replied_at.get(m.id) if state == "replied" else m.created_at
         person = names.person(recipient_ep, m.team_id)
         lines.append(MessageLine(

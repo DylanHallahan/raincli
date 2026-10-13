@@ -133,11 +133,14 @@ def hold_reason(session: Session, msg: Message) -> str | None:
 def view_state(session: Session, viewer: User | None, msg: Message) -> tuple[str, str | None, str | None]:
     """``(state, raw hold code, route)`` as ``viewer`` may see a message (§21 C13 H4). For a message to a person
     (``recipient_user_id``), anyone but that person sees no read receipt: held ``no_inbox`` while the person has
-    no inbox in that team, otherwise ``received`` (``replied`` once they replied). The person sees their own read
+    no inbox in that team, otherwise ``received`` (``replied`` once they replied); one sent before v0.6 (no
+    ``route``) is ``received``, as it was delivered in their app. The person sees their own read
     state. Otherwise today's state, with the derived or reported hold."""
     if msg.recipient_user_id is not None and (viewer is None or viewer.id != msg.recipient_user_id):
         if msg.delivery_state == "replied":
             return "replied", None, msg.route
+        if msg.route is None:  # sent before v0.6, delivered in their app then: never waiting for an inbox (R4)
+            return "received", None, msg.route
         own = person_of_endpoint(session, sender_endpoint(session, msg)) == msg.recipient_user_id
         if not own and presentation.inbox_of(session, msg.team_id, msg.recipient_user_id) is None:
             return "held", "no_inbox", msg.route
@@ -300,10 +303,19 @@ def parse_uuid(value: object, what: str, *, not_found: bool = False) -> uuid.UUI
 
 
 def _pending_count(session: Session, recipient: Endpoint) -> int:
-    """Messages the recipient has not taken yet: a machine's unacked ones; for a person, the ones they have neither
-    seen (person_seen_at, §21 H2) nor had picked up by a machine."""
+    """Messages the recipient has not taken yet (the ``inbox_full`` cap): a machine's unacked ones; for a person,
+    the ones not picked up by a machine and not yet answered (no later message from them or their machines in the
+    same conversation, as in the waiting set, C6.2). Never their read state: a sender can't learn from the cap
+    whether the person has read anything (§21 C13 H4, PR5)."""
     if recipient.kind == "person":
-        where = and_(Message.recipient_user_id == recipient.user.id, Message.person_seen_at.is_(None))
+        uid = recipient.user.id
+        answer = Message.__table__.alias("answer")
+        answered = select(answer.c.id).where(
+            answer.c.conversation_id == Message.conversation_id, answer.c.seq > Message.seq,
+            or_(answer.c.sender_user_id == uid,
+                answer.c.sender_agent_id.in_(select(Agent.id).where(Agent.owner_user_id == uid)))).exists()
+        # Messages from before v0.6 (no route) aren't waiting for anything (not in the waiting set either).
+        where = and_(Message.recipient_user_id == uid, Message.route.is_not(None), ~answered)
     else:
         where = Message.recipient_agent_id == recipient.agent.id
     return session.scalar(

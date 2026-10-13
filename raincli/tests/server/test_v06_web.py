@@ -14,7 +14,7 @@ from sqlalchemy import update
 
 from conftest_v06 import OWN_STRINGS, PASSWORD, TEAMMATE_STRINGS, v06_seed  # noqa: F401  (fixture)
 from raincli_server import identity
-from raincli_server.models import AgentPresence, Conversation, Message
+from raincli_server.models import AgentPresence, Conversation, MachineAgent, Message
 from test_app_mode import NAV, WEBVIEW, handoff_code
 from test_web_app import csrf_of, login
 
@@ -427,3 +427,37 @@ def test_an_escalation_from_your_own_agent_is_unread_until_you_read_it(maya, ses
     session.expire_all()
     from raincli_server import messaging
     assert not messaging.is_unread_for(session, v06_seed["people"]["Jon"].id, session.get(Message, sent.id))
+
+
+# Messages from before v0.6 (R4) ------------------------------------------------------------------------
+
+def test_a_message_from_before_v06_to_a_person_shows_received_and_isnt_waiting(maya, session, v06_seed):  # noqa: F811
+    """R4: a message to a person sent before v0.6 (no route) was delivered in their app then. It shows received,
+    not "waiting for Sam to pick an inbox"; it isn't in Sam's waiting set (C6.2: route 'person' only), so picking an
+    inbox doesn't move it, and it doesn't count toward his cap."""
+    from raincli_server import messaging
+
+    s = v06_seed
+    nw, sam, maya_u = s["teams"]["northwind"], s["people"]["Sam"], s["people"]["Maya"]
+    cap = messaging._pending_count(session, messaging.Endpoint("person", user=sam))
+    waiting = messaging.waiting_count(session, sam, nw.id)
+    old = Message(id=uuid.uuid4(), team_id=nw.id, conversation_id=s["conversations"]["sam"].id, body="from v0.5",
+                  kind="message", route=None, sender_user_id=maya_u.id, recipient_user_id=sam.id,
+                  delivery_state="stored")
+    session.add(old)
+    session.commit()
+    page = maya.get(f"/app/conversations/{conv(v06_seed, 'sam')}").text
+    assert re.search(rf'data-trail="{old.id}" data-state="received"', page)
+    assert messaging.view_state(session, maya_u, old) == ("received", None, None)
+    assert messaging.waiting_count(session, sam, nw.id) == waiting  # not waiting
+    assert messaging._pending_count(session, messaging.Endpoint("person", user=sam)) == cap  # not counted
+    sam_machine = s["machines"]["sam"]
+    session.add(MachineAgent(agent_id=sam_machine.id, key="desk", name="desk", type="claude", status="idle",
+                             role="inbox", reachability="next-turn", source="herdr", seen_at=identity.now()))
+    session.commit()
+    result = messaging.set_person_inbox(session, sam, nw.id, sam_machine.id, "desk", deliver_waiting=True, via="web")
+    session.commit()
+    assert result["delivered_waiting"] == waiting
+    session.expire_all()
+    kept = session.get(Message, old.id)
+    assert (kept.recipient_user_id, kept.recipient_agent_id, kept.route) == (sam.id, None, None)  # not moved

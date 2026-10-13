@@ -196,6 +196,22 @@ def test_no_read_receipt_anywhere_the_sender_looks(app, maya, client, session, v
         same(snapshot(), replied)
 
 
+def test_a_message_to_a_person_lists_stored_once(maya, client, session, v06_seed):  # noqa: F811
+    """R2: the trail's history under a message to a person has one "stored", then "replied" once answered."""
+    s = v06_seed
+    cid, msg = str(s["conversations"]["sam"].id), s["messages"]["to_sam"]
+
+    def history():
+        block = re.search(rf'data-trail="{msg.id}".*?<ol class="rc-history">(.*?)</ol>',
+                          maya.get(f"/app/conversations/{cid}").text, re.S).group(1)
+        return re.findall(r"<li>([a-z]+) ", block)
+    assert history() == ["stored"]
+    r = client.post("/api/v1/person/send", headers=auth(s["person_tokens"]["Sam"]),
+                    json={"id": str(uuid.uuid4()), "in_reply_to": str(msg.id), "body": "answered"})
+    assert r.status_code == 201, r.text
+    assert history() == ["stored", "replied"]
+
+
 # Header presence (§21 C5.4) -------------------------------------------------------------------------
 
 def test_the_header_shows_the_persons_presence_and_speed_with_the_offline_rule(maya, session, v06_seed):  # noqa: F811

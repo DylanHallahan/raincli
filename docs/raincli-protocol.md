@@ -83,7 +83,7 @@ Codes:
 - **Reply:** if `in_reply_to` is given, the parent must be visible to the caller (404 otherwise). `to` must be the parent's other participant (otherwise 400). The conversation is inherited, so an explicit `conversation_id` that differs returns 400.
 - **Conversation:** without `in_reply_to`, an explicit `conversation_id` must be an existing conversation between exactly these two agents (otherwise 400). If it is omitted, the server reuses the existing direct conversation for the pair, or creates one.
 - **Idempotency:** if the id already exists with an identical sender, recipient, body, in_reply_to and conversation, the server returns `200 created:false`. Any other existing id returns `409 id_conflict`. This check happens **before** the capacity checks.
-- **Capacity:** when the recipient already has `RAINCLI_MAX_PENDING` or more unacked messages (default 1000), the server returns `429 inbox_full`. Nothing is ever deleted silently.
+- **Capacity:** when the recipient already has `RAINCLI_MAX_PENDING` or more unacked messages (default 1000), the server returns `429 inbox_full`. Nothing is ever deleted silently. For a person recipient, what counts is in §21.6 ("No read receipt").
 
 **Limits:** request bodies are capped at 64 KiB (413), except `POST /api/v1/messages` (2 MiB, §8) and `PUT /api/v1/presence` (128 KiB, §14). The application also rate-limits per credential (default 120 requests/minute, returning 429 `rate_limited` with `Retry-After`). Nginx adds per-IP limits.
 
@@ -1832,7 +1832,7 @@ A message to person P in team T is stored as follows, decided once, at send time
   - **The conversation** is X's (after `merged_into`), and X is marked `replied`.
   - **A target that disappears later** is handled by the client as before: held `offline`, then rejected after 14 days.
 - **Waiting messages (no inbox).**
-  - **The waiting set:** messages to P with `recipient_user_id = P` and route `person`, not sent by P or P's machines, and not answered, whether or not P has read them. "Answered" means a later message (greater `seq`) from P exists in the same conversation.
+  - **The waiting set:** messages to P with `recipient_user_id = P` and route `person`, not sent by P or P's machines, and not answered, whether or not P has read them. "Answered" means a later message (greater `seq`) from P or P's machines exists in the same conversation. Messages from before v0.6 (no route) are not waiting: they were delivered in P's app.
   - **Picking an inbox** offers "Also deliver the N waiting messages", on by default. If accepted, those messages are re-targeted to the inbox endpoint in the same transaction. If declined, they stay in the app.
 - **Changing the inbox.**
   - **Moved:** unacked route-`inbox` messages at the previous inbox endpoint move to the new one, except messages already marked `replied`.
@@ -1877,9 +1877,12 @@ A message to person P in team T is stored as follows, decided once, at send time
   Pages never render a raw detail. Event lists shown to anyone but the recipient machine's owner carry neither `reported_by` nor `detail`.
 - **No read receipt.** A person's own read state is `messages.person_seen_at`, set when they see a message in the app, on the website or through the person API. It is used only in that person's views and unread counts. `acked_at` is a machine's pickup only, so a message a person has read is still delivered to an inbox they pick later. Reading writes no event and changes nothing anyone else can fetch. For a message to a person (`recipient_user_id`), everyone but that person sees:
   - held `no_inbox` while the person has no inbox in that team, otherwise `received` (`replied` once they replied);
+  - `received` for a message sent before v0.6 (no route), which was delivered in their app;
   - no `acked_at`;
   - `delivery_updated_at` equal to `created_at`, until replied;
   - a trail derived from these states, never from events.
+
+  **The capacity cap** (`inbox_full`, §4) for a person counts the messages to them that a machine hasn't picked up and that they haven't answered ("answered" as in the waiting set, §21.5), from v0.6 on (with a route). It never depends on their read state, so a sender can't learn from it whether anything was read. Answering frees capacity, as does picking an inbox (the delivered waiting messages move to it).
 - **Conversations:**
   - `peer`, `peer_endpoint` and `archived_by` are people;
   - a person's `self` conversation is "From your agents", and their `own_agents` conversation is "Your agents".
