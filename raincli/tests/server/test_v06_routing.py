@@ -425,3 +425,23 @@ def test_stayed_counts_only_messages_still_in_progress(client, session, v06_seed
     session.commit()
     r = client.put("/api/v1/me/inbox", headers=auth(jon_t), json={"agent": "zq-agent-jon-two"}).json()
     assert r["stayed"] == 1, r
+
+
+def test_unread_counts_your_agents_escalations_and_routed_messages(client, session, v06_seed):  # noqa: F811
+    """H2 helpers: an escalation from your own machine to you counts as unread until you see it; a message routed to
+    your inbox machine counts too; what you or your machines sent never does."""
+    from raincli_server import messaging
+
+    maya = v06_seed["people"]["Maya"]
+    esc = machine_send(client, v06_seed["machine_tokens"]["maya"], {"person": "maya@example.test"}, "need you",
+                       kind="escalation").json()["message"]["id"]
+    to_jon = machine_send(client, v06_seed["machine_tokens"]["maya"], "jon@example.test", "mine").json()["message"]["id"]
+
+    def unread(user):
+        session.expire_all()
+        return set(map(str, session.scalars(select(Message.id).where(messaging.unread_for(user.id)))))
+    assert esc in unread(maya) and to_jon not in unread(maya)
+    assert messaging.is_unread_for(session, maya.id, stored(session, esc))
+    assert to_jon in unread(v06_seed["people"]["Jon"])
+    assert client.post(f"/api/v1/person/messages/{esc}/ack", headers=auth(v06_seed["person_tokens"]["Maya"])).status_code == 200
+    assert esc not in unread(maya) and not messaging.is_unread_for(session, maya.id, stored(session, esc))

@@ -213,6 +213,7 @@ def test_no_read_receipt_anything_the_sender_can_fetch_is_unchanged(client, v06_
 
 def test_every_api_route_is_scanned_or_exempted(app):
     routes = {r for r in _routes(app) if r[1].startswith("/api/v1")}
+    assert len(routes) >= len(COVERED) + len(DRIVEN), "the route walk found too few routes: it would pass vacuously"
     gets = {p for m, p in routes if m == "GET"}
     unknown_gets = gets - COVERED - set(EXEMPT)
     assert unknown_gets == set(), f"GET routes not in the privacy scan: {sorted(unknown_gets)}"
