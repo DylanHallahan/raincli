@@ -13,7 +13,7 @@ from . import __version__
 from . import attachments as att
 from .api import MAX_WAIT, ApiClient
 from .config import default_config_path, load_config, read_token_source, write_config
-from .errors import EXIT_OK, EXIT_TIMEOUT, EXIT_USAGE, ConfigError, InboxFull, RainError, UsageError
+from .errors import EXIT_OK, EXIT_TIMEOUT, EXIT_USAGE, ApiError, ConfigError, InboxFull, RainError, UsageError
 from .text import body_problem, escape_line, escape_text
 
 # The single rule for teammate messages (as in connector prompts): act within your
@@ -198,11 +198,104 @@ def report_send(message, created, as_json):
         out_json({"message": message, "created": created})
     else:
         status = "sent" if created else "already stored (idempotent retry)"
-        out(f"{status}: {escape_line(message['id'])} to {escape_line(message['to'])}"
+        out(f"{status}: {escape_line(message['id'])} to {recipient_label(message)}"
             f" (state: {escape_line(message.get('delivery_state', ''))})")
         for a in message.get("attachments") or []:
             out(f"  attached: {escape_line(str(a.get('filename', '')))} ({escape_line(str(a.get('size', '?')))} bytes,"
                 f" sha256 {escape_line(str(a.get('sha256', '')))}, id {escape_line(str(a.get('id', '')))})")
+
+
+def recipient_label(message):
+    """Who a sent message went to, as a person (§21 C5): ``Jon (jon@example.com)``. Your own endpoint
+    keeps its handle (a message from your agent to you)."""
+    to = message.get("to_endpoint") if isinstance(message.get("to_endpoint"), dict) else {}
+    if to.get("person") and to.get("display_name"):
+        return f"{escape_line(str(to['display_name']))} ({escape_line(str(to['person']))})"
+    return escape_line(str(message.get("to", "")))
+
+
+# -- people (§21 C2, C5.3, PR13) ---------------------------------------------
+
+class PersonRefused(RainError):
+    """A server refusal about a person (``address_people``, ``ambiguous_person``, ``inbox_invalid``),
+    printed as the server's own sentence; ``lines`` follow it (the matching people)."""
+
+    def __init__(self, message, lines=()):
+        super().__init__(message)
+        self.lines = list(lines)
+
+
+PERSON_CODES = ("address_people", "ambiguous_person", "inbox_invalid")
+
+
+def person_refusal(exc):
+    """``exc`` as a :class:`PersonRefused` when it is one of the person refusals, else ``exc``."""
+    if not isinstance(exc, ApiError) or exc.code not in PERSON_CODES:
+        return exc
+    text = exc.args[0] if exc.args else exc.code
+    lines = []
+    if exc.code == "ambiguous_person":
+        for p in (getattr(exc, "payload", {}) or {}).get("people") or []:
+            if not isinstance(p, dict):
+                continue
+            name, email = escape_line(str(p.get("name") or "")), escape_line(str(p.get("email") or ""))
+            label = name if email and email in name else f"{name} ({email})" if email else name
+            lines.append(f"  {label}" + (f"  ->  raincli send @{email}" if email else ""))
+    return PersonRefused(text, lines)
+
+
+def person_address(text):
+    """The ``to`` for a typed person (§21 C2.1): an email (with or without ``@``) is
+    ``{"person": email}``; anything else is a name, ``{"person_name": name}``, resolved by the server
+    among the team's people. A machine handle or ``handle/agent`` is refused there (address_people)."""
+    value = text.strip() if isinstance(text, str) else ""
+    if not value:
+        raise UsageError("give a person: their email, or their name in your team")
+    email = value[1:] if value.startswith("@") else value
+    if "@" in email:
+        return {"person": email}
+    if value.startswith("@"):
+        raise UsageError("@email must be one email address")
+    return {"person_name": value}
+
+
+def presence_text(person):
+    """PR13: "Ready · Instant", "Busy · Next turn", "Offline" or "No inbox yet"."""
+    presence, speed = person.get("presence"), person.get("speed")
+    if presence == "no_inbox":
+        return "No inbox yet"
+    if presence == "offline" or speed not in ("instant", "next_turn"):
+        return "Offline"
+    word = {"ready": "Ready", "busy": "Busy"}.get(presence) or escape_line(str(presence)).capitalize()
+    return f"{word} \u00b7 {'Instant' if speed == 'instant' else 'Next turn'}"
+
+
+def print_people(people, as_json):
+    if as_json:
+        out_json({"people": people})
+        return
+    if not people:
+        out("No people.")
+        return
+    teams = {str(p.get("team") or "") for p in people}
+    one_team = teams.pop() if len(teams) == 1 else None
+    if one_team:
+        out(f"People in {escape_line(one_team)}")
+    labels = [f"{escape_line(str(p.get('display_name') or ''))} ({escape_line(str(p.get('email') or ''))})"
+              for p in people]
+    width = max(len(label) for label in labels)
+    for label, p in zip(labels, people):
+        team = f"  team {escape_line(str(p['team']))}" if p.get("team") and one_team is None else ""
+        out(f"  {label.ljust(width)}  {presence_text(p)}{team}")
+
+
+def cmd_people(args):
+    """The team's people with presence and speed (§21 C5.3, PR13); never machines or agents."""
+    print_people(client(args).people(), args.json)
+    return EXIT_OK
+
+
+AGENTS_NOTICE = "raincli agents now lists people: address people, not agents (see raincli people)"
 
 
 # -- commands --------------------------------------------------------------
@@ -230,32 +323,13 @@ def cmd_whoami(args):
 
 
 def cmd_agents(args):
-    """Machines (registered handles) and the agent sessions each one reports (14.2)."""
-    agents = client(args).agents()
+    """v0.6 (§21 C9.2): an alias of ``raincli people`` with a one-line notice. Agents are not addressed."""
+    people = client(args).people()
     if args.json:
-        out_json({"agents": agents})
-        return EXIT_OK
-    for a in agents:
-        flag = "" if a.get("active", True) else "  (inactive)"
-        presence = a.get("presence") or {}
-        status = f"  [{escape_line(str(presence.get('status', 'unknown')))}]" if presence else ""
-        machine = a.get("machine") or {}
-        client_info = ""
-        if machine:
-            state = str(machine.get("update_state") or "")
-            error = f" ({machine['error']})" if machine.get("error") else ""
-            client_info = (f"  raincli {escape_line(str(machine.get('client_version') or '?'))}"
-                           f" {escape_line(str(machine.get('update_mode') or ''))}"
-                           f" {escape_line(state)}{escape_line(error)}")
-        owner = f" (owner {escape_line(str(a['owner']))[:80]})" if a.get("owner") else ""  # §18.1 item 7
-        out(f"{escape_line(a['handle'])}{owner}  {escape_line(a.get('display_name') or '')}{flag}{status}{client_info}")
-        sessions = sorted(a.get("agents") or [], key=lambda s: (s.get("role") != "inbox", str(s.get("name"))))
-        for s in sessions:
-            role = "inbox" if s.get("role") == "inbox" else "     "
-            reach = f"  ({escape_line(str(s['reachability']))})" if s.get("reachability") else ""
-            out(f"  {role}  {escape_line(str(s.get('name', '')))}  {escape_line(str(s.get('type', '')))}"
-                f"  {escape_line(str(s.get('status', '')))}{reach}"
-                + ("  (detected, status unknown)" if s.get("source") == "scan" else ""))
+        print(AGENTS_NOTICE, file=sys.stderr)
+    else:
+        out(AGENTS_NOTICE)
+    print_people(people, args.json)
     return EXIT_OK
 
 
@@ -284,11 +358,16 @@ def _send_surfacing_id(args, mid, action):
 
 
 def cmd_send(args):
+    """``raincli send PERSON`` (§21 C2): to a person, by email or by a name unique in the team. The
+    hidden ``--to TEXT`` passes the text form unchanged (the server reads email, @email or a name)."""
     if (args.endpoint is None) == (args.to is None):
-        raise UsageError("give one recipient: raincli send ENDPOINT --body-file F|- (or the older --to HANDLE)")
+        raise UsageError("give one person: raincli send PERSON --body-file F|- (their email or their name)")
     if args.endpoint is not None:
-        from .cli_me import cmd_send_endpoint
-        return cmd_send_endpoint(args)
+        if args.body is not None:
+            raise UsageError("raincli send PERSON reads the body from --body-file PATH or - (stdin) only")
+        to = person_address(args.endpoint)
+    else:
+        to = args.to
     body = read_body(args)
     mid = message_id(args.id) if args.id else str(uuid.uuid4())  # fixed before any request
     files = att.load_for_send(args.attach)
@@ -296,29 +375,35 @@ def cmd_send(args):
 
     def action(state):
         state["sent"] = True
-        return api.send(args.to, body, message_id=mid, conversation_id=args.conversation,
+        return api.send(to, body, message_id=mid, conversation_id=args.conversation,
                         attachments=files, from_agent=args.from_agent)
 
-    message, created = _send_surfacing_id(args, mid, action)
+    try:
+        message, created = _send_surfacing_id(args, mid, action)
+    except ApiError as exc:
+        raise person_refusal(exc) from None
     report_send(message, created, args.json)
     return EXIT_OK
 
 
 def cmd_reply(args):
+    """A reply names only the message it answers: no ``to``. The server sends it back to the agent
+    that asked, or that person's inbox (§21 C4, PR1)."""
     body = read_body(args)
     mid = message_id(args.id) if args.id else str(uuid.uuid4())  # fixed before any request
     files = att.load_for_send(args.attach)
     api = client(args)
 
     def action(state):
-        from .cli_me import reply_endpoint
         parent = api.get_message(args.message_id)
-        to = reply_endpoint(parent, api.me()["agent"]["handle"])  # a person, a named agent or a machine (§16.4)
         state["sent"] = True
-        return api.send(to, body, message_id=mid, in_reply_to=parent["id"], attachments=files,
+        return api.send(None, body, message_id=mid, in_reply_to=parent["id"], attachments=files,
                         from_agent=args.from_agent)
 
-    message, created = _send_surfacing_id(args, mid, action)
+    try:
+        message, created = _send_surfacing_id(args, mid, action)
+    except ApiError as exc:
+        raise person_refusal(exc) from None
     report_send(message, created, args.json)
     return EXIT_OK
 
@@ -334,7 +419,9 @@ def format_conversation(c):
             f"  unacked {escape_line(str(c.get('unacked', '')))}")
     if c.get("archived_at"):
         by = c.get("archived_by")
-        line += f"  archived {when(c['archived_at'])}" + (f" by {escape_line(endpoint_label(by))}" if by else "")
+        who = (by.get("display_name") or endpoint_label(by)) if isinstance(by, dict) and "person" in by else \
+            (endpoint_label(by) if by else None)  # §21: archived by a person, shown by name
+        line += f"  archived {when(c['archived_at'])}" + (f" by {escape_line(who)}" if who else "")
     return line
 
 
@@ -410,6 +497,93 @@ def _addressed_to(message, agent):
     """Whether a message is to this machine's endpoint (``agent`` None) or to that named agent."""
     to = message.get("to_endpoint") if isinstance(message.get("to_endpoint"), dict) else {}
     return to.get("agent") == agent if agent else to.get("agent") is None
+
+
+def _inbox_place(inbox, here):
+    if not inbox:
+        return None
+    machine = str(inbox.get("machine") or "")
+    where = escape_line(machine) + (" (this computer)" if machine == here else "")
+    return f"{escape_line(str(inbox.get('agent') or ''))} on {where}"
+
+
+def _plural(n, word):
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def cmd_inbox_show(args):
+    """``raincli inbox show`` (§21 C8.1): your inbox, the waiting messages and the agents you can pick."""
+    api = client(args)
+    data = api.my_inbox()
+    if args.json:
+        out_json(data)
+        return EXIT_OK
+    here = api.me()["agent"]["handle"]
+    place = _inbox_place(data.get("inbox"), here)
+    out(f"Your inbox: {place}" if place else "No inbox yet: messages to you wait in your app")
+    waiting = int(data.get("waiting") or 0)
+    out(f"Waiting in your app: {_plural(waiting, 'message')}"
+        + (" (raincli inbox set AGENT delivers them)" if waiting and not place else ""))
+    candidates = [c for c in data.get("candidates") or [] if isinstance(c, dict)]
+    if not candidates:
+        out("No agents to pick yet: start one of your agents with the runtime running")
+        return EXIT_OK
+    out("Agents you can pick (raincli inbox set AGENT):")
+    for c in candidates:
+        notes = ["live" if c.get("live") else "not live"]
+        if c.get("suggested"):
+            notes.append("this machine's inbox agent")
+        out(f"  {_inbox_place(c, here)}  ({', '.join(notes)})")
+    return EXIT_OK
+
+
+def _set_inbox_as_person(args, team, machine):
+    """C13 L4: another of your machines is picked with your person session (``/person/me/inbox``)."""
+    from . import person
+    path = args.agent_config or default_config_path()
+    if person.load_session(load_config(path).path) is None:
+        raise RainError(f"this machine's credential can pick only an agent on this machine; to pick one on "
+                        f"{escape_line(machine)}, use the RainCLI app, or sign in as yourself here with "
+                        f"raincli login --person and run this again")
+    api = person.PersonClient.for_config(path)
+    body = {"team": team, "machine": machine, "agent": args.agent, "deliver_waiting": args.deliver_waiting}
+    return api.api.request("PUT", "/person/me/inbox", body=body)[1]
+
+
+def cmd_inbox_set(args):
+    """``raincli inbox set AGENT [--machine HANDLE] [--no-deliver-waiting]`` (§21 C8, PR3, PR8)."""
+    api = client(args)
+    me = api.me()["agent"]
+    here = me["handle"]
+    try:
+        if args.machine in (None, here):
+            result = api.set_my_inbox(args.agent, deliver_waiting=args.deliver_waiting)
+        else:
+            result = _set_inbox_as_person(args, me["team"]["slug"], args.machine)
+    except ApiError as exc:
+        raise person_refusal(exc) from None
+    if args.json:
+        out_json(result)
+        return EXIT_OK
+    out(f"Your inbox: {_inbox_place(result.get('inbox'), here) or escape_line(args.agent)}")
+    moved, stayed = int(result.get("moved") or 0), int(result.get("stayed") or 0)
+    delivered = int(result.get("delivered_waiting") or 0)
+    out(f"moved {moved} from your previous inbox, {stayed} stayed there (already picked up), "
+        f"delivered {delivered} waiting")
+    return EXIT_OK
+
+
+def cmd_inbox_clear(args):
+    """``raincli inbox clear``: no inbox; messages to you wait in your app (§21 C6.4)."""
+    result = client(args).clear_my_inbox()
+    if args.json:
+        out_json(result)
+        return EXIT_OK
+    out("No inbox: messages to you now wait in your app")
+    moved = int(result.get("moved") or 0)
+    if moved:
+        out(f"moved {_plural(moved, 'message')} back to your app")
+    return EXIT_OK
 
 
 def cmd_show(args):
@@ -1222,8 +1396,10 @@ def build_parser():
     cli_me.register(sub, _Parser)
 
     with_json(sub.add_parser("whoami", help="show this agent's identity")).set_defaults(func=cmd_whoami)
-    with_json(sub.add_parser("agents", help="list the team's machines and the agent sessions each reports "
-                                        "(inbox marked; client version and update state)")).set_defaults(func=cmd_agents)
+    with_json(sub.add_parser("people", help="the people in your team, with presence and speed "
+                                        "(Ready, Busy, Offline, No inbox yet)")).set_defaults(func=cmd_people)
+    with_json(sub.add_parser("agents", help="an alias of raincli people: you address people, not agents"
+                             )).set_defaults(func=cmd_agents)
 
     def body_args(sp):
         g = sp.add_mutually_exclusive_group(required=True)
@@ -1234,17 +1410,22 @@ def build_parser():
                         help="attach a Markdown (.md) file; repeatable (not the message text)")
         with_json(sp)
 
-    send = sub.add_parser("send", help="send a message to a machine, handle/agent or @email")
-    send.add_argument("endpoint", nargs="?", metavar="ENDPOINT",
-                      help="handle, handle/agent or @email (§16.1); the body then comes from --body-file only")
-    send.add_argument("--to", metavar="HANDLE", help=argparse.SUPPRESS)
+    send = sub.add_parser("send", help="send a message to a person (their email or their name in your team)",
+                          description="Send a message to a person: their email (or @email), or their name when "
+                                      "it is unique in your team. RainCLI delivers it to the agent they picked as "
+                                      "their inbox, or keeps it in their app until they pick one. Teammates' "
+                                      "machines and agents can't be addressed.")
+    send.add_argument("endpoint", nargs="?", metavar="PERSON",
+                      help="an email, @email or a name unique in your team; the body then comes from "
+                           "--body-file only")
+    send.add_argument("--to", metavar="PERSON", help=argparse.SUPPRESS)
     send.add_argument("--conversation", metavar="CONV_ID", help=argparse.SUPPRESS)
     send.add_argument("--from-agent", metavar="NAME",
                       help="the name of this machine's agent that writes the message (§16.1)")
     body_args(send)
     send.set_defaults(func=cmd_send)
 
-    reply = sub.add_parser("reply", help="reply to a message")
+    reply = sub.add_parser("reply", help="reply to a message (it goes back to the agent that asked)")
     reply.add_argument("message_id", metavar="MSG_ID")
     reply.add_argument("--from-agent", metavar="NAME",
                        help="the name of this machine's agent that writes the reply (§16.1), so answers come back to it")
@@ -1266,7 +1447,10 @@ def build_parser():
                        help=argparse.SUPPRESS)
     convs.set_defaults(func=cmd_conversations)
 
-    inbox = with_json(sub.add_parser("inbox", help="list received messages (unacked by default)"))
+    inbox = with_json(sub.add_parser("inbox", help="list received messages (unacked by default); "
+                                                    "inbox show|set|clear: your inbox agent",
+                                     usage="raincli inbox [--all] [--agent NAME] [--json] [--utc]\n"
+                                           "       raincli inbox {show,set,clear} ..."))
     inbox.add_argument("--all", action="store_true", help="include acknowledged messages")
     inbox.add_argument("--agent", metavar="NAME",
                        help="messages to that named agent of this machine, instead of the machine's inbox")
@@ -1274,6 +1458,25 @@ def build_parser():
     inbox.add_argument("--limit", type=int, default=100, choices=range(1, 501), metavar="N",
                        help=argparse.SUPPRESS)
     inbox.set_defaults(func=cmd_inbox)
+    inbox_sub = inbox.add_subparsers(dest="inbox_command", required=False, parser_class=_Parser,
+                                     metavar="{show,set,clear}")
+    with_json(inbox_sub.add_parser(
+        "show", help="your inbox (the agent messages to you go to), waiting messages and the agents you can pick"
+    )).set_defaults(func=cmd_inbox_show)
+    inbox_set = with_json(inbox_sub.add_parser(
+        "set", help="pick the agent that receives messages to you",
+        description="Pick one of your agents as your inbox: messages to you go to it. Messages your previous "
+                    "inbox hasn't picked up move to it, and the messages waiting in your app are delivered too "
+                    "unless --no-deliver-waiting."))
+    inbox_set.add_argument("agent", metavar="AGENT", help="the agent's name, as raincli inbox show lists it")
+    inbox_set.add_argument("--machine", metavar="HANDLE",
+                           help="one of your own machines (default: this one); another machine needs your person "
+                                "session here (raincli login --person) or the app")
+    inbox_set.add_argument("--no-deliver-waiting", dest="deliver_waiting", action="store_false",
+                           help="leave the messages waiting in your app where they are")
+    inbox_set.set_defaults(func=cmd_inbox_set)
+    with_json(inbox_sub.add_parser(
+        "clear", help="have no inbox: messages to you wait in your app")).set_defaults(func=cmd_inbox_clear)
 
     show = with_json(sub.add_parser("show", help="show one message"))
     show.add_argument("message_id", metavar="MSG_ID")
@@ -1334,7 +1537,8 @@ def build_parser():
     conn_parser("escalation-done", "mark an escalation resolved",
                 cmd_connector_escalation_done).add_argument("escalation_id", metavar="ESC_ID")
     conn_parser("trust", "always deliver messages from this sender",
-                lambda a: _connector_op(a, "trust")).add_argument("handle", metavar="HANDLE")
+                lambda a: _connector_op(a, "trust")).add_argument("handle", metavar="EMAIL",
+                                                                   help="the person's email (or an old machine handle)")
     return p
 
 
@@ -1352,6 +1556,8 @@ def main(argv=None, *, herdr=None):
         return args.func(args)
     except RainError as exc:
         print(f"raincli: error: {escape_line(str(exc))}", file=sys.stderr)
+        for line in getattr(exc, "lines", ()):
+            print(f"raincli: {line}", file=sys.stderr)
         return exc.exit_code
     except KeyboardInterrupt:
         return 1

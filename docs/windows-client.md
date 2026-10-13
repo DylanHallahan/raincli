@@ -36,7 +36,7 @@ Sign-in stores the machine credential in `%USERPROFILE%\.config\raincli\agent.js
 `raincli login` does the same from a terminal. It reads the password from a no-echo prompt only (never an argument, the environment or a file) and refuses without one.
 
 ### What the app does in this release
-The RainCLI window shows your **Inbox** and conversations and the **Agents** in your teams, signed in as you, plus two pages of its own: **This computer** (the connection, the machine name, the version and update state, the routing policy and the coding agents on this machine, with Pause, Open log and Sign out) and **Settings** (who may message this computer's agents, trust, and updates). If RainCLI can't be reached, the window says so and offers **Retry**. Links to other sites open in your default browser.
+The RainCLI window shows your **Inbox** and conversations and the **People** in your teams, signed in as you, plus two pages of its own: **This computer** (the connection, the machine name, the version and update state, the routing policy and the coding agents on this machine, with **Use as my inbox** on each, "Your inbox: …" and **Change**, plus Pause, Open log and Sign out) and **Settings** (who may message your agents, trust, notifications, and updates). Notifications show only what needs you (a message a teammate wrote by hand, one held for your approval, one waiting because you have no inbox, an escalation, or your inbox offline for over an hour); "Notify me about every message" turns on the rest. If RainCLI can't be reached, the window says so and offers **Retry**. Links to other sites open in your default browser.
 
 The window opens your inbox through a single-use sign-in link that only this app can use: the link is bound to a random token this installation keeps beside its credential, and the window sends that token to RainCLI with every request. A copied link or cookie does nothing in another browser, and the window always shows **Signed in as <name> (<email>)**. Signing in again or signing out replaces the token.
 
@@ -46,7 +46,7 @@ Signing out (This computer) revokes the machine, deletes its credential and clea
 
 The window uses the **Microsoft Edge WebView2 Runtime** (part of Windows 11, and on most Windows 10 computers). Without it, RainCLI never falls back to the old Internet Explorer engine: the tray and message delivery keep working, and **Open RainCLI** opens Microsoft's download page instead.
 
-A machine signed in through the app runs in **machine mode**: it reports its presence, client version and agent list to your team, takes pushed updates, and delivers teammates' messages to your named agents (a named Herdr agent at once; a Claude Code or Codex session with RainCLI hooks at its next turn). It has no inbox, so messages to the machine itself are stored on the server. Who may reach your agents is set with `raincli trust` (any teammate by default); see [SETUP.md](../SETUP.md#messages-to-your-agents-and-to-you). Machines moved over from an existing connector setup (below) keep delivering exactly as before.
+A machine signed in through the app runs in **machine mode**: it reports its presence, client version and agent list (shown to you; teammates see only your inbox's availability), takes pushed updates, and delivers to the agent you pick as your inbox on This computer, and replies to your agents (a named Herdr agent at once; a Claude Code or Codex session with RainCLI hooks at its next turn). Until you pick an inbox, messages to you wait in the window. Who may reach your agents is set with `raincli trust` (any teammate by default); see [SETUP.md](../SETUP.md#messages-your-inbox-and-replies). Machines moved over from an existing connector setup (below) keep delivering exactly as before.
 
 ### Which coding agents are listed
 The runtime finds this computer's agents in three ways: Herdr, the agents' own hooks, and a process scan. A failing source never hides the others; it is logged once.
@@ -80,7 +80,7 @@ Sources, checked 2026-10-06:
 **An agent run by `node.exe`** (an npm install whose native binary was not linked, for example with install scripts disabled) can't be recognised by its image. Connect its hooks so it is listed by name: `raincli hooks install --claude` or `--codex`, or **Connect** on This computer.
 
 ### Desktop apps and hooks
-- **Claude desktop app, Code tab:** it runs Claude Code with your `~/.claude/settings.json`. The docs say "Hooks and skills defined in settings apply to both" and that `~/.claude/settings.json` is shared with the CLI (code.claude.com/docs/en/desktop, "Shared configuration"). So once Claude Code is connected, sessions in the Code tab report too. Cloud sessions don't run your local hooks. *Check on your machine:* start a Code-tab session and look for it in `raincli agents`.
+- **Claude desktop app, Code tab:** it runs Claude Code with your `~/.claude/settings.json`. The docs say "Hooks and skills defined in settings apply to both" and that `~/.claude/settings.json` is shared with the CLI (code.claude.com/docs/en/desktop, "Shared configuration"). So once Claude Code is connected, sessions in the Code tab report too. Cloud sessions don't run your local hooks. *Check on your machine:* start a Code-tab session and look for it on This computer (or in `raincli inbox show`).
 - **Codex app:** Codex reads hooks from `~/.codex/hooks.json` (learn.chatgpt.com/docs/hooks). The docs don't say which surfaces run them, so whether the app or the IDE extension does is **unverified**.
 - **Approving Codex hooks:** "Non-managed hooks must be reviewed and trusted before they run", and the docs say to use `/hooks` **in the CLI**. Approval writes a `hooks.state."<key>".trusted_hash` to `config.toml` (codex-rs `hook_config.rs`). With only the desktop app, openai/codex issue #47283 (open, 2026-09-22) reports that its `/hooks` screen shows our hooks but can't trust them, so they are skipped. Until that is fixed, run `codex` once in a terminal, open `/hooks` and trust RainCLI's hooks, then check that `hooks.state` appears in `%USERPROFILE%\.codex\config.toml`. The copy inside `WindowsApps` can't be run directly; use the CLI from winget or npm.
 - **When RainCLI updates its Codex hooks** (a new command form, as in v0.5.1), Codex treats them as changed: you'll see "RainCLI updated its Codex hooks; open /hooks in Codex and trust them again". Claude Code needs no approval.
@@ -159,13 +159,13 @@ raincli config init --api-url https://raincli.com --token-file "$HOME\Downloads\
 raincli whoami
 # Only after whoami confirms your expected handle and team:
 Remove-Item "$HOME\Downloads\raincli-your-handle.json"
-raincli agents
-raincli inbox --all
+raincli people
+raincli inbox show
 ```
 
 The config lives at `$HOME\.config\raincli\agent.json`. New private files and directories receive a protected Windows ACL allowing the current user, SYSTEM and Administrators. Credential reads verify the owner and ACL; Windows `chmod` is not used as a substitute. If a config has broader access, re-import your downloaded credential with `config init --force`. Do not paste tokens into command arguments, chat or reports.
 
-The same send/reply/fetch commands work in PowerShell. Use quoted Windows paths and `(New-Guid).ToString()` when supplying `--id`. For the optional skill, copy the packaged `raincli_agent\skill\SKILL.md` to your agent's skill folder; ask before replacing existing instructions. This avoids Windows PowerShell 5.1's UTF-16 output redirection.
+The same send/reply/fetch commands work in PowerShell; `raincli send` takes a teammate's email or name. Use quoted Windows paths and `(New-Guid).ToString()` when supplying `--id`. For the optional skill, copy the packaged `raincli_agent\skill\SKILL.md` to your agent's skill folder; ask before replacing existing instructions. This avoids Windows PowerShell 5.1's UTF-16 output redirection.
 
 ### Connector boundary
 

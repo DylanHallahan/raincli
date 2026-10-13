@@ -446,28 +446,31 @@ def test_second_connector_publishes_only_its_inbox(tmp_path):
     assert [(a["name"], a["role"]) for a in out[id(second)]] == [("second-inbox", "inbox")]
 
 
-def test_cli_agents_shows_machines_and_their_agents(tmp_path, capsys, monkeypatch):
+def test_cli_agents_prints_people_with_a_notice(tmp_path, capsys, monkeypatch):
+    """v0.6 (§21 C9.2): `raincli agents` is an alias of `raincli people` (it no longer lists machines, client
+    versions or agent sessions). The answer is stubbed to carry every presence and a hostile name; every field
+    is escaped. tests/server/test_v060_cli.py runs both commands against the real server."""
+    from raincli_agent.api import ApiClient
     from raincli_agent.cli import main
     from .fake_server import FakeApi
+    people = [
+        {"display_name": "Jon", "email": "jon@example.test", "team": "Alpha", "presence": "ready", "speed": "instant"},
+        {"display_name": "\x1b[2JSneaky", "email": "s@example.test", "team": "Alpha", "presence": "busy",
+         "speed": "next_turn"},
+        {"display_name": "Sam", "email": "sam@example.test", "team": "Alpha", "presence": "no_inbox", "speed": None},
+        {"display_name": "Ryan", "email": "ryan@example.test", "team": "Alpha", "presence": "offline", "speed": None}]
+    monkeypatch.setattr(ApiClient, "people", lambda self: people)
     with FakeApi() as server:
         token = server.state.add_agent("laptop")
-        server.state.clients["laptop"] = {"version": "0.3.0", "update_mode": "automatic",
-                                          "update_state": "failed", "error": "network"}
-        server.state.directory["laptop"] = [
-            {"key": "a" * 32, "name": "helper", "type": "codex", "status": "working", "role": None,
-             "reachability": None, "source": "herdr"},
-            {"key": "b" * 32, "name": "inbox", "type": "claude", "status": "idle", "role": "inbox",
-             "reachability": "next-turn", "source": "hook"},
-            {"key": "c" * 32, "name": "\x1b[2Jsneaky", "type": "claude", "status": "unknown", "role": None,
-             "reachability": None, "source": "scan"}]
         write_config(tmp_path / "agent.json", server.url, token)
         assert main(["--config", str(tmp_path / "agent.json"), "agents"]) == 0
         lines = capsys.readouterr().out.splitlines()
-        assert "raincli 0.3.0 automatic failed (network)" in lines[0]
-        assert lines[1].split() == ["inbox", "inbox", "claude", "idle", "(next-turn)"]
-        assert ["helper", "codex", "working"] in [line.split() for line in lines[2:]]
-        [scanned] = [line for line in lines if "sneaky" in line]
-        assert "\x1b" not in scanned and "(detected, status unknown)" in scanned
+        assert lines[0] == "raincli agents now lists people: address people, not agents (see raincli people)"
+        assert lines[1] == "People in Alpha"
+        assert lines[2].split() == ["Jon", "(jon@example.test)", "Ready", "\u00b7", "Instant"]
+        [sneaky] = [line for line in lines if "Sneaky" in line]
+        assert "\x1b" not in sneaky and sneaky.endswith("Busy \u00b7 Next turn")
+        assert lines[4].split()[-3:] == ["No", "inbox", "yet"] and lines[5].split()[-1] == "Offline"
 
 
 def test_runtime_finds_the_managed_root_it_runs_from(tmp_path):

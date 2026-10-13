@@ -227,7 +227,7 @@ def test_missing_herdr_holds_offline_and_is_found_later(tmp_path, fake_api, conn
     assert cli.binary is None
     with pytest.raises(HerdrError, match="not found"):
         cli.get_agent("x")
-    msg = send(fake_api, fake_api.alice, "bob")
+    msg = send(fake_api, fake_api.alice, "bob@example.com")
     conn = connector_env.connector()
     conn.herdr = cli
     conn.run_once()
@@ -277,7 +277,7 @@ def test_oversize_prompt_is_rejected_before_anything_runs(monkeypatch):
 
 
 def test_connector_holds_an_oversize_message_without_submitting(fake_api, connector_env):
-    msg = send(fake_api, fake_api.alice, "bob", "body")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "body")
     conn = connector_env.connector()
     connector_env.herdr.max_prompt_chars = 10  # every framed prompt is "too long"
     conn.run_once()
@@ -338,7 +338,7 @@ def test_version_is_read_once_per_connector_start(tmp_path):
 
 
 def test_repeated_agent_not_ready_backs_off(fake_api, connector_env):
-    msg = send(fake_api, fake_api.alice, "bob")
+    msg = send(fake_api, fake_api.alice, "bob@example.com")
     conn = connector_env.connector()
     now = [1000.0]
     conn._clock = lambda: now[0]
@@ -366,7 +366,7 @@ def test_repeated_agent_not_ready_backs_off(fake_api, connector_env):
 
 def test_oversize_escalation_is_held_before_submitting(fake_api, connector_env):
     """H3: the same command-line check before an escalation is submitted."""
-    msg = send(fake_api, fake_api.alice, "bob")
+    msg = send(fake_api, fake_api.alice, "bob@example.com")
     path = connector_env.make(mode="inbox", escalation={"herdr_agent": "main-session", "notify": False})
     connector_env.herdr.add("main-session")
     conn = connector_env.connector(path=path)

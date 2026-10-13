@@ -17,7 +17,7 @@ def test_redirect_refused_and_token_not_sent_to_target(fake_api, recorder):
     with pytest.raises(RedirectRefused):
         api.me()
     with pytest.raises(RedirectRefused):
-        api.send("bob", "hi")
+        api.send("bob@example.com", "hi")
     assert recorder.requests == []
     assert fake_api.state.send_commits == 0
 
@@ -26,7 +26,7 @@ def test_503_retried_without_duplicate_send(fake_api):
     fake_api.state.fail("POST", r"/messages$", (503, "unavailable", {}), times=2)
     sleeps = []
     api = ApiClient(fake_api.url, fake_api.alice, sleep=sleeps.append)
-    message, created = api.send("bob", "hello")
+    message, created = api.send("bob@example.com", "hello")
     assert created is True
     assert len(sleeps) == 2
     assert fake_api.state.send_commits == 1
@@ -36,7 +36,7 @@ def test_dropped_connection_after_commit_does_not_duplicate(fake_api):
     fake_api.state.fail("POST", r"/messages$", "drop_after")
     mid = str(uuid.uuid4())
     api = client_for(fake_api, fake_api.alice)
-    message, created = api.send("bob", "hello", message_id=mid)
+    message, created = api.send("bob@example.com", "hello", message_id=mid)
     # first attempt committed but the response was lost; the retry reused the id
     assert message["id"] == mid and created is False
     assert fake_api.state.send_commits == 1
@@ -49,7 +49,7 @@ def test_dropped_connection_before_commit_is_retried(fake_api):
     fake_api.state.fail("GET", r"/me$", "drop")
     api = client_for(fake_api, fake_api.alice)
     assert api.me()["agent"]["handle"] == "alice"
-    message, created = api.send("bob", "hello")
+    message, created = api.send("bob@example.com", "hello")
     assert created is True and fake_api.state.send_commits == 1
 
 
@@ -61,19 +61,19 @@ def test_503_exhausted_is_unavailable(fake_api):
 
 
 def test_rate_limited_honors_retry_after(fake_api):
-    fake_api.state.fail("GET", r"/agents$", (429, "rate_limited", {"Retry-After": "2"}))
+    fake_api.state.fail("GET", r"/people$", (429, "rate_limited", {"Retry-After": "2"}))
     sleeps = []
     api = ApiClient(fake_api.url, fake_api.alice, sleep=sleeps.append)
-    assert {a["handle"] for a in api.agents()} == {"alice", "bob", "mallory"}
+    assert {p["email"] for p in api.people()} == {"alice@example.com", "bob@example.com", "mallory@example.com"}
     assert sleeps == [2.0]
 
 
 def test_inbox_full_not_retried(fake_api):
     fake_api.state.max_pending = 1
     api = ApiClient(fake_api.url, fake_api.alice, sleep=lambda s: pytest.fail("retried"))
-    api.send("bob", "one")
+    api.send("bob@example.com", "one")
     with pytest.raises(InboxFull):
-        api.send("bob", "two")
+        api.send("bob@example.com", "two")
 
 
 def test_unreachable(fake_api):
@@ -84,7 +84,7 @@ def test_unreachable(fake_api):
 
 def test_typed_errors(fake_api):
     alice, bob = client_for(fake_api, fake_api.alice), client_for(fake_api, fake_api.bob)
-    msg, _ = alice.send("bob", "hello")
+    msg, _ = alice.send("bob@example.com", "hello")
     with pytest.raises(Forbidden):
         alice.ack(msg["id"])  # only the recipient acks
     with pytest.raises(NotAcked):
@@ -92,7 +92,7 @@ def test_typed_errors(fake_api):
     with pytest.raises(NotFound):
         client_for(fake_api, fake_api.mallory).get_message(msg["id"])
     with pytest.raises(IdConflict):
-        alice.send("bob", "different body", message_id=msg["id"])
+        alice.send("bob@example.com", "different body", message_id=msg["id"])
     with pytest.raises(Invalid):
         alice.send("eve", "cross-team")
     with pytest.raises(Unauthorized):
@@ -100,11 +100,11 @@ def test_typed_errors(fake_api):
 
 
 def test_ack_idempotent_and_event_after_ack(fake_api):
-    msg = send(fake_api, fake_api.alice, "bob")
+    msg = send(fake_api, fake_api.alice, "bob@example.com")
     bob = client_for(fake_api, fake_api.bob)
     assert bob.ack(msg["id"])[1] is True
     assert bob.ack(msg["id"])[1] is False
-    assert bob.event(msg["id"], "submitted", "ok")["delivery_state"] == "submitted"
+    assert bob.event(msg["id"], "submitted", "delivered")["delivery_state"] == "submitted"
 
 
 def test_token_never_in_repr_or_errors(fake_api):
@@ -125,7 +125,7 @@ def test_https_used_for_remote_hosts_only():
 
 def test_long_poll_returns_early(fake_api):
     bob = client_for(fake_api, fake_api.bob)
-    threading.Timer(0.3, lambda: send(fake_api, fake_api.alice, "bob", "late")).start()
+    threading.Timer(0.3, lambda: send(fake_api, fake_api.alice, "bob@example.com", "late")).start()
     start = time.monotonic()
     messages, cursor = bob.inbox(wait=10)
     assert time.monotonic() - start < 5

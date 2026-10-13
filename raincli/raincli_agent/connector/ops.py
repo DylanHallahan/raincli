@@ -41,11 +41,15 @@ def reject(queue, message_id):
         return record
 
 
-def trust(queue, handle):
-    if not HANDLE_RE.fullmatch(handle or ""):
-        raise q.QueueError(f"not a valid agent handle: {handle[:40]!r}")
+def trust(queue, sender):
+    """Trust a sender from now on: a person's email (``jon@example.com`` or ``@jon@example.com``; §21: teammates
+    are people), or a machine handle (an older server's sender)."""
+    from .config import EMAIL_RE, sender_key
+    sender = (sender or "").strip()
+    if not (HANDLE_RE.fullmatch(sender) or EMAIL_RE.fullmatch(sender)):
+        raise q.QueueError(f"not a person's email or a machine handle: {sender[:40]!r}")
     with queue.lock():
-        return queue.add_trusted(handle)
+        return queue.add_trusted(sender_key(sender))
 
 
 def _escalation_or_none(queue, some_id):

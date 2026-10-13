@@ -46,64 +46,15 @@ def team_choice(exc):
     return RainError(f"you are a member of several teams; choose one with --team ({names})")
 
 
-def not_deliverable(exc, endpoint):
-    """§16.12 C10: an agent endpoint that can't receive is refused, never silently rerouted;
-    the machine endpoint is offered instead."""
-    reason = (getattr(exc, "payload", {}) or {}).get("reason")
-    reason = escape_line(str(reason)).replace("_", " ") if reason else "not deliverable"
-    if isinstance(endpoint, dict) and endpoint.get("agent"):
-        handle = escape_line(str(endpoint.get("machine")))
-        return RainError(f"{escape_line(person.endpoint_label(endpoint))} can't receive messages ({reason}); "
-                         f"to leave it with the machine instead, send to {handle}")
-    return RainError(f"{escape_line(person.endpoint_label(endpoint))} can't receive messages ({reason})")
-
-
-def _sending(endpoint, call):
+def _sending(args, mid, action):
+    """A person send through ``_send_surfacing_id`` (so a 400 still reports the id as not stored), then
+    ``team_required`` names the teams and a person refusal is the server's sentence (§21 C2)."""
     try:
-        return call()
+        return _send_surfacing_id(args, mid, action)
     except ApiError as exc:
         if exc.code == "team_required":
             raise team_choice(exc) from None
-        if exc.code == "not_deliverable":
-            raise not_deliverable(exc, endpoint) from None
-        raise
-
-
-# -- raincli send <endpoint> (machine credential, §16.11) ----------------------------------------------
-
-def cmd_send_endpoint(args):
-    """``raincli send <endpoint>``: any endpoint kind; the body from a file or stdin only."""
-    if args.body is not None:
-        raise UsageError("raincli send <endpoint> reads the body from --body-file PATH or - (stdin) only")
-    endpoint = person.parse_endpoint(args.endpoint)
-    body = read_body(args)
-    mid = message_id(args.id) if args.id else str(uuid.uuid4())
-    files = att.load_for_send(args.attach)
-    api = client(args)
-
-    def action(state):
-        state["sent"] = True
-        return _sending(endpoint, lambda: api.send(endpoint, body, message_id=mid, attachments=files,
-                                                   from_agent=args.from_agent))
-
-    message, created = _send_surfacing_id(args, mid, action)
-    report_send(message, created, args.json)
-    return EXIT_OK
-
-
-def reply_endpoint(parent, me):
-    """The other participant of ``parent`` as an API endpoint, seen from ``me`` (an
-    endpoint label: a handle or ``@email``). §16.4: a reply to a named agent goes to it."""
-    sender = parent.get("from_endpoint") or parent.get("from")
-    recipient = parent.get("to_endpoint") or parent.get("to")
-    mine = parent.get("from") == me
-    other = recipient if mine else sender
-    if isinstance(other, dict) and "person" in other:
-        return {"person": other["person"]}
-    if isinstance(other, dict):
-        return {k: other[k] for k in ("machine", "agent") if other.get(k)} if other.get("agent") \
-            else other.get("machine")
-    return other
+        raise _cli.person_refusal(exc) from None
 
 
 # -- raincli me ... (person session, §16.4) ------------------------------------------------------------
@@ -182,7 +133,8 @@ def cmd_me_read(args):
 
 
 def cmd_me_send(args):
-    endpoint = person.parse_endpoint(args.endpoint)
+    """``raincli me send PERSON``: as yourself, to a person by email or by a name unique in the team (§21 C2)."""
+    to = _cli.person_address(args.endpoint)
     body = read_body(args)
     mid = message_id(args.id) if args.id else str(uuid.uuid4())
     files = att.load_for_send(args.attach)
@@ -190,15 +142,16 @@ def cmd_me_send(args):
 
     def action(state):
         state["sent"] = True
-        return _sending(endpoint, lambda: api.send(endpoint, body, message_id=mid, attachments=files,
-                                                   team=args.team))
+        return api.send(to, body, message_id=mid, attachments=files, team=args.team)
 
-    message, created = _send_surfacing_id(args, mid, action)
+    message, created = _sending(args, mid, action)
     report_send(message, created, args.json)
     return EXIT_OK
 
 
 def cmd_me_reply(args):
+    """A reply names only the message it answers, with no ``to``: the server sends it back to the agent
+    that asked, or that person's inbox (§21 C4)."""
     body = read_body(args)
     mid = message_id(args.id) if args.id else str(uuid.uuid4())
     files = att.load_for_send(args.attach)
@@ -206,23 +159,21 @@ def cmd_me_reply(args):
 
     def action(state):
         parent = api.message(args.message_id)
-        to = reply_endpoint(parent, "@" + api.me()["user"]["email"])
         state["sent"] = True
         # §16.16 (3): the server takes the team from the parent's conversation.
-        return _send_reply(api, to, body, mid, parent, files)
+        return _send_reply(api, body, mid, parent["id"], files)
 
-    message, created = _send_surfacing_id(args, mid, action)
+    message, created = _sending(args, mid, action)
     report_send(message, created, args.json)
     return EXIT_OK
 
 
-def _send_reply(api, to, body, mid, parent, files):
-    try:
-        return api.send(to, body, message_id=mid, in_reply_to=parent["id"], attachments=files)
-    except ApiError as exc:
-        if exc.code == "not_deliverable":
-            raise not_deliverable(exc, to) from None
-        raise
+def _send_reply(api, body, mid, parent_id, files):
+    payload = {"id": mid, "body": body, "in_reply_to": parent_id}
+    if files:
+        payload["attachments"] = files
+    data = api.api.request("POST", "/person/send", body=payload)[1]
+    return data["message"], bool(data.get("created"))
 
 
 def cmd_me_fetch(args):
@@ -399,12 +350,12 @@ def register(sub, parser_class):
     read.add_argument("message_id", metavar="MSG_ID")
     read.add_argument("--json", action="store_true", help="print JSON")
     read.set_defaults(func=cmd_me_read)
-    send = me_sub.add_parser("send", help="send as yourself to a machine, handle/agent or @email")
-    send.add_argument("endpoint", metavar="ENDPOINT", help="handle, handle/agent or @email")
+    send = me_sub.add_parser("send", help="send as yourself to a person (their email or their name in your team)")
+    send.add_argument("endpoint", metavar="PERSON", help="an email, @email or a name unique in your team")
     send.add_argument("--team", metavar="SLUG", help="the team, when you belong to several")
     body_file_args(send)
     send.set_defaults(func=cmd_me_send, body=None)
-    reply = me_sub.add_parser("reply", help="reply to a message as yourself")
+    reply = me_sub.add_parser("reply", help="reply to a message as yourself (it goes back to the agent that asked)")
     reply.add_argument("message_id", metavar="MSG_ID")
     body_file_args(reply)
     reply.set_defaults(func=cmd_me_reply, body=None)
@@ -422,22 +373,25 @@ def register(sub, parser_class):
     sign_out.add_argument("--local-only", action="store_true", help="delete it here without revoking it")
     sign_out.set_defaults(func=cmd_me_sign_out)
 
-    trust = sub.add_parser("trust", help="who may reach this machine's named agents (team or list)",
-                           description="Trust for messages to this machine's named agents (§16.12 C5). In team "
-                                       "mode (the default) any member of your team reaches them; in list mode only "
-                                       "trusted senders do and others wait for raincli me approve. You are always "
-                                       "trusted.")
+    trust = sub.add_parser("trust", help="who may reach your agents on this machine (team or list)",
+                           description="Trust for messages to your agents on this machine (§16.12 C5, §21): your "
+                                       "inbox agent and replies to your agents. In team mode (the default) any "
+                                       "member of your team reaches them; in list mode only the people you trust do, "
+                                       "and others wait for raincli me approve. You are always trusted.")
     trust.add_argument("action", nargs="?", choices=("add", "remove"))
-    trust.add_argument("sender", nargs="?", metavar="MACHINE|@EMAIL")
+    trust.add_argument("sender", nargs="?", metavar="EMAIL", help="a person's email (an older machine handle "
+                                                                    "is still accepted)")
     trust.add_argument("--mode", choices=("list", "team"))
     trust.add_argument("--runtime-config", metavar="PATH", help="machine runtime config (default: beside --config)")
     trust.add_argument("--json", action="store_true", help="print JSON")
     trust.set_defaults(func=_checked_trust)
 
-    routing = sub.add_parser("routing", help="whether teammates may message this machine's named agents")
+    routing = sub.add_parser("routing", help="whether this machine takes messages only at its own inbox agent")
     which = routing.add_mutually_exclusive_group()
-    which.add_argument("--all", action="store_true", help="named agents and the inbox (the default)")
-    which.add_argument("--inbox-only", action="store_true", help="only this machine's inbox")
+    which.add_argument("--all", action="store_true",
+                       help="your picked inbox agent and replies to your agents reach them by name (the default)")
+    which.add_argument("--inbox-only", action="store_true",
+                       help="everything for this machine goes to its own inbox agent")
     routing.add_argument("--json", action="store_true", help="print JSON")
     routing.set_defaults(func=cmd_routing)
 

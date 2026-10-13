@@ -62,11 +62,14 @@ def frame_record(record, identity, guidance="", agent_config=None, held_seconds=
     person = origin if isinstance(origin, dict) and "person" in origin else None
     person = {"display_name": person.get("display_name"), "email": person.get("person")} if person else None
     team = message.get("team") or identity.get("team", "")
+    from_kind = message.get("from_kind") if message.get("from_kind") in ("app", "agent") else None
     return wrap_message(record["id"], record["sender"], team, message["body"],
                         record.get("attachments_local") or (), guidance, agent_config,
                         machine=identity.get("handle", ""), target=record.get("target"), person=person,
                         from_agent=message.get("from_agent"), held_seconds=held_seconds,
-                        owner=_from_owner(message, person))
+                        owner=_from_owner(message, person), from_kind=from_kind,
+                        # §21: a v0.6 server's message (from_kind) reaches this machine as its owner's inbox
+                        inbox_of=identity.get("owner") if from_kind else None)
 
 
 def _from_owner(message, person):
@@ -784,7 +787,20 @@ class Connector:
         if self.config.mode == "inbox" and not record.get("target"):
             guidance = inbox_guidance(record["id"], self.identity["handle"],
                                       self.config.shareable_context, self.config.path)
-        return frame_record(record, self.identity, guidance, self.prompt_agent_config, held_seconds)
+        return frame_record(record, self._identity_with_owner(), guidance, self.prompt_agent_config, held_seconds)
+
+    def _identity_with_owner(self):
+        """The identity, with this machine's owner's display name (§21 C17: ``To: you, as <Name>'s inbox``),
+        read once from ``/me``; without it the frame keeps the pre-§21 To line."""
+        identity = self.identity or {}
+        if "owner" not in identity and self.api is not None:
+            try:
+                owner = (self.api.me() or {}).get("owner") or {}
+                identity = {**identity, "owner": owner.get("display_name") or owner.get("email")}
+            except (ApiError, RainError, OSError, ValueError, TypeError, AttributeError):
+                return identity  # offline: the old To line now, the owner next time
+            self.identity = identity
+        return identity
 
     def _prompt(self, target_name, text):
         """Run the prompt; return None on success or the Exception. A

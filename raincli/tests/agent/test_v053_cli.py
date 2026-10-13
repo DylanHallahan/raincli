@@ -47,20 +47,20 @@ def test_the_app_refuses_a_pushed_target_below_the_floor(tmp_path, app):  # noqa
 def test_the_ratchet_raises_the_floor_and_survives_a_reinstall(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
-    (state / security.RATCHET_FILE).write_text(json.dumps({"min_safe": "0.5.9"}))  # a later release ran here
-    assert security.effective_min(state) == (0, 5, 9)
+    (state / security.RATCHET_FILE).write_text(json.dumps({"min_safe": "0.6.2"}))  # a later release ran here
+    assert security.effective_min(state) == (0, 6, 2)
     d = driver(tmp_path, state)
     # Above the running version, below the ratcheted floor (not the running version itself, which is no update).
-    d.consider({"version": "v0.5.8", "allow_downgrade": True, "set_at": "t"})
+    d.consider({"version": "v0.6.1", "allow_downgrade": True, "set_at": "t"})
     assert d.data["error"] == "below_min_safe"
-    assert security.record(state) == (0, 5, 9)  # recording never lowers it
-    assert json.loads((state / security.RATCHET_FILE).read_text()) == {"min_safe": "0.5.9"}
+    assert security.record(state) == (0, 6, 2)  # recording never lowers it
+    assert json.loads((state / security.RATCHET_FILE).read_text()) == {"min_safe": "0.6.2"}
     fresh = tmp_path / "fresh"
     fresh.mkdir()
     assert security.record(fresh) == security.MIN_SAFE
     # A reinstall of this release reads the same record again.
     again = driver(tmp_path, state)
-    again.consider({"version": "v0.5.8", "allow_downgrade": True, "set_at": "t2"})
+    again.consider({"version": "v0.6.1", "allow_downgrade": True, "set_at": "t2"})
     assert again.data["error"] == "below_min_safe"
 
 
@@ -183,7 +183,7 @@ def test_a_returned_message_must_carry_the_requested_id(fake_api):
     from raincli_agent.api import ApiClient
     from raincli_agent.errors import BadResponse
     from .conftest import send
-    msg = send(fake_api, fake_api.alice, "bob", "x")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "x")
     api = ApiClient(fake_api.url, fake_api.bob, max_attempts=1)
     assert api.get_message(msg["id"].upper())["id"] == msg["id"]  # the request is canonicalised
     for wrong in ("C:", "NUL", "x:y", msg["id"].upper(), "0b7f3c1e-2a4d-4c6e-9f10-1a2b3c4d5e6f"):
@@ -207,7 +207,7 @@ def test_only_fixed_codes_reach_the_server(fake_api, connector_env):
     from raincli_agent.connector.herdr import HerdrError
     from raincli_agent.connector.runner import report_code
     from .conftest import send
-    msg = send(fake_api, fake_api.alice, "bob", "hello")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "hello")
     connector_env.herdr.prompt_results = [HerdrError("herdr agent prompt failed (x): /home/bob/secret-project pane w9:p1")]
     conn = connector_env.connector()
     conn.run_once()
@@ -303,17 +303,24 @@ def test_the_known_device_never_appears_in_errors(account, tmp_path, monkeypatch
 # -- §18.1 item 7, the owner shown ---------------------------------------------------------------------
 
 def test_the_owner_is_shown_in_frames_and_agents(fake_api, connector_env, as_agent, capsys):
+    """§21: the sender is shown as their person (the owner of the machine that sent), never the machine; and
+    `raincli agents` lists the team's people (GET /people), each with their email."""
     from .conftest import body_of, send
     st = fake_api.state
-    st.owner_names[st.tokens[fake_api.alice]] = "Alice Example"
-    send(fake_api, fake_api.alice, "bob", "hello")
+    st.set_person_name("alice@example.com", "Alice Owner")
+    send(fake_api, fake_api.alice, "bob@example.com", "hello")
     conn = connector_env.connector()
     conn.run_once()
     [prompt] = [p[1] for p in connector_env.herdr.prompts]
-    assert '\nFrom: machine alice (owner "Alice Example") | team alpha\n' in prompt and body_of(prompt) == "hello"
+    assert ('\nFrom: "Alice Owner" <alice@example.com> | sent by "Alice Owner"\'s agent | team alpha\n' in prompt
+            and body_of(prompt) == "hello")
+    assert "machine alice" not in prompt
     as_agent(fake_api.bob)
     assert cli.main(["agents"]) == 0
-    assert "alice (owner Alice Example)" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert any("Alice Owner" in line and "(alice@example.com)" in line for line in out.splitlines())
+    assert any("Bob Example" in line and "(bob@example.com)" in line for line in out.splitlines())
+    assert "eve" not in out  # another team
 
 
 # -- §18.1 item 4: an empty answer with Retry-After is honoured ---------------------------------------
@@ -345,7 +352,7 @@ def test_the_person_feed_waits(tmp_path):
     class Client:
         poll_backoff = None
 
-        def inbox(self, after, wait):
+        def inbox(self, after, wait, routed=False):
             self.poll_backoff = 9.0
             return [], after
     slept = []

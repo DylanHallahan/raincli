@@ -176,15 +176,52 @@ def _mailto(url):
     return "mailto:" + head + (("?" + urlencode(kept, quote_via=quote)) if kept else "")
 
 
-def toast_text(kind, sender):
-    """C14: "New message from <display name>" or "Escalation from <machine>". Never body text."""
+INBOX_OFFLINE_TOAST = "Your inbox has been offline for more than an hour. Open This computer to check it."
+
+
+def toast_wanted(entry, every=False):
+    """§21 PR6: whether a notification-queue entry (``person.take_notifications``) earns a toast.
+
+    Only what needs the person: a message a teammate wrote by hand (``from_kind`` ``app``), one held for
+    their approval, one waiting because they have no inbox, an escalation, and their inbox offline for
+    more than an hour (``inbox_offline``). Agent-sent messages their inbox received stay quiet unless
+    ``every`` ("Notify me about every message", off by default). An entry without ``from_kind`` (a server
+    or runtime before v0.6) is toasted as before."""
+    entry = entry if isinstance(entry, dict) else {}
+    kind = entry.get("kind")
+    if kind in ("inbox_offline", "escalation") or every:
+        return True
+    from_kind = entry.get("from_kind")
+    return from_kind not in ("app", "agent") or from_kind == "app" or entry.get("hold") == "approval" \
+        or entry.get("waiting") is True
+
+
+def toast_text(kind, sender, hold=None):
+    """C14: "New message from <name>", "Escalation from <name>" or "<name> is waiting for your approval".
+    Never body text."""
     name = " ".join(str(sender or "a teammate").split())[:64] or "a teammate"
-    return f"Escalation from {name}" if kind == "escalation" else f"New message from {name}"
+    if kind == "escalation":
+        return f"Escalation from {name}"
+    if hold == "approval":
+        return f"A message from {name} is waiting for your approval"
+    return f"New message from {name}"
 
 
 def toast_sender(message):
-    """The display name for a toast, from a person-API message: a person's display name, else the machine."""
-    ep = (message or {}).get("from_endpoint") or {}
-    if "person" in ep:
-        return ep.get("display_name") or ep["person"]
-    return ep.get("machine") or (message or {}).get("from") or "a teammate"
+    """The person label for a toast (C5.1, INV §1.7): the sender's display name, else their email. Never a
+    machine handle or an agent name: a machine-form endpoint (a server before v0.6) gives its owner's name
+    when the server sent one, else "a teammate"."""
+    message = message if isinstance(message, dict) else {}
+    ep = message.get("from_endpoint") if isinstance(message.get("from_endpoint"), dict) else {}
+    if isinstance(ep.get("person"), str) and ep["person"]:
+        name = ep.get("display_name")
+        return name if isinstance(name, str) and name.strip() else ep["person"]
+    owner = message.get("from_owner")
+    if isinstance(owner, dict):
+        owner = owner.get("display_name") or owner.get("email")
+    if isinstance(owner, str) and owner.strip():
+        return owner
+    sender = message.get("from")
+    if isinstance(sender, str) and sender.startswith("@") and "/" not in sender:
+        return sender[1:]
+    return "a teammate"

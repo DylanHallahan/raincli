@@ -90,14 +90,16 @@ def inbox(configs, who, *extra):
 
 def test_send_reply_ack_roundtrip(agents, world):
     mid = str(uuid.uuid4())
-    cli(agents, "alice", "send", "--to", "bob-agent", "--body-file", "-", "--id", mid,
+    cli(agents, "alice", "send", "--to", "bob@example.test", "--body-file", "-", "--id", mid,
         input="Can you review PR 12?\nThanks")
     # Retry of the same command must not duplicate.
-    cli(agents, "alice", "send", "--to", "bob-agent", "--body-file", "-", "--id", mid,
+    cli(agents, "alice", "send", "--to", "bob@example.test", "--body-file", "-", "--id", mid,
         input="Can you review PR 12?\nThanks")
     msgs = inbox(agents, "bob")
     assert [m["id"] for m in msgs] == [mid]
-    assert msgs[0]["from"] == "alice-agent" and msgs[0]["body"] == "Can you review PR 12?\nThanks"
+    # §21: teammates are people; bob's machine reads alice as her person (C5.2).
+    assert msgs[0]["from"] == "@alice@example.test" and msgs[0]["body"] == "Can you review PR 12?\nThanks"
+    assert msgs[0]["from_endpoint"] == {"person": "alice@example.test", "display_name": "Alice"}
 
     # Sender cannot acknowledge; recipient can, idempotently.
     assert cli(agents, "alice", "ack", mid, check=False).returncode == 3
@@ -107,7 +109,9 @@ def test_send_reply_ack_roundtrip(agents, world):
 
     cli(agents, "bob", "reply", mid, "--body", "Done, LGTM")
     reply = inbox(agents, "alice")
-    assert len(reply) == 1 and reply[0]["in_reply_to"] == mid and reply[0]["from"] == "bob-agent"
+    # The reply goes back to the machine that wrote (C4), shown as its person.
+    assert len(reply) == 1 and reply[0]["in_reply_to"] == mid and reply[0]["from"] == "@bob@example.test"
+    assert reply[0]["to"] == "alice-agent" and reply[0]["to_endpoint"] == {"machine": "alice-agent"}
     shown = json.loads(cli(agents, "alice", "show", mid, "--json").stdout)["message"]
     assert shown["delivery_state"] == "replied" and shown["acked_at"]
 
@@ -115,7 +119,7 @@ def test_send_reply_ack_roundtrip(agents, world):
 def test_offline_catch_up_and_watch(agents):
     ids = [str(uuid.uuid4()) for _ in range(3)]
     for i, mid in enumerate(ids):
-        cli(agents, "alice", "send", "--to", "bob-agent", "--body", f"note {i}", "--id", mid)
+        cli(agents, "alice", "send", "--to", "bob@example.test", "--body", f"note {i}", "--id", mid)
     out = cli(agents, "bob", "watch", "--json", "--once", "--timeout", "10").stdout
     got = [json.loads(line)["id"] for line in out.splitlines() if line.strip()]
     assert got == ids
@@ -124,14 +128,18 @@ def test_offline_catch_up_and_watch(agents):
 
 
 def test_cross_team_and_spoofing_rejected(agents, world, server):
-    assert cli(agents, "eve", "send", "--to", "bob-agent", "--body", "hi", check=False).returncode != 0
+    refused = cli(agents, "eve", "send", "--to", "bob@example.test", "--body", "hi", check=False)
+    assert refused.returncode != 0 and "Address people: send to a teammate's name or email" in refused.stderr
+    # A machine handle is never an address (§21 C2); a teammate's handle is mapped to its person.
+    refused = cli(agents, "alice", "send", "--to", "bob-agent", "--body", "hi", check=False)
+    assert refused.returncode != 0 and "Address people: send to Bob (bob@example.test)" in refused.stderr
     mid = str(uuid.uuid4())
-    cli(agents, "alice", "send", "--to", "bob-agent", "--body", "private", "--id", mid)
+    cli(agents, "alice", "send", "--to", "bob@example.test", "--body", "private", "--id", mid)
     assert cli(agents, "eve", "show", mid, check=False).returncode != 0
     assert cli(agents, "eve", "ack", mid, check=False).returncode != 0
     req = urllib.request.Request(
         server + "/api/v1/messages", method="POST",
-        data=json.dumps({"id": str(uuid.uuid4()), "to": "bob-agent", "body": "x", "from": "bob-agent"}).encode(),
+        data=json.dumps({"id": str(uuid.uuid4()), "to": "bob@example.test", "body": "x", "from": "bob-agent"}).encode(),
         headers={"Authorization": "Bearer " + world["tokens"]["alice"], "Content-Type": "application/json"},
     )
     with pytest.raises(urllib.error.HTTPError) as err:
@@ -148,18 +156,18 @@ def test_revoked_and_rotated_credentials_rejected(agents, world, session):
     assert cli(agents, "bob", "whoami", check=False).returncode != 0
     identity.revoke_agent(session, world["agents"]["alice"])
     session.commit()
-    assert cli(agents, "alice", "send", "--to", "bob-agent", "--body", "x", check=False).returncode != 0
+    assert cli(agents, "alice", "send", "--to", "bob@example.test", "--body", "x", check=False).returncode != 0
 
 
 @pytest.mark.skipif(not PG_CONTAINER, reason="needs a dedicated restartable PostgreSQL container")
 def test_postgres_restart_preserves_and_clients_recover(agents, engine):
     mid = str(uuid.uuid4())
-    cli(agents, "alice", "send", "--to", "bob-agent", "--body", "before restart", "--id", mid)
+    cli(agents, "alice", "send", "--to", "bob@example.test", "--body", "before restart", "--id", mid)
     subprocess.run(["docker", "restart", "-t", "5", PG_CONTAINER], check=True, capture_output=True, timeout=120)
     engine.dispose()  # the test harness's own pooled connections died with the server
     # The client retries transient 503/connection failures; the server reconnects (pool_pre_ping).
     mid2 = str(uuid.uuid4())
-    cli(agents, "alice", "send", "--to", "bob-agent", "--body", "after restart", "--id", mid2)
+    cli(agents, "alice", "send", "--to", "bob@example.test", "--body", "after restart", "--id", mid2)
     assert [m["id"] for m in inbox(agents, "bob")] == [mid, mid2]
 
 
@@ -171,7 +179,7 @@ def test_markdown_attachments_exact_bytes_and_safe_fetch(agents, tmp_path):
     ctx.write_bytes(b"context\n")
     mid = str(uuid.uuid4())
     for _ in range(2):  # retry with same id + same attachments is idempotent
-        cli(agents, "alice", "send", "--to", "bob-agent", "--body", "Report attached", "--id", mid,
+        cli(agents, "alice", "send", "--to", "bob@example.test", "--body", "Report attached", "--id", mid,
             "--attach", str(report), "--attach", str(ctx))
     [msg] = inbox(agents, "bob")
     names = [(a["filename"], a["size"]) for a in msg["attachments"]]
@@ -194,7 +202,7 @@ def test_markdown_attachments_exact_bytes_and_safe_fetch(agents, tmp_path):
 def test_body_file_is_not_an_attachment(agents, tmp_path):
     body = tmp_path / "body.md"
     body.write_text("# Body only\n")
-    cli(agents, "alice", "send", "--to", "bob-agent", "--body-file", str(body))
+    cli(agents, "alice", "send", "--to", "bob@example.test", "--body-file", str(body))
     [msg] = inbox(agents, "bob")
     assert msg["body"] == "# Body only\n" and msg["attachments"] == []
 

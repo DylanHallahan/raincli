@@ -104,7 +104,7 @@ def test_missing_binary_is_herdr_error(tmp_path):
 
 
 def test_connector_with_real_boundary(fake_api, connector_env, fake_bin):
-    msg = send(fake_api, fake_api.alice, "bob", "via the cli boundary")
+    msg = send(fake_api, fake_api.alice, "bob@example.com", "via the cli boundary")
     conn = connector_env.connector(expect_pane_id="w9:p1")
     conn.herdr = HerdrCli(fake_bin.binary)
     conn.run_once()
@@ -117,7 +117,7 @@ def test_connector_with_real_boundary(fake_api, connector_env, fake_bin):
 
 def test_connector_slow_prompt_is_uncertain(fake_api, connector_env, fake_bin):
     fake_bin.mode("slow")
-    msg = send(fake_api, fake_api.alice, "bob")
+    msg = send(fake_api, fake_api.alice, "bob@example.com")
     conn = connector_env.connector(prompt_timeout=1)
     conn.herdr = HerdrCli(fake_bin.binary)
     conn.run_once()

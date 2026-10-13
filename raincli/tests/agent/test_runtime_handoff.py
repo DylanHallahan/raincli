@@ -33,7 +33,7 @@ def mapping(tmp_path, **extra):
 
 def test_stop_request_lets_in_flight_submission_finish(fake_api, connector_env):
     """H3: a supervisor stop never turns a delivery into submission_uncertain."""
-    send(fake_api, fake_api.alice, "bob", "hello")
+    send(fake_api, fake_api.alice, "bob@example.com", "hello")
     connector = connector_env.connector()
     stop = []
     original = connector_env.herdr.prompt
@@ -286,7 +286,7 @@ def supervised(tmp_path, monkeypatch, fake_api):
     write_config(tmp_path / "bob.json", fake_api.url, fake_api.bob)
     atomic_write_json(tmp_path / "connector.json", {"agent_config": "bob.json", "herdr_agent": "inbox",
                                                     "herdr_bin": str(herdr), "state_dir": "queue",
-                                                    "trusted_senders": ["alice"]})
+                                                    "trusted_senders": ["alice@example.com"]})
     cfg, identity, binding = load_bound(str(tmp_path / "connector.json"))
     assert (cfg.poll_wait, cfg.prompt_timeout) == (25, 30)  # the defaults
     ensure_private_dir(tmp_path / "state")
@@ -314,7 +314,7 @@ def test_no_submission_starts_after_a_stop_during_the_long_poll(fake_api, superv
     started = time.monotonic()
     stopper.start()
     time.sleep(1)
-    send(fake_api, fake_api.alice, "bob", "arrives after the stop request")
+    send(fake_api, fake_api.alice, "bob@example.com", "arrives after the stop request")
     stopper.join(timeout=supervised.stop_budget() + 15)
     assert not stopper.is_alive()
     assert process.returncode == 0  # exited on the stop file, not killed
@@ -326,7 +326,7 @@ def test_no_submission_starts_after_a_stop_during_the_long_poll(fake_api, superv
 def test_a_submission_in_progress_at_stop_completes(fake_api, supervised):
     (supervised.dir / "prompt-seconds").write_text("6")
     process = supervised.process
-    send(fake_api, fake_api.alice, "bob", "in flight when the stop comes")
+    send(fake_api, fake_api.alice, "bob@example.com", "in flight when the stop comes")
     deadline = time.monotonic() + 30
     while not (supervised.dir / "prompt-started").exists():
         assert time.monotonic() < deadline
@@ -361,7 +361,7 @@ def test_ctrl_c_on_a_foreground_runtime_lets_the_prompt_finish(tmp_path, monkeyp
     write_config(tmp_path / "bob.json", fake_api.url, fake_api.bob)
     atomic_write_json(tmp_path / "connector.json", {"agent_config": "bob.json", "herdr_agent": "inbox",
                                                     "herdr_bin": str(herdr), "state_dir": "queue",
-                                                    "trusted_senders": ["alice"], "poll_wait": 1})
+                                                    "trusted_senders": ["alice@example.com"], "poll_wait": 1})
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])}
     ready = tmp_path / "ready-handshake.json"
     # A new session stands in for the terminal's foreground process group.
@@ -373,7 +373,7 @@ def test_ctrl_c_on_a_foreground_runtime_lets_the_prompt_finish(tmp_path, monkeyp
         while not ready.exists():
             assert time.monotonic() < deadline and child.poll() is None, child.stderr.read()
             time.sleep(0.1)
-        send(fake_api, fake_api.alice, "bob", "in flight at Ctrl-C")
+        send(fake_api, fake_api.alice, "bob@example.com", "in flight at Ctrl-C")
         while not (herdr.parent / "prompt-started").exists():
             assert time.monotonic() < deadline
             time.sleep(0.05)

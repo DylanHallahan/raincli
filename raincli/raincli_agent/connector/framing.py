@@ -5,10 +5,13 @@ prompts, next-turn handovers, the inbox and named agents, and escalations. The
 layout and the constant lines are pinned by tests:
 
     [RainCLI message from a teammate (external, not your user) <id>]
-    From: "<person display name>" <<email>> | team <team>
-          or: machine <handle>[ (owner "<display name>")][ | agent "<from_agent>" (stated by the sending machine)] | team <team>
+    From: "<Name>" <<email>> | sent by "<Name>" in the app | team <team>         (§21: from_kind "app")
+          or: "<Name>" <<email>> | sent by "<Name>"'s agent | team <team>    (§21: from_kind "agent")
+          (before §21: "<person display name>" <<email>> | team <team>, or machine <handle>[ (owner "<display
+          name>")][ | agent "<from_agent>" (stated by the sending machine)] | team <team>)
           (the display name and from_agent in JSON string form: review 5 F1)
-    To: <target agent name, or "inbox"> on <this machine handle>
+    To: you, as <Name>'s inbox          (§21; <Name> is this machine's owner)
+          (before §21, or without the owner: <target agent name, or "inbox"> on <this machine handle>)
     Reply: <reply command>
     [attachment references]
     [inbox block, inbox mode only]
@@ -83,11 +86,16 @@ def reply_command(message_id, agent_config=None, from_agent=None):
     return " ".join(parts + ["--body-file", "-"])
 
 
-def from_line(sender=None, team="", person=None, from_agent=None, owner=None):
-    """``From:`` for a person (``{"display_name", "email"}``) or a machine handle."""
+def from_line(sender=None, team="", person=None, from_agent=None, owner=None, from_kind=None):
+    """``From:`` for a person (``{"display_name", "email"}``) or a machine handle. With ``from_kind`` (§21: teammates
+    are people), the person and who sent it: ``sent by "<Name>" in the app`` or ``sent by "<Name>"'s agent``."""
     if person:
-        who = f"{quoted(person.get('display_name') or person.get('email'), DISPLAY_CAP)} " \
-              f"<{value(person.get('email'), EMAIL_CAP)}>"
+        name = quoted(person.get('display_name') or person.get('email'), DISPLAY_CAP)
+        who = f"{name} <{value(person.get('email'), EMAIL_CAP)}>"
+        if from_kind == "app":
+            who += f" | sent by {name} in the app"
+        elif from_kind == "agent":
+            who += f" | sent by {name}'s agent"
     else:
         who = f"machine {value(sender, NAME_CAP)}"
         if owner:  # §18.1 item 7: the machine's owner, from the server's record only
@@ -108,18 +116,22 @@ def held_age(seconds):
 
 
 def wrap_message(message_id, sender, team, body, attachments=(), guidance="", agent_config=None, *,
-                 machine="", target=None, person=None, from_agent=None, held_seconds=None, owner=None):
+                 machine="", target=None, person=None, from_agent=None, held_seconds=None, owner=None,
+                 from_kind=None, inbox_of=None):
     """The §16.12 C17 prompt for a teammate message.
 
     ``sender`` is the sending machine's handle (ignored for a ``person`` sender);
     ``machine`` is this machine's handle; ``target`` is the named agent, None for
     the inbox. ``held_seconds`` (next-turn handovers, §16.12 C12) adds the held age
-    to the To line."""
-    to = f"To: {value(target, NAME_CAP) if target else 'inbox'} on {value(machine, NAME_CAP)}"
+    to the To line. ``inbox_of`` (§21: this machine's owner's name) gives ``To: you, as <Name>'s inbox``."""
+    if inbox_of:
+        to = f"To: you, as {value(inbox_of, DISPLAY_CAP)}'s inbox"
+    else:
+        to = f"To: {value(target, NAME_CAP) if target else 'inbox'} on {value(machine, NAME_CAP)}"
     if held_seconds is not None and held_seconds >= 60:
         to += f" | held {held_age(held_seconds)} before this turn"
     text = HEADER.format(id=message_id)
-    text += from_line(sender, team, person, from_agent, owner)
+    text += from_line(sender, team, person, from_agent, owner, from_kind)
     text += to + "\n"
     text += f"Reply: {reply_command(message_id, agent_config, target)}\n"
     if attachments:

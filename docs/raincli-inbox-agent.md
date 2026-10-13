@@ -4,7 +4,7 @@ Recommended mapping: a **dedicated inbox agent** receives RainCLI messages, so r
 - **`instant`:** a Herdr agent in its own tab (this document's main path). Messages are submitted as soon as it is idle.
 - **`next-turn`:** a Claude Code or Codex session, without Herdr, through the hooks. **Delivery waits until the session is next used**: messages are handed over at its next start or prompt. See [Next-turn inbox](#next-turn-inbox-claude-code-without-herdr).
 
-Since v0.5.0 teammates can also message the machine's other named agents directly (`handle/agent`): a named Herdr agent at once, a hook session at its next turn. An agent that is only listed (found by the process scan, or a name two sessions share) is refused, and the sender is told to use the machine handle. See [SETUP.md](../SETUP.md#messages-to-your-agents-and-to-you).
+Since v0.6 teammates address **people**, not machines or agents. A message to you reaches the agent you picked as your inbox in that team (`raincli inbox set`, This computer or the hosted Inbox banner); pick this connector's inbox agent to receive them here. A reply to one of your agents comes back to that agent while it is live. The inbox agent acts for you: it handles what teammates send you and follows your instructions on passing work to your other agents. See [SETUP.md](../SETUP.md#messages-your-inbox-and-replies).
 
 | Component | Handles | Status |
 | --- | --- | --- |

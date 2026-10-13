@@ -46,10 +46,22 @@ D. The app window (protocol §16.10, §16.14, §16.15; design §10 GUI coverage)
    its minimum (760x520, scaled for DPI) still showing the conversation list (v0.5.4 §19.7), a custom-scheme new
    window that opens nothing, a live update of the open thread (an answer from another machine appears and the
    trail moves to replied, with no reload), This computer and Settings
-   with the last report in local time, the offline
+   with the last report in local time, v0.6 person routing (D6b: an inbox picked on This computer, a message to the
+   person routed to the picked agent, a PR1 reply routed back to the asking agent, the teammate's view free of the
+   machine and agent names; D6c: the CLI transcript of brief screenshot 14), the offline
    page and Retry (the server stopped and started), and sign-out (the machine revoked, the profile
    marked for reset). A full install afterwards restores the no-argument shortcut. Screenshots go to
    build/e2e-artifacts. Skipped with --real (the published v0.4 installers have no window).
+
+v0.6 (protocol §21, not yet run on Windows): teammates address PEOPLE, never machines or agents. Every machine above
+belongs to one person (EMAIL); a second person, the TEAMMATE, with one machine whose inbox is that machine
+(inbox-only), sends the messages that parts B, B2, C, D and E deliver, after EMAIL's inbox is pointed at the machine
+under test (the operator's set-inbox plus that machine's inbox-only routing). The observer machine still writes to
+its own owner (own traffic, "From your agents"), and the window's reply to it goes back to the observer.
+
+B2. (v0.6, C10.1) a pip v0.5.1 client from its release archive, as a foreground connector: it receives a message
+   to its owner on both C3.1 paths (inbox mode, then the named path), sends to a person by email with --from-agent,
+   and a PR1 reply (in_reply_to, no to) to that message is routed to (its machine, that agent) and acked by it.
 
 E. A stale or foreign saved setup (protocol §16.17, §16.18), each case on a fresh install of this ref:
    1. a pip-style config whose credential is revoked and owned by ANOTHER account, plus a connector config
@@ -127,6 +139,11 @@ e2e_versions = importlib.util.module_from_spec(_versions_spec)
 _versions_spec.loader.exec_module(e2e_versions)
 OLD, NEW, BROKEN = e2e_versions.versions(ROOT)
 OLD_PIP, OLD_MANAGED = "v0.2.0", "v0.3.2"
+# v0.6, not yet run on Windows. The teammate (another person in TEAM, with one machine) and the v0.5.1 client (B2).
+TEAMMATE_EMAIL, TEAMMATE_NAME, TEAMMATE = "e2e-teammate@example.invalid", "Taylor", "e2e-teammate"
+OLD_V051, V051_MACHINE, V051_AGENT = "v0.5.1", "e2e-v051-machine", "e2e-v051-agent"
+# The window machine's two local agents for D6b (brief screenshot 6: "laptop-agent" picked, "notes-agent" offered).
+LAPTOP_AGENT, NOTES_AGENT = "laptop-agent", "notes-agent"
 HOSTS = ("api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
 # The default RainCLI service (login.DEFAULT_API_URL): mapped to this runner, with no certificate for it, so a
 # fresh sign-in to the default (§16.20 F1) fails here and never reaches production.
@@ -516,6 +533,127 @@ def send(server, token, to, body):
     message_id = str(uuid.uuid4())
     api(server, token, "/api/v1/messages", {"id": message_id, "to": to, "body": body})
     return message_id
+
+
+# -- v0.6 person routing (protocol §21), not yet run on Windows ------------------------------------------------
+
+def message(server, token, message_id):
+    """``GET /api/v1/messages/{id}`` as ``token`` sees it (§21 C5.2: a reader's OWN endpoint keeps
+    ``{machine, agent}``; everyone else is ``{person, display_name}``), or None."""
+    try:
+        return api(server, token, f"/api/v1/messages/{message_id}")["message"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def received(server, token, message_id):
+    """v0.6, not yet run on Windows. Stricter than delivered(): the recipient machine acked it (received or later),
+    not a derived or reported ``held``. For a message routed to a machine endpoint, so the sender sees the real state
+    (C13 H4 hides the read state only for messages to a person with no inbox)."""
+    state = (message(server, token, message_id) or {}).get("delivery_state")
+    return state if state not in (None, "stored", "held") else None
+
+
+def old_client_took(server, token, queue, message_id):
+    """v0.6, not yet run on Windows. For a pre-0.5 connector (B): "acked" when it acked the message, "skipped
+    (<problem>)" when it recorded it in its queue's skipped.json (it can't parse v0.6's "@email" sender), else None."""
+    state = received(server, token, message_id)
+    if state:
+        return f"acked ({state})"
+    try:
+        recent = json.loads((queue / "skipped.json").read_text("utf-8")).get("recent") or []
+    except (OSError, ValueError):
+        return None
+    hit = next((r for r in recent if isinstance(r, dict) and r.get("id") == message_id), None)
+    return f"skipped ({hit.get('problem')})" if hit else None
+
+
+def refusal(server, token, to):
+    """v0.6, not yet run on Windows. ``(status, code, message)`` of a refused send to ``to``; None if it was taken."""
+    try:
+        send(server, token, to, "this must be refused")
+    except urllib.error.HTTPError as exc:
+        try:
+            error = json.loads(exc.read()).get("error") or {}
+        except ValueError:
+            error = {}
+        return exc.code, error.get("code"), error.get("message", "")
+    return None
+
+
+def point_inbox_at(server, email, handle, token, agent="inbox", inbox_only=True):
+    """v0.6, not yet run on Windows. Make ``handle`` (one of ``email``'s machines, ``token`` its credential) that
+    person's inbox. Old clients (< v0.5) never report agents, so nothing can be picked live for them: the operator's
+    set-inbox (no live check) names the agent, and the machine's own inbox-only routing makes messages to the person
+    take the C3.1(a) machine-endpoint path, the one an old client receives. With ``inbox_only=False`` the routing is
+    "all" and the pick is the named path, C3.1(b). --no-deliver-waiting: the messages waiting in EMAIL's app (and
+    those sent back there when an earlier inbox machine was revoked) are not pushed to the machine under test, so
+    every delivery checked below is exactly the one sent."""
+    routing = api(server, token, "/api/v1/routing", {"routing": "inbox-only" if inbox_only else "all"}, method="PUT")
+    check(routing.get("routing") == ("inbox-only" if inbox_only else "all"), f"{handle}'s routing is {routing}")
+    server.admin("set-inbox", "--team", TEAM, "--email", email, "--handle", handle, "--agent", agent,
+                 "--no-deliver-waiting")
+    inbox = api(server, token, "/api/v1/me/inbox").get("inbox") or {}
+    check((inbox.get("machine"), inbox.get("agent")) == (handle, agent),
+          f"{email}'s inbox is {inbox}, not {agent} on {handle}")
+
+
+def machine_token(config_path=None):
+    """v0.6, not yet run on Windows. The credential of a machine signed in here (DPAPI, this Windows user), for
+    the window machine's own API reads and sends in D6b. Registered in SECRETS before anything can print it."""
+    from raincli_agent.config import load_config
+
+    return SECRETS.add(load_config(str(config_path or default_agent_config())).token.reveal())
+
+
+def publish_local_agents(server, token, names, source="hook"):
+    """v0.6, not yet run on Windows. A presence report (``PUT /api/v1/presence``, §14.1) listing ``names`` as idle,
+    deliverable (next-turn) agents of the machine, with no inbox role (so a pick of one is the named path, C3.1(b)).
+    The e2e has no live local agent it can rely on (no Herdr, no running Claude Code or Codex session), so it
+    publishes the directory entries a hook session would, as tests/conftest.py seeds its world inbox agent. The
+    names stay known for 14 days (``known_agents``), so they remain pickable; they are LIVE (C13 M4, what a PR1
+    reply needs) only until the machine's own runtime reports its directory again, so callers re-publish right
+    before a step that needs them live and check with local_agent_live()."""
+    agents = [{"key": hashlib.sha256(name.encode()).hexdigest()[:16], "name": name, "type": "claude",
+               "status": "idle", "source": source, "reachability": "next-turn"} for name in names]
+    return api(server, token, "/api/v1/presence", {"status": "ready", "agents": agents}, method="PUT")
+
+
+def local_agent_live(server, token, name):
+    """v0.6, not yet run on Windows. Whether ``GET /api/v1/me/inbox`` offers ``name`` on the caller's machine as
+    live (the server's C13 M4 test: fresh presence and directory row, deliverable, not inbox-only)."""
+    me = api(server, token, "/api/v1/me")["agent"]["handle"]
+    return any(c.get("machine") == me and c.get("agent") == name and c.get("live") is True
+               for c in api(server, token, "/api/v1/me/inbox").get("candidates") or [])
+
+
+def pr1_reply(server, replier, parent_id, asker_token, asker, agent, body, local_agents, attempts=3):
+    """v0.6, not yet run on Windows. C4.1/PR1: ``replier`` answers ``parent_id`` with ``in_reply_to`` and NO ``to``;
+    the server routes it to (``asker``, ``agent``) when that agent is live at send time, else to the asking person's
+    inbox. Its liveness is published just before (``publish_local_agents``), but the asking machine's own runtime may
+    report its directory in between (the window app does every tick); a reply that fell back is not a routing
+    failure, so it is retried, at most ``attempts`` times. ``local_agents`` is the asker's whole published directory
+    (a report replaces it). Returns ``(reply id, the reply as the asker sees it)``."""
+    seen = None
+    for attempt in range(1, attempts + 1):
+        publish_local_agents(server, asker_token, local_agents)
+        if not local_agent_live(server, asker_token, agent):
+            say(f"PR1 attempt {attempt}: {agent} on {asker} is not live yet; publishing again")
+            time.sleep(2)
+            continue
+        reply = str(uuid.uuid4())
+        api(server, replier, "/api/v1/messages", {"id": reply, "body": body, "in_reply_to": parent_id})
+        seen = message(server, asker_token, reply) or {}
+        if seen.get("to_endpoint") == {"machine": asker, "agent": agent}:
+            return reply, seen
+        say(f"PR1 attempt {attempt}: the reply went to {seen.get('to_endpoint')} (the inbox fallback: the agent "
+            "was no longer live at send time); replying again")
+    raise Failure(f"no PR1 reply reached {agent} on {asker} in {attempts} attempts; last {seen and seen.get('to_endpoint')}")
+
+
+def leaks(texts, names):
+    """v0.6, not yet run on Windows. Which of ``names`` (machine handles, agent names) appear in any of ``texts``."""
+    return sorted({n for n in names for t in texts if n in t})
 
 
 # -- the app window (part D) ------------------------------------------------------------------
@@ -989,8 +1127,30 @@ def inbox_bodies(server, token):
     return [m.get("body", "") for m in data.get("messages", [])]
 
 
-def part_d(app, server, installers, password, observer, menu, work):
-    """The app window over CDP; see D in the module docstring."""
+def pick_person(page, name, email):
+    """v0.6, not yet run on Windows. New message's To addresses a PERSON (§21 C7.2). The v0.6 web half turns the
+    page's people <select id=to> into a combobox (app-picker.js: an <input id=to role=combobox>, options in
+    #to-options, picked on mousedown, shown as a chip). Without that script the <select> is used by label; a
+    server without the v0.6 web half still has the v0.5.5 text field, which takes the email (C2.1 string form)."""
+    page.wait_for_load_state("load")  # app-picker.js (deferred) has replaced the <select> by then, if it will
+    to = page.locator("#to")
+    to.wait_for(state="attached", timeout=30000)
+    if page.locator("select#to").count():
+        to.select_option(label=name)
+    elif (to.get_attribute("role") or "") == "combobox":
+        to.click()
+        to.fill(name)
+        option = page.locator("#to-options .rc-picker-option", has_text=name).first
+        option.wait_for(state="visible", timeout=30000)
+        option.click()
+        page.wait_for_selector(".rc-chip-picked:not([hidden])", timeout=30000)
+        check(name in page.inner_text(".rc-chip-picked"), f"the picker's chip says {page.inner_text('.rc-chip-picked')!r}")
+    else:
+        to.fill(email)
+
+
+def part_d(app, server, installers, password, observer, teammate, menu, work):
+    """The app window over CDP; see D in the module docstring. ``teammate`` is the teammate machine's token (v0.6)."""
     from playwright.sync_api import sync_playwright
 
     # D1. A full install of this ref: stub 2, an install_stamp, the no-argument shortcut.
@@ -1101,9 +1261,15 @@ def part_d(app, server, installers, password, observer, menu, work):
             "handoff opened the inbox and the rail shows who is signed in; the token is not in navigator.userAgent")
 
         # D5. Read, reply and send.
-        send(server, observer, {"person": EMAIL}, "Hello from the observer machine")
+        # v0.6, not yet run on Windows: the observer is the owner's own machine, so its message to the owner is own
+        # traffic (C13 H2 (i)) in the window's "From your agents" conversation, found by its id (not "the first row").
+        # The window's REPLY goes back to the observer (H2 (ii)); the NEW message addresses a person, the teammate
+        # (C2: a machine handle is refused), through the people picker, and reaches the teammate's inbox machine.
+        hello = send(server, observer, {"person": EMAIL}, "Hello from the observer machine")
+        own_conversation = (message(server, observer, hello) or {}).get("conversation_id")
+        check(own_conversation, "the observer cannot read its own message to its owner")
         page.reload()
-        page.click(".rc-conv")
+        page.click(f".rc-conv[href*='{own_conversation}']")
         page.wait_for_selector(".rc-thread")
         check("Hello from the observer machine" in page.inner_text(".rc-thread"), "the thread is missing the message")
         shot(page, "d5-thread")
@@ -1112,24 +1278,30 @@ def part_d(app, server, installers, password, observer, menu, work):
         page.click(".rc-compose button[type=submit]")  # the thread header also has Archive
         # v0.5.5 R2 (§20.2): a send in a conversation stays in place; the message appears without a navigation.
         page.wait_for_selector(".rc-thread .rc-msg:has-text('A reply from the app window')", timeout=60000)
+        wait_for("the observer to receive the window's reply (own traffic, back to the asking machine)",
+                 lambda: "A reply from the app window" in inbox_bodies(server, observer), timeout=120)
         page.click(".rc-new")
-        page.fill("#to", OBSERVER)
+        pick_person(page, TEAMMATE_NAME, TEAMMATE_EMAIL)  # v0.6: a person, never OBSERVER or any other handle
         page.fill("#body", "A new message from the app window")
         page.click(".rc-compose button[type=submit]")
         # New message still posts the form; app mode redirects to the conversation, with no banner (§20.2).
         page.wait_for_url("**/app/conversations/**", timeout=60000)
         page.wait_for_selector(".rc-thread .rc-msg:has-text('A new message from the app window')", timeout=60000)
-        wait_for("the observer to receive the reply and the new message",
-                 lambda: {"A reply from the app window", "A new message from the app window"}
-                 <= set(inbox_bodies(server, observer)), timeout=120)
+        wait_for("the teammate's inbox machine to receive the new message",
+                 lambda: "A new message from the app window" in inbox_bodies(server, teammate), timeout=120)
         shot(page, "d5-sent")
-        say("PASS: D5. the window read the observer's message, replied and sent a new one; both reached it")
+        say("PASS: D5. the window read the observer's message (its own machine, From your agents) and replied, and "
+            f"the reply reached the observer; a new message to the person {TEAMMATE_NAME} (picked by name) reached "
+            "the teammate's inbox machine")
 
         # D5b. v0.5.2 (§17.1, §17.2): times in the window are local, never the server's UTC text; Archive moves
         # the conversation out of the inbox for both sides and under Archived; Unarchive brings it back.
+        # v0.6, not yet run on Windows: the conversation is the person pair (EMAIL, the teammate), so "the other side"
+        # is the teammate's machine (C13 M1: a machine reads its owner's conversations); archived_by is a person.
         match = re.search(r"/app/conversations/([0-9a-f-]{36})", url_of(page))
         check(match, f"D5 did not end on the conversation: {url_of(page)}")
         conversation = match.group(1)
+        check(conversation != own_conversation, "the message to the teammate landed in the From your agents conversation")
         stamp = page.locator(".rc-thread time[datetime]").first
         page.wait_for_selector(".rc-thread time[data-local]", state="attached", timeout=30000)
         label, title = stamp.inner_text(), stamp.get_attribute("title") or ""
@@ -1138,13 +1310,13 @@ def part_d(app, server, installers, password, observer, menu, work):
         page.wait_for_url("**/app/inbox?notice=archived", timeout=60000)
         check(page.locator(f".rc-conv[href*='{conversation}']").count() == 0, "the archived conversation is in the inbox")
 
-        def observer_list(archived):
-            rows = api(server, observer, f"/api/v1/conversations?archived={archived}")["conversations"]
+        def peer_list(archived):
+            rows = api(server, teammate, f"/api/v1/conversations?archived={archived}")["conversations"]
             return {row["id"]: row for row in rows}
-        seen = observer_list("only").get(conversation)
-        check(seen and seen["archived"] and "person" in (seen.get("archived_by") or {}),
-              f"the observer does not see it archived by the person: {seen}")
-        check(conversation not in observer_list("exclude"), "the observer's main list still has the archived conversation")
+        seen = peer_list("only").get(conversation)
+        check(seen and seen["archived"] and (seen.get("archived_by") or {}).get("person") == EMAIL,
+              f"the teammate does not see it archived by the person: {seen}")
+        check(conversation not in peer_list("exclude"), "the teammate's main list still has the archived conversation")
         page.click("nav.rc-nav a:has-text('Archived')")
         page.wait_for_url("**/app/archived", timeout=60000)
         row = page.locator(".rc-archived-row", has_text="Archived by you")
@@ -1157,7 +1329,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         page.click("nav.rc-nav a:has-text('Inbox')")
         page.wait_for_url(f"**/app/conversations/{conversation}*", timeout=60000)  # §20.6 M1
         page.wait_for_selector(f".rc-conv[href*='{conversation}']", timeout=60000)
-        check(not observer_list("include")[conversation]["archived"], "the observer still sees it archived")
+        check(not peer_list("include")[conversation]["archived"], "the teammate still sees it archived")
         say(f"PASS: D5b. the thread shows local times ({label!r}, title {title!r}); Archive moved the conversation "
             "out of both sides' inboxes and under Archived (archived by you); Unarchive brought it back")
 
@@ -1218,8 +1390,11 @@ def part_d(app, server, installers, password, observer, menu, work):
         say("PASS: D5c. target=_blank and window.open with a custom scheme opened no window and nothing else; "
             "the drop was logged by scheme only")
 
-        # D5e. v0.5.4 (§19.1, §19.7): the open thread updates on its own. The window sends a message; the observer
-        # machine acknowledges and answers it; without a reload the answer appears and the trail moves to replied.
+        # D5e. v0.5.4 (§19.1, §19.7): the open thread updates on its own. The window sends a message; the other
+        # side's machine acknowledges and answers it; without a reload the answer appears and the trail moves to replied.
+        # v0.6, not yet run on Windows: the other side is the teammate's inbox machine (the conversation is the person
+        # pair); its answer is a reply with in_reply_to and no "to" (C4.3: to the window's person, EMAIL, who has no
+        # inbox yet, so it waits in the app, which is this window).
         page.goto(server.url + f"/app/conversations/{conversation}#latest")
         page.wait_for_selector(".rc-compose textarea#body", timeout=60000)
         page.fill("#body", "Live from the window")
@@ -1227,15 +1402,14 @@ def part_d(app, server, installers, password, observer, menu, work):
         page.wait_for_selector(".rc-thread .rc-msg:has-text('Live from the window')", timeout=60000)  # in place (§20.2)
         page.mouse.move(2, 2)  # no hover state in the capture
         shot(page, "after-win-4-send-in-place-light-1180x780")  # brief v0.5.5 shot 4: stored, no banner, no focus box
-        mine = wait_for("the window's message in the observer's inbox", lambda: next(
-            (m for m in api(server, observer, "/api/v1/inbox?routing=1&wait=0&limit=100")["messages"]
+        mine = wait_for("the window's message in the teammate's inbox", lambda: next(
+            (m for m in api(server, teammate, "/api/v1/inbox?routing=1&wait=0&limit=100")["messages"]
              if m["body"] == "Live from the window"),
             None), timeout=120)
         page.evaluate("() => { window.__rcNoReload = 'kept'; }")  # gone if the page reloads
-        api(server, observer, f"/api/v1/messages/{mine['id']}/ack", {}, method="POST")
+        api(server, teammate, f"/api/v1/messages/{mine['id']}/ack", {}, method="POST")
         answer = str(uuid.uuid4())
-        api(server, observer, "/api/v1/messages", {"id": answer, "to": {"person": EMAIL}, "body": "Live answer",
-                                                   "in_reply_to": mine["id"]})
+        api(server, teammate, "/api/v1/messages", {"id": answer, "body": "Live answer", "in_reply_to": mine["id"]})
         wait_for("the answer in the open window", lambda: page.locator(f"#m-{answer}").count() == 1,
                  timeout=60, interval=1)
         trail = page.locator(f'[data-trail="{mine["id"]}"]')
@@ -1243,8 +1417,8 @@ def part_d(app, server, installers, password, observer, menu, work):
             "data-state", timeout=2000) == "replied", timeout=60, interval=1)
         check(page.evaluate("() => window.__rcNoReload") == "kept", "the window reloaded to show the update")
         shot(page, "d5e-live-replied")
-        say("PASS: D5e. a message from the observer machine appeared in the open window without a reload, and the "
-            "window's own message moved to replied")
+        say("PASS: D5e. the teammate machine's answer (a reply with no to) appeared in the open window without a "
+            "reload, and the window's own message moved to replied")
 
         # D5f. v0.5.5 R3 (§20.4, brief shot 6): keyboard focus on a message shows one ring in --rc-focus that follows the
         # message's radius; after a mouse click no message has an outline.
@@ -1264,9 +1438,13 @@ def part_d(app, server, installers, password, observer, menu, work):
         say("PASS: D5f. Tab into a message shows one rounded ring (10px, the message radius); a click shows none")
 
         # D5h. v0.5.5 (§20.3, §20.6 L6, §20.7): a hidden start reads nothing, and launch opens the latest conversation. The
-        # observer writes; the app restarts hidden (--background, as at logon), so the hosted page loads unseen: no
+        # teammate writes; the app restarts hidden (--background, as at logon), so the hosted page loads unseen: no
         # focus, nothing acknowledged after 10 s (and, while hidden, no polling). Shown and focused, the window is on
         # that conversation, selected in the list, and only then reads the message.
+        # v0.6, not yet run on Windows: the writer is the teammate (not the observer, whose messages to its owner land
+        # in From your agents, not in `conversation`). EMAIL has no inbox yet, so the message waits in the app (C3.2).
+        # Its read state is read with the OBSERVER's credential (EMAIL's own machine: the recipient person's view);
+        # the teammate, as sender, never sees it (C13 H4: no read receipt for a message to a person).
         # The app quits first: a message sent while the previous window is still open and focused would be read
         # there (its poll), before the hidden start this step is about.
         window.close()
@@ -1283,7 +1461,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         # v0.5.6: the window must fit on screen for the pixel check below (the runner starts at 1024x768).
         d5h_display = display_state()
         set_display(1920, 1080, 100)
-        unseen = send(server, observer, {"person": EMAIL}, "Read me only when you can see me")
+        unseen = send(server, teammate, {"person": EMAIL}, "Read me only when you can see me")  # v0.6
         launched = time.strftime("%H:%M:%S", time.gmtime())
         port = free_port()
         env = dict(os.environ, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f"--remote-debugging-port={port}")
@@ -1361,7 +1539,7 @@ def part_d(app, server, installers, password, observer, menu, work):
         # for the captures, independent of the hidden start's DevTools session.
         app.quit()
         wait_cold("before --open")
-        unseen_open = send(server, observer, {"person": EMAIL}, "Read me when the window opens")
+        unseen_open = send(server, teammate, {"person": EMAIL}, "Read me when the window opens")  # v0.6, as above
         window = WindowCDP(pw, open_window_cdp(app))
         page = window.page(INBOX, timeout=180)
         page.wait_for_url(f"**/app/conversations/{conversation}*", timeout=60000)
@@ -1446,6 +1624,139 @@ def part_d(app, server, installers, password, observer, menu, work):
         shot(page, "d6-settings")
         say(f"PASS: D6. This computer shows the machine (last report {last_report!r}); Settings shows the routing "
             "policy")
+
+        # D6b. v0.6 person routing (§21 C11.4, C8, C9.1, C3, C4, C5; brief "Windows e2e" and screenshot 6).
+        # v0.6, NOT YET RUN ON WINDOWS. The live local agents: the e2e has no Herdr and no running Claude Code or
+        # Codex session, so the window machine's directory is published with its own credential (two idle, next-turn
+        # hook entries, no inbox role: publish_local_agents), as tests/conftest.py seeds its world. The pick itself is
+        # made in the real window ("Use as my inbox"); the server accepts it because the names are known (C1.1).
+        # A fresh app sign-in is MACHINE MODE (runtime.json machine_config, no connector): nothing on the window machine
+        # polls its server queue, so a message routed to (window machine, agent) is checked as ROUTED there (the
+        # machine's own view of it keeps {machine, agent}, C5.2), not as acked; the sender's state is logged only.
+        window_token = machine_token()
+        window_agents = [LAPTOP_AGENT, NOTES_AGENT]
+        publish_local_agents(server, window_token, window_agents)
+        # (a0) A message to EMAIL before any inbox: held no_inbox for its sender (C6.1), and the card's waiting tick
+        # (C6.2). The window shows its local pages now, so the hosted page cannot read it in the meantime.
+        waiting = send(server, teammate, {"person": EMAIL}, "Waiting for an inbox to be picked")
+        held = message(server, teammate, waiting) or {}
+        check((held.get("delivery_state"), held.get("hold_reason")) == ("held", "no_inbox"),
+              f"the teammate sees the waiting message as {held.get('delivery_state')}/{held.get('hold_reason')}")
+        # (a) This computer's "Your inbox" card: No inbox yet, both agents offered, the waiting tick on by default.
+        page.click("nav.rc-nav button[data-open=this-computer]", no_wait_after=True)  # the app navigates
+        page = window.page("this-computer.html", timeout=60)  # re-attached after the swap
+        wait_for("This computer's inbox card", lambda: page.inner_text("#inbox-status").startswith("No inbox yet"),
+                 timeout=60, interval=1)
+        laptop = page.locator(f"#inbox-candidates li[data-inbox-agent='{LAPTOP_AGENT}']")
+        notes = page.locator(f"#inbox-candidates li[data-inbox-agent='{NOTES_AGENT}']")
+        wait_for("both local agents offered", lambda: laptop.count() == 1 and notes.count() == 1, timeout=60, interval=1)
+        check(page.is_visible("#inbox-waiting-row") and page.is_checked("#inbox-waiting"),
+              "the waiting messages' tick is not shown, or not ticked by default")
+        waiting_label = page.inner_text("#inbox-waiting-label")
+        check(waiting_label.startswith("Also deliver the"), f"the waiting tick says {waiting_label!r}")
+        shot(page, "d6b-this-computer-no-inbox")
+        laptop.locator("button").click(no_wait_after=True)
+        expected = f"Your inbox: {LAPTOP_AGENT} on this computer"
+        wait_for("the inbox status line", lambda: page.inner_text("#inbox-status") == expected, timeout=60, interval=1)
+        said = page.inner_text("#inbox-message")
+        check(said.startswith(f"Your inbox is now {LAPTOP_AGENT} on this computer."), f"after the pick: {said!r}")
+        page.click("#inbox-change")  # Change: the picker again, the pick shown as Your inbox, the other offered
+        wait_for("the picker after Change", lambda: page.is_visible("#inbox-picker"), timeout=30, interval=0.5)
+        check(laptop.locator(".pill").count() == 1 and laptop.locator(".pill").inner_text() == "Your inbox",
+              f"the picked agent's row says {laptop.inner_text()!r}")
+        check(notes.locator("button").inner_text() == "Use as my inbox", f"the other agent's row says {notes.inner_text()!r}")
+        page.mouse.move(2, 2)
+        shot(page, "after-win-v06-6-this-computer-inbox")  # brief v0.6 screenshot 6 (light)
+        page.emulate_media(color_scheme="dark")  # no page.evaluate on the local pages (their CSP); a short settle
+        time.sleep(1)
+        shot(page, "after-win-v06-6-this-computer-inbox-dark")
+        page.emulate_media(color_scheme="null")
+        page.click("#inbox-change")  # Cancel: back to the status line only
+        mine_now = api(server, window_token, "/api/v1/me/inbox")
+        check(((mine_now.get("inbox") or {}).get("machine"), (mine_now.get("inbox") or {}).get("agent"))
+              == (WINDOW_MACHINE, LAPTOP_AGENT) and mine_now.get("waiting") == 0,
+              f"the server's inbox after the pick: {mine_now.get('inbox')}, waiting {mine_now.get('waiting')}")
+        moved = message(server, window_token, waiting) or {}
+        check(moved.get("to_endpoint") == {"machine": WINDOW_MACHINE, "agent": LAPTOP_AGENT},
+              f"the waiting message was not delivered to the pick: {moved.get('to_endpoint')}")
+        say(f"PASS: D6b(a). This computer showed No inbox yet, offered {LAPTOP_AGENT} and {NOTES_AGENT} with "
+            f"{waiting_label!r} ticked; Use as my inbox made it {expected!r} (Change shows the pick and offers the "
+            "other agent); the server has the inbox and the waiting message went to it")
+
+        # (b) Person delivery: the teammate sends to the PERSON; it is routed to the picked agent (C3.1(b), named path).
+        delivery = send(server, teammate, {"person": EMAIL}, "For whoever is your inbox")
+        routed = message(server, window_token, delivery) or {}
+        check(routed.get("to_endpoint") == {"machine": WINDOW_MACHINE, "agent": LAPTOP_AGENT},
+              f"a message to {EMAIL} was routed to {routed.get('to_endpoint')}")
+        theirs = message(server, teammate, delivery) or {}
+        check((theirs.get("to_endpoint") or {}).get("person") == EMAIL and theirs.get("to") == "@" + EMAIL,
+              f"the sender sees the recipient as {theirs.get('to')!r} {theirs.get('to_endpoint')}")
+        say(f"PASS: D6b(b). a message to the person {EMAIL} was routed to {LAPTOP_AGENT} on {WINDOW_MACHINE} (the "
+            f"machine's own view); the sender sees only the person (state {theirs.get('delivery_state')}, hold "
+            f"{theirs.get('hold_reason')}: machine mode has no connector to take it here)")
+
+        # (c) PR1: the window machine's NOTES agent asks the teammate (a person); the teammate replies with
+        # in_reply_to and no to; the reply goes back to (window machine, notes-agent) while it is live (C4.1, C13 M4).
+        # The asking agent is deliberately NOT the inbox agent: the C4.1 fallback (the asker's inbox) would be
+        # (window machine, laptop-agent), so the two outcomes are told apart.
+        asked = str(uuid.uuid4())
+        api(server, window_token, "/api/v1/messages", {"id": asked, "to": {"person": TEAMMATE_EMAIL},
+                                                       "body": "A question from an agent on the window machine",
+                                                       "from_agent": NOTES_AGENT})
+        got = wait_for("the question in the teammate's inbox", lambda: next(
+            (m for m in api(server, teammate, "/api/v1/inbox?routing=1&wait=0&limit=100")["messages"]
+             if m["id"] == asked), None), timeout=120)
+        check(got.get("from") == "@" + EMAIL and got.get("from_agent") is None and got.get("from_kind") == "agent"
+              and (got.get("from_endpoint") or {}).get("person") == EMAIL,
+              f"the teammate sees the question as from {got.get('from')!r} {got.get('from_endpoint')} "
+              f"(from_agent {got.get('from_agent')!r}, from_kind {got.get('from_kind')!r})")
+        reply, seen = pr1_reply(server, teammate, asked, window_token, WINDOW_MACHINE, NOTES_AGENT,
+                                "An answer for the agent that asked", window_agents)
+        check(seen.get("in_reply_to") == asked, f"the reply's in_reply_to is {seen.get('in_reply_to')}")
+        say(f"PASS: D6b(c). PR1: a reply with in_reply_to and no to was routed back to {NOTES_AGENT} on "
+            f"{WINDOW_MACHINE} (the asking agent, not the inbox agent)")
+
+        # (d) Privacy (C5): nothing the teammate can fetch about these messages names the window machine, the
+        # observer or either agent: the messages, its inbox, its conversations and their messages, people, agents.
+        views = [message(server, teammate, m) for m in (waiting, delivery, asked, reply)]
+        check(all(views), "the teammate cannot read one of its own messages")
+        texts = [json.dumps(v) for v in views] + [json.dumps(api(server, teammate, p)) for p in (
+            "/api/v1/inbox?routing=1&wait=0&limit=100&include_acked=true", "/api/v1/conversations?archived=include",
+            f"/api/v1/conversations/{conversation}/messages", "/api/v1/people", "/api/v1/agents")]
+        leaked = leaks(texts, [WINDOW_MACHINE, OBSERVER, LAPTOP_AGENT, NOTES_AGENT])
+        check(not leaked, f"the teammate's view names {leaked}")
+        page.click("nav.rc-nav button[data-open=settings]", no_wait_after=True)  # the app navigates
+        page = window.page("settings.html", timeout=60)  # re-attached after the swap
+        wait_for("Settings to show the inbox", lambda: page.inner_text("#inbox-status") == expected, timeout=60,
+                 interval=1)
+        say(f"PASS: D6b(d). the teammate's view of these messages, its inbox, conversations, people and agents never "
+            f"names {WINDOW_MACHINE}, {OBSERVER}, {LAPTOP_AGENT} or {NOTES_AGENT}; Settings shows {expected!r}")
+
+        # D6c. Brief v0.6 screenshot 14 (terminal text): `raincli people`, `raincli inbox show` and a refused
+        # `raincli send <a teammate's machine handle>`, through the installed CLI on the window machine.
+        # v0.6, not yet run on Windows.
+        transcript = []
+
+        def cli_step(*args):
+            result = app.cli(*args, check=False, timeout=120)
+            transcript.append(f"$ raincli {' '.join(str(a) for a in args)}\n{result.stdout}{result.stderr}"
+                              f"[exit {result.returncode}]\n")
+            return result, result.stdout + result.stderr
+        people, people_text = cli_step("people")
+        check(people.returncode == 0 and TEAMMATE_NAME in people_text and not re.search(rf"{TEAMMATE}(?!@)", people_text),
+              f"raincli people: {SECRETS.scrub(people_text)[-1500:]}")
+        shown, shown_text = cli_step("inbox", "show")
+        check(shown.returncode == 0 and LAPTOP_AGENT in shown_text, f"raincli inbox show: {SECRETS.scrub(shown_text)[-1500:]}")
+        body = work / "v06-14-body.txt"
+        body.write_text("this must be refused\n", "utf-8")
+        refused, refused_text = cli_step("send", TEAMMATE, "--body-file", body)
+        check(refused.returncode != 0 and "Address people" in refused_text and TEAMMATE_EMAIL in refused_text,
+              f"raincli send {TEAMMATE} was not refused with Address people: {SECRETS.scrub(refused_text)[-1500:]}")
+        ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        (ARTIFACTS / "v06-14-cli.txt").write_text(SECRETS.scrub("\n".join(transcript)), "utf-8")
+        say(f"PASS: D6c. raincli people lists {TEAMMATE_NAME} (no handle), raincli inbox show names {LAPTOP_AGENT}, "
+            f"raincli send {TEAMMATE} is refused with Address people naming {TEAMMATE_EMAIL}; transcript in "
+            "v06-14-cli.txt")
 
         # D7. Offline and Retry.
         server.stop()
@@ -1588,8 +1899,8 @@ def signed_in_fresh(server, observer, handle, config_dir):
             and (config_dir / "person.json").is_file() and (config_dir / "agent.json").is_file())
 
 
-def part_e(app, server, installers, password, observer, work, codex=None):
-    """Stale or foreign saved setups; see E in the module docstring."""
+def part_e(app, server, installers, password, observer, teammate, work, codex=None):
+    """Stale or foreign saved setups; see E in the module docstring. ``teammate``: the teammate machine's token (v0.6)."""
     from playwright.sync_api import sync_playwright
 
     config_dir = default_agent_config().parent
@@ -1748,8 +2059,10 @@ def part_e(app, server, installers, password, observer, work, codex=None):
     check({"bad-agent.json", "bad-connector.json", "runtime.json"} <= backup_files(config_dir),
           f"the backup holds {backup_files(config_dir)}")
     wait_for("the valid credential's presence", lambda: shows(server, observer, "e2e-two-good", NEW), timeout=300)
-    message = send(server, observer, "e2e-two-good", "after the stale one was set aside")
-    wait_for("delivery to the valid credential", lambda: delivered(server, observer, message), timeout=240)
+    # v0.6, not yet run on Windows: the teammate writes to the PERSON, whose inbox is now this machine (inbox-only).
+    point_inbox_at(server, EMAIL, "e2e-two-good", good_token)
+    sent = send(server, teammate, {"person": EMAIL}, "after the stale one was set aside")
+    wait_for("delivery to the valid credential", lambda: received(server, teammate, sent), timeout=240)
     set_aside_log = config_dir / "runtime-state" / "migration.log"
     records = [json.loads(line) for line in set_aside_log.read_text("utf-8").splitlines() if line.strip()]
     check([(Path(r["agent_config"]).name, r["result"]) for r in records if r.get("event") == "stale_credential_set_aside"]
@@ -1873,16 +2186,17 @@ def write_private(path, data):
     atomic_write_json(path, data, mode=0o600)
 
 
-def prepare_old_pip_client(work):
-    """0.2.0 from its release archive, in its own venv (done before the hosts file changes)."""
-    venv = work / "old-pip"
+def prepare_old_pip_client(work, version=OLD_PIP):
+    """``version`` (0.2.0 by default; v0.6: also 0.5.1 for B2) from its release archive, in its own venv (done
+    before the hosts file changes)."""
+    venv = work / f"old-pip-{version}"
     run([sys.executable, "-m", "venv", venv], timeout=180)
     python = venv / "Scripts" / "python.exe"
-    archive = f"https://github.com/{updates.REPO}/archive/refs/tags/{OLD_PIP}.zip"
+    archive = f"https://github.com/{updates.REPO}/archive/refs/tags/{version}.zip"
     run([python, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", f"raincli @ {archive}#subdirectory=raincli"],
         timeout=900)
-    version = run([venv / "Scripts" / "raincli.exe", "--version"]).stdout.strip()
-    check(version == "raincli " + OLD_PIP[1:], f"the old pip client reports {version!r}")
+    reported = run([venv / "Scripts" / "raincli.exe", "--version"]).stdout.strip()
+    check(reported == "raincli " + version[1:], f"the old pip client {version} reports {reported!r}")
     return venv
 
 
@@ -2045,9 +2359,9 @@ def fresh_slate(app):
             shutil.rmtree(path)
 
 
-def register(server, name):
+def register(server, name, owner=EMAIL):
     staged = server.work / f"{name}.json"
-    server.admin("register-agent", "--team", TEAM, "--owner", EMAIL, "--handle", name, "--out", str(staged))
+    server.admin("register-agent", "--team", TEAM, "--owner", owner, "--handle", name, "--out", str(staged))
     issued = json.loads(staged.read_text())
     staged.unlink()
     return issued["api_url"], SECRETS.add(issued["token"])
@@ -2170,6 +2484,8 @@ def run_e2e(args, work, stack):
     # Everything that needs the real GitHub happens before the hosts file changes.
     old_venv = prepare_old_pip_client(work)
     say(f"PASS: old pip client {OLD_PIP} installed from its release archive")
+    v051_venv = prepare_old_pip_client(work, OLD_V051)  # v0.6, not yet run on Windows (B2, C10.1)
+    say(f"PASS: pip client {OLD_V051} installed from its release archive")
     managed = prepare_managed_install(work)
     codex = None if args.real else codex_smoke.fetch_codex(work)  # before the hosts file: the real GitHub
     stack.callback(lambda: release_e2e.kill_marked({str(managed)}))
@@ -2188,7 +2504,29 @@ def run_e2e(args, work, stack):
     server.admin("create-user", "--email", EMAIL, "--name", "App E2E", input=password + "\n")
     server.admin("create-team", "--slug", TEAM, "--name", "App E2E", "--owner", EMAIL)
     observer = register(server, OBSERVER)[1]
-    say(f"PASS: throwaway server on {server.url}; user, team {TEAM} and observer {OBSERVER}")
+    # v0.6, not yet run on Windows: a second person in the team, with one machine that is their inbox (inbox-only,
+    # so messages to them land in that machine's own queue, which inbox_bodies(server, teammate) reads).
+    teammate_password = SECRETS.add(secrets.token_urlsafe(18))
+    server.admin("create-user", "--email", TEAMMATE_EMAIL, "--name", TEAMMATE_NAME, input=teammate_password + "\n")
+    server.admin("add-member", "--team", TEAM, "--email", TEAMMATE_EMAIL)
+    teammate = register(server, TEAMMATE, owner=TEAMMATE_EMAIL)[1]
+    point_inbox_at(server, TEAMMATE_EMAIL, TEAMMATE, teammate)
+    # §21 C13 M2: /agents lists the caller's own machines only. C2.2: machine addresses are refused for everyone, a
+    # teammate's handle mapped to its person, your own handle with the generic text (C13 L3).
+    check(handles(server, observer) == [OBSERVER] and handles(server, teammate) == [TEAMMATE],
+          f"/agents shows {handles(server, observer)} to the observer, {handles(server, teammate)} to the teammate")
+    mapped = [(observer, TEAMMATE, TEAMMATE_EMAIL), (teammate, OBSERVER, EMAIL), (teammate, {"machine": OBSERVER}, EMAIL),
+              (teammate, {"machine": OBSERVER, "agent": "inbox"}, EMAIL)]
+    for token, to, person in mapped:  # a teammate's machine: "Address people: send to <Name> (<email>)"
+        refused = refusal(server, token, to)
+        check(refused is not None and refused[:2] == (400, "address_people") and person in refused[2],
+              f"a send to the teammate machine {to}: {refused}")
+    own, unknown = refusal(server, observer, OBSERVER), refusal(server, observer, "e2e-no-such-machine")
+    check(own is not None and own[:2] == (400, "address_people") and own == unknown and EMAIL not in own[2],
+          f"your own handle and an unknown one must get the same generic refusal: {own} / {unknown}")
+    say(f"PASS: throwaway server on {server.url}; user, team {TEAM} and observer {OBSERVER}; v0.6: teammate "
+        f"{TEAMMATE_NAME} with {TEAMMATE} as their inbox; /agents shows own machines only; machine addresses are "
+        "refused with address_people (a teammate's handle mapped to the person)")
 
     if args.real:
         say(f"PASS: published installers of v{OLD} and v{NEW} downloaded and checksum-verified")
@@ -2316,13 +2654,13 @@ def run_e2e(args, work, stack):
         say("SKIP: D. the published v0.4 installers have no app window")
     else:
         fresh_slate(app)
-        part_d(app, server, installers, password, observer, menu, work)
+        part_d(app, server, installers, password, observer, teammate, menu, work)
 
     # == E. a stale or foreign saved setup ==================================================================
     if args.real:
         say("SKIP: E. the published v0.4 installers have no v0.5.1 stale-setup handling")
     else:
-        part_e(app, server, installers, password, observer, work, codex=codex)
+        part_e(app, server, installers, password, observer, teammate, work, codex=codex)
 
     # == B. an old pip client's foreground connector ============================================
     fresh_slate(app)
@@ -2336,8 +2674,18 @@ def run_e2e(args, work, stack):
     old_raincli = old_venv / "Scripts" / "raincli.exe"
     old_connector = start_console([old_raincli, "connector", "run", "--config", connector], work / "old-connector.log")
     stack.callback(end, old_connector)
-    first = send(server, observer, OLD_MACHINE, "before migration")
-    wait_for("the old pip connector to take a message", lambda: delivered(server, observer, first), timeout=240)
+    # v0.6, not yet run on Windows: the teammate writes to the PERSON; EMAIL's inbox is this machine, inbox-only, so
+    # the message takes the machine-endpoint path a 0.2.0 client polls. KNOWN v0.6 LIMIT (C10.3): v0.6 shows every
+    # sender but the reader's own machine as "@email" (C5.2), and a pre-0.5 connector skips a sender that is not a
+    # handle ("bad sender"), unacked; so here "took" is an ack OR that recorded skip (the queue's skipped.json), and
+    # the server must have routed it to this machine either way. Migration below needs only the old queue.
+    point_inbox_at(server, EMAIL, OLD_MACHINE, pip_token)
+    first = send(server, teammate, {"person": EMAIL}, "before migration")
+    took = wait_for("the old pip connector to take a message", lambda: old_client_took(server, teammate, queue, first),
+                    timeout=240)
+    check((message(server, pip_token, first) or {}).get("to_endpoint") == {"machine": OLD_MACHINE},
+          "the message to the person was not routed to the old machine's endpoint")
+    say(f"B: the {OLD_PIP} connector {took} the teammate's message to {EMAIL} (routed to {OLD_MACHINE})")
     before = handles(server, observer)
     queue_files = sorted(p.name for p in queue.rglob("*") if p.is_file())
     check(queue_files, "the old connector wrote nothing under its relative state_dir")
@@ -2353,8 +2701,8 @@ def run_e2e(args, work, stack):
     check(handles(server, observer) == before, "migration created or removed a machine")
     check(api(server, pip_token, "/api/v1/me")["agent"]["handle"] == OLD_MACHINE, "the old credential stopped working")
     check(app.run_value() == stub_command, "the Run value does not start the app after migration")
-    second = send(server, observer, OLD_MACHINE, "after migration")
-    wait_for("delivery after migration", lambda: delivered(server, observer, second), timeout=240)
+    second = send(server, teammate, {"person": EMAIL}, "after migration")  # v0.6: to the person, as above
+    wait_for("delivery after migration", lambda: received(server, teammate, second), timeout=240)
     check(set(queue_files) <= {p.name for p in queue.rglob("*") if p.is_file()}, "migration dropped queue files")
     logs = [p for p in [runtime_state_dir(config_dir) / "migration.log"] if p.is_file()]
     check(logs and pip_token not in logs[0].read_text("utf-8", errors="replace"),
@@ -2367,6 +2715,60 @@ def run_e2e(args, work, stack):
           "uninstall without sign-out removed agent.json, the connector config, the queue or migration.log")
     check(api(server, pip_token, "/api/v1/me")["agent"]["handle"] == OLD_MACHINE, "uninstall signed the machine out")
     say("PASS: B. uninstall with /SIGNOUT=no kept agent.json, the connector config, the queue and migration.log")
+
+    # == B2. a v0.5.1 client still receives (v0.6 C10.1; brief "Windows e2e") ==================================
+    # v0.6, NOT YET RUN ON WINDOWS. A pip v0.5.1 client as a foreground connector (as in B; Herdr is the e2e's
+    # missing "raincli-e2e-no-herdr", so it stores and acks, then holds what it can't hand to an agent). It never
+    # reports agents or presence, so its inbox is set by the operator and its agent's liveness is published here.
+    fresh_slate(app)
+    api_url, v051_token = register(server, V051_MACHINE)
+    write_private(default_agent_config(), {"api_url": api_url, "token": v051_token})
+    connector = config_dir / "connector.json"
+    write_private(connector, {"herdr_agent": "e2e-inbox", "herdr_bin": "raincli-e2e-no-herdr",
+                              "state_dir": "v051-queue", "poll_wait": 1})
+    v051_raincli = v051_venv / "Scripts" / "raincli.exe"
+    v051_connector = start_console([v051_raincli, "connector", "run", "--config", connector], work / "v051-connector.log")
+    stack.callback(end, v051_connector)
+    # (a) C3.1(a), inbox mode: EMAIL's inbox is this machine, inbox-only; the teammate writes to the person.
+    point_inbox_at(server, EMAIL, V051_MACHINE, v051_token)
+    inbox_mode = send(server, teammate, {"person": EMAIL}, "to a v0.5.1 inbox, inbox mode")
+    wait_for("the v0.5.1 connector to ack (inbox mode)", lambda: received(server, teammate, inbox_mode), timeout=240)
+    check((message(server, v051_token, inbox_mode) or {}).get("to_endpoint") == {"machine": V051_MACHINE},
+          "the inbox-mode message was not routed to the v0.5.1 machine's endpoint")
+    say(f"PASS: B2(a). a message to the person {EMAIL} reached the {OLD_V051} client's inbox (C3.1(a), acked)")
+    # (b) C3.1(b), the named path: routing "all", EMAIL's inbox is (this machine, its agent).
+    point_inbox_at(server, EMAIL, V051_MACHINE, v051_token, agent=V051_AGENT, inbox_only=False)
+    publish_local_agents(server, v051_token, [V051_AGENT], source="herdr")
+    named = send(server, teammate, {"person": EMAIL}, "to a v0.5.1 inbox, named path")
+    check((message(server, v051_token, named) or {}).get("to_endpoint") == {"machine": V051_MACHINE, "agent": V051_AGENT},
+          "the named-path message was not routed to the v0.5.1 machine's agent")
+    wait_for("the v0.5.1 connector to ack (named path)",
+             lambda: (message(server, v051_token, named) or {}).get("acked_at"), timeout=240)
+    say(f"PASS: B2(b). a message to the person reached {V051_AGENT} on the {OLD_V051} client (C3.1(b)), acked by it")
+    # (c) C10.1 "send to a person by email": the old client's own CLI, from its agent; then a PR1 reply (in_reply_to,
+    # no to) is routed back to (this machine, that agent), and the old connector acks it (its hand-off to the agent
+    # then holds offline here: the e2e has no Herdr; the server's routing and the client's ack are what is checked).
+    question = work / "v051-question.txt"
+    question.write_text("a question from a v0.5.1 agent\n", "utf-8")
+    asked = str(uuid.uuid4())
+    sent = run([v051_raincli, "send", "@" + TEAMMATE_EMAIL, "--from-agent", V051_AGENT, "--body-file", question,
+                "--id", asked], check=False, timeout=120)
+    check(sent.returncode == 0, f"the {OLD_V051} CLI could not send to a person: "
+                                f"{SECRETS.scrub(sent.stdout + sent.stderr)[-1500:]}")
+    got = wait_for("the v0.5.1 question at the teammate", lambda: message(server, teammate, asked), timeout=120)
+    check(got.get("from") == "@" + EMAIL and got.get("from_agent") is None,
+          f"the teammate sees the v0.5.1 question as from {got.get('from')!r} (from_agent {got.get('from_agent')!r})")
+    # EMAIL's inbox back to another name, so the C4.1 fallback (the asker's inbox) is told apart from the PR1 target.
+    point_inbox_at(server, EMAIL, V051_MACHINE, v051_token, agent="inbox", inbox_only=False)
+    reply, _ = pr1_reply(server, teammate, asked, v051_token, V051_MACHINE, V051_AGENT, "an answer for the v0.5.1 agent",
+                         [V051_AGENT])
+    wait_for("the v0.5.1 connector to ack the PR1 reply",
+             lambda: (message(server, v051_token, reply) or {}).get("acked_at"), timeout=240)
+    end(v051_connector)
+    said = (work / "v051-connector.log").read_text("utf-8", errors="replace")
+    check("malformed" not in said, f"the {OLD_V051} connector skipped a v0.6 message: {SECRETS.scrub(said)[-1500:]}")
+    say(f"PASS: B2(c). the {OLD_V051} CLI sent to the person {TEAMMATE_EMAIL} with --from-agent; the teammate's reply "
+        f"(in_reply_to, no to) was routed to {V051_AGENT} on {V051_MACHINE} and the {OLD_V051} connector acked it")
 
     # == C. a managed v0.3 install in the documented layout, started by its Run value ===============
     # SETUP.md step 5 and the Windows guide: the credential, the connector and runtime.json all in
@@ -2408,8 +2810,10 @@ def run_e2e(args, work, stack):
     check(handles(server, observer) == before, "migration created or removed a machine")
     check(api(server, managed_token, "/api/v1/me")["agent"]["handle"] == MANAGED_MACHINE,
           "the managed credential stopped working")
-    third = send(server, observer, MANAGED_MACHINE, "after managed migration")
-    wait_for("delivery after the managed migration", lambda: delivered(server, observer, third), timeout=240)
+    # v0.6, not yet run on Windows: to the person, whose inbox is now this machine (inbox-only).
+    point_inbox_at(server, EMAIL, MANAGED_MACHINE, managed_token)
+    third = send(server, teammate, {"person": EMAIL}, "after managed migration")
+    wait_for("delivery after the managed migration", lambda: received(server, teammate, third), timeout=240)
     say(f"PASS: C. managed {OLD_MANAGED} in the documented layout (default runtime.json, started by its Run value): "
         "the installer recorded the Run value, the launcher stopped on the app's stop request, the Run value now "
         f"starts the stub, and {MANAGED_MACHINE} keeps delivering; no new machine")

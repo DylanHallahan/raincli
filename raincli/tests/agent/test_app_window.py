@@ -231,7 +231,8 @@ def test_toast_text_names_the_sender_only():
     assert policy.toast_text("message", "  x\n" * 40).startswith("New message from x x")
     assert len(policy.toast_text("message", "y" * 500)) == len("New message from ") + 64
     assert policy.toast_sender({"from_endpoint": {"person": "b@x", "display_name": "Bob"}, "body": "secret"}) == "Bob"
-    assert policy.toast_sender({"from_endpoint": {"machine": "bob-laptop", "agent": "rev"}}) == "bob-laptop"
+    # §21 C9.5: the person label, never a machine handle (a pre-v0.6 machine endpoint gives "a teammate").
+    assert policy.toast_sender({"from_endpoint": {"machine": "bob-laptop", "agent": "rev"}}) == "a teammate"
 
 
 # -- the js_api (C4) ---------------------------------------------------------------------------------------
@@ -270,7 +271,8 @@ def test_js_api_never_returns_a_credential(tmp_path):
     names = [n for n in dir(Api) if not n.startswith("_")]
     assert set(names) == {"sign_in_defaults", "sign_in", "status", "settings", "save_settings", "toggle_pause",
                           "forget_device",
-                          "open_log", "sign_out", "open", "retry", "hooks", "connect_hooks"}
+                          "open_log", "sign_out", "open", "retry", "hooks", "connect_hooks",
+                          "inbox", "set_inbox", "clear_inbox", "dismiss_inbox_notice"}
     source = (APP_DIR / "services.py").read_text()
     tree = ast.parse(source)
     status = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "status")

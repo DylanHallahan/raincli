@@ -224,28 +224,43 @@ class Tray:
     # -- toasts (§16.10, §16.12 C14) ------------------------------------------------------------
 
     def toasts(self):
-        """One toast per new notification: the sender's name only, never body text."""
+        """A toast only for what needs the person (§21 PR6, ``policy.toast_wanted``), or for every message
+        with "Notify me about every message": the sender's name only, never body text (C14). The rest of
+        the new entries are taken quietly."""
         if not self.signed_in():
             return
         try:
             entries = self.services.notifications()
         except Exception:  # noqa: BLE001 - no person session or queue yet
             return
+        every = None
         for entry in entries or ():
+            if entry.get("kind") == "inbox_offline":
+                self.toast_opens = "this-computer"  # "your inbox has been offline": This computer shows it
+                if self.icon is not None:
+                    self.icon.notify(policy.INBOX_OFFLINE_TOAST, TITLE)
+                continue
+            if every is None:
+                try:
+                    every = self.services.notify_all() is True
+                except Exception:  # noqa: BLE001 - the default: only what needs the person
+                    every = False
+            if not policy.toast_wanted(entry, every):
+                continue
             text, thread = self.toast_for(entry)
             self.toast_thread, self.toast_opens = thread, None  # a message toast opens its thread
             if self.icon is not None:
                 self.icon.notify(text, TITLE)
 
     def toast_for(self, entry):
-        """``(text, conversation id or None)`` for a queue entry ``{id, kind, at}``."""
+        """``(text, conversation id or None)`` for a queue entry ``{id, kind, at, …}``."""
         kind, sender, thread = entry.get("kind"), None, None
         try:
             summary = self.services.message_summary(entry["id"])
             kind, sender, thread = summary["kind"] or kind, summary["sender"], summary.get("conversation_id")
         except Exception:  # noqa: BLE001 - offline: a toast without the name
             pass
-        return policy.toast_text(kind, sender), thread
+        return policy.toast_text(kind, sender, entry.get("hold")), thread
 
     def toast_clicked(self):
         if getattr(self, "toast_opens", None) == "this-computer":
