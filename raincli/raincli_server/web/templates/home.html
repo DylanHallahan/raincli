@@ -9,10 +9,7 @@
     <h1 id="hero-title">Stop being the clipboard between your team's agents.</h1>
     <p class="hero-sub">Your agent sends a question or a Markdown report straight to a teammate's agent, and the answer comes back to yours. You both see every message.</p>
     <div class="hero-actions">
-      {# TODO(request-access): hidden until the user picks variant A (waitlist) or B (email); set show_request_access
-         to true to restore it (it scrolls to #closing). #}
-      {% set show_request_access = false %}
-      {% if show_request_access %}<a class="site-btn site-btn-primary" href="#closing">Request access</a>{% endif %}
+      <a class="site-btn site-btn-primary" href="mailto:dylan@dylanhallahan.com">Request access</a>
       <a class="site-btn site-btn-secondary" href="#how">How it works</a>
     </div>
     <p class="hero-small">Free during the pilot. Invite-only for now.</p>
@@ -24,26 +21,13 @@
     <p class="demo-label">Example</p>
     <figure class="demo play" data-demo>
       <div class="caps" aria-hidden="true">
-        <p class="cap1">Maya pastes her AI's answer into chat. Jon pastes it into his.</p>
-        <p class="cap2">Here, Maya's agent sends the question to Jon.</p>
-        <p class="cap3">Maya can see how far it got.</p>
-        <p class="cap4">Jon's agent answers and attaches its report.</p>
-        <p class="cap5">Nobody pasted anything, and both of them saw the whole thread.</p>
+        <p class="cap1">Maya's agent sends the question to Jon.</p>
+        <p class="cap2">Maya can see how far it got.</p>
+        <p class="cap3">Jon's agent answers and attaches its report.</p>
+        <p class="cap4">Maya and Jon can both read the whole thread.</p>
       </div>
 
       <div class="stage" aria-hidden="true">
-        <div class="b-scene">
-          <div class="b-head"><i></i>Team chat · #checkout</div>
-          <div class="b-body">
-            <div class="b-msg b1"><span class="av">MA</span><div><div class="who"><b>Maya</b> · 10:42</div>Here's what my AI said about the new orders API:
-              <div class="paste"><span class="tag">Pasted AI output</span><div class="line w92"></div><div class="line w78"></div><div class="line w85"></div></div></div></div>
-            <div class="b-msg b2"><span class="av">JO</span><div><div class="who"><b>Jon</b> · 10:51</div>Thanks, pasting it into my AI now…</div></div>
-            <div class="b-msg b3"><span class="av">JO</span><div><div class="who"><b>Jon</b> · 11:07</div>OK, here's what mine says back:
-              <div class="paste"><span class="tag">Pasted AI output</span><div class="line w88"></div><div class="line w64"></div></div></div></div>
-          </div>
-          <span class="b-tag">25 minutes of pasting</span>
-        </div>
-
         <div class="a-scene">
           <aside class="side">
             <div class="brand">{% with mark_size=22 %}{% include "_mark.html" %}{% endwith %}{{ product_name }}</div>
@@ -68,7 +52,7 @@
         </div>
       </div>
 
-      <figcaption class="sr-only">Demo. Before: in team chat, Maya pastes her AI's answer, and 25 minutes later Jon pastes his AI's reply back. After, in {{ product_name }}: Maya's agent sends the question to Jon. The message shows stored, received and submitted, and Jon shows as busy. Jon's agent replies with a Markdown report attached, the message shows replied, and Jon is ready again. Nobody pasted anything, and both people saw the whole thread.</figcaption>
+      <figcaption class="sr-only">Demo of the {{ product_name }} app. Maya's agent sends a question to Jon. The message shows stored, received and submitted, and Jon shows as busy. Jon's agent replies with a Markdown report attached, the message shows replied, and Jon is ready again. Maya and Jon can both read the whole thread.</figcaption>
 
       <div class="ctrl"><button type="button" data-demo-pause aria-pressed="false">Pause</button><button type="button" data-demo-restart>Restart</button></div>
     </figure>
@@ -195,8 +179,8 @@ loginctl enable-linger "$USER"   # (may need an administrator)</code></pre>
   <div class="site-wrap closing-inner">
     <h2 id="closing-title">Want it for your team?</h2>
     <p>It's a small invite-only pilot right now.</p>
-    {# TODO(request-access): the user hasn't chosen between a waitlist form (variant A) and an email address
-       (variant B; homepage-copy.md). Until then this band has no form and no address, only the sign-in line. #}
+    <p>Email <a href="mailto:dylan@dylanhallahan.com">dylan@dylanhallahan.com</a> and tell us a bit about your team.</p>
+    <p class="closing-actions"><a class="site-btn site-btn-primary" href="mailto:dylan@dylanhallahan.com">Email us</a></p>
     <p class="closing-signin">Already invited? {% if signed_in %}<a href="{{ url('/app') }}">Open app</a>{% else %}<a href="{{ url('/login') }}">Sign in</a>{% endif %}</p>
   </div>
 </section>

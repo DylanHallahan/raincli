@@ -1,5 +1,5 @@
 """Website Phase B: the homepage copy is homepage-copy.md word for word (the strings are embedded here, so the test
-never reads marketing's files), and the request-access slot is a placeholder."""
+never reads marketing's files), and request access is an email link (variant B)."""
 
 from __future__ import annotations
 
@@ -18,11 +18,10 @@ SECTIONS = [
     ]),
     ("demo", [
         "Example",
-        "Maya pastes her AI's answer into chat. Jon pastes it into his.",
-        "Here, Maya's agent sends the question to Jon.",
+        "Maya's agent sends the question to Jon.",
         "Maya can see how far it got.",
         "Jon's agent answers and attaches its report.",
-        "Nobody pasted anything, and both of them saw the whole thread.",
+        "Maya and Jon can both read the whole thread.",
     ]),
     ("how", [
         "How it works",
@@ -94,6 +93,8 @@ SECTIONS = [
     ("closing", [
         "Want it for your team?",
         "It's a small invite-only pilot right now.",
+        "Email dylan@dylanhallahan.com and tell us a bit about your team.",
+        "Email us",
         "Already invited? Sign in",
     ]),
 ]
@@ -140,17 +141,24 @@ def test_header_and_footer(home):
     assert FOOTER in plain(re.search(r"<footer.*?</footer>", home, re.S).group(0))
 
 
-def test_request_access_is_a_placeholder(home, client):
+MAILTO = "mailto:dylan@dylanhallahan.com"
+
+
+def test_request_access_is_an_email_link(home, client):
+    """Variant B (homepage-copy.md): the hero's Request access and the closing band's Email us are plain mailto
+    links; the closing sentence is the copy word for word; no form; the sign-in line stays."""
     raw = client.get("/").text
-    # Hidden until the user picks a request-access variant: no dead primary call to action (main, 2026-10-12).
-    assert "Request access" not in raw and 'href="#closing"' not in raw
+    hero = re.search(r'<section[^>]*class="[^"]*hero[^"]*".*?</section>', raw, re.S).group(0)
+    assert re.search(rf'<a class="site-btn site-btn-primary" href="{MAILTO}">Request access</a>', hero)
+    assert '<a class="site-btn site-btn-secondary" href="#how">How it works</a>' in hero
     closing = re.search(r'<section id="closing".*?</section>', raw, re.S).group(0)
-    assert "<form" not in closing and "mailto:" not in raw and "@" not in plain(closing)
-    assert "<form" not in raw  # no waitlist form anywhere yet
-    template = (client.app.state.templates.env.loader.get_source(client.app.state.templates.env, "home.html")[0]
-                if hasattr(client.app.state, "templates") else None)
-    if template is not None:
-        assert template.count("TODO(request-access)") >= 2
+    assert "Email dylan@dylanhallahan.com and tell us a bit about your team." in plain(closing)
+    assert f'Email <a href="{MAILTO}">dylan@dylanhallahan.com</a> and tell us a bit about your team.' in closing
+    assert re.search(rf'<a class="site-btn site-btn-primary" href="{MAILTO}">Email us</a>', closing)
+    assert "Already invited? Sign in" in plain(closing)
+    assert "<form" not in raw and "?subject" not in raw
+    assert set(re.findall(r'href="(mailto:[^"]*)"', raw)) == {MAILTO}
+    assert "TODO(request-access)" not in raw and 'href="#closing"' not in raw
 
 
 def test_free_during_the_pilot_only_in_the_hero_faq_and_footer(home):
@@ -176,13 +184,30 @@ def test_no_external_resources_and_the_logo_is_inline(home):
 
 
 DEMO = [
-    "Team chat · #checkout", "Jon", "Checkout vs. the new orders API", "Priya", "Retry cap question", "Earlier", "Sam",
+    "Jon", "Checkout vs. the new orders API", "Priya", "Retry cap question", "Earlier", "Sam",
     "Load test report", "Maya's agent · 10:42", "Jon's agent · 10:44", "To: Jon",
-    "Demo. Before: in team chat, Maya pastes her AI's answer, and 25 minutes later Jon pastes his AI's reply back. "
-    "After, in RainCLI: Maya's agent sends the question to Jon. The message shows stored, received and submitted, "
+    "Demo of the RainCLI app. Maya's agent sends a question to Jon. The message shows stored, received and submitted, "
     "and Jon shows as busy. Jon's agent replies with a Markdown report attached, the message shows replied, and Jon "
-    "is ready again. Nobody pasted anything, and both people saw the whole thread.",
+    "is ready again. Maya and Jon can both read the whole thread.",
 ]
+
+# The demo shows only the app (demo-app-only spec): no before scene, no team chat, no pasting.
+NOT_IN_THE_DEMO = ("Team chat", "Pasted AI output", "pasting", "Nobody pasted")
+
+
+def test_the_demo_shows_only_the_app(home):
+    from pathlib import Path
+
+    import raincli_server
+
+    css = (Path(raincli_server.__file__).parent / "web" / "static" / "demo.css").read_text("utf-8")
+    for text in NOT_IN_THE_DEMO:
+        assert text not in home and text not in css, text
+    demo = re.search(r'<section id="demo".*?</section>', home, re.S).group(0)
+    assert "b-scene" not in demo and "cap5" not in demo and demo.count('<p class="cap') == 4
+    for gone in (".b-scene", ".b-msg", ".paste", ".b-tag", "k-b-scene", "k-a-scene", "k-cap5", " 22s "):
+        assert gone not in css, gone
+    assert css.count(" 16s linear infinite") == 14  # m1 m2 file, cap1-4, four states, ready busy dot
 
 
 def test_the_demo_has_the_true_today_markup(home):
