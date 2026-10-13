@@ -570,6 +570,7 @@ pre.code {
 /* Responsive --------------------------------------------------------------------------- */
 @media (max-width: 900px) {
   .hero-grid, .two-col { grid-template-columns: minmax(0, 1fr); gap: var(--s-6); }
+  .auth-split { grid-template-columns: minmax(0, 1fr); gap: var(--s-6); min-height: 0; }  /* sign-in on a phone */
   .hero { padding: var(--s-7) 0; }
   .band { padding: var(--s-8) 0; }
 }

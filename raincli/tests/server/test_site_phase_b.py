@@ -12,7 +12,6 @@ import pytest
 
 SECTIONS = [
     ("hero", [
-        "Agent-to-agent · free during the pilot",
         "Agent Direct Messaging for your team",
         "Your agent asks a teammate's agent directly. No copy-pasting.",
         "Request access", "Read the details",
@@ -20,10 +19,6 @@ SECTIONS = [
         "Runs on Windows app · Linux, headless too",
         "Access Invite-only pilot",
         "The RainCLI app · fictional team",
-        "Maya's agent sends the question to Jon.",
-        "Maya can see how far it got.",
-        "Jon's agent answers and attaches its report.",
-        "Maya and Jon can both read the whole thread.",
     ]),
     ("how", [
         "01 How a message moves",
@@ -176,7 +171,10 @@ def test_request_access_is_an_email_link(home):
 
 def test_free_during_the_pilot_only_in_the_hero_faq_and_footer(home):
     words = plain(home).lower()
-    assert words.count("free during the pilot") == 2  # the hero label and the footer
+    assert words.count("free during the pilot") == 1  # the footer (pass 2a removed the hero eyebrow)
+    assert "Agent-to-agent" not in home
+    for tag in ('name="description"', 'property="og:description"', 'name="twitter:description"'):
+        assert re.search(rf'<meta {tag} content="[^"]*Free during the pilot\.', home), tag  # the preview tags keep it
     assert "Yes, during the pilot." in section(home, "faq")
     for promise in ("pricing", "price", "per seat", "/month", "after the pilot", "will cost", "paid plan"):
         assert promise not in words, promise
@@ -267,8 +265,14 @@ def test_the_demo_shows_only_the_app(home):
     demo = _demo(home)
     for text in NOT_IN_THE_DEMO:
         assert text not in demo and text not in css, text
-    assert "b-scene" not in demo and "cap5" not in demo and demo.count('<p class="cap') == 4
-    assert css.count(" 16s linear infinite") == 15  # m1 m2 file, cap1-4, four states, ready busy dot, progress
+    assert "b-scene" not in demo and 'class="cap' not in demo and 'class="caps' not in demo  # pass 2a: no captions
+    for gone in ("<button", "data-demo-pause", "data-demo-restart", 'class="ctrl"', 'class="prog"'):
+        assert gone not in demo, gone  # pass 2a: no controls; the demo just plays
+    for gone in (".caps", ".cap1", ".ctrl", ".prog", "k-cap", "k-prog"):
+        assert gone not in css, gone
+    js = (Path(web.__file__).parent / "static" / "landing.js").read_text("utf-8")
+    assert "data-demo-pause" not in js and "data-demo-restart" not in js
+    assert css.count(" 16s linear infinite") == 10  # m1 m2 file, four states, ready busy dot
 
 
 def test_the_demo_has_the_v06_markup(home):
@@ -292,3 +296,22 @@ def test_no_copy_claims_any_agent_routing_or_the_team_list(home):
     for phrase in NOT_TODAY:
         assert phrase not in words, phrase
     assert '<div class="grp">Team</div>' not in _demo(home)
+
+
+def test_the_blue_band_has_no_ruled_lines(home):
+    """Pass 2a (user feedback, "what's with the horizontal lines"): the band keeps its glow but no line pattern, and
+    the delivery states read without row rules."""
+    from raincli_server import web
+
+    css = (Path(web.__file__).parent / "static" / "landing.css").read_text("utf-8")
+    band = re.search(r"\.band::before\{[^}]*\}", css).group(0)
+    assert "radial-gradient" in band and "linear-gradient" not in band
+    for rule in (r"\.gloss\{[^}]*\}", r"\.gl\{[^}]*\}"):
+        assert "border" not in re.search(rule, css).group(0), rule
+    assert '<dl class="gloss">' in home
+
+
+def test_the_sign_in_headline_matches_the_hero(client):
+    page = client.get("/login").text
+    assert '<p class="auth-statement">Agent Direct Messaging <em>for your team</em></p>' in page
+    assert "in one place" not in page

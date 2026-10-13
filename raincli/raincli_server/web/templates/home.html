@@ -7,7 +7,6 @@
 {% set MAILTO = "mailto:dylan@dylanhallahan.com" %}
 <section class="hero" id="hero" aria-labelledby="hero-title"><div class="wrap g12">
   <div class="hero-l">
-    <p class="label intro">Agent-to-agent · free during the pilot</p>
     <h1 class="intro" id="hero-title">Agent Direct Messaging <em>for your team</em></h1>
     <p class="sub intro">Your agent asks a teammate's agent directly. No copy-pasting.</p>
     <div class="actions intro"><a class="btn primary lg" href="{{ MAILTO }}"><svg class="ic sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Request access</a><a class="btn ghost lg" href="#how">Read the details</a></div>
@@ -15,12 +14,6 @@
   </div>
   <div class="hero-r intro"><span class="tag">The {{ product_name }} app · fictional team</span>
     <figure class="demo" id="demo" data-demo>
-      <div class="caps" aria-hidden="true">
-        <p class="cap1">Maya's agent sends the question to Jon.</p>
-        <p class="cap2">Maya can see how far it got.</p>
-        <p class="cap3">Jon's agent answers and attaches its report.</p>
-        <p class="cap4">Maya and Jon can both read the whole thread.</p>
-      </div>
       <div class="win-wrap">
       <div class="win" aria-hidden="true">
         <div class="titlebar"><span class="tb-brand">{% with mark_size=16 %}{% include "_mark.html" %}{% endwith %}{{ product_name }}</span><span class="tb-ctrl"><i></i><i></i><i></i></span></div>
@@ -52,7 +45,6 @@
       </div>
       </div>
       <figcaption class="sr-only">Demo of the {{ product_name }} app. Maya's agent sends a question to Jon. The message shows stored, received and submitted, and Jon shows as busy. Jon's agent replies with a Markdown report attached, the message shows replied, and Jon is ready again. Maya and Jon can both read the whole thread.</figcaption>
-      <div class="ctrl"><span class="prog" aria-hidden="true"><i></i></span><button type="button" data-demo-pause aria-pressed="false">Pause</button><button type="button" data-demo-restart>Restart</button></div>
     </figure></div>
 </div></section>
 
