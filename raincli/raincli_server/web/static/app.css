@@ -667,3 +667,17 @@ pre.code {
 .inbox-choice { display: flex; align-items: center; gap: .5rem; }
 .inbox-choice-meta, .inbox-banner-team { color: var(--muted); font-size: .9em; }
 .inbox-waiting { display: flex; align-items: center; gap: .5rem; margin-bottom: .75rem; }
+
+/* Sign-in and invitation (login.html, invite.html): the homepage's concept C look, with brand blue as the one
+   accent, a pill button and a mono kicker. The other pages keep the terracotta accent above. */
+@font-face {
+  font-family: "RC Mono"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url("fonts/jetbrains-mono-regular-v2304.woff2") format("woff2");
+}
+.auth-split { --accent: #1f5fd1; --accent-hover: #1a4fb0; --accent-soft: #e8effc; --accent-ink: #1f5fd1; --on-accent: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  .auth-split { --accent: #7aa7ff; --accent-hover: #9dbdff; --accent-soft: #1e2a44; --accent-ink: #7aa7ff; --on-accent: #0b1630; }
+}
+.auth-split .kicker { font-family: "RC Mono", var(--mono); font-weight: 400; letter-spacing: .16em; }
+.auth-split .btn { min-height: 44px; border-radius: 999px; background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.auth-split .btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }

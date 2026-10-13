@@ -60,6 +60,14 @@ def test_screenshots(browser, live):  # noqa: F811
         page.screenshot(path=str(OUT / f"desktop-reduced-motion-{scheme}-1366x768.png"))
         saved.append(f"desktop-reduced-motion-{scheme}-1366x768.png")
         context.close()
+    for scheme in ("light", "dark"):  # the sign-in page, restyled to match (second commit)
+        context = browser.new_context(viewport={"width": 1366, "height": 768}, color_scheme=scheme)
+        page = context.new_page()
+        page.goto(live + "/login", wait_until="networkidle")
+        page.evaluate("document.activeElement && document.activeElement.blur()")
+        page.screenshot(path=str(OUT / f"login-{scheme}-1366x768.png"))
+        saved.append(f"login-{scheme}-1366x768.png")
+        context.close()
     # The link-preview image, rendered with the site's fonts (served by the live server).
     # bypass_csp: the preview's own page has an inline style; it is never served, only rendered here.
     context = browser.new_context(viewport={"width": 1200, "height": 630}, device_scale_factor=1, bypass_csp=True)

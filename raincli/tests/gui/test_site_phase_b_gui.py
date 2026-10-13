@@ -372,3 +372,23 @@ def test_request_access_links_in_the_hero_and_closing(browser, live, artifacts, 
         assert log["console"] == [] and log["errors"] == [], log
     finally:
         context.close()
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+def test_the_sign_in_page_matches_in_blue(browser, live, artifacts, scheme):  # noqa: F811
+    """/login takes the homepage's brand blue (concept C) for its accent and button; contrast holds, no errors."""
+    context = browser.new_context(viewport={"width": 1366, "height": 768}, color_scheme=scheme)
+    page = context.new_page()
+    log = []
+    page.on("console", lambda m: log.append(m.text) if m.type in ("error", "warning") else None)
+    try:
+        page.goto(live + "/login", wait_until="networkidle")
+        button = page.evaluate("getComputedStyle(document.querySelector('.auth-card .btn')).backgroundColor")
+        assert button == ("rgb(31, 95, 209)" if scheme == "light" else "rgb(122, 167, 255)"), button
+        accent = page.evaluate("getComputedStyle(document.querySelector('.auth-statement em')).color")
+        assert accent == button
+        assert page.evaluate(CONTRAST) == []
+        page.screenshot(path=str(artifacts / f"login-{scheme}.png"))
+        assert log == [], log
+    finally:
+        context.close()
