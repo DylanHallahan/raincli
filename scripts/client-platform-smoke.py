@@ -78,7 +78,7 @@ def main():
         report = root / "report.md"
         report.write_bytes(data)
         mid = str(uuid.uuid4())
-        send_args = ("send", "--to", "bob", "--body", "Please review", "--attach", report, "--id", mid, "--json")
+        send_args = ("send", "--to", "bob@example.com", "--body", "Please review", "--attach", report, "--id", mid, "--json")
         sent = json.loads(cli("alice", *send_args))
         assert sent["created"] and sent["message"]["id"] == mid
         assert not json.loads(cli("alice", *send_args))["created"]
@@ -92,7 +92,9 @@ def main():
         assert (dest / "report.md").read_bytes() == b"keep my changes"
         passed("send, idempotent retry, inbox, exact UTF-8/CRLF attachment, no overwrite")
         reply = json.loads(cli("bob", "reply", mid, "--body", "Reviewed", "--json"))["message"]
-        assert reply["in_reply_to"] == mid and reply["to"] == "alice"
+        # §21: the reply goes back from the parent (no "to"), and a teammate is shown as a person
+        assert reply["in_reply_to"] == mid and reply["to"] == "@alice@example.com"
+        assert reply["to_endpoint"] == {"person": "alice@example.com", "display_name": "Alice Example"}
         passed("linked reply between two client identities")
         shareable = root / "shareable"
         shareable.mkdir()

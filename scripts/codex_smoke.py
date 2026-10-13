@@ -396,7 +396,8 @@ def run_stage(root, server, wait_for, show, kill_tree):
         connector_path.write_text(json.dumps({"agent_config": str(agent_cfg),
                                               "inbox": {"hook": "codex", "name": "smoke project"},
                                               "state_dir": str(profile / "queue"),
-                                              "trusted_senders": ["codex-alice"]}), encoding="utf-8")
+                                              "trusted_senders": ["codex-alice@example.com"]}),  # §21: people
+                                   encoding="utf-8")
         cfg = load_connector_config(str(connector_path))
         connector = Connector(cfg, ApiClient(server.url, bob_token), FakeHerdr(), Queue(cfg.state_dir), log=lambda line: None, sleep=lambda s: None,
                               sessions_state=str(state))
@@ -432,7 +433,7 @@ def run_stage(root, server, wait_for, show, kill_tree):
                   "reached the codex process through the shell and raincli", flush=True)
 
             body = ("Ünïcödé ✓ 日本 next-turn report line for the Codex inbox. " * 300)[:15000]
-            message = ApiClient(server.url, sender).send("codex-bob", body)[0]["id"]
+            message = ApiClient(server.url, sender).send("codex-bob@example.com", body)[0]["id"]  # §21: the person
             connector.run_once()
             assert connector.queue.get(message)["state"] == "handed_over", connector.queue.get(message)
             Path(str(out) + ".stop").write_text("")
