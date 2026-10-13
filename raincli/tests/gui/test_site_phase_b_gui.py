@@ -1,4 +1,4 @@
-"""Website Phase B, the homepage in headless Chromium: no CSP violations or console errors in either theme, no
+"""The homepage (concept C "Paper"; it replaced website Phase B) in headless Chromium: no CSP violations or console errors in either theme, no
 requests to other origins, the anchors, the demo's autoplay rules (on screen and visible only), Pause/Restart by
 keyboard, the reduced-motion final frame, the phone layout, and accessibility checks done in the page (Lighthouse
 and axe are not test dependencies): WCAG AA contrast of every visible text, accessible names, landmarks, one h1,
@@ -80,6 +80,12 @@ STRUCTURE = """() => {
 }"""
 
 
+def reveal_all(page):
+    """Every section revealed (they fade in as they reach the screen), so the checks see the whole page."""
+    page.evaluate("document.querySelectorAll('.rv').forEach((e) => e.classList.add('in'))")
+    page.wait_for_timeout(900)
+
+
 @pytest.fixture
 def artifacts(tmp_path) -> Path:
     path = Path(os.environ.get("RAINCLI_GUI_ARTIFACTS") or tmp_path)
@@ -118,26 +124,33 @@ def test_no_csp_violations_no_other_origins_and_the_layout(browser, live, artifa
         assert log["console"] == [] and log["errors"] == [], log  # a CSP violation is a console error
         origin = urlparse(live).netloc
         assert log["requests"] and all(urlparse(u).netloc == origin for u in log["requests"]), log["requests"]
-        assert not any("/fonts/" in u or u.endswith((".woff", ".woff2", ".png", ".jpg")) for u in log["requests"])
+        fonts = sorted({urlparse(u).path for u in log["requests"] if "/fonts/" in urlparse(u).path})
+        assert fonts == ["/static/fonts/jetbrains-mono-regular-v2304.woff2",
+                         "/static/fonts/noto-serif-display-light-italic-v2009.woff2",
+                         "/static/fonts/noto-serif-display-light-v2009.woff2"], fonts  # self-hosted only
+        assert not any(urlparse(u).path.endswith((".png", ".jpg")) for u in log["requests"])
         # No horizontal scroll, and the theme really is the requested one.
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         bg = page.evaluate("getComputedStyle(document.body).backgroundColor")
-        assert bg == ("rgb(255, 255, 255)" if scheme == "light" else "rgb(33, 33, 33)"), bg
+        assert bg == ("rgb(243, 238, 228)" if scheme == "light" else "rgb(19, 18, 15)"), bg  # paper, ink
         page.evaluate("window.scrollTo(0, 0)")
         if size == "desktop":
-            # Above the fold at 1366x768: the hero, the first caption and the top of the demo frame.
-            fold = page.evaluate("""() => ({
-                cap: document.querySelector('.cap1').getBoundingClientRect().bottom,
-                stage: document.querySelector('.stage').getBoundingClientRect().top,
-                small: document.querySelector('.hero-small').getBoundingClientRect().bottom})""")
-            assert fold["small"] < 768 and fold["cap"] < 768 and fold["stage"] < 768 - 40, fold
-            assert page.is_visible(".site-nav") and not page.is_visible(".site-menu")
+            # Above the fold at 1366x768: the headline in 3-4 lines, the subline, both buttons and the app window.
+            fold = page.evaluate("""() => {
+                const h1 = document.querySelector('.hero h1'), r = (s) => document.querySelector(s).getBoundingClientRect();
+                return {lines: Math.round(h1.getBoundingClientRect().height / parseFloat(getComputedStyle(h1).lineHeight)),
+                        sub: r('.hero .sub').bottom, actions: r('.hero .actions').bottom, win: r('.hero .win').top};
+            }""")
+            assert 3 <= fold["lines"] <= 4 and fold["sub"] < 768 and fold["actions"] < 768 - 24, fold
+            assert fold["win"] < 768 - 200, fold
+            assert page.is_visible(".nav") and not page.is_visible(".menu")
         else:
-            assert not page.is_visible(".site-nav") and page.is_visible(".site-menu")
-            assert page.evaluate("document.querySelector('.stage').getBoundingClientRect().height") == 420
+            assert not page.is_visible(".nav") and page.is_visible(".menu")
+            assert page.evaluate("document.querySelector('.hero .win').getBoundingClientRect().height") == 430
             assert not page.is_visible(".demo .side")
             gutter = page.evaluate("document.querySelector('#how h2').getBoundingClientRect().left")
             assert gutter == 16, gutter
+        reveal_all(page)
         assert page.evaluate(CONTRAST) == []
         assert page.evaluate(STRUCTURE) == []
         # The header gets its border once the page scrolls.
@@ -151,11 +164,11 @@ def test_no_csp_violations_no_other_origins_and_the_layout(browser, live, artifa
 def test_the_anchors_resolve_and_the_nav_scrolls_to_them(browser, live):
     context, page, _ = open_home(browser, live, motion="reduce")
     try:
-        for ident in ("how", "security", "install"):
-            page.click(f".site-nav a[href='#{ident}']")
+        for ident in ("how", "cli", "security", "install"):
+            page.click(f".nav a[href='#{ident}']")
             page.wait_for_function(f"() => Math.abs(document.getElementById('{ident}').getBoundingClientRect().top) < 120")
         # Request access is an email link now (variant B): it opens the mail client and scrolls nowhere.
-        assert page.locator(".hero a.site-btn-primary").get_attribute("href") == "mailto:dylan@dylanhallahan.com"
+        assert page.locator(".hero a.btn.primary").get_attribute("href") == "mailto:dylan@dylanhallahan.com"
         assert page.locator(".hero a[href='#closing']").count() == 0
         for ident in ("how", "install", "security", "closing"):
             page.goto(f"{live}/#{ident}")
@@ -172,10 +185,10 @@ def test_the_anchors_resolve_and_the_nav_scrolls_to_them(browser, live):
 def test_the_phone_menu_opens_and_reaches_the_anchors(browser, live):
     context, page, _ = open_home(browser, live, size="phone", motion="reduce")
     try:
-        page.click(".site-menu summary")
-        page.click(".site-menu-list a[href='#security']")
+        page.click(".menu summary")
+        page.click(".menu-list a[href='#security']")
         page.wait_for_function("() => Math.abs(document.getElementById('security').getBoundingClientRect().top) < 120")
-        assert page.evaluate("document.querySelector('.site-menu').open") is False
+        assert page.evaluate("document.querySelector('.menu').open") is False
     finally:
         context.close()
 
@@ -241,7 +254,7 @@ def test_pause_and_restart_work_by_keyboard(browser, live):
         after = page.evaluate(ANIMATIONS)
         assert after["running"] > 0 and after["time"] < before and after["time"] < 500, (before, after)
         # Restarting starts from 0 s with the app already visible (no fade-in of the app frame).
-        assert page.evaluate("getComputedStyle(document.querySelector('.a-scene')).opacity") == "1"
+        assert page.evaluate("getComputedStyle(document.querySelector('.win')).opacity") == "1"
         # Restart while paused starts it playing.
         page.keyboard.press("Shift+Tab")
         page.keyboard.press("Enter")
@@ -260,15 +273,18 @@ def test_reduced_motion_shows_the_final_frame(browser, live, artifacts, scheme):
         page.wait_for_timeout(200)
         assert page.evaluate(ANIMATIONS)["count"] == 0
         assert not page.is_visible(".demo .ctrl") and page.locator(".b-scene").count() == 0
-        frame = page.evaluate("""() => ['.a-scene', '.m1', '.m2', '.file', '.cap4', '.p-ready']
+        frame = page.evaluate("""() => ['.win', '.m1', '.m2', '.file', '.cap4', '.p-ready']
             .map((s) => getComputedStyle(document.querySelector(s)).opacity)""")
         assert frame == ["1"] * 6
         assert page.evaluate("getComputedStyle(document.querySelector('.cap1')).opacity") == "0"
         assert page.evaluate("getComputedStyle(document.querySelector('.p-busy')).opacity") == "0"  # ready
         lit = page.evaluate("Array.from(document.querySelectorAll('.states span'), (e) => getComputedStyle(e).color)")
-        ok = page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--rc-ok').trim()")
-        assert len(set(lit)) == 1 and ok  # every state lit in the same --rc-ok colour
-        # The demo's final frame passes contrast too (states in green, the code chips, the file line).
+        ok = page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--ok').trim()")
+        assert len(set(lit)) == 1 and ok  # every state lit in the same --ok colour
+        # The demo's final frame passes contrast too (states in green, the code chips, the file line); under
+        # reduced motion every section is shown without its fade.
+        assert page.evaluate("document.querySelectorAll('.rv').length") > 20
+        assert page.evaluate("document.documentElement.classList.contains('js')") is False
         assert page.evaluate(CONTRAST) == []
         page.locator("[data-demo]").screenshot(path=str(artifacts / f"demo-{scheme}-reduced-motion.png"))
         if scheme == "light":
@@ -284,7 +300,7 @@ FRAME = """() => {
     const op = (s) => Number(getComputedStyle(document.querySelector(s)).opacity);
     const lit = (s) => getComputedStyle(document.querySelector(s)).color === getComputedStyle(document.querySelector('.st-stored')).color
         && op(s) > 0.9;
-    return {app: op('.a-scene'), caps: [1, 2, 3, 4].map((i) => op('.cap' + i)), m1: op('.m1'), m2: op('.m2'), file: op('.file'),
+    return {app: op('.win'), caps: [1, 2, 3, 4].map((i) => op('.cap' + i)), m1: op('.m1'), m2: op('.m2'), file: op('.file'),
             busy: op('.p-busy'), ready: op('.p-ready'), stored: op('.st-stored'), received: op('.st-received'),
             submitted: op('.st-submitted'), replied: op('.st-replied')};
 }"""
@@ -332,7 +348,7 @@ def test_the_phone_demo(browser, live, artifacts, scheme):
         page.evaluate("document.querySelector('[data-demo]').scrollIntoView({block: 'center'})")
         page.evaluate(SEEK, 9600)
         assert page.evaluate("getComputedStyle(document.querySelector('.side')).display") == "none"
-        box = page.evaluate("document.querySelector('.demo .stage').getBoundingClientRect().width")
+        box = page.evaluate("document.querySelector('.demo .win').getBoundingClientRect().right")
         assert box <= 390
         page.locator("[data-demo]").screenshot(path=str(artifacts / f"demo-phone-{scheme}-t09.6s.png"))
         page.evaluate(SEEK, None)
@@ -345,10 +361,10 @@ def test_the_phone_demo(browser, live, artifacts, scheme):
 @pytest.mark.parametrize("scheme", ["light", "dark"])
 @pytest.mark.parametrize("size", ["desktop", "phone"])
 def test_request_access_links_in_the_hero_and_closing(browser, live, artifacts, size, scheme):
-    """Variant B: Request access (hero) and Email us (closing) are mailto links; no console or CSP errors."""
+    """Request access (header on desktop, hero, closing) is a mailto link; no console or CSP errors."""
     context, page, log = open_home(browser, live, size=size, scheme=scheme, motion="reduce")
     try:
-        for selector in (".hero a.site-btn-primary", "#closing a.site-btn-primary"):
+        for selector in (".hero a.btn.primary", "#closing a.btn.primary") + ((".top-bar a.btn.primary",) if size == "desktop" else ()):
             assert page.locator(selector).get_attribute("href") == "mailto:dylan@dylanhallahan.com"
         assert page.locator("#closing p", has_text="Already invited?").count() == 1
         page.locator(".hero").screenshot(path=str(artifacts / f"request-access-hero-{size}-{scheme}.png"))

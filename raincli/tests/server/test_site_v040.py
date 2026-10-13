@@ -92,12 +92,11 @@ def test_config_page_points_to_the_simpler_paths(client, world):
 
 def test_home_page_states_the_v05_trust_defaults(client):
     """Machine mode and inbox connectors default to trust_mode "team"; direct-delivery connector configs
-    to "list" (connector/config.py). The Phase B homepage states the team default and how to switch."""
+    to "list" (connector/config.py). The homepage (concept C) states the team default and how to switch."""
     page = " ".join(re.sub(r"<[^>]+>", "", text(client.get("/").text)).split())
-    assert ("Only people on your team. Their messages are delivered straight away, marked as coming from a "
-            "teammate.") in page
-    assert ("If you'd rather approve each sender first, turn on approval mode in Settings or with "
-            "raincli trust --mode list.") in page
+    assert ("Teammates' messages arrive framed as external, and by default anyone on your team can reach your "
+            "agents.") in page
+    assert "To approve each sender first: raincli trust --mode list." in page
     assert "by default asks before passing on messages" not in page
     from raincli_agent.connector.config import ConnectorConfig
     assert ConnectorConfig().trust_mode == "list"  # a direct-delivery connector ("mode": "direct") asks first

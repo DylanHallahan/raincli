@@ -1,118 +1,136 @@
-"""Website Phase B: the homepage copy is homepage-copy.md word for word (the strings are embedded here, so the test
-never reads marketing's files), and request access is an email link (variant B)."""
+"""The homepage, concept C "Paper" (marketing landing-v2, which replaced website Phase B's direction A). The copy is
+the concept's, checked against v0.6 person routing; the strings are embedded here, so the test never reads
+marketing's files. Request access is an email link."""
 
 from __future__ import annotations
 
 import html as htmllib
 import re
+from pathlib import Path
 
 import pytest
 
 SECTIONS = [
     ("hero", [
-        "Stop being the clipboard between your team's agents.",
-        "Your agent sends a question or a Markdown report straight to a teammate's agent, and the answer comes back "
-        "to yours. You both see every message.",
-        "How it works",
-        "Free during the pilot. Invite-only for now.",
-    ]),
-    ("demo", [
-        "Example",
+        "Agent-to-agent · free during the pilot",
+        "Agent Direct Messaging for your team",
+        "Your agent asks a teammate's agent directly. No copy-pasting.",
+        "Request access", "Read the details",
+        "Agents Claude Code · Codex · Herdr · any CLI agent",
+        "Runs on Windows app · Linux, headless too",
+        "Access Invite-only pilot",
+        "The RainCLI app · fictional team",
         "Maya's agent sends the question to Jon.",
         "Maya can see how far it got.",
         "Jon's agent answers and attaches its report.",
         "Maya and Jon can both read the whole thread.",
     ]),
     ("how", [
-        "How it works",
-        "1 Install and sign in",
-        "On Windows, install the RainCLI app. It needs no admin rights and no Python. On Linux, or over SSH, run "
-        "raincli login. Either way you sign in with your email and password.",
-        "2 RainCLI finds your agents",
-        "Sign in once per machine and it picks up your Claude Code, Codex and Herdr sessions. They never send "
-        "prompts, paths or transcripts.",
-        "3 Send it to a teammate",
-        "Your agent uses the raincli CLI, or you write in the app. Herdr agents get it right away. Claude Code and "
-        "Codex get it at their next turn, and the conversation header tells you which.",
-        "4 Watch it land",
-        "Each message shows stored, received, submitted and replied as they happen. The app updates by itself, so "
-        "replies show up without a refresh.",
+        "01 How a message moves",
+        "Agent to agent, with every hop on the record.",
+        "Built for small dev teams where everyone runs their own coding agent. You address a teammate, not a "
+        "machine: your agent sends from the CLI, and RainCLI delivers it to the agent they picked as their inbox. "
+        "Both of you can read the thread in the app.",
+        "Your agent runs raincli send jon@example.com",
+        "RainCLI server stored stores it for Jon's inbox",
+        "Their machine received the runtime picks it up and acknowledges it",
+        "Their inbox agent submitted gets it in its session",
+        "The reply replied comes back to the agent that asked, linked to your message",
+        "stored On the server. The recipient's machine hasn't picked it up yet.",
+        "held Waiting on their side: they haven't picked an inbox yet, their inbox is busy or offline, it's a "
+        "next-turn agent, or they approve senders first.",
+        "replied Their agent answered, in the same thread.",
+    ]),
+    ("threads", [
+        "A reply is linked to the message it answers. A report travels with its checksum.",
+        "Every message belongs to a conversation, one per pair of people.",
+        "Markdown reports go with the message: UTF-8, up to 256 KiB each, five files and 1 MiB per message.",
+    ]),
+    ("cli", [
+        "02 From the command line",
+        "Your agent already knows how to run this.",
+        "raincli people",
+        "raincli send @jon@example.com --body-file - --attach audit.md",
+        "raincli inbox", "raincli thread <CONV_ID>", "raincli fetch <MSG_ID>", "raincli watch",
+        "raincli --skill > ~/.claude/skills/raincli/SKILL.md",
+        "People, not machines A message to @jon@example.com goes to the agent Jon picked as an inbox, or waits in "
+        "Jon's app until one is picked. Teammates see people and availability, never your machines or agents.",
     ]),
     ("app", [
-        "In the app",
-        "Instant or Next turn. How soon the agent will see your message.",
-        "Ready, Busy, Offline. You can see whether the other side is around before you send.",
-        "A heads-up when a machine is quiet. If a teammate's machine hasn't connected in a while, you're told before "
-        "you send.",
-        "Reports, attached. Markdown files go with the message, with their size and checksum.",
-        "Archive when you're done. Nothing is deleted, and a new message brings the conversation back.",
-        "Your own time zone. Every time is shown in local time.",
-    ]),
-    ("trust", [
-        "Who can reach your agents",
-        "Only people on your team. Their messages are delivered straight away, marked as coming from a teammate.",
-        "A message can ask your agent for something. It can't change the agent's instructions or permissions, and "
-        "nothing runs by itself.",
-        "If you'd rather approve each sender first, turn on approval mode in Settings or with "
-        "raincli trust --mode list.",
+        "03 In the app",
+        "Instant or Next turn How soon their inbox agent will see your message.",
+        "Ready, Busy, Offline Whether the other side is around before you send.",
+        "A quiet inbox If a teammate's inbox hasn't connected in a while, or they haven't picked one yet, you're "
+        "told before you send.",
+        "Sam's inbox hasn't connected since Tuesday.",
+        "Done, not deleted A new message brings the conversation back.",
     ]),
     ("works-with", [
-        "Works with",
-        "Claude Code, Codex and Herdr. Any other agent can use the raincli CLI and the skill that comes with it. "
-        "Codex needs version 0.145.0 or later, plus a one-time hook approval in Codex.",
+        "04 Works with",
+        "Mixed teams are the point.",
+        "Herdr Instant as soon as the agent is idle Herdr 0.9.3 or later",
+        "Codex with hooks enabled (0.145.0 or later on Windows), one-time approval in /hooks",
+        "macOS hasn't been tested yet.",
+    ]),
+    ("install", [
+        "05 Install",
+        "Windows app, or a few commands on Linux.",
+        "Download for Windows",
+        "raincli inbox show", "raincli inbox set <agent>",
     ]),
     ("security", [
-        "Security",
-        "What's protected",
-        "Traffic is encrypted with TLS. Your machines only make outbound HTTPS connections, so there are no ports "
-        "to open.",
-        "Each machine has its own credential. The server stores only a hash, Windows keeps it protected with DPAPI, "
-        "and revoking it takes effect straight away.",
-        "The sender of every message comes from that credential. Nobody can pose as a teammate by editing a message.",
-        "What isn't, yet",
-        "Messages aren't end-to-end encrypted. The server stores them and can read them, so treat it like your team "
-        "chat.",
-        "The Windows installer isn't code-signed yet. Windows may warn you the first time. Check the SHA-256 "
-        "published with each release.",
+        "06 Trust and security",
+        "What's protected, and what isn't yet.",
+        "TLS everywhere. Machines only make outbound HTTPS connections: no inbound ports, no VPN.",
+        "The sender comes from the credential, never from the message text. Messages reach only people on your team.",
+        "Teammates see people and availability, never your machines, agents or sessions.",
+        "Messages aren't end-to-end encrypted. The server stores them and can read them.",
+        "The Windows installer isn't code-signed. The updater checks its published SHA-256, which catches a "
+        "corrupted download, not a malicious release.",
+    ]),
+    ("source", [
+        "Read the code, or run your own server.",
+        "07 Source and self-hosting",
+        "The client and the server are public on GitHub, with a runbook for hosting it yourself: FastAPI, PostgreSQL "
+        "and Nginx, plus migrations, backups and rollback.",
     ]),
     ("faq", [
-        "FAQ",
+        "08 Questions",
         "Is it free? Yes, during the pilot.",
         "Does everyone need the same AI tool? No. One person can use Claude Code, another Codex, another Herdr. "
         "Everyone on the team can be reached, whatever agent they use.",
-        "Can a teammate's agent take over mine? No. It can send a request. Your agent decides what to do with it "
-        "within its current job, and a message can't change instructions or permissions.",
-        "What if their agent is offline? The message waits. Their machine picks it up when it's back, and you'll "
-        "see it move to received.",
+        "What if they haven't picked an inbox yet? The message waits in their app, and you see it held: waiting "
+        "for them to pick an inbox. When they pick one, the waiting messages can go to it.",
+        "What if their agent is offline? The message waits on the server, held while their inbox is offline. "
+        "Their machine picks it up when it's back, and you'll see it move to received.",
         "Can you read our messages? Yes. They're encrypted in transit but not end to end, so the server can read "
-        "them. Share what you'd share in your team chat.",
-        "Which systems does it run on? Windows, through the app. Linux, including headless servers. We haven't "
-        "tested macOS yet.",
-        "Is the code open? Yes. It's on GitHub: github.com/DylanHallahan/raincli",
+        "them. Share what you'd share in your team chat, or run your own server.",
+        "Does a next-turn agent wake up for a message? No. A Claude Code or Codex session sees it the next time "
+        "it's used, and the sender sees it held until then. Use a Herdr agent if messages should be handled while "
+        "you're away.",
     ]),
     ("closing", [
         "Want it for your team?",
-        "It's a small invite-only pilot right now.",
-        "Email dylan@dylanhallahan.com and tell us a bit about your team.",
-        "Email us",
+        "It's a small invite-only pilot. Email dylan@dylanhallahan.com and say a bit about your team.",
+        "Request access",
         "Already invited? Sign in",
     ]),
 ]
-HEADER = ["RainCLI", "How it works", "Security", "Install", "Sign in"]
-FOOTER = ("RainCLI · Messages between your team's agents · Free during the pilot · TLS in transit, not end-to-end "
-          "encrypted · GitHub")
+ORDER = ["hero", "how", "threads", "cli", "app", "works-with", "install", "security", "source", "faq", "closing"]
+HEADER = ["RainCLI", "How it works", "CLI", "Install", "Security", "GitHub", "Sign in", "Request access"]
+FOOTER = "RainCLI Free during the pilot TLS in transit · not end-to-end encrypted GitHub"
+MAILTO = "mailto:dylan@dylanhallahan.com"
 
 
 def plain(fragment: str) -> str:
     """The visible words: tags dropped (a block element ends a sentence with a space), entities and whitespace
     normalised."""
     fragment = re.sub(r"<!--.*?-->", "", fragment, flags=re.S)
-    fragment = re.sub(r"</?(p|li|h[1-6]|summary|div|span class=\"step-num\"[^>]*)>", " ", fragment)
-    return " ".join(htmllib.unescape(re.sub(r"<[^>]+>", " ", fragment)).split()).replace(" .", ".")
+    return " ".join(htmllib.unescape(re.sub(r"<[^>]+>", " ", fragment)).split()).replace(" .", ".").replace(" ,", ",")
 
 
 def section(page: str, ident: str) -> str:
-    m = re.search(rf'<section id="{ident}"[^>]*>(.*?)</section>', page, re.S)
+    m = re.search(rf'<section[^>]*\bid="{ident}"[^>]*>(.*?)</section>', page, re.S)
     assert m, ident
     return plain(m.group(1))
 
@@ -123,15 +141,14 @@ def home(client):
 
 
 @pytest.mark.parametrize("ident,expected", SECTIONS, ids=[s[0] for s in SECTIONS])
-def test_each_section_has_the_copy_word_for_word(home, ident, expected):
+def test_each_section_has_the_copy(home, ident, expected):
     words = section(home, ident)
     for sentence in expected:
         assert sentence in words, sentence
 
 
 def test_sections_come_in_the_specified_order(home):
-    ids = re.findall(r'<section id="([a-z-]+)"', home)
-    assert ids == [s[0] for s in SECTIONS[:6]] + ["security", "install", "faq", "closing"]
+    assert re.findall(r'<section[^>]*\bid="([a-z-]+)"', home) == ORDER
 
 
 def test_header_and_footer(home):
@@ -141,51 +158,95 @@ def test_header_and_footer(home):
     assert FOOTER in plain(re.search(r"<footer.*?</footer>", home, re.S).group(0))
 
 
-MAILTO = "mailto:dylan@dylanhallahan.com"
-
-
-def test_request_access_is_an_email_link(home, client):
-    """Variant B (homepage-copy.md): the hero's Request access and the closing band's Email us are plain mailto
-    links; the closing sentence is the copy word for word; no form; the sign-in line stays."""
-    raw = client.get("/").text
-    hero = re.search(r'<section[^>]*class="[^"]*hero[^"]*".*?</section>', raw, re.S).group(0)
-    assert re.search(rf'<a class="site-btn site-btn-primary" href="{MAILTO}">Request access</a>', hero)
-    assert '<a class="site-btn site-btn-secondary" href="#how">How it works</a>' in hero
-    closing = re.search(r'<section id="closing".*?</section>', raw, re.S).group(0)
-    assert "Email dylan@dylanhallahan.com and tell us a bit about your team." in plain(closing)
-    assert f'Email <a href="{MAILTO}">dylan@dylanhallahan.com</a> and tell us a bit about your team.' in closing
-    assert re.search(rf'<a class="site-btn site-btn-primary" href="{MAILTO}">Email us</a>', closing)
+def test_request_access_is_an_email_link(home):
+    """The header's, the hero's and the closing band's Request access are plain mailto links; no form; the
+    sign-in line stays."""
+    hero = re.search(r'<section class="hero".*?</section>', home, re.S).group(0)
+    assert re.search(rf'<a class="btn primary lg" href="{MAILTO}">.*?Request access</a>', hero, re.S)
+    assert '<a class="btn ghost lg" href="#how">Read the details</a>' in hero
+    closing = re.search(r'<section class="closing".*?</section>', home, re.S).group(0)
+    assert re.search(rf'<a class="btn primary lg" href="{MAILTO}">.*?Request access</a>', closing, re.S)
+    assert f'Email <a href="{MAILTO}">dylan@dylanhallahan.com</a>' in closing
     assert "Already invited? Sign in" in plain(closing)
-    assert "<form" not in raw and "?subject" not in raw
-    assert set(re.findall(r'href="(mailto:[^"]*)"', raw)) == {MAILTO}
-    assert "TODO(request-access)" not in raw and 'href="#closing"' not in raw
+    header = re.search(r"<header.*?</header>", home, re.S).group(0)
+    assert f'href="{MAILTO}">Request access</a>' in header
+    assert "<form" not in home and "?subject" not in home
+    assert set(re.findall(r'href="(mailto:[^"]*)"', home)) == {MAILTO}
 
 
 def test_free_during_the_pilot_only_in_the_hero_faq_and_footer(home):
-    words = plain(home)
-    assert words.count("Free during the pilot") == 2  # the hero line and the footer (copy file's footer)
+    words = plain(home).lower()
+    assert words.count("free during the pilot") == 2  # the hero label and the footer
     assert "Yes, during the pilot." in section(home, "faq")
     for promise in ("pricing", "price", "per seat", "/month", "after the pilot", "will cost", "paid plan"):
-        assert promise not in words.lower(), promise
+        assert promise not in words, promise
+
+
+def test_public_on_github_never_open_source(home):
+    """There is no licence yet: the code is "public on GitHub", never "open source"."""
+    words = plain(home).lower()
+    assert "public on github" in words
+    for claim in ("open source", "open-source", "opensource", "the code open", "mit licen", "apache licen"):
+        assert claim not in words and claim not in home.lower(), claim
 
 
 def test_the_anchors_still_exist(home):
-    for ident in ("how", "install", "security", "closing", "hero", "demo", "app", "trust", "faq"):
+    for ident in ("how", "install", "security", "closing", "hero", "demo", "app", "trust", "faq", "cli"):
         assert f'id="{ident}"' in home, ident
-    for ident in ("how", "security", "install"):
+    for ident in ("how", "security", "install", "cli"):
         assert f'href="#{ident}"' in home
 
 
 def test_no_external_resources_and_the_logo_is_inline(home):
-    assert re.search(r'<(?:script|link|img|iframe)[^>]+(?:src|href)="(?:https?:)?//', home) is None
-    assert "<img" not in home and "fonts" not in home
-    assert home.count('<svg class="mark"') == 2  # the header and the demo's sidebar
-    assert re.search(r'style="', home) is None and "<style" not in home
+    # Nothing is fetched from another origin (the canonical link names the page, it loads nothing).
+    assert re.search(r'<(?:script|img|iframe)[^>]+src="(?:https?:)?//', home) is None
+    assert re.search(r'<link (?!rel="canonical")[^>]*href="(?:https?:)?//', home) is None
+    assert "<img" not in home
+    assert home.count('<svg class="mark"') == 3  # the header, the demo's title bar and the footer
+    assert re.search(r'style="', home) is None and "<style" not in home and "<script>" not in home
+
+
+def test_link_previews_have_absolute_urls_and_the_image_is_served(home, client):
+    for prop in ("og:image", "twitter:image"):
+        url = re.search(rf'<meta (?:property|name)="{prop}" content="([^"]+)">', home).group(1)
+        assert re.fullmatch(r"http://testserver/static/og\.png\?v=[0-9a-f]{12}", url), url
+    for tag in ('property="og:title" content="Agent Direct Messaging for your team"', 'property="og:type"',
+                'property="og:url" content="http://testserver/"', 'name="twitter:card" content="summary_large_image"',
+                'property="og:image:width" content="1200"', 'property="og:image:height" content="630"',
+                'rel="canonical" href="http://testserver/"', 'property="og:image:alt"'):
+        assert tag in home, tag
+    r = client.get("/static/og.png")
+    assert r.status_code == 200 and r.content[:8] == b"\x89PNG\r\n\x1a\n"
+    width, height = int.from_bytes(r.content[16:20], "big"), int.from_bytes(r.content[20:24], "big")
+    assert (width, height) == (1200, 630)
+
+
+def test_the_page_loads_only_its_own_css_js_and_fonts(home, client):
+    from raincli_server import web
+
+    static = Path(web.__file__).parent / "static"
+    assert re.findall(r'<link rel="stylesheet" href="/static/([^"?]+)', home) == ["landing.css"]
+    assert re.findall(r'<script src="/static/([^"?]+)', home) == ["landing.js"]
+    css = (static / "landing.css").read_text("utf-8")
+    fonts = re.findall(r'url\("fonts/([^"]+)"\)', css)
+    assert fonts == ["noto-serif-display-light-v2009.woff2", "noto-serif-display-light-italic-v2009.woff2",
+                     "jetbrains-mono-regular-v2304.woff2"]
+    assert "font-display:swap" in css and "data:" not in css and "url(http" not in css
+    for name in fonts:
+        assert client.get(f"/static/fonts/{name}").status_code == 200
+    for family in ("NotoSerifDisplay", "JetBrainsMono"):
+        assert "SIL Open Font License" in (static / "fonts" / f"OFL-{family}.txt").read_text("utf-8")
+    readme = (static / "fonts" / "README.md").read_text("utf-8")
+    assert "https://github.com/JetBrains/JetBrainsMono/releases/tag/v2.304" in readme
+    assert "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf" in readme  # the release zip
+    import hashlib
+    digest = hashlib.sha256((static / "fonts" / "jetbrains-mono-regular-v2304.woff2").read_bytes()).hexdigest()
+    assert digest in readme
 
 
 DEMO = [
     "Jon", "Checkout vs. the new orders API", "Priya", "Retry cap question", "Earlier", "Sam",
-    "Load test report", "Maya's agent · 10:42", "Jon's agent · 10:44", "To: Jon",
+    "Load test report", "Maya · agent · 10:42", "Jon · agent · 10:44", "To Jon", "Ready", "Instant",
     "Demo of the RainCLI app. Maya's agent sends a question to Jon. The message shows stored, received and submitted, "
     "and Jon shows as busy. Jon's agent replies with a Markdown report attached, the message shows replied, and Jon "
     "is ready again. Maya and Jon can both read the whole thread.",
@@ -195,36 +256,39 @@ DEMO = [
 NOT_IN_THE_DEMO = ("Team chat", "Pasted AI output", "pasting", "Nobody pasted")
 
 
+def _demo(home):
+    return re.search(r'<figure class="demo" id="demo".*?</figure>', home, re.S).group(0)
+
+
 def test_the_demo_shows_only_the_app(home):
-    from pathlib import Path
+    from raincli_server import web
 
-    import raincli_server
-
-    css = (Path(raincli_server.__file__).parent / "web" / "static" / "demo.css").read_text("utf-8")
+    css = (Path(web.__file__).parent / "static" / "landing.css").read_text("utf-8")
+    demo = _demo(home)
     for text in NOT_IN_THE_DEMO:
-        assert text not in home and text not in css, text
-    demo = re.search(r'<section id="demo".*?</section>', home, re.S).group(0)
+        assert text not in demo and text not in css, text
     assert "b-scene" not in demo and "cap5" not in demo and demo.count('<p class="cap') == 4
-    for gone in (".b-scene", ".b-msg", ".paste", ".b-tag", "k-b-scene", "k-a-scene", "k-cap5", " 22s "):
-        assert gone not in css, gone
-    assert css.count(" 16s linear infinite") == 14  # m1 m2 file, cap1-4, four states, ready busy dot
+    assert css.count(" 16s linear infinite") == 15  # m1 m2 file, cap1-4, four states, ready busy dot, progress
 
 
-def test_the_demo_has_the_true_today_markup(home):
-    words = section(home, "demo")
+def test_the_demo_has_the_v06_markup(home):
+    """The app's own labels: a message an agent sent is "<Name> · agent" (§21.6)."""
+    words = plain(_demo(home))
     for text in DEMO:
         assert text in words, text
+    assert "Maya's agent ·" not in words and "Jon's agent ·" not in words
 
 
-# The "true today" copy (person routing, 2026-10-12): no addressing a teammate's agent by name and no Team list.
+# The "true today" copy (person routing): no addressing a teammate's agent or machine, no agent list for the team.
 NOT_TODAY = ("api-agent", "laptop-agent", "web-agent", "ops-agent", "Pick the teammate and the agent",
-             "Each agent gets its own address", "the agent they picked", "Shown next to every agent on your team",
-             "Teammates see the names", "show up for the team", "Send to an agent", "sends the question to Jon's agent")
+             "Each agent gets its own address", "Shown next to every agent on your team",
+             "Teammates see the names", "show up for the team", "Send to an agent", "sends the question to Jon's agent",
+             "Coming in v0.6", "In v0.6", "named agents", "machine's address", "The agent list your team sees",
+             "Agents only reach agents", "Sam's laptop", "last seen")
 
 
 def test_no_copy_claims_any_agent_routing_or_the_team_list(home):
     words = plain(home)
     for phrase in NOT_TODAY:
         assert phrase not in words, phrase
-    demo = re.search(r'<section id="demo".*?</section>', home, re.S).group(0)
-    assert '<div class="grp">Team</div>' not in demo and 'class="ag"' not in demo and 'class="dot' not in demo
+    assert '<div class="grp">Team</div>' not in _demo(home)

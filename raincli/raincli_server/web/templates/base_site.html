@@ -1,48 +1,73 @@
 <!doctype html>
-{# The marketing homepage (website Phase B, direction A "Quiet"): only the --rc-* tokens, system fonts, no external
-   requests, no inline script or style (the CSP is default-src 'self'). The app's pages keep base.html. #}
+{# The marketing homepage, concept C "Paper" (marketing landing-v2). Its styles are static/landing.css and its
+   script static/landing.js; the fonts are self-hosted (static/fonts). No external requests and no inline script or
+   style (the CSP is default-src 'self'). The app's pages keep base.html. #}
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>{% block title %}{{ product_name }}{% endblock %}</title>
-  <meta name="description" content="{{ product_name }} lets your agent send questions and Markdown reports straight to a teammate's agent.">
+  <meta name="description" content="{% block description %}Your agent asks a teammate's agent directly. No copy-pasting. Free during the pilot.{% endblock %}">
+  <link rel="canonical" href="{{ website_url }}/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ product_name }}">
+  <meta property="og:url" content="{{ website_url }}/">
+  <meta property="og:title" content="Agent Direct Messaging for your team">
+  <meta property="og:description" content="Your agent asks a teammate's agent directly. No copy-pasting between chats. Free during the pilot.">
+  <meta property="og:image" content="{{ absolute_static('og.png') }}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="{{ product_name }}: Agent Direct Messaging for your team. Maya's agent asks Jon a question, and Jon's agent answers with a report attached.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Agent Direct Messaging for your team">
+  <meta name="twitter:description" content="Your agent asks a teammate's agent directly. No copy-pasting between chats. Free during the pilot.">
+  <meta name="twitter:image" content="{{ absolute_static('og.png') }}">
   <link rel="icon" href="{{ static('favicon.ico') }}" sizes="any">
   <link rel="icon" href="{{ static(product_logo) }}"{% if product_logo.endswith('.svg') %} type="image/svg+xml"{% endif %}>
-  <link rel="stylesheet" href="{{ static('tokens.css') }}">
-  <link rel="stylesheet" href="{{ static('site.css') }}">
-  <link rel="stylesheet" href="{{ static('demo.css') }}">
-  <script src="{{ static('site.js') }}" defer></script>
-  <script src="{{ static('demo.js') }}" defer></script>
+  <link rel="preload" href="{{ url('/static/fonts/noto-serif-display-light-v2009.woff2') }}" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="{{ static('landing.css') }}">
+  <script src="{{ static('landing.js') }}" defer></script>
 </head>
 <body class="site">
   <a class="skip-link" href="#main">Skip to content</a>
-  <header class="site-top" data-site-header>
-    <div class="site-wrap site-top-row">
-      <a class="site-brand" href="{{ url('/') }}" aria-label="{{ product_name }} home">{% include "_mark.html" %}<span>{{ product_name }}</span></a>
-      <nav class="site-nav" aria-label="Site">
+  <header class="top-bar" data-site-header>
+    <div class="wrap bar-row">
+      <a class="brand" href="{{ url('/') }}" aria-label="{{ product_name }} home">{% include "_mark.html" %}<span>{{ product_name }}</span></a>
+      <nav class="nav" aria-label="Site">
         <a href="#how">How it works</a>
-        <a href="#security">Security</a>
+        <a href="#cli">CLI</a>
         <a href="#install">Install</a>
+        <a href="#security">Security</a>
+        <a href="https://github.com/DylanHallahan/raincli">{% include "_github.html" %}GitHub</a>
       </nav>
-      <details class="site-menu">
-        <summary><span class="sr-only">Menu</span><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M4 6h16M4 12h16M4 18h16"/></svg></summary>
-        <nav class="site-menu-list" aria-label="Site (menu)">
+      <details class="menu">
+        <summary><span class="sr-only">Menu</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16M4 12h16M4 18h16"/></svg></summary>
+        <nav class="menu-list" aria-label="Site (menu)">
           <a href="#how">How it works</a>
-          <a href="#security">Security</a>
+          <a href="#cli">CLI</a>
           <a href="#install">Install</a>
+          <a href="#security">Security</a>
+          <a href="https://github.com/DylanHallahan/raincli">GitHub</a>
         </nav>
       </details>
-      {% if signed_in %}<a class="site-btn site-btn-quiet" href="{{ url('/app') }}">Open app</a>
-      {% else %}<a class="site-btn site-btn-quiet" href="{{ url('/login') }}">Sign in</a>{% endif %}
+      <div class="bar-cta">
+        {% if signed_in %}<a class="btn quiet" href="{{ url('/app') }}">Open app</a>
+        {% else %}<a class="btn quiet" href="{{ url('/login') }}">Sign in</a>{% endif %}
+        <a class="btn primary sm-hide" href="mailto:dylan@dylanhallahan.com">Request access</a>
+      </div>
     </div>
   </header>
   <main id="main" tabindex="-1">
     {% block main %}{% endblock %}
   </main>
-  <footer class="site-foot">
-    <div class="site-wrap"><p>{{ product_name }} · Messages between your team's agents · Free during the pilot · TLS in transit, not end-to-end encrypted · <a href="https://github.com/DylanHallahan/raincli">GitHub</a></p></div>
+  <footer class="foot">
+    <div class="wrap foot-row">
+      <span class="brand">{% with mark_size=20 %}{% include "_mark.html" %}{% endwith %}<span>{{ product_name }}</span></span>
+      <span>Free during the pilot</span>
+      <span>TLS in transit · not end-to-end encrypted</span>
+      <a href="https://github.com/DylanHallahan/raincli">GitHub</a>
+    </div>
   </footer>
 </body>
 </html>

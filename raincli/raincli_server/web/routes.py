@@ -173,6 +173,8 @@ def _context(request: Request, viewer: auth.Viewer | None, csrf: str | None, ctx
     return {
         "url": lambda path: root + path,
         "static": lambda name: f"{root}/static/{name}?v={STATIC_VERSIONS.get(name, '0')}",
+        # for link previews (og:image, twitter:image), which need an absolute URL
+        "absolute_static": lambda name: f"{settings.public_url}{root}/static/{name}?v={STATIC_VERSIONS.get(name, '0')}",
         "viewer": viewer,
         "csrf": csrf if csrf is not None else (viewer.csrf if viewer else ""),
         "path": _route_path(request),
