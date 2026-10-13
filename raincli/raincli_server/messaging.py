@@ -930,21 +930,22 @@ def is_unread_for(session: Session, user_id: uuid.UUID, msg: Message, owned: set
     """``unread_for`` for one loaded message (templates). ``owned``: the user's machine ids, if already known."""
     if msg.person_seen_at is not None:
         return False
+    if msg.recipient_user_id is not None:
+        return msg.recipient_user_id == user_id  # to them as a person, from anyone (their own agents' escalations too)
     owned = owned if owned is not None else set(session.scalars(select(Agent.id).where(Agent.owner_user_id == user_id)))
-    to_user = msg.recipient_user_id == user_id or msg.recipient_agent_id in owned
     from_user = msg.sender_user_id == user_id or msg.sender_agent_id in owned
-    return bool(to_user and not from_user)
+    return bool(msg.recipient_agent_id in owned and not from_user)
 
 
 def unread_for(user_id: uuid.UUID):
-    """A SQL condition: a message ``user_id`` has not seen yet (their unread counts and lists, §21 H2): to them as a
-    person, or routed to one of their machines, not sent by them or their machines, and without ``person_seen_at``."""
+    """A SQL condition: a message ``user_id`` has not seen yet (their unread counts and lists, §21 H2), without
+    ``person_seen_at``: to them as a person (from anyone, their own agents' escalations and reports included), or
+    routed to one of their machines and not sent by them or their machines."""
     mine = select(Agent.id).where(Agent.owner_user_id == user_id)
-    return and_(
-        or_(Message.recipient_user_id == user_id, Message.recipient_agent_id.in_(mine)),
-        or_(Message.sender_user_id.is_(None), Message.sender_user_id != user_id),
-        or_(Message.sender_agent_id.is_(None), Message.sender_agent_id.not_in(mine)),
-        Message.person_seen_at.is_(None))
+    routed_to_me = and_(Message.recipient_user_id.is_(None), Message.recipient_agent_id.in_(mine),
+                        or_(Message.sender_user_id.is_(None), Message.sender_user_id != user_id),
+                        or_(Message.sender_agent_id.is_(None), Message.sender_agent_id.not_in(mine)))
+    return and_(or_(Message.recipient_user_id == user_id, routed_to_me), Message.person_seen_at.is_(None))
 
 
 def conversation_endpoint(session: Session, conv: Conversation, side: str) -> Endpoint:
