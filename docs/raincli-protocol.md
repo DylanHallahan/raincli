@@ -1878,7 +1878,7 @@ A message to person P in team T is stored as follows, decided once, at send time
 - **No read receipt.** A person's own read state is `messages.person_seen_at`, set when they see a message in the app, on the website or through the person API. It is used only in that person's views and unread counts. `acked_at` is a machine's pickup only, so a message a person has read is still delivered to an inbox they pick later. Reading writes no event and changes nothing anyone else can fetch. For a message to a person (`recipient_user_id`), everyone but that person sees:
   - held `no_inbox` while the person has no inbox in that team, otherwise `received` (`replied` once they replied);
   - `received` for a message sent before v0.6 (no route), which was delivered in their app;
-  - no `acked_at`;
+  - no `acked_at` (a message to a machine, an inbox or a reply, shows its pickup as `acked_at` to every reader: the trail's "received" step);
   - `delivery_updated_at` equal to `created_at`, until replied;
   - a trail derived from these states, never from events.
 

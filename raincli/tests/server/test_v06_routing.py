@@ -105,6 +105,20 @@ def test_no_inbox_waits_in_the_app_and_the_sender_sees_no_inbox(client, session,
 
 # H4: no read receipt ---------------------------------------------------------------------------------------------
 
+def test_a_machines_pickup_is_shown_to_the_sender(client, session, v06_seed):  # noqa: F811
+    """§21.6: only messages to a person (recipient_user_id) hide acked_at. One delivered to the person's inbox
+    machine shows its pickup to the sender, as the trail's "received" step does."""
+    maya = v06_seed["person_tokens"]["Maya"]
+    r = person_send(client, maya, "jon@example.test", "for Jon's inbox")
+    mid = r.json()["message"]["id"]
+    assert stored(session, mid).recipient_agent_id == v06_seed["machines"]["jon"].id  # inbox-routed
+    assert client.get(f"/api/v1/person/messages/{mid}", headers=auth(maya)).json()["message"]["acked_at"] is None
+    picked = client.post(f"/api/v1/messages/{mid}/ack", headers=auth(v06_seed["machine_tokens"]["jon"]))
+    assert picked.status_code == 200
+    shown = client.get(f"/api/v1/person/messages/{mid}", headers=auth(maya)).json()["message"]
+    assert shown["acked_at"] == picked.json()["message"]["acked_at"] and shown["delivery_state"] == "received"
+
+
 def test_viewing_in_the_app_changes_nothing_the_sender_can_fetch(client, session, v06_seed):  # noqa: F811
     r = person_send(client, v06_seed["person_tokens"]["Maya"], "sam@example.test", "read me")
     mid = r.json()["message"]["id"]

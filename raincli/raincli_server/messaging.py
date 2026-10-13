@@ -199,9 +199,10 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
         "body": msg.body,
         "created_at": iso(msg.created_at),
         "seq": msg.seq,
-        # a person's own read state for them (person_seen_at); a machine's pickup for the machine's owner
-        "acked_at": iso(msg.person_seen_at) if msg.recipient_user_id is not None and viewer_id == msg.recipient_user_id
-        else iso(msg.acked_at) if msg.recipient_user_id is None and owns_recipient else None,
+        # To a person: their own read state (person_seen_at) for them alone, nothing for anyone else (§21.6, H4).
+        # To a machine (an inbox, a reply): its pickup, the "received" step every reader of the message sees.
+        "acked_at": (iso(msg.person_seen_at) if viewer_id == msg.recipient_user_id else None)
+        if msg.recipient_user_id is not None else iso(msg.acked_at),
         "delivery_state": state,
         "hold_reason": hold if owns_recipient else presentation.api_hold_code(hold, route),
         # H4: for a message to a person, the time it changed would tell the sender when they read it.
