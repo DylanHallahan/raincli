@@ -1861,10 +1861,18 @@ A message to person P in team T is stored as follows, decided once, at send time
   - **`from_same_owner`:** unchanged.
 - **Hold reasons:**
   - **The recipient machine's owner** sees the raw code.
-  - **Everyone else** sees a coarse code: `no_inbox`, `inbox_busy`, `inbox_offline`, `update_needed`, `approval` or `inbox_failed`. For route `reply` it's `agent_busy` or `agent_offline`.
+  - **Everyone else** sees a coarse code: `no_inbox`, `inbox_busy`, `inbox_next_turn`, `inbox_offline`, `update_needed`, `approval` or `inbox_failed`. For route `reply` it's `agent_busy`, `agent_next_turn` or `agent_offline`.
+  - **The raw codes behind them:**
+    - `busy` and `blocked` are busy;
+    - `next_turn` (handed to a hook session, which takes it at its next turn, §14.4) is next turn;
+    - `offline`, `expired_offline` and `agent_not_ready` are offline;
+    - `client_update_needed` is an update;
+    - `approval_required` and `sender_blocked` are approval;
+    - anything else is `inbox_failed`. As holds that means `target_mismatch`, `target_ambiguous`, `too_large_for_hook` and `too_large_for_command_line`, which the recipient has to fix.
   - **Pages** show the matching sentence:
     - "waiting for <Name> to pick an inbox";
     - "<Name>'s inbox is busy" or "is offline" ("<Name>'s agent is busy" or "is offline" for replies);
+    - "waiting for <Name>'s inbox's next turn" ("waiting for <Name>'s agent's next turn" for replies);
     - "<Name>'s RainCLI needs an update";
     - "waiting for <Name>'s approval";
     - "<Name>'s inbox couldn't take it".

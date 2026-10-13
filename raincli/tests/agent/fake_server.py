@@ -43,12 +43,12 @@ EVENT_CODES = frozenset({
 ADDRESS_PEOPLE = "Address people: send to a teammate's name or email"
 INVALID_RECIPIENT = "recipient must be a teammate's name or email"
 INBOX_INVALID = "{machine} can't be your inbox: pick one of your own agents that can receive messages"
-_HOLD_GROUPS = {"no_inbox": "no_inbox", "busy": "busy", "blocked": "busy", "offline": "offline",
-                "expired_offline": "offline", "client_update_needed": "update", "approval_required": "approval",
-                "sender_blocked": "approval"}
-_API_CODES = {"no_inbox": "no_inbox", "busy": "inbox_busy", "offline": "inbox_offline", "update": "update_needed",
-              "approval": "approval", "failed": "inbox_failed"}
-_API_REPLY_CODES = {"busy": "agent_busy", "offline": "agent_offline"}
+_HOLD_GROUPS = {"no_inbox": "no_inbox", "busy": "busy", "blocked": "busy", "next_turn": "next_turn",
+                "offline": "offline", "expired_offline": "offline", "agent_not_ready": "offline",
+                "client_update_needed": "update", "approval_required": "approval", "sender_blocked": "approval"}
+_API_CODES = {"no_inbox": "no_inbox", "busy": "inbox_busy", "next_turn": "inbox_next_turn",
+              "offline": "inbox_offline", "update": "update_needed", "approval": "approval", "failed": "inbox_failed"}
+_API_REPLY_CODES = {"busy": "agent_busy", "next_turn": "agent_next_turn", "offline": "agent_offline"}
 
 
 def api_hold_code(code, route=None):

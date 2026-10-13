@@ -43,26 +43,33 @@ EVENT_CODES = frozenset({
     "next_turn_emitted",
 })
 
-# Raw hold codes to the coarse groups teammates see (§21 C5.5, C13 M3).
+# Raw hold codes to the coarse groups teammates see (§21 C5.5, C13 M3). Every other code is "failed": a hold the
+# recipient has to fix (target_mismatch, target_ambiguous, too_large_for_hook, too_large_for_command_line), or a code
+# that is never a hold's detail (the outcomes reported with submitted, submission_uncertain or rejected, and
+# owner_unreachable, which only holds an escalation on the recipient's machine).
 _GROUPS = {
     "no_inbox": "no_inbox",
     "busy": "busy", "blocked": "busy",
+    "next_turn": "next_turn",  # handed to a hook session (Claude Code, Codex): it takes it at its next turn (§14.4)
     "offline": "offline", "expired_offline": "offline",
+    "agent_not_ready": "offline",  # Herdr's pane isn't running the agent: the connector holds it as offline too
     "client_update_needed": "update",
     "approval_required": "approval", "sender_blocked": "approval",
 }
-_API_CODES = {"no_inbox": "no_inbox", "busy": "inbox_busy", "offline": "inbox_offline", "update": "update_needed",
-              "approval": "approval", "failed": "inbox_failed"}
-_API_REPLY_CODES = {"busy": "agent_busy", "offline": "agent_offline"}
+_API_CODES = {"no_inbox": "no_inbox", "busy": "inbox_busy", "next_turn": "inbox_next_turn",
+              "offline": "inbox_offline", "update": "update_needed", "approval": "approval", "failed": "inbox_failed"}
+_API_REPLY_CODES = {"busy": "agent_busy", "next_turn": "agent_next_turn", "offline": "agent_offline"}
 _TEXTS = {
     "no_inbox": "waiting for {name} to pick an inbox",
     "busy": "{name}'s inbox is busy",
+    "next_turn": "waiting for {name}'s inbox's next turn",
     "offline": "{name}'s inbox is offline",
     "update": "{name}'s RainCLI needs an update",
     "approval": "waiting for {name}'s approval",
     "failed": "{name}'s inbox couldn't take it",
 }
-_REPLY_TEXTS = {"busy": "{name}'s agent is busy", "offline": "{name}'s agent is offline"}  # C13 L5
+_REPLY_TEXTS = {"busy": "{name}'s agent is busy", "next_turn": "waiting for {name}'s agent's next turn",
+                "offline": "{name}'s agent is offline"}  # C13 L5
 
 ADDRESS_PEOPLE = "Address people: send to a teammate's name or email"
 _ERRORS = {
