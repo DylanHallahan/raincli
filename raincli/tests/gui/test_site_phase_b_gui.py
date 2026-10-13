@@ -154,7 +154,9 @@ def test_the_anchors_resolve_and_the_nav_scrolls_to_them(browser, live):
         for ident in ("how", "security", "install"):
             page.click(f".site-nav a[href='#{ident}']")
             page.wait_for_function(f"() => Math.abs(document.getElementById('{ident}').getBoundingClientRect().top) < 120")
-        assert page.locator(".hero a[href='#closing']").count() == 0  # Request access is hidden for now
+        # Request access is an email link now (variant B): it opens the mail client and scrolls nowhere.
+        assert page.locator(".hero a.site-btn-primary").get_attribute("href") == "mailto:dylan@dylanhallahan.com"
+        assert page.locator(".hero a[href='#closing']").count() == 0
         for ident in ("how", "install", "security", "closing"):
             page.goto(f"{live}/#{ident}")
             page.wait_for_timeout(100)
@@ -338,3 +340,19 @@ def test_the_phone_demo(browser, live, artifacts, scheme):
     finally:
         context.close()
 
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+@pytest.mark.parametrize("size", ["desktop", "phone"])
+def test_request_access_links_in_the_hero_and_closing(browser, live, artifacts, size, scheme):
+    """Variant B: Request access (hero) and Email us (closing) are mailto links; no console or CSP errors."""
+    context, page, log = open_home(browser, live, size=size, scheme=scheme, motion="reduce")
+    try:
+        for selector in (".hero a.site-btn-primary", "#closing a.site-btn-primary"):
+            assert page.locator(selector).get_attribute("href") == "mailto:dylan@dylanhallahan.com"
+        assert page.locator("#closing p", has_text="Already invited?").count() == 1
+        page.locator(".hero").screenshot(path=str(artifacts / f"request-access-hero-{size}-{scheme}.png"))
+        page.locator("#closing").screenshot(path=str(artifacts / f"request-access-closing-{size}-{scheme}.png"))
+        assert log["console"] == [] and log["errors"] == [], log
+    finally:
+        context.close()

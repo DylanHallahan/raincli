@@ -1,5 +1,5 @@
 """Website Phase B: the homepage copy is homepage-copy.md word for word (the strings are embedded here, so the test
-never reads marketing's files), and the request-access slot is a placeholder."""
+never reads marketing's files), and request access is an email link (variant B)."""
 
 from __future__ import annotations
 
@@ -93,6 +93,8 @@ SECTIONS = [
     ("closing", [
         "Want it for your team?",
         "It's a small invite-only pilot right now.",
+        "Email dylan@dylanhallahan.com and tell us a bit about your team.",
+        "Email us",
         "Already invited? Sign in",
     ]),
 ]
@@ -139,17 +141,24 @@ def test_header_and_footer(home):
     assert FOOTER in plain(re.search(r"<footer.*?</footer>", home, re.S).group(0))
 
 
-def test_request_access_is_a_placeholder(home, client):
+MAILTO = "mailto:dylan@dylanhallahan.com"
+
+
+def test_request_access_is_an_email_link(home, client):
+    """Variant B (homepage-copy.md): the hero's Request access and the closing band's Email us are plain mailto
+    links; the closing sentence is the copy word for word; no form; the sign-in line stays."""
     raw = client.get("/").text
-    # Hidden until the user picks a request-access variant: no dead primary call to action (main, 2026-10-12).
-    assert "Request access" not in raw and 'href="#closing"' not in raw
+    hero = re.search(r'<section[^>]*class="[^"]*hero[^"]*".*?</section>', raw, re.S).group(0)
+    assert re.search(rf'<a class="site-btn site-btn-primary" href="{MAILTO}">Request access</a>', hero)
+    assert '<a class="site-btn site-btn-secondary" href="#how">How it works</a>' in hero
     closing = re.search(r'<section id="closing".*?</section>', raw, re.S).group(0)
-    assert "<form" not in closing and "mailto:" not in raw and "@" not in plain(closing)
-    assert "<form" not in raw  # no waitlist form anywhere yet
-    template = (client.app.state.templates.env.loader.get_source(client.app.state.templates.env, "home.html")[0]
-                if hasattr(client.app.state, "templates") else None)
-    if template is not None:
-        assert template.count("TODO(request-access)") >= 2
+    assert "Email dylan@dylanhallahan.com and tell us a bit about your team." in plain(closing)
+    assert f'Email <a href="{MAILTO}">dylan@dylanhallahan.com</a> and tell us a bit about your team.' in closing
+    assert re.search(rf'<a class="site-btn site-btn-primary" href="{MAILTO}">Email us</a>', closing)
+    assert "Already invited? Sign in" in plain(closing)
+    assert "<form" not in raw and "?subject" not in raw
+    assert set(re.findall(r'href="(mailto:[^"]*)"', raw)) == {MAILTO}
+    assert "TODO(request-access)" not in raw and 'href="#closing"' not in raw
 
 
 def test_free_during_the_pilot_only_in_the_hero_faq_and_footer(home):

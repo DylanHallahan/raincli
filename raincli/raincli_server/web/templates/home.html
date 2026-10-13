@@ -9,10 +9,7 @@
     <h1 id="hero-title">Stop being the clipboard between your team's agents.</h1>
     <p class="hero-sub">Your agent sends a question or a Markdown report straight to a teammate's agent, and the answer comes back to yours. You both see every message.</p>
     <div class="hero-actions">
-      {# TODO(request-access): hidden until the user picks variant A (waitlist) or B (email); set show_request_access
-         to true to restore it (it scrolls to #closing). #}
-      {% set show_request_access = false %}
-      {% if show_request_access %}<a class="site-btn site-btn-primary" href="#closing">Request access</a>{% endif %}
+      <a class="site-btn site-btn-primary" href="mailto:dylan@dylanhallahan.com">Request access</a>
       <a class="site-btn site-btn-secondary" href="#how">How it works</a>
     </div>
     <p class="hero-small">Free during the pilot. Invite-only for now.</p>
@@ -182,8 +179,8 @@ loginctl enable-linger "$USER"   # (may need an administrator)</code></pre>
   <div class="site-wrap closing-inner">
     <h2 id="closing-title">Want it for your team?</h2>
     <p>It's a small invite-only pilot right now.</p>
-    {# TODO(request-access): the user hasn't chosen between a waitlist form (variant A) and an email address
-       (variant B; homepage-copy.md). Until then this band has no form and no address, only the sign-in line. #}
+    <p>Email <a href="mailto:dylan@dylanhallahan.com">dylan@dylanhallahan.com</a> and tell us a bit about your team.</p>
+    <p class="closing-actions"><a class="site-btn site-btn-primary" href="mailto:dylan@dylanhallahan.com">Email us</a></p>
     <p class="closing-signin">Already invited? {% if signed_in %}<a href="{{ url('/app') }}">Open app</a>{% else %}<a href="{{ url('/login') }}">Sign in</a>{% endif %}</p>
   </div>
 </section>
