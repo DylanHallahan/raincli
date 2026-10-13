@@ -726,9 +726,9 @@ def test_inbox_agent_block_on_agents_and_token_pages_without_tokens(client, worl
 
 
 def test_public_page_links_connector_setups_to_the_setup_guide(client):
-    # Website Phase B moved the inbox-agent recommendation to the setup guide; the homepage links to it.
+    # The inbox-agent and connector setup lives in the setup guide; the homepage links to it in one line.
     html = client.get("/").text
-    assert "Inbox and connector setups" in html and "deliver messages to an inbox agent" in html
+    assert 'Connector and inbox setups: see the <a href="https://github.com/DylanHallahan/raincli/blob/main/SETUP.md">setup guide</a>.' in html
     assert "Recommended: a dedicated inbox agent" not in html
 
 

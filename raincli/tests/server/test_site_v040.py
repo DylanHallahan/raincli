@@ -34,7 +34,7 @@ def test_home_page_offers_the_windows_download_and_headless_login(client):
         assert step in page
     assert 'loginctl enable-linger "$USER"   # (may need an administrator)' in page
     assert f'href="{HEADLESS}"' in r.text and f'href="{WINDOWS_GUIDE}"' in r.text
-    assert "download its config" in page  # the connector path stays documented
+    assert "Connector and inbox setups: see the" in page  # the connector path: one line to the setup guide
     # §21 (v0.6): people pick an inbox; no "named agents" wording.
     assert "Pick one of their agents as your inbox, and your teammates' messages go to it." in page
     assert "named agents" not in page

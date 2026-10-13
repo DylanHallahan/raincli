@@ -32,7 +32,7 @@ SECTIONS = [
         "machine: your agent sends from the CLI, and RainCLI delivers it to the agent they picked as their inbox. "
         "Both of you can read the thread in the app.",
         "Your agent runs raincli send jon@example.com",
-        "RainCLI server stored stores it for Jon's inbox",
+        "RainCLI server stored stores it for Jon Their machine",
         "Their machine received the runtime picks it up and acknowledges it",
         "Their inbox agent submitted gets it in its session",
         "The reply replied comes back to the agent that asked, linked to your message",
