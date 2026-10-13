@@ -1542,8 +1542,21 @@ def build_parser():
     return p
 
 
+def _never_fail_on_encoding():
+    """Output never fails on a character the stream's encoding can't show (Windows: a pipe or a console in cp1252,
+    and a teammate's name with an emoji or CJK): it is shown as "?" instead. The encoding itself is unchanged."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None and getattr(stream, "errors", "strict") == "strict":
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):  # a closed or unusual stream: leave it as it is
+                pass
+
+
 def main(argv=None, *, herdr=None):
     argv = sys.argv[1:] if argv is None else list(argv)
+    _never_fail_on_encoding()
     if argv[:1] == ["hook"] and argv[1:] not in (["-h"], ["--help"]):
         # Only a bare `raincli hook --help` shows help: `--name -h` is a name, and
         # nothing an agent passes may print help into its context.

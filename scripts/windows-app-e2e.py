@@ -420,8 +420,8 @@ class App:
         left = [p for p in running_app_exes() if str(p).casefold().startswith(str(self.root).casefold())]
         check(not left, f"still running after --quit: {left}")
 
-    def cli(self, *args, check=True, timeout=300):
-        return run([self.root / "bin" / "raincli.exe", *args], check=check, timeout=timeout)
+    def cli(self, *args, check=True, timeout=300, **kw):
+        return run([self.root / "bin" / "raincli.exe", *args], check=check, timeout=timeout, **kw)
 
     def launch_run_value(self):
         """Exactly what Windows runs at logon: the Run value's command line, unparsed."""
@@ -552,6 +552,19 @@ def received(server, token, message_id):
     (C13 H4 hides the read state only for messages to a person with no inbox)."""
     state = (message(server, token, message_id) or {}).get("delivery_state")
     return state if state not in (None, "stored", "held") else None
+
+
+def picked_up(server, sender, machine, message_id, what, timeout=240):
+    """Wait until ``machine`` (its own token) has acked ``message_id``: its connector took the message, whatever the
+    agent hand-over then reports (with no Herdr here that can be ``held``, which received() rightly doesn't count).
+    A timeout names both views, so a wrong route is told apart from a connector that never polled."""
+    try:
+        return wait_for(what, lambda: (message(server, machine, message_id) or {}).get("acked_at"), timeout=timeout)
+    except Failure:
+        mine, theirs = message(server, machine, message_id) or {}, message(server, sender, message_id) or {}
+        raise Failure(f"timed out after {timeout} s waiting for {what}: the machine sees "
+                      f"{mine.get('to_endpoint')} {mine.get('delivery_state')}/{mine.get('hold_reason')}, the sender "
+                      f"{theirs.get('delivery_state')}/{theirs.get('hold_reason')}") from None
 
 
 def old_client_took(server, token, queue, message_id):
@@ -1737,13 +1750,24 @@ def part_d(app, server, installers, password, observer, teammate, menu, work):
         # v0.6, not yet run on Windows.
         transcript = []
 
+        import ctypes  # the frozen raincli.exe ignores PYTHON* variables and writes to a pipe in the ANSI code page
+        ansi = f"cp{ctypes.windll.kernel32.GetACP()}"
+
+        def text_of(raw):  # "·" in "Ready · Instant": cp1252 here, UTF-8 if a build ever writes that
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return raw.decode(ansi, errors="replace")
+
         def cli_step(*args):
-            result = app.cli(*args, check=False, timeout=120)
-            transcript.append(f"$ raincli {' '.join(str(a) for a in args)}\n{result.stdout}{result.stderr}"
-                              f"[exit {result.returncode}]\n")
-            return result, result.stdout + result.stderr
+            result = subprocess.run([str(a) for a in (app.root / "bin" / "raincli.exe", *args)], capture_output=True,
+                                    timeout=120)
+            out, err = text_of(result.stdout), text_of(result.stderr)
+            transcript.append(f"$ raincli {' '.join(str(a) for a in args)}\n{out}{err}[exit {result.returncode}]\n")
+            return result, out + err
         people, people_text = cli_step("people")
-        check(people.returncode == 0 and TEAMMATE_NAME in people_text and not re.search(rf"{TEAMMATE}(?!@)", people_text),
+        check(people.returncode == 0 and TEAMMATE_NAME in people_text and not re.search(rf"{TEAMMATE}(?!@)", people_text)
+              and "\ufffd" not in people_text,
               f"raincli people: {SECRETS.scrub(people_text)[-1500:]}")
         shown, shown_text = cli_step("inbox", "show")
         check(shown.returncode == 0 and LAPTOP_AGENT in shown_text, f"raincli inbox show: {SECRETS.scrub(shown_text)[-1500:]}")
@@ -2062,7 +2086,7 @@ def part_e(app, server, installers, password, observer, teammate, work, codex=No
     # v0.6, not yet run on Windows: the teammate writes to the PERSON, whose inbox is now this machine (inbox-only).
     point_inbox_at(server, EMAIL, "e2e-two-good", good_token)
     sent = send(server, teammate, {"person": EMAIL}, "after the stale one was set aside")
-    wait_for("delivery to the valid credential", lambda: received(server, teammate, sent), timeout=240)
+    picked_up(server, teammate, good_token, sent, "delivery to the valid credential")
     set_aside_log = config_dir / "runtime-state" / "migration.log"
     records = [json.loads(line) for line in set_aside_log.read_text("utf-8").splitlines() if line.strip()]
     check([(Path(r["agent_config"]).name, r["result"]) for r in records if r.get("event") == "stale_credential_set_aside"]
@@ -2702,7 +2726,7 @@ def run_e2e(args, work, stack):
     check(api(server, pip_token, "/api/v1/me")["agent"]["handle"] == OLD_MACHINE, "the old credential stopped working")
     check(app.run_value() == stub_command, "the Run value does not start the app after migration")
     second = send(server, teammate, {"person": EMAIL}, "after migration")  # v0.6: to the person, as above
-    wait_for("delivery after migration", lambda: received(server, teammate, second), timeout=240)
+    picked_up(server, teammate, pip_token, second, "delivery after migration")
     check(set(queue_files) <= {p.name for p in queue.rglob("*") if p.is_file()}, "migration dropped queue files")
     logs = [p for p in [runtime_state_dir(config_dir) / "migration.log"] if p.is_file()]
     check(logs and pip_token not in logs[0].read_text("utf-8", errors="replace"),
@@ -2732,7 +2756,7 @@ def run_e2e(args, work, stack):
     # (a) C3.1(a), inbox mode: EMAIL's inbox is this machine, inbox-only; the teammate writes to the person.
     point_inbox_at(server, EMAIL, V051_MACHINE, v051_token)
     inbox_mode = send(server, teammate, {"person": EMAIL}, "to a v0.5.1 inbox, inbox mode")
-    wait_for("the v0.5.1 connector to ack (inbox mode)", lambda: received(server, teammate, inbox_mode), timeout=240)
+    picked_up(server, teammate, v051_token, inbox_mode, "the v0.5.1 connector to ack (inbox mode)")
     check((message(server, v051_token, inbox_mode) or {}).get("to_endpoint") == {"machine": V051_MACHINE},
           "the inbox-mode message was not routed to the v0.5.1 machine's endpoint")
     say(f"PASS: B2(a). a message to the person {EMAIL} reached the {OLD_V051} client's inbox (C3.1(a), acked)")
@@ -2813,7 +2837,7 @@ def run_e2e(args, work, stack):
     # v0.6, not yet run on Windows: to the person, whose inbox is now this machine (inbox-only).
     point_inbox_at(server, EMAIL, MANAGED_MACHINE, managed_token)
     third = send(server, teammate, {"person": EMAIL}, "after managed migration")
-    wait_for("delivery after the managed migration", lambda: received(server, teammate, third), timeout=240)
+    picked_up(server, teammate, managed_token, third, "delivery after the managed migration")
     say(f"PASS: C. managed {OLD_MANAGED} in the documented layout (default runtime.json, started by its Run value): "
         "the installer recorded the Run value, the launcher stopped on the app's stop request, the Run value now "
         f"starts the stub, and {MANAGED_MACHINE} keeps delivering; no new machine")

@@ -236,7 +236,10 @@ def named_agents_stage(work, exe, env, herdr, server, wait_for, sender):
         api = ApiClient(server.url, sender)
 
         def send(agent, body):
-            return api.send({"machine": "herdr-machine", "agent": agent}, body, from_agent="smoke-planner")[0]["id"]
+            # §21: people are addressed; the machine's owner picks ``agent`` as their inbox, then the sender writes
+            # to the owner, and the message reaches that agent by name.
+            server.state.set_inbox("herdr-machine@example.com", "alpha", "herdr-machine", agent)
+            return api.send("herdr-machine@example.com", body, from_agent="smoke-planner")[0]["id"]
 
         def state_of(mid):
             return server.state.messages[mid]["delivery_state"]
@@ -252,8 +255,9 @@ def named_agents_stage(work, exe, env, herdr, server, wait_for, sender):
         wait_for(lambda: received("smoke-alpha") and received("smoke-beta"), timeout=30)
         [got_alpha], [got_beta] = received("smoke-alpha"), received("smoke-beta")
         assert body_of(got_alpha) == "for alpha: héllo ✓" and body_of(got_beta) == "for beta\nsecond line"
-        assert "\nTo: smoke-alpha on herdr-machine\n" in got_alpha and "\nTo: smoke-beta on herdr-machine\n" in got_beta
-        assert 'agent "smoke-planner" (stated by the sending machine)' in got_alpha
+        to_line = "\nTo: you, as Herdr-Machine Example's inbox\n"  # §21 C17
+        assert to_line in got_alpha and to_line in got_beta
+        assert 'From: "Herdr-Sender Example" <herdr-sender@example.com> | sent by "Herdr-Sender Example"\'s agent' in got_alpha
         assert '--from-agent "smoke-alpha"' in got_alpha
         print("PASS: named agents: each Herdr agent got only its own message, framed for it (C17)", flush=True)
 
@@ -262,7 +266,7 @@ def named_agents_stage(work, exe, env, herdr, server, wait_for, sender):
             timeout=60)
         context = run_hook(state, "UserPromptSubmit", "smoke-session-1", "smoke-hook", env)
         assert body_of(context) == "for the hook session", context[-400:]
-        assert "\nTo: smoke-hook on herdr-machine" in context
+        assert "\nTo: you, as Herdr-Machine Example's inbox" in context
         wait_for(lambda: state_of(hooked) == "submitted", timeout=60)
         assert run_hook(state, "UserPromptSubmit", "smoke-session-1", "smoke-hook", env) == ""  # once only
         print("PASS: named agents: a hook session by name got its message at its next turn, once", flush=True)
@@ -351,7 +355,7 @@ def run_stage(root, server, wait_for, show, kill_tree):
                                           "herdr_bin": str(exe), "herdr_session": SESSION,
                                           "expect_pane_id": pane if agent == "smoke-inbox" else "",
                                           "state_dir": str(work / f"queue-{handle}"), "poll_wait": 1,
-                                          "trusted_senders": ["herdr-sender"], "prompt_timeout": 30})
+                                          "trusted_senders": ["herdr-sender@example.com"], "prompt_timeout": 30})
             connectors.append(str(connector))
         sender = server.state.add_agent("herdr-sender")
         atomic_write_json(config, {"connectors": connectors, "state_dir": str(work / "runtime-state")})
@@ -374,7 +378,7 @@ def run_stage(root, server, wait_for, show, kill_tree):
         # 1. Exact bytes: non-ASCII, quotes, cmd/PowerShell metacharacters, newlines and CRLF-free text.
         tricky = ("héllo wörld ✓ 日本語 😀\n\"double\" 'single' `back` \\\\share\\path\\\n"
                   "%PATH% $env:HOME ^& | < > && ; $(x)\n\n  indented line\nlast")
-        first = send("herdr-inbox", tricky)
+        first = send("herdr-inbox@example.com", tricky)
         wait_for(lambda: state_of(first) == "submitted", timeout=90)
         wait_for(lambda: len(received()) >= 1, timeout=30)
         assert body_of(received()[0]) == tricky, repr(received()[0][-400:])
@@ -383,7 +387,7 @@ def run_stage(root, server, wait_for, show, kill_tree):
 
         # 2. A near-cap body (the 16,000-character body limit) within the command-line bound.
         near = ("abcdefghij é ✓ " * 1200)[:15900]
-        second = send("herdr-inbox", near)
+        second = send("herdr-inbox@example.com", near)
         wait_for(lambda: state_of(second) == "submitted", timeout=90)
         wait_for(lambda: len(received()) >= 2, timeout=30)
         assert body_of(received()[1]) == near
@@ -393,7 +397,7 @@ def run_stage(root, server, wait_for, show, kill_tree):
         wait_for(lambda: json.loads(herdr("agent", "get", "smoke-inbox").stdout or "{}")
                  .get("result", {}).get("agent", {}).get("agent_status") == "idle", timeout=30)
         herdr("pane", "report-agent", pane, "--source", SOURCE, "--agent", "claude", "--state", "blocked")
-        third = send("herdr-inbox", "while blocked")
+        third = send("herdr-inbox@example.com", "while blocked")
         wait_for(lambda: state_of(third) == "held"
                  and any(e[0] == third and e[1] == "held" and "blocked" in (e[2] or "") for e in server.state.events),
                  timeout=60)
@@ -402,7 +406,7 @@ def run_stage(root, server, wait_for, show, kill_tree):
         print("PASS: Herdr: a blocked agent holds the message (blocked), delivered once idle", flush=True)
 
         # 4. An agent name nothing runs -> held offline.
-        fourth = send("herdr-absent", "nobody home")
+        fourth = send("herdr-absent@example.com", "nobody home")
         wait_for(lambda: state_of(fourth) == "held"
                  and any(e[0] == fourth and e[1] == "held" and "offline" in (e[2] or "") for e in server.state.events),
                  timeout=60)
@@ -419,7 +423,7 @@ def run_stage(root, server, wait_for, show, kill_tree):
         # 6. An oversize command line is held, never truncated or sent.
         before = len(received())
         quotes = '"' * 15500  # list2cmdline doubles each quote: over the 30,000 bound
-        fifth = send("herdr-inbox", quotes)
+        fifth = send("herdr-inbox@example.com", quotes)
         wait_for(lambda: state_of(fifth) == "held" and any(
             e[0] == fifth and e[1] == "held" and "too_large_for_command_line" in (e[2] or "")
             for e in server.state.events), timeout=60)

@@ -140,7 +140,9 @@ def flow(work, base, env, login_on_pty, scrub):
     outputs.append(stdout + stderr)
     assert watch.returncode == 0, scrub(stderr)
     [seen] = [json.loads(line) for line in stdout.splitlines() if line.strip()]
-    assert seen["id"] == mid and seen["from"] == "bob-box" and not seen["acked_at"]
+    # §21: a teammate is a person; bob's machine sent it, so it reads as Bob's agent
+    assert seen["id"] == mid and seen["from"] == "@bob@smoke.test" and seen["from_kind"] == "agent" \
+        and not seen["acked_at"]
     print("PASS: person (real server): me inbox --watch printed bob's message as it arrived (not marked read)",
           flush=True)
 
@@ -153,12 +155,16 @@ def flow(work, base, env, login_on_pty, scrub):
     rid = str(uuid.uuid4())
     cli("alice", "me", "reply", mid, "--body-file", "-", "--id", rid, input="Looks good.")
     reply = json.loads(cli("bob", "show", rid, "--json").stdout)["message"]
-    assert reply["from"] == "@alice@smoke.test" and reply["to"] == "bob-box" and reply["in_reply_to"] == mid
-    sent = json.loads(cli("alice", "me", "send", "bob-box", "--body-file", "-", "--json", input="ping").stdout)
-    assert sent["message"]["to"] == "bob-box" and sent["created"]
-    assert cli("alice", "me", "send", "bob-box", "--body", "x", check=False).returncode == 2  # never from argv
-    print("PASS: person (real server): me read, me fetch (verified bytes), me reply to the machine, me send",
-          flush=True)
+    # §21: bob's machine (machine mode, no inbox path) sent with no agent name, and Bob has no inbox, so the reply
+    # waits for Bob in his app; his machine still sees its owner's message.
+    assert reply["from"] == "@alice@smoke.test" and reply["to"] == "@bob@smoke.test" and reply["in_reply_to"] == mid
+    sent = json.loads(cli("alice", "me", "send", "bob@smoke.test", "--body-file", "-", "--json", input="ping").stdout)
+    assert sent["message"]["to"] == "@bob@smoke.test" and sent["created"]
+    refused = cli("alice", "me", "send", "bob-box", "--body-file", "-", "--json", input="x", check=False)
+    assert refused.returncode != 0 and "Address people" in refused.stdout + refused.stderr  # a machine is refused
+    assert cli("alice", "me", "send", "bob@smoke.test", "--body", "x", check=False).returncode == 2  # never from argv
+    print("PASS: person (real server): me read, me fetch (verified bytes), me reply (back to Bob), me send to a "
+          "person, a machine refused", flush=True)
 
     secrets_found = []
     for who in ("alice", "bob"):
