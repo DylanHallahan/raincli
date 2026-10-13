@@ -329,11 +329,11 @@ def test_a_message_counts_as_read_only_when_focused_and_half_visible(agent_threa
     poll_now(page)
     page.wait_for_timeout(1500)
     session.expire_all()
-    assert session.get(Message, uuid.UUID(reply["id"])).acked_at is None  # visible, but no focus: not read
+    assert session.get(Message, uuid.UUID(reply["id"])).person_seen_at is None  # visible, but no focus: not read
     page.evaluate("() => { window.__focus = true; window.dispatchEvent(new Event('focus')); }")
     page.wait_for_function(f"() => !document.querySelector('#m-{reply['id']}').hasAttribute('data-unread')")
     session.expire_all()
-    assert session.get(Message, uuid.UUID(reply["id"])).acked_at is not None
+    assert session.get(Message, uuid.UUID(reply["id"])).person_seen_at is not None
     context.close()
 
 
@@ -451,7 +451,7 @@ def test_a_long_message_counts_as_seen_once_it_fills_half_the_view(agent_thread,
     page.evaluate(f"() => document.getElementById('m-{reply['id']}').scrollIntoView({{block: 'start'}})")
     page.wait_for_function(f"() => !document.querySelector('#m-{reply['id']}').hasAttribute('data-unread')")
     session.expire_all()
-    assert session.get(Message, uuid.UUID(reply["id"])).acked_at is not None
+    assert session.get(Message, uuid.UUID(reply["id"])).person_seen_at is not None
     context.close()
 
 
@@ -574,5 +574,5 @@ def test_a_failed_ack_keeps_the_message_unread(agent_thread, browser, session):
     page.evaluate("() => window.dispatchEvent(new Event('focus'))")
     page.wait_for_function(f"() => !document.querySelector('#m-{reply['id']}').hasAttribute('data-unread')")
     session.expire_all()
-    assert session.get(Message, uuid.UUID(reply["id"])).acked_at is not None
+    assert session.get(Message, uuid.UUID(reply["id"])).person_seen_at is not None
     context.close()

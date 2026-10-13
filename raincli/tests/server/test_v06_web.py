@@ -10,6 +10,7 @@ from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 
 from conftest_v06 import OWN_STRINGS, PASSWORD, TEAMMATE_STRINGS, v06_seed  # noqa: F401  (fixture)
 from raincli_server import identity
@@ -381,3 +382,48 @@ def test_inbox_shows_the_banner_rather_than_opening_the_latest(maya, session, v0
                                       "choice": "zq-handle-maya|zq-agent-maya-laptop"}, follow_redirects=False)
     assert r.status_code in (302, 303)
     assert "data-open-latest" in maya.get("/app/inbox").text  # Contoso has nothing to pick: P2 again
+
+
+# Read state (§21 H2) --------------------------------------------------------------------------------
+
+def test_unread_is_the_persons_own_read_state(maya, session, v06_seed):  # noqa: F811
+    """H2: Maya's unread marks and counts come from her own read state (person_seen_at), not from a machine's
+    pickup: Jon's agent's answer, routed to her machine and picked up there, is unread in her app until she reads it,
+    and reading it changes nothing a sender can fetch (acked_at, delivery_state)."""
+    reply, cid = v06_seed["messages"]["reply"], conv(v06_seed, "jon")
+    picked = identity.now()
+    session.execute(update(Message).where(Message.id == reply.id).values(acked_at=picked))
+    session.commit()
+
+    def unread_count():
+        row = re.search(rf'href="/app/conversations/{cid}#latest".*?</a>', maya.get("/app/inbox").text, re.S).group(0)
+        found = re.search(r'rc-count[^>]*>(\d+)<', row)
+        return int(found.group(1)) if found else 0
+
+    page = maya.get(f"/app/conversations/{cid}").text
+    assert re.search(rf'id="m-{reply.id}"[^>]*data-unread', page)
+    before = unread_count()
+    assert before >= 1
+    csrf = re.search(r'data-csrf="([^"]+)"', page).group(1)
+    r = maya.post("/app/ack", json={"csrf_token": csrf, "ids": [str(reply.id)]})
+    assert r.status_code == 200 and r.json()["acked"] == [str(reply.id)]
+    session.expire_all()
+    m = session.get(Message, reply.id)
+    assert m.person_seen_at is not None and m.acked_at == picked
+    assert not re.search(rf'id="m-{reply.id}"[^>]*data-unread', maya.get(f"/app/conversations/{cid}").text)
+    assert unread_count() == before - 1
+
+
+def test_an_escalation_from_your_own_agent_is_unread_until_you_read_it(maya, session, v06_seed):  # noqa: F811
+    """H2: what your own agent writes to you ("From your agents") counts and is marked unread like anyone's; what
+    you write never does."""
+    esc, cid = v06_seed["messages"]["escalation"], conv(v06_seed, "self")
+    page = maya.get(f"/app/conversations/{cid}").text
+    assert re.search(rf'id="m-{esc.id}"[^>]*data-unread', page)
+    csrf = re.search(r'data-csrf="([^"]+)"', page).group(1)
+    assert maya.post("/app/ack", json={"csrf_token": csrf, "ids": [str(esc.id)]}).json()["acked"] == [str(esc.id)]
+    assert not re.search(rf'id="m-{esc.id}"[^>]*data-unread', maya.get(f"/app/conversations/{cid}").text)
+    sent = v06_seed["messages"]["by_hand"]  # Jon's own message from the app: never unread for Jon
+    session.expire_all()
+    from raincli_server import messaging
+    assert not messaging.is_unread_for(session, v06_seed["people"]["Jon"].id, session.get(Message, sent.id))

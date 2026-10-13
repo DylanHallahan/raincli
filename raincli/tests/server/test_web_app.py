@@ -519,11 +519,11 @@ def test_compose_as_the_person_and_reply(client, world, session):
     assert session.get(Message, uuid.UUID(mid)).delivery_state == "replied"
     reply = session.scalar(select(Message).where(Message.in_reply_to == uuid.UUID(mid)))
     assert reply.sender_user_id == world["users"]["bob"].id and reply.recipient_user_id == world["users"]["alice"].id
-    # Alice reads the reply; viewing it acks it.
+    # Alice reads the reply; viewing it marks it seen (§21 H2: her own read state, not a pickup).
     page = client.get(f"/app/conversations/{reply.conversation_id}").text
     assert "On it" in page
     session.expire_all()
-    assert session.get(Message, reply.id).acked_at is not None
+    assert session.get(Message, reply.id).person_seen_at is not None
 
 
 def test_compose_endpoints_and_cross_team_recipients(client, world, session):

@@ -2,7 +2,7 @@
    line, atts, conv_id, can_send and reply_only (your own agents' conversation: replies only, §21 C13 H2). The meta is "Jon" or "Jon · agent" (presentation); no handle, no "via". #}
 {% from "_state.html" import time %}
 {% set m = line.message %}
-<li class="rc-msg{{ ' rc-out' if line.outgoing else '' }}" id="m-{{ m.id }}" data-seq="{{ m.seq }}"{% if not line.outgoing and line.recipient.mine and line.recipient.endpoint.kind == 'person' and not m.acked_at %} data-unread{% endif %}>
+<li class="rc-msg{{ ' rc-out' if line.outgoing else '' }}" id="m-{{ m.id }}" data-seq="{{ m.seq }}"{% if line.unread %} data-unread{% endif %}>
   {# §20.4 R3: not focusable, so a #m-<id> link scrolls to it without a focus box. R8: the person's initials. #}
   <span class="rc-avatar" aria-hidden="true">{{ line.initials or '?' }}</span>
   <div class="rc-msg-body">

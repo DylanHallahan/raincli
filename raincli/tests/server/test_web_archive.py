@@ -8,9 +8,9 @@ import uuid
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from raincli_server.models import Conversation
+from raincli_server.models import Conversation, Message
 from test_app_mode import alice_app  # noqa: F401  (fixture)
 from test_web_app import add_message, csrf_of, login
 
@@ -28,8 +28,14 @@ def signed_in(app, email="alice@example.test"):
     return browser
 
 
-def archive(browser, cid, through=None):
-    page = browser.get(f"/app/conversations/{cid}").text
+def archive(browser, cid, through=None, unread=None):
+    """Archive as the thread's form does. ``unread`` (a session): archive it from the inbox without opening it,
+    since opening it on the website reads it (§16.4, §21 H2)."""
+    if unread is not None:
+        page = browser.get("/app/inbox").text
+        through = str(unread.scalar(select(func.max(Message.seq)).where(Message.conversation_id == uuid.UUID(cid))))
+    else:
+        page = browser.get(f"/app/conversations/{cid}").text
     if through is None:
         through = THROUGH_RE.search(page).group(1)
     return browser.post(f"/app/conversations/{cid}/archive",
@@ -39,9 +45,9 @@ def archive(browser, cid, through=None):
 def test_archive_unarchive_on_the_website(app, session, world):
     cid = thread(session, world, "please archive me")
     browser = signed_in(app)
-    page = browser.get(f"/app/conversations/{cid}").text
-    assert ">Archive</button>" in page and "onclick" not in page and "confirm(" not in page  # no confirmation
-    r = archive(browser, cid)
+    page = browser.get("/app/inbox").text
+    assert "onclick" not in page and "confirm(" not in page  # no confirmation
+    r = archive(browser, cid, unread=session)
     assert r.status_code == 303 and r.headers["location"].endswith("/app/inbox?notice=archived")
     inbox = browser.get("/app/inbox?notice=archived").text
     assert "Conversation archived" in inbox and "please archive me" not in inbox and "/app/archived" in inbox
@@ -57,6 +63,8 @@ def test_archive_unarchive_on_the_website(app, session, world):
     assert r.status_code == 303 and r.headers["location"].endswith("/app/archived?notice=unarchived")
     assert f"/app/conversations/{cid}" not in browser.get("/app/archived").text
     assert "please archive me" in browser.get("/app/inbox").text
+    page = browser.get(f"/app/conversations/{cid}").text
+    assert ">Archive</button>" in page and "onclick" not in page and "confirm(" not in page  # no confirmation
     session.expire_all()
     conv = session.get(Conversation, uuid.UUID(cid))
     assert conv.archived_at is None and conv.archived_by_key is None and conv.archived_through_seq is None

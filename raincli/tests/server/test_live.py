@@ -159,8 +159,9 @@ def test_ack_needs_csrf_and_acks_only_messages_to_you(client, world, alice_app, 
     r = webview.post("/app/ack", json={"csrf_token": csrf, "ids": [to_me["id"], mine["id"], "junk", str(uuid.uuid4())]})
     assert r.status_code == 200 and r.json()["acked"] == [to_me["id"]]
     session.expire_all()
-    assert session.get(Message, uuid.UUID(to_me["id"])).acked_at is not None
-    assert session.get(Message, uuid.UUID(mine["id"])).acked_at is None
+    seen = session.get(Message, uuid.UUID(to_me["id"]))
+    assert seen.person_seen_at is not None and seen.acked_at is None  # §21 H2: her read state, not a pickup
+    assert session.get(Message, uuid.UUID(mine["id"])).person_seen_at is None
     assert webview.post("/app/ack", json={"csrf_token": csrf, "ids": [to_me["id"]]}).json()["acked"] == []
 
 
@@ -171,12 +172,13 @@ def test_opening_a_thread_acks_on_the_website_but_never_in_app_mode(app, client,
                        conversation_id=first["conversation_id"])
     alice_app["webview"].get(f"/app/conversations/{first['conversation_id']}")
     session.expire_all()
-    assert session.get(Message, uuid.UUID(to_me["id"])).acked_at is None
+    assert session.get(Message, uuid.UUID(to_me["id"])).person_seen_at is None
     with TestClient(app) as browser:
         assert login(browser).status_code == 303
         browser.get(f"/app/conversations/{first['conversation_id']}")
     session.expire_all()
-    assert session.get(Message, uuid.UUID(to_me["id"])).acked_at is not None  # §16.4, until D4
+    seen = session.get(Message, uuid.UUID(to_me["id"]))
+    assert seen.person_seen_at is not None and seen.acked_at is None  # §16.4 until D4; §21 H2: her read state only
 
 
 # Names, header and trail ---------------------------------------------------------------------------------
@@ -251,17 +253,18 @@ def test_a_state_committed_before_the_polls_now_still_shows(client, world, alice
 
 
 def test_ack_never_acks_a_message_to_the_viewers_own_machine(client, world, alice_app, session):  # noqa: F811
-    """M2: only messages to the viewer as a person; their machines' connectors ack their own. §21: Bob addresses
-    Alice; with her inbox on her machine, it is that machine's to acknowledge."""
+    """M2: their machines' connectors ack their own. §21: Bob addresses Alice; with her inbox on her machine, it is
+    that machine's to acknowledge. H2: reading it in her app marks only her own read state (person_seen_at)."""
     webview = alice_app["webview"]
     to_machine = agent_send(client, world["tokens"]["bob"], {"person": "alice@example.test"}, "for alice's inbox")
     assert to_machine["to_endpoint"]["person"] == "alice@example.test"
     page = webview.get("/app/inbox").text
     csrf = re.search(r'data-csrf="([^"]+)"', page).group(1)
     r = webview.post("/app/ack", json={"csrf_token": csrf, "ids": [to_machine["id"]]})
-    assert r.status_code == 200 and r.json()["acked"] == []
+    assert r.status_code == 200 and r.json()["acked"] == [to_machine["id"]]
     session.expire_all()
-    assert session.get(Message, uuid.UUID(to_machine["id"])).acked_at is None
+    seen = session.get(Message, uuid.UUID(to_machine["id"]))
+    assert seen.acked_at is None and seen.person_seen_at is not None  # still the machine's to pick up
 
 
 def test_a_message_you_send_to_your_own_machine_is_yours(client, world, alice_app):  # noqa: F811

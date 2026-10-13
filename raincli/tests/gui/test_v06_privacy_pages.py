@@ -299,12 +299,11 @@ VOLATILE = r'data-states-since="[^"]*"|name="message_id" value="[^"]*"'
 
 
 def _read_by_recipient(session, message_id) -> bool:
-    """The recipient person's own read state: person_seen_at once core has it, acked_at before."""
+    """The recipient person's own read state (§21 H2)."""
     from raincli_server.models import Message
 
     session.expire_all()
-    m = session.get(Message, uuid.UUID(message_id))
-    return (m.person_seen_at if hasattr(Message, "person_seen_at") else m.acked_at) is not None
+    return session.get(Message, uuid.UUID(message_id)).person_seen_at is not None
 
 
 def test_no_read_receipt_on_the_senders_pages(live, browser, v06_seed, session):  # noqa: F811

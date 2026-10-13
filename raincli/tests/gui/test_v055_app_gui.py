@@ -49,7 +49,7 @@ def acked(team, message_id):
     from raincli_server.models import Message
 
     team["session"].expire_all()
-    return team["session"].get(Message, uuid.UUID(message_id)).acked_at is not None
+    return team["session"].get(Message, uuid.UUID(message_id)).person_seen_at is not None  # §21 H2: read in the app
 
 
 def jon_writes(team, body):

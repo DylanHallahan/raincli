@@ -292,6 +292,7 @@ class MessageLine:
     trail: object = None  # thread.Trail, only for the viewer's own messages (§19.7)
     initials: str = ""  # §20.4 R8: from the person behind the sender (present.initials)
     state: str = ""  # §21 C13 H4: the delivery state this viewer may see
+    unread: bool = False  # §21 H2: not yet seen by the viewer (messaging.is_unread_for), for the app's read marking
     hold_text: str = ""  # §21 C5.5: "held: …" in presentation's words, for the website
     updated_at: datetime | None = None  # the "updated" time this viewer may see (H1: never a person's read time)
 
@@ -386,13 +387,6 @@ def final_conversation_id(db: Session, conversation_id: object) -> uuid.UUID | N
     return messaging.final_conversation_id(db, cid) if cid is not None else None
 
 
-def _mine_as_recipient(user: User, owned: dict):
-    clauses = [Message.recipient_user_id == user.id]
-    if owned:
-        clauses.append(Message.recipient_agent_id.in_(list(owned)))
-    return or_(*clauses)
-
-
 def _archived_by(db: Session, conv: Conversation, user: User, owned: dict) -> str:
     """"Archived by you" or by the person (§21 C13 M3: through presentation, never a handle)."""
     endpoint = messaging.endpoint_for_key(db, conv.archived_by_key)
@@ -422,7 +416,7 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
         (cid, tid): (last_seq, count, unacked)
         for cid, tid, last_seq, count, unacked in db.execute(
             select(Message.conversation_id, Message.team_id, func.max(Message.seq), func.count(),
-                   func.count().filter(and_(Message.acked_at.is_(None), _mine_as_recipient(user, owned))))
+                   func.count().filter(messaging.unread_for(user.id)))  # §21 H2: their own read state
             .where(Message.conversation_id.in_(conv_ids)).group_by(Message.conversation_id, Message.team_id)
         )
     }
@@ -532,6 +526,9 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
             if not own and not has_inbox(m.team_id, m.recipient_user_id):
                 return "held", "no_inbox", route
             return "received", None, route
+        if m.recipient_user_id is not None:  # the person's own view: their own read state (§21 H2)
+            return ("received" if m.person_seen_at is not None and m.delivery_state == "stored"
+                    else m.delivery_state), None, route
         hold = hold_of(m)
         return ("held" if m.delivery_state == "stored" and hold else m.delivery_state), hold, route
 
@@ -544,6 +541,7 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
                Message.seq > min(m.seq for m in to_others), Message.in_reply_to.in_([m.id for m in to_others]))
         .group_by(Message.in_reply_to)).all()) if to_others else {}
 
+    mine = set(db.scalars(select(Agent.id).where(Agent.owner_user_id == user.id))) if messages else set()
     lines = []
     for m in messages:
         sender_ep, recipient_ep = messaging.sender_endpoint(db, m), messaging.recipient_endpoint(db, m)
@@ -568,7 +566,7 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
             if outgoing else None,
             initials=present.initials(people.of(m)), state=state,
             hold_text=(presentation.held_line(hold, person, route) or "") if outgoing and hold else "",
-            updated_at=updated_at))
+            updated_at=updated_at, unread=messaging.is_unread_for(db, user.id, m, mine)))
     return lines, events
 
 
@@ -601,11 +599,11 @@ def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], convers
 
 
 def ack_viewed(db: Session, user: User, view: ConversationView) -> int:
-    """Viewing a thread acks the messages addressed to the person (§16.4)."""
+    """Viewing a thread marks what the person hadn't seen as seen (§16.4, §21 H2: their own read state only)."""
     acked = 0
     for line in view.lines:
         m = line.message
-        if m.recipient_user_id == user.id and m.acked_at is None:
+        if line.unread:
             messaging.person_ack(db, user, m.id)
             acked += 1
     return acked
@@ -647,13 +645,12 @@ def attachment_for_user(db: Session, user: User, team_ids: list[uuid.UUID], mess
 
 
 def pending_for_user(db: Session, user: User, team_ids: list[uuid.UUID]) -> int:
-    """Unacknowledged messages to the person or to machines they own."""
+    """Messages the person hasn't seen yet, to them or routed to their machines (§21 H2)."""
     if not team_ids:
         return 0
-    owned = _owned_ids(db, user, team_ids)
     return db.scalar(
         select(func.count()).select_from(Message)
-        .where(Message.team_id.in_(team_ids), _mine_as_recipient(user, owned), Message.acked_at.is_(None))
+        .where(Message.team_id.in_(team_ids), messaging.unread_for(user.id))
     ) or 0
 
 

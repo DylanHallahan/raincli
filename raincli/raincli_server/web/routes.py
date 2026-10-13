@@ -738,12 +738,14 @@ async def live_ack(request: Request, db: Session = Depends(get_db)):
     if not viewer.app_mode:
         raise not_found()  # app mode only, like GET /app/live (§19.9); the website acks on view
     acked = []
+    owned = set(db.scalars(select(Agent.id).where(Agent.owner_user_id == viewer.user.id)))
     for raw in data["ids"]:
         mid = queries.parse_uuid(raw)
         if mid is None:
             continue
         msg = db.get(Message, mid)
-        if msg is None or msg.recipient_user_id != viewer.user.id or msg.team_id not in _team_ids(viewer):
+        # §21 H2: what the person sees in their app, to them or routed to their machines; person_ack refuses the rest
+        if msg is None or msg.team_id not in _team_ids(viewer) or not messaging.is_unread_for(db, viewer.user.id, msg, owned):
             continue
         try:
             _, done = messaging.person_ack(db, viewer.user, mid)
