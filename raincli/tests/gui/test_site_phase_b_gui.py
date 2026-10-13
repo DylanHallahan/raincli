@@ -106,9 +106,9 @@ def test_no_csp_violations_no_other_origins_and_the_layout(browser, live, artifa
     context, page, log = open_home(browser, live, size=size, scheme=scheme)
     try:
         page.wait_for_timeout(300)
-        # Screenshots at two moments of the loop (seeked with the Web Animations API, then held there): the
-        # "before" chat at 6 s and the "after" thread at 17 s; and the whole page.
-        for name, ms in (("before", 6000), ("after", 17000)):
+        # Screenshots at the spec's moments of the 16 s loop (seeked with the Web Animations API, then held there),
+        # and the whole page.
+        for name, ms in (("t01.0", 1000), ("t03.5", 3500), ("t06.0", 6000), ("t09.6", 9600), ("t13.0", 13000)):
             page.evaluate(SEEK, ms)
             page.screenshot(path=str(artifacts / f"home-{size}-{scheme}-{name}.png"))
         page.screenshot(path=str(artifacts / f"home-{size}-{scheme}-full.png"), full_page=True)
@@ -238,6 +238,8 @@ def test_pause_and_restart_work_by_keyboard(browser, live):
         page.keyboard.press("Enter")
         after = page.evaluate(ANIMATIONS)
         assert after["running"] > 0 and after["time"] < before and after["time"] < 500, (before, after)
+        # Restarting starts from 0 s with the app already visible (no fade-in of the app frame).
+        assert page.evaluate("getComputedStyle(document.querySelector('.a-scene')).opacity") == "1"
         # Restart while paused starts it playing.
         page.keyboard.press("Shift+Tab")
         page.keyboard.press("Enter")
@@ -255,8 +257,8 @@ def test_reduced_motion_shows_the_final_frame(browser, live, artifacts, scheme):
     try:
         page.wait_for_timeout(200)
         assert page.evaluate(ANIMATIONS)["count"] == 0
-        assert not page.is_visible(".demo .ctrl") and not page.is_visible(".b-scene")
-        frame = page.evaluate("""() => ['.a-scene', '.m1', '.m2', '.file', '.cap5', '.p-ready']
+        assert not page.is_visible(".demo .ctrl") and page.locator(".b-scene").count() == 0
+        frame = page.evaluate("""() => ['.a-scene', '.m1', '.m2', '.file', '.cap4', '.p-ready']
             .map((s) => getComputedStyle(document.querySelector(s)).opacity)""")
         assert frame == ["1"] * 6
         assert page.evaluate("getComputedStyle(document.querySelector('.cap1')).opacity") == "0"
@@ -266,9 +268,73 @@ def test_reduced_motion_shows_the_final_frame(browser, live, artifacts, scheme):
         assert len(set(lit)) == 1 and ok  # every state lit in the same --rc-ok colour
         # The demo's final frame passes contrast too (states in green, the code chips, the file line).
         assert page.evaluate(CONTRAST) == []
+        page.locator("[data-demo]").screenshot(path=str(artifacts / f"demo-{scheme}-reduced-motion.png"))
         if scheme == "light":
             page.screenshot(path=str(artifacts / "home-desktop-light-reduced-motion.png"))
             page.screenshot(path=str(artifacts / "home-desktop-light-reduced-motion-full.png"), full_page=True)
         assert log["console"] == [] and log["errors"] == []
     finally:
         context.close()
+
+
+# The spec's timeline (demo-app-only): what is on stage at each moment of the 16 s loop.
+FRAME = """() => {
+    const op = (s) => Number(getComputedStyle(document.querySelector(s)).opacity);
+    const lit = (s) => getComputedStyle(document.querySelector(s)).color === getComputedStyle(document.querySelector('.st-stored')).color
+        && op(s) > 0.9;
+    return {app: op('.a-scene'), caps: [1, 2, 3, 4].map((i) => op('.cap' + i)), m1: op('.m1'), m2: op('.m2'), file: op('.file'),
+            busy: op('.p-busy'), ready: op('.p-ready'), stored: op('.st-stored'), received: op('.st-received'),
+            submitted: op('.st-submitted'), replied: op('.st-replied')};
+}"""
+TIMELINE = [  # (ms, the caption shown, expectations)
+    (1000, 1, {"busy": 0, "m2": 0}),
+    (3500, 2, {"busy": 0, "stored": 1, "received": 1, "m2": 0}),
+    (6000, 2, {"busy": 1, "ready": 0, "submitted": 1, "m2": 0}),
+    (9600, 3, {"busy": 0, "ready": 1, "m2": 1, "file": 1, "replied": 1}),
+    (13000, 4, {"busy": 0, "m1": 1, "m2": 1, "file": 1, "replied": 1}),
+]
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+def test_the_timeline_matches_the_spec(browser, live, artifacts, scheme):
+    """App only, 16 s: the app is on screen for the whole loop; captions, messages, states and presence at the
+    spec's moments; busy only between submitted (4.4 s) and the reply (7.8 s)."""
+    context, page, log = open_home(browser, live, scheme=scheme)
+    try:
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
+        page.evaluate("document.querySelector('[data-demo]').scrollIntoView({block: 'center'})")
+        for ms, cap, want in TIMELINE:
+            page.evaluate(SEEK, ms)
+            f = page.evaluate(FRAME)
+            assert f["app"] == 1, (ms, f)
+            assert [round(c) for c in f["caps"]] == [int(i == cap) for i in range(1, 5)], (ms, f)
+            for key, value in want.items():
+                assert round(f[key]) == value, (ms, key, f)
+            page.locator("[data-demo]").screenshot(path=str(artifacts / f"demo-{scheme}-t{ms / 1000:04.1f}s.png"))
+        # Busy only between submitted and the reply.
+        for ms in range(0, 16000, 250):
+            page.evaluate(SEEK, ms)
+            busy = page.evaluate("Number(getComputedStyle(document.querySelector('.p-busy')).opacity)")
+            if busy > 0.5:
+                assert 4400 <= ms <= 7800, ms
+        page.evaluate(SEEK, None)
+        assert log["console"] == [] and log["errors"] == [], log
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+def test_the_phone_demo(browser, live, artifacts, scheme):
+    context, page, log = open_home(browser, live, size="phone", scheme=scheme)
+    try:
+        page.evaluate("document.querySelector('[data-demo]').scrollIntoView({block: 'center'})")
+        page.evaluate(SEEK, 9600)
+        assert page.evaluate("getComputedStyle(document.querySelector('.side')).display") == "none"
+        box = page.evaluate("document.querySelector('.demo .stage').getBoundingClientRect().width")
+        assert box <= 390
+        page.locator("[data-demo]").screenshot(path=str(artifacts / f"demo-phone-{scheme}-t09.6s.png"))
+        page.evaluate(SEEK, None)
+        assert log["console"] == [] and log["errors"] == [], log
+    finally:
+        context.close()
+

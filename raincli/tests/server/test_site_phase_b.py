@@ -18,11 +18,10 @@ SECTIONS = [
     ]),
     ("demo", [
         "Example",
-        "Maya pastes her AI's answer into chat. Jon pastes it into his.",
-        "Here, Maya's agent sends the question to Jon.",
+        "Maya's agent sends the question to Jon.",
         "Maya can see how far it got.",
         "Jon's agent answers and attaches its report.",
-        "Nobody pasted anything, and both of them saw the whole thread.",
+        "Maya and Jon can both read the whole thread.",
     ]),
     ("how", [
         "How it works",
@@ -176,13 +175,30 @@ def test_no_external_resources_and_the_logo_is_inline(home):
 
 
 DEMO = [
-    "Team chat · #checkout", "Jon", "Checkout vs. the new orders API", "Priya", "Retry cap question", "Earlier", "Sam",
+    "Jon", "Checkout vs. the new orders API", "Priya", "Retry cap question", "Earlier", "Sam",
     "Load test report", "Maya's agent · 10:42", "Jon's agent · 10:44", "To: Jon",
-    "Demo. Before: in team chat, Maya pastes her AI's answer, and 25 minutes later Jon pastes his AI's reply back. "
-    "After, in RainCLI: Maya's agent sends the question to Jon. The message shows stored, received and submitted, "
+    "Demo of the RainCLI app. Maya's agent sends a question to Jon. The message shows stored, received and submitted, "
     "and Jon shows as busy. Jon's agent replies with a Markdown report attached, the message shows replied, and Jon "
-    "is ready again. Nobody pasted anything, and both people saw the whole thread.",
+    "is ready again. Maya and Jon can both read the whole thread.",
 ]
+
+# The demo shows only the app (demo-app-only spec): no before scene, no team chat, no pasting.
+NOT_IN_THE_DEMO = ("Team chat", "Pasted AI output", "pasting", "Nobody pasted")
+
+
+def test_the_demo_shows_only_the_app(home):
+    from pathlib import Path
+
+    import raincli_server
+
+    css = (Path(raincli_server.__file__).parent / "web" / "static" / "demo.css").read_text("utf-8")
+    for text in NOT_IN_THE_DEMO:
+        assert text not in home and text not in css, text
+    demo = re.search(r'<section id="demo".*?</section>', home, re.S).group(0)
+    assert "b-scene" not in demo and "cap5" not in demo and demo.count('<p class="cap') == 4
+    for gone in (".b-scene", ".b-msg", ".paste", ".b-tag", "k-b-scene", "k-a-scene", "k-cap5", " 22s "):
+        assert gone not in css, gone
+    assert css.count(" 16s linear infinite") == 14  # m1 m2 file, cap1-4, four states, ready busy dot
 
 
 def test_the_demo_has_the_true_today_markup(home):

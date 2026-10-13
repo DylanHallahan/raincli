@@ -17,29 +17,14 @@
 .demo .ctrl button:focus-visible { outline: 2px solid var(--rc-focus); outline-offset: 2px; }
 .demo .ctrl button[aria-pressed="true"] { background: var(--rc-surface-2); }
 
-/* BEFORE: a generic team chat (deliberately unbranded) */
-.demo .b-scene { position: absolute; inset: 0; background: var(--rc-surface); display: flex; flex-direction: column; }
-.demo .b-head { padding: 12px 18px; border-bottom: 1px solid var(--rc-border); font-weight: 600; font-size: .875rem; display: flex;
-  gap: 8px; align-items: center; }
-.demo .b-head i { width: 22px; height: 22px; border-radius: 6px; background: var(--rc-surface-2); display: inline-block; }
-.demo .b-body { flex: 1; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; font-size: .875rem; overflow: hidden; }
-.demo .b-msg { display: grid; grid-template-columns: 28px 1fr; gap: 10px; opacity: 0; }
+/* Message parts */
 .demo .who { font-size: .75rem; color: var(--rc-muted); margin-bottom: 2px; }
 .demo .who b { color: var(--rc-text); font-weight: 600; }
 .demo .av { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-size: .6875rem; font-weight: 700;
   background: var(--rc-surface-2); color: var(--rc-text); }
-.demo .paste { margin-top: 6px; border: 1px dashed var(--rc-muted); border-radius: var(--rc-radius-sm); padding: 8px 10px;
-  background: var(--rc-surface-2); font-size: .8125rem; color: var(--rc-text-2); }
-.demo .paste .tag { font-size: .6875rem; font-weight: 700; color: var(--rc-muted); text-transform: uppercase; letter-spacing: .04em;
-  display: block; margin-bottom: 4px; }
-.demo .line { height: 7px; border-radius: 4px; background: var(--rc-border); margin: 5px 0; }
-.demo .line.w92 { width: 92%; } .demo .line.w88 { width: 88%; } .demo .line.w85 { width: 85%; }
-.demo .line.w78 { width: 78%; } .demo .line.w64 { width: 64%; }
-.demo .b-tag { position: absolute; right: 16px; bottom: 14px; opacity: 0; font-size: .75rem; font-weight: 700; color: var(--rc-warn);
-  background: var(--rc-bg); border: 1px solid var(--rc-border); border-radius: var(--rc-radius-pill); padding: 4px 10px; }
 
-/* AFTER: the app window, direction A */
-.demo .a-scene { position: absolute; inset: 0; background: var(--rc-bg); display: grid; grid-template-columns: 200px 1fr; opacity: 0; }
+/* The app window, direction A */
+.demo .a-scene { position: absolute; inset: 0; background: var(--rc-bg); display: grid; grid-template-columns: 200px 1fr; }
 .demo .side { background: var(--rc-surface); border-right: 1px solid var(--rc-border); padding: 12px 10px; font-size: .8125rem;
   display: flex; flex-direction: column; gap: 4px; }
 .demo .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; padding: 2px 6px 10px; }
@@ -78,56 +63,41 @@
 .demo .pres .pw span { position: absolute; left: 0; top: 50%; transform: translateY(-50%); white-space: nowrap; }
 .demo .p-busy { opacity: 0; }
 
-/* The timeline (from the mock): a 22 s loop, played while .play is set; .paused holds it */
-@keyframes k-b-scene { 0%, 30.91% { opacity: 1; transform: none; } 32.95%, 100% { opacity: 0; transform: translateY(-4px); } }
-@keyframes k-b1 { 0%, 3.64% { opacity: 0; transform: translateY(8px); } 5.68%, 30.91% { opacity: 1; transform: none; } 32.95%, 100% { opacity: 0; transform: none; } }
-@keyframes k-b2 { 0%, 10.91% { opacity: 0; transform: translateY(8px); } 12.95%, 30.91% { opacity: 1; transform: none; } 32.95%, 100% { opacity: 0; transform: none; } }
-@keyframes k-b3 { 0%, 19.09% { opacity: 0; transform: translateY(8px); } 21.14%, 30.91% { opacity: 1; transform: none; } 32.95%, 100% { opacity: 0; transform: none; } }
-@keyframes k-b-tag { 0%, 22.27% { opacity: 0; transform: translateY(8px); } 24.32%, 30.91% { opacity: 1; transform: none; } 32.95%, 100% { opacity: 0; transform: none; } }
-@keyframes k-a-scene { 0%, 31.82% { opacity: 0; transform: translateY(8px); } 33.86%, 97.27% { opacity: 1; transform: none; } 99.32%, 100% { opacity: 0; transform: none; } }
-@keyframes k-m1 { 0%, 35.45% { opacity: 0; transform: translateY(8px); } 37.50%, 97.27% { opacity: 1; transform: none; } 99.32%, 100% { opacity: 0; transform: none; } }
-@keyframes k-m2 { 0%, 66.36% { opacity: 0; transform: translateY(8px); } 68.41%, 97.27% { opacity: 1; transform: none; } 99.32%, 100% { opacity: 0; transform: none; } }
-@keyframes k-file { 0%, 70.45% { opacity: 0; transform: translateY(8px); } 72.50%, 97.27% { opacity: 1; transform: none; } 99.32%, 100% { opacity: 0; transform: none; } }
-@keyframes k-cap1 { 0%, 30.91% { opacity: 1; transform: none; } 32.95%, 100% { opacity: 0; transform: translateY(-4px); } }
-@keyframes k-cap2 { 0%, 31.82% { opacity: 0; transform: translateY(8px); } 33.86%, 48.18% { opacity: 1; transform: none; } 50.23%, 100% { opacity: 0; transform: none; } }
-@keyframes k-cap3 { 0%, 48.18% { opacity: 0; transform: translateY(8px); } 50.23%, 65.45% { opacity: 1; transform: none; } 67.50%, 100% { opacity: 0; transform: none; } }
-@keyframes k-cap4 { 0%, 65.45% { opacity: 0; transform: translateY(8px); } 67.50%, 83.64% { opacity: 1; transform: none; } 85.68%, 100% { opacity: 0; transform: none; } }
-@keyframes k-cap5 { 0%, 83.64% { opacity: 0; transform: translateY(8px); } 85.68%, 98.18% { opacity: 1; transform: none; } 100.00%, 100% { opacity: 0; transform: none; } }
-@keyframes k-st-stored { 0%, 40.91% { color: var(--rc-muted); opacity: .45; } 42.27%, 97.27% { color: var(--rc-ok); opacity: 1; } 99.09%, 100% { color: var(--rc-muted); opacity: .45; } }
-@keyframes k-st-received { 0%, 48.18% { color: var(--rc-muted); opacity: .45; } 49.55%, 97.27% { color: var(--rc-ok); opacity: 1; } 99.09%, 100% { color: var(--rc-muted); opacity: .45; } }
-@keyframes k-st-submitted { 0%, 55.45% { color: var(--rc-muted); opacity: .45; } 56.82%, 97.27% { color: var(--rc-ok); opacity: 1; } 99.09%, 100% { color: var(--rc-muted); opacity: .45; } }
-@keyframes k-st-replied { 0%, 74.55% { color: var(--rc-muted); opacity: .45; } 75.91%, 97.27% { color: var(--rc-ok); opacity: 1; } 99.09%, 100% { color: var(--rc-muted); opacity: .45; } }
-@keyframes k-p-ready { 0%, 57.27% { opacity: 1; } 58.64%, 66.36% { opacity: 0; } 67.73%, 100% { opacity: 1; } }
-@keyframes k-p-busy { 0%, 57.27% { opacity: 0; } 58.64%, 66.36% { opacity: 1; } 67.73%, 100% { opacity: 0; } }
-@keyframes k-pd { 0%, 57.27% { background: var(--rc-ok); } 58.64%, 66.36% { background: var(--rc-warn); } 67.73%, 100% { background: var(--rc-ok); } }
-.demo.play .b-scene { animation: k-b-scene 22s linear infinite; }
-.demo.play .b1 { animation: k-b1 22s linear infinite; }
-.demo.play .b2 { animation: k-b2 22s linear infinite; }
-.demo.play .b3 { animation: k-b3 22s linear infinite; }
-.demo.play .b-tag { animation: k-b-tag 22s linear infinite; }
-.demo.play .a-scene { animation: k-a-scene 22s linear infinite; }
-.demo.play .m1 { animation: k-m1 22s linear infinite; }
-.demo.play .m2 { animation: k-m2 22s linear infinite; }
-.demo.play .file { animation: k-file 22s linear infinite; }
-.demo.play .cap1 { animation: k-cap1 22s linear infinite; }
-.demo.play .cap2 { animation: k-cap2 22s linear infinite; }
-.demo.play .cap3 { animation: k-cap3 22s linear infinite; }
-.demo.play .cap4 { animation: k-cap4 22s linear infinite; }
-.demo.play .cap5 { animation: k-cap5 22s linear infinite; }
-.demo.play .st-stored { animation: k-st-stored 22s linear infinite; }
-.demo.play .st-received { animation: k-st-received 22s linear infinite; }
-.demo.play .st-submitted { animation: k-st-submitted 22s linear infinite; }
-.demo.play .st-replied { animation: k-st-replied 22s linear infinite; }
-.demo.play .p-ready { animation: k-p-ready 22s linear infinite; }
-.demo.play .p-busy { animation: k-p-busy 22s linear infinite; }
-.demo.play .pd { animation: k-pd 22s linear infinite; }
+/* The timeline: app only, a 16 s loop, played while .play is set; .paused holds it */
+@keyframes k-m1{0%,3.75%{opacity:0;transform:translateY(8px)}6.56%,95.62%{opacity:1;transform:none}98.44%,100%{opacity:0;transform:none}}
+.demo.play .m1 { animation: k-m1 16s linear infinite; }
+@keyframes k-m2{0%,48.75%{opacity:0;transform:translateY(8px)}51.56%,95.62%{opacity:1;transform:none}98.44%,100%{opacity:0;transform:none}}
+.demo.play .m2 { animation: k-m2 16s linear infinite; }
+@keyframes k-file{0%,54.37%{opacity:0;transform:translateY(8px)}57.19%,95.62%{opacity:1;transform:none}98.44%,100%{opacity:0;transform:none}}
+.demo.play .file { animation: k-file 16s linear infinite; }
+@keyframes k-cap1{0%,16.25%{opacity:1;transform:none}19.06%,100%{opacity:0;transform:translateY(-4px)}}
+.demo.play .cap1 { animation: k-cap1 16s linear infinite; }
+@keyframes k-cap2{0%,16.25%{opacity:0;transform:translateY(8px)}19.06%,47.50%{opacity:1;transform:none}50.31%,100%{opacity:0;transform:none}}
+.demo.play .cap2 { animation: k-cap2 16s linear infinite; }
+@keyframes k-cap3{0%,47.50%{opacity:0;transform:translateY(8px)}50.31%,71.25%{opacity:1;transform:none}74.06%,100%{opacity:0;transform:none}}
+.demo.play .cap3 { animation: k-cap3 16s linear infinite; }
+@keyframes k-cap4{0%,71.25%{opacity:0;transform:translateY(8px)}74.06%,95.62%{opacity:1;transform:none}98.44%,100%{opacity:0;transform:none}}
+.demo.play .cap4 { animation: k-cap4 16s linear infinite; }
+@keyframes k-st-stored{0%,10.00%{color:var(--rc-muted);opacity:.45}11.88%,95.62%{color:var(--rc-ok);opacity:1}98.12%,100%{color:var(--rc-muted);opacity:.45}}
+.demo.play .st-stored { animation: k-st-stored 16s linear infinite; }
+@keyframes k-st-received{0%,18.75%{color:var(--rc-muted);opacity:.45}20.62%,95.62%{color:var(--rc-ok);opacity:1}98.12%,100%{color:var(--rc-muted);opacity:.45}}
+.demo.play .st-received { animation: k-st-received 16s linear infinite; }
+@keyframes k-st-submitted{0%,27.50%{color:var(--rc-muted);opacity:.45}29.38%,95.62%{color:var(--rc-ok);opacity:1}98.12%,100%{color:var(--rc-muted);opacity:.45}}
+.demo.play .st-submitted { animation: k-st-submitted 16s linear infinite; }
+@keyframes k-st-replied{0%,58.75%{color:var(--rc-muted);opacity:.45}60.63%,95.62%{color:var(--rc-ok);opacity:1}98.12%,100%{color:var(--rc-muted);opacity:.45}}
+.demo.play .st-replied { animation: k-st-replied 16s linear infinite; }
+@keyframes k-p-ready{0%,30.00%{opacity:1}31.87%,48.75%{opacity:0}50.62%,100%{opacity:1}}
+.demo.play .p-ready { animation: k-p-ready 16s linear infinite; }
+@keyframes k-p-busy{0%,30.00%{opacity:0}31.87%,48.75%{opacity:1}50.62%,100%{opacity:0}}
+.demo.play .p-busy { animation: k-p-busy 16s linear infinite; }
+@keyframes k-pd{0%,30.00%{background:var(--rc-ok)}31.87%,48.75%{background:var(--rc-warn)}50.62%,100%{background:var(--rc-ok)}}
+.demo.play .pd { animation: k-pd 16s linear infinite; }
 .demo.paused * { animation-play-state: paused !important; }
 
 /* Reduced motion: no animation; the final frame and the last caption, and no controls */
 @media (prefers-reduced-motion: reduce) {
   .demo.play * { animation: none !important; }
-  .demo .b-scene, .demo .b-tag { display: none; }
-  .demo .a-scene, .demo .msg, .demo .file, .demo .cap5 { opacity: 1 !important; transform: none !important; }
+  .demo .msg, .demo .file, .demo .cap4 { opacity: 1 !important; transform: none !important; }
   .demo .states span, .demo .states i { opacity: 1; }
   .demo .states span { color: var(--rc-ok); }
   .demo .ctrl { display: none; }
