@@ -420,8 +420,8 @@ class App:
         left = [p for p in running_app_exes() if str(p).casefold().startswith(str(self.root).casefold())]
         check(not left, f"still running after --quit: {left}")
 
-    def cli(self, *args, check=True, timeout=300):
-        return run([self.root / "bin" / "raincli.exe", *args], check=check, timeout=timeout)
+    def cli(self, *args, check=True, timeout=300, **kw):
+        return run([self.root / "bin" / "raincli.exe", *args], check=check, timeout=timeout, **kw)
 
     def launch_run_value(self):
         """Exactly what Windows runs at logon: the Run value's command line, unparsed."""
@@ -1737,8 +1737,10 @@ def part_d(app, server, installers, password, observer, teammate, menu, work):
         # v0.6, not yet run on Windows.
         transcript = []
 
+        utf8 = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")  # "·" in "Ready · Instant"
+
         def cli_step(*args):
-            result = app.cli(*args, check=False, timeout=120)
+            result = app.cli(*args, check=False, timeout=120, env=utf8, encoding="utf-8", errors="replace")
             transcript.append(f"$ raincli {' '.join(str(a) for a in args)}\n{result.stdout}{result.stderr}"
                               f"[exit {result.returncode}]\n")
             return result, result.stdout + result.stderr
