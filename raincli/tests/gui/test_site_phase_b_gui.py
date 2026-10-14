@@ -237,12 +237,62 @@ def test_the_demo_just_plays_with_no_controls_or_captions(browser, live):  # noq
         context.close()
 
 
+# The finished frame: both messages, the file and every state lit, Jon ready.
+FINISHED = """() => ['.win', '.m1', '.m2', '.file', '.p-ready', '.st-stored', '.st-received', '.st-submitted',
+    '.st-replied'].map((s) => getComputedStyle(document.querySelector(s)).opacity).concat(
+    [getComputedStyle(document.querySelector('.p-busy')).opacity])"""
+
+# Move every animation's clock on (keeps it playing), as if that much time had passed.
+JUMP = """(ms) => document.querySelector('[data-demo]').getAnimations({subtree: true}).forEach((a) => {
+    a.currentTime = ms; })"""
+
+
+def test_the_demo_stops_on_the_finished_frame_after_two_plays(browser, live):  # noqa: F811
+    """Main's decision (pass 2a): two plays, then it holds on the finished frame, with no controls. The clock is the
+    animations' own, so the off-screen pause delays the stop; the stop happens at 13 s into the second full play
+    (the first join at 11.4 s is the tail of a loop, not a play)."""
+    context, page, log = open_home(browser, live)
+    try:
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
+        # The second play, part way: still running.
+        page.evaluate(JUMP, 16000 + 16000 + 6000)
+        page.wait_for_timeout(500)
+        assert page.evaluate(ANIMATIONS)["running"] > 0
+        assert page.get_attribute("[data-demo]", "data-demo-state") == "playing"
+        # Scrolled away (paused), with the clock just before the stop: it can't reach the stop point.
+        page.evaluate("document.getElementById('faq').scrollIntoView()")
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'waiting'")
+        page.evaluate(JUMP, 16000 + 16000 + 12800)  # setting the time of a paused animation keeps it paused
+        page.wait_for_timeout(1000)
+        assert page.get_attribute("[data-demo]", "data-demo-state") == "waiting"
+        assert page.evaluate(ANIMATIONS)["running"] == 0
+        # Back on screen: it plays the last moment and stops, holding the finished frame with nothing animating.
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'done'",
+                               timeout=5000)
+        assert page.evaluate(ANIMATIONS)["count"] == 0
+        assert page.evaluate(FINISHED) == ["1"] * 9 + ["0"]
+        # It stays stopped, scrolled away and back.
+        page.evaluate("document.getElementById('faq').scrollIntoView()")
+        page.wait_for_timeout(300)
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(1500)
+        assert page.evaluate(ANIMATIONS)["count"] == 0
+        assert page.get_attribute("[data-demo]", "data-demo-state") == "done"
+        assert page.locator("[data-demo] button").count() == 0
+        assert log["console"] == [] and log["errors"] == [], log
+    finally:
+        context.close()
+
+
 @pytest.mark.parametrize("scheme", ["light", "dark"])
 def test_reduced_motion_shows_the_final_frame(browser, live, artifacts, scheme):
     context, page, log = open_home(browser, live, motion="reduce", scheme=scheme)
     try:
         page.wait_for_timeout(200)
         assert page.evaluate(ANIMATIONS)["count"] == 0
+        assert page.get_attribute("[data-demo]", "data-demo-state") is None  # the script never starts it
+        assert page.evaluate(FINISHED) == ["1"] * 9 + ["0"]  # the finished frame, straight away
         assert page.locator(".b-scene, .demo .ctrl, .demo .caps").count() == 0
         frame = page.evaluate("""() => ['.win', '.m1', '.m2', '.file', '.p-ready']
             .map((s) => getComputedStyle(document.querySelector(s)).opacity)""")
