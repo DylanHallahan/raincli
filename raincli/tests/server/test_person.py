@@ -178,18 +178,18 @@ def test_every_trigger_revokes(client, alice, session, trigger):
     assert client.get("/api/v1/person/me", headers=auth(person)).status_code == 401
 
 
-def test_member_removal_keeps_the_session_but_rechecks_membership(client, world, session):
-    """C6: removal from a team doesn't revoke the session; every request re-checks membership."""
+def test_a_session_covers_its_machines_team_whatever_else_the_person_joins(client, world, session):
+    """§21.13 (replacing C9's several-team sessions): a session issued to an acme machine covers acme; joining
+    globex, sending there through the website, and leaving it again change nothing the session sees."""
     identity.add_member(session, world["teams"]["globex"], world["users"]["alice"])
     session.commit()
     person = app_login(client, team="acme", person_session=True).json()["person_session"]
-    sent = psend(client, person, "eve@example.test", team="globex").json()["message"]
+    assert client.get("/api/v1/person/me", headers=auth(person)).json()["teams"] == [{"slug": "acme", "name": "Acme"}]
+    r = psend(client, person, "eve@example.test", team="globex")
+    assert r.status_code == 400 and r.json() == psend(client, person, "eve@example.test", team="nope").json()
     identity.remove_member(session, world["teams"]["globex"], world["users"]["alice"])
     session.commit()
     assert client.get("/api/v1/person/me", headers=auth(person)).json()["teams"] == [{"slug": "acme", "name": "Acme"}]
-    assert client.get(f"/api/v1/person/messages/{sent['id']}", headers=auth(person)).status_code == 404
-    r = psend(client, person, "eve@example.test", team="globex")
-    assert r.status_code == 400 and err(r) == "invalid"
     assert psend(client, person, "bob@example.test").status_code == 201  # acme still works
 
 
@@ -291,14 +291,13 @@ def test_person_send_rules(client, alice, session):
                     {"machine": "bob-agent", "agent": "inbox"}, "alice-agent", "alice-laptop"):  # §21 C2.2: machines are never addresses, own ones included
         r = psend(client, person, machine)
         assert r.status_code == 400 and err(r) == "address_people", machine
-    # C9: several teams need "team".
+    # §21.13: the session covers its machine's team (acme), whatever other teams the person is in.
     identity.add_member(session, world["teams"]["globex"], world["users"]["alice"])
     session.commit()
-    r = psend(client, person, "bob@example.test")
-    assert r.status_code == 400 and r.json()["error"]["code"] == "team_required"
-    assert {t["slug"] for t in r.json()["teams"]} == {"acme", "globex"}
+    assert psend(client, person, "bob@example.test").status_code == 201
     assert psend(client, person, "bob@example.test", team="acme").status_code == 201
-    assert psend(client, person, "eve@example.test", team="globex").status_code == 201
+    r = psend(client, person, "eve@example.test", team="globex")  # answered like an unknown team
+    assert r.status_code == 400 and err(r) == "invalid"
     r = psend(client, person, "eve@example.test", team="acme")  # eve is not in acme
     assert r.status_code == 400 and err(r) == "address_people" and "eve" not in r.text.lower()
     r = psend(client, person, "bob@example.test", team="nope")
@@ -398,8 +397,8 @@ def test_person_reply_takes_the_parents_team(client, alice, session):
     assert r.status_code == 201 and r.json()["message"]["conversation_id"] == parent["conversation_id"]
     r = psend(client, person, "bob-agent", "again", in_reply_to=parent["id"], team="globex")  # team is ignored
     assert r.status_code == 201 and r.json()["message"]["conversation_id"] == parent["conversation_id"]
-    r = psend(client, person, "bob@example.test", "new")  # a new conversation still needs it
-    assert r.status_code == 400 and r.json()["error"]["code"] == "team_required"
+    r = psend(client, person, "bob@example.test", "new")  # a new conversation: the session's team (§21.13)
+    assert r.status_code == 201 and r.json()["message"]["conversation_id"] == parent["conversation_id"]
     r = psend(client, person, "bob-agent", "x", in_reply_to=str(uuid.uuid4()))  # unknown or unseen: 404
     assert r.status_code == 404
     r = psend(client, person, "bob-agent", "x", in_reply_to="not-a-uuid")

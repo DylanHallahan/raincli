@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import update
 
-from conftest_v06 import OWN_STRINGS, PASSWORD, TEAMMATE_STRINGS, v06_seed  # noqa: F401  (fixture)
+from conftest_v06 import OWN_STRINGS, PASSWORD, TEAMMATE_STRINGS, _machine, v06_seed  # noqa: F401  (fixture)
 from raincli_server import identity
 from raincli_server.models import AgentPresence, Conversation, MachineAgent, Message
 from test_app_mode import NAV, WEBVIEW, handoff_code
@@ -130,9 +130,9 @@ def test_an_old_merged_id_redirects_to_the_final_conversation(maya, session, v06
 def test_people_page_lists_teammates_with_presence_and_speed(maya, v06_seed):  # noqa: F811
     page = maya.get("/app/people").text
     words = text(page)
-    for expected in ("Jon Ready · Instant", "Priya Busy · Next turn", "Sam No inbox yet", "Ryan Offline",
-                     "Lee", "Contoso"):
+    for expected in ("Jon Ready · Instant", "Priya Busy · Next turn", "Sam No inbox yet", "Ryan Offline"):
         assert expected in words, expected
+    assert "Lee" not in words and "Contoso" not in words  # §21.13: the window covers its machine's team
     assert "Maya" not in re.findall(r'rc-agent-name">.*?</span>([^<]+)</span>', page)
     assert 'href="/app/compose?to=jon%40example.test' in page
     teammate_free(page)
@@ -150,7 +150,7 @@ def test_recipients_are_people_only_recent_first(maya, v06_seed):  # noqa: F811
     assert set(recent) == {"Jon", "Sam", "Priya"}  # the people Maya has conversations with
     assert [p["name"] for p in people[:len(recent)]] == recent
     jon = next(p for p in people if p["name"] == "Jon")
-    assert jon["status"] == "Ready · Instant" and jon["team"] == "Northwind"  # several teams: the team shows
+    assert jon["status"] == "Ready · Instant" and jon["team"] is None  # one team in the window (§21.13): not shown
     assert "jon@example.test" in jon["match"]
     teammate_free(r.text)
     assert "Maya" not in [p["name"] for p in people]
@@ -241,13 +241,13 @@ def test_w1_owner_notice_for_their_own_old_machine(maya, session, v06_seed):  # 
     session.commit()
     words = text(maya.get("/app/inbox").text)
     assert "zq-handle-maya : This machine runs an old RainCLI that doesn't confirm delivery; update it." in words
-    # With a second notice the app combines them into one line; the old client keeps its own wording there.
-    for cred in session.query(AgentCredential).filter_by(agent_id=v06_seed["machines"]["maya_ct"].id):
-        cred.last_used_at = None
+    # With a second notice the app combines them into one line; the old client keeps its own wording there. The
+    # second machine is in the window's team (§21.13: a contoso machine's notice belongs to a contoso window).
+    second, _ = _machine(session, v06_seed["teams"]["northwind"], v06_seed["people"]["Maya"], "zq-handle-maya-2")
     session.commit()
     words = text(maya.get("/app/inbox").text)
     assert "1 runs an old RainCLI that doesn't confirm delivery; update it: zq-handle-maya" in words
-    for cred in session.query(AgentCredential).filter_by(agent_id=v06_seed["machines"]["maya_ct"].id):
+    for cred in session.query(AgentCredential).filter_by(agent_id=second.id):
         cred.last_used_at = identity.now()
     session.commit()
     _fresh(session, machine, "0.5.6")
@@ -317,7 +317,7 @@ def test_the_banner_offers_your_own_agents_and_the_waiting_messages(maya, v06_se
     assert set(choices) == {"zq-handle-maya|zq-agent-maya-laptop", "zq-handle-maya|zq-agent-maya-notes"}
     assert re.search(r'name="choice" value="[^"]+" required checked', page)  # one pre-selected: two clicks at most
     assert "Also deliver the 1 waiting message" in words  # Jon's message written in the app
-    assert "Use as my inbox in Northwind" in words and "In Contoso" in words  # one per team (H3)
+    assert "Use as my inbox" in words and "Contoso" not in words  # the window's own team only (§21.13)
     teammate_free(page, own_too=False)
 
 
@@ -336,8 +336,7 @@ def test_picking_an_inbox_sets_it_delivers_waiting_and_hides_the_banner(maya, se
     page = maya.get(r.headers["location"]).text
     words = text(page)
     assert "Your inbox is set." in words
-    assert "Use as my inbox in Northwind" not in words  # picked there
-    assert "In Contoso" in words and "None of your agents can receive messages right now" in words  # not there
+    assert "Use as my inbox" not in words and "Contoso" not in words  # picked in the window's only team
 
 
 def test_an_inbox_on_someone_elses_machine_is_refused_quietly(maya, session, v06_seed):  # noqa: F811

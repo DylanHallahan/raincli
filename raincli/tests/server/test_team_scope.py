@@ -18,22 +18,28 @@ from test_web_app import login
 
 @pytest.fixture
 def shared(client, world, session):
-    """Alice and Bob share acme and globex; each has a person session from a globex machine."""
+    """Alice and Bob share acme and globex; each has a person session per team, from a machine in that team (an app
+    sign-in covers its machine's team, §21.13)."""
     globex = world["teams"]["globex"]
     for name in ("alice", "bob"):
         identity.add_member(session, globex, world["users"][name])
     session.commit()
 
-    def person(email, machine):
-        r = client.post("/api/v1/app/login", json={"email": email, "password": PASSWORD, "machine_name": machine,
-                                                   "team": "globex", "person_session": True})
-        assert r.status_code == 201, r.text
-        return r.json()["person_session"]
-    return {"alice": person("alice@example.test", "alice-gx"), "bob": person("bob@example.test", "bob-gx")}
+    def person(name):
+        sessions = {}
+        for team in ("globex", "acme"):
+            r = client.post("/api/v1/app/login", json={"email": f"{name}@example.test", "password": PASSWORD,
+                                                       "machine_name": f"{name}-{team[:2]}", "team": team,
+                                                       "person_session": True})
+            assert r.status_code == 201, r.text
+            sessions[team] = r.json()["person_session"]
+        return sessions
+    return {"alice": person("alice"), "bob": person("bob")}
 
 
 def psend(client, person, team, body, **extra):
-    r = client.post("/api/v1/person/send", headers=auth(person),
+    """``person``: their sessions by team; the one for ``team`` sends."""
+    r = client.post("/api/v1/person/send", headers=auth(person[team]),
                     json={"id": str(uuid.uuid4()), "to": {"person": "bob@example.test"}, "body": body, "team": team,
                           **extra})
     assert r.status_code == 201, r.text
@@ -55,7 +61,7 @@ def test_a_removed_member_cannot_read_the_other_teams_messages(client, app, worl
     gone = psend(client, shared["alice"], "acme", "acme only")
     identity.remove_member(session, world["teams"]["acme"], world["users"]["bob"])
     session.commit()
-    bob = shared["bob"]
+    bob = shared["bob"]["globex"]
     r = client.get(f"/api/v1/person/conversations/{gone['conversation_id']}", headers=auth(bob))
     assert r.status_code == 404
     r = client.get(f"/api/v1/person/conversations/{keep['conversation_id']}", headers=auth(bob))
@@ -73,7 +79,7 @@ def test_a_removed_member_cannot_read_the_other_teams_messages(client, app, worl
 def test_a_reply_cannot_cross_teams(client, world, shared, session):
     parent = psend(client, shared["alice"], "acme", "parent in acme")
     # The person API files a reply in the parent's team, whatever team the request names.
-    r = client.post("/api/v1/person/send", headers=auth(shared["bob"]),
+    r = client.post("/api/v1/person/send", headers=auth(shared["bob"]["acme"]),
                     json={"id": str(uuid.uuid4()), "to": {"person": "alice@example.test"}, "body": "reply",
                           "team": "globex", "in_reply_to": parent["id"]})
     assert r.status_code == 201 and r.json()["message"]["conversation_id"] == parent["conversation_id"]
@@ -102,7 +108,7 @@ def test_a_retried_send_naming_a_conversation_it_was_moved_from_is_the_same_mess
     session.execute(update(Message).where(Message.id == uuid.UUID(first["id"]))
                     .values(moved_from_conversation_id=uuid.UUID(old)))
     session.commit()
-    r = client.post("/api/v1/person/send", headers=auth(shared["alice"]),
+    r = client.post("/api/v1/person/send", headers=auth(shared["alice"]["acme"]),
                     json={"id": first["id"], "to": {"person": "bob@example.test"}, "body": "moved once",
                           "team": "acme", "conversation_id": old})
     assert r.status_code == 200 and r.json()["created"] is False, r.text
