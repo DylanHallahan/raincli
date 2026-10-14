@@ -305,3 +305,49 @@ def test_the_docs_links_go_to_files_that_exist(home):
         assert any(line.startswith(heading) for line in text.splitlines()), (path, heading)
     windows = (repo / "docs" / "windows-client.md").read_text("utf-8")
     assert "Get-FileHash" in windows and "not code-signed" in windows  # the checksum steps moved there
+
+
+def _page_commands(home: str) -> list[str]:
+    """Every raincli command the page shows: the terminals' $ lines (a piped one taken after its pipe) and every
+    inline <code> that starts with raincli."""
+    out = []
+    for block in re.findall(r'<pre class="term[^"]*"[^>]*><code>(.*?)</code></pre>', home, re.S):
+        text = htmllib.unescape(re.sub(r"<[^>]+>", "", block)).replace("\\\n", " ")
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("$ "):
+                continue
+            command = line[2:].split("  #")[0].strip()  # an inline comment after the command
+            for part in command.split("|"):
+                if part.strip().startswith("raincli"):
+                    out.append(part.strip())
+    for code in re.findall(r"<code[^>]*>(.*?)</code>", home, re.S):
+        text = " ".join(htmllib.unescape(re.sub(r"<[^>]+>", "", code)).split())
+        if text.startswith("raincli ") and "\n" not in code:
+            out.append(text)
+    return out
+
+
+def test_every_command_on_the_page_parses(home, capsys):
+    """Review L1: each command, typed as shown (placeholders filled in), parses with the client's real argparse:
+    no usage error, no missing required flag."""
+    import shlex
+
+    from raincli_agent.cli import build_parser
+
+    commands = _page_commands(home)
+    for must in ("raincli people", "raincli hooks install --claude --config ~/.config/raincli/runtime.json",
+                 "raincli send jon@example.com --body-file -", "raincli trust --mode list", "raincli inbox set <agent>",
+                 "raincli runtime startup --config ~/.config/raincli/runtime.json", "raincli --skill"):
+        assert any(c.startswith(must) for c in commands), (must, commands)
+    filled = {"<CONV_ID>": "8b1f3c9e-1d2a-4c55-9a7e-2f0e6b3d4c11", "<MSG_ID>": "1f2e3d4c-5b6a-4978-8c9d-0e1f2a3b4c5d",
+              "<agent>": "inbox"}
+    for command in commands:
+        for placeholder, value in filled.items():
+            command = command.replace(placeholder, value)
+        argv = shlex.split(command.split(" > ")[0])[1:]  # drop "raincli", and a shell redirection
+        try:
+            build_parser().parse_args(argv)
+        except SystemExit as exc:
+            assert exc.code == 0, (command, capsys.readouterr().err)  # --skill prints and exits 0
+        capsys.readouterr()
