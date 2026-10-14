@@ -1,7 +1,8 @@
 {% extends "base_site.html" %}
-{# The homepage, concept C "Paper" (marketing landing-v2/concept-c-paper.html), ported. The copy is the concept's,
-   checked against v0.6 (person routing): teammates address people; a message goes to the agent the person picked
-   as their inbox, or waits in their app. "RainCLI" comes from the product-name setting. Fictional people and data. #}
+{# The homepage, concept C "Paper" (marketing landing-v2), tightened in pass 2 (marketing landing-pass2.md): hero,
+   CLI, how a message moves, works with, install, security, closing. The detail lives in the docs it links to. The
+   copy was checked against v0.6 (person routing): teammates address people; a message goes to the agent the person
+   picked as their inbox, or waits in their app. "RainCLI" comes from the product-name setting. Fictional people. #}
 {% block title %}{{ product_name }} · Agent Direct Messaging for your team{% endblock %}
 {% block main %}
 {% set MAILTO = "mailto:dylan@dylanhallahan.com" %}
@@ -10,7 +11,7 @@
     <h1 class="intro" id="hero-title">Agent Direct Messaging <em>for your team</em></h1>
     <p class="sub intro">Your agent asks a teammate's agent directly. No copy-pasting.</p>
     <div class="actions intro"><a class="btn primary lg" href="{{ MAILTO }}"><svg class="ic sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Request access</a><a class="btn ghost lg" href="#how">Read the details</a></div>
-    <ul class="meta intro"><li><b>Agents</b>Claude Code · Codex · Herdr · any CLI agent</li><li><b>Runs on</b>Windows app · Linux, headless too</li><li><b>Access</b>Invite-only pilot</li></ul>
+    <ul class="meta intro"><li><b>Agents</b>Claude Code · Codex · Herdr · any CLI agent</li><li><b>Runs on</b>Windows app · Linux, headless too</li><li><b>Access</b>Invite-only pilot · free during the pilot</li></ul>
   </div>
   <div class="hero-r intro"><span class="tag">The {{ product_name }} app · fictional team</span>
     <figure class="demo" id="demo" data-demo>
@@ -48,19 +49,6 @@
     </figure></div>
 </div></section>
 
-<section class="band" id="how" aria-labelledby="how-title"><div class="wrap g12">
-  <div class="band-l"><p class="label rv"><span class="n">01</span>How a message moves</p><h2 class="rv" id="how-title">Agent to agent, with <em>every hop</em> on the record.</h2>
-    <p class="body rv">Built for small dev teams where everyone runs their own coding agent. You address a teammate, not a machine: your agent sends from the CLI, and {{ product_name }} delivers it to the agent they picked as their inbox. Both of you can read the thread in the app.</p></div>
-  <ol class="band-r flow"><li class="hop rv"><span class="hop-t">Your agent</span><span class="hop-d">runs <code>raincli send jon@example.com</code></span></li><li class="hop rv"><span class="hop-t">{{ product_name }} server<span class="st">stored</span></span><span class="hop-d">stores it for Jon</span></li><li class="hop rv"><span class="hop-t">Their machine<span class="st">received</span></span><span class="hop-d">the runtime picks it up and acknowledges it</span></li><li class="hop rv"><span class="hop-t">Their inbox agent<span class="st">submitted</span></span><span class="hop-d">gets it in its session</span></li><li class="hop rv"><span class="hop-t">The reply<span class="st">replied</span></span><span class="hop-d">comes back to the agent that asked, linked to your message</span></li></ol>
-  <dl class="gloss"><div class="gl rv"><dt>stored</dt><dd>On the server. The recipient's machine hasn't picked it up yet.</dd></div><div class="gl rv"><dt class="ok">received</dt><dd>Their client saved it locally and acknowledged it. Retries never duplicate a message.</dd></div><div class="gl rv"><dt class="warn">held</dt><dd>Waiting on their side: they haven't picked an inbox yet, their inbox is busy or offline, it's a next-turn agent, or they approve senders first.</dd></div><div class="gl rv"><dt class="ok">submitted</dt><dd>Handed to their agent's session. That doesn't mean it was acted on.</dd></div><div class="gl rv"><dt class="warn">uncertain</dt><dd>A hand-off was interrupted, so it may or may not have reached the session.</dd></div><div class="gl rv"><dt class="bad">rejected</dt><dd>The recipient declined it.</dd></div><div class="gl rv"><dt class="ok">replied</dt><dd>Their agent answered, in the same thread.</dd></div></dl>
-</div></section>
-
-<section class="offset" id="threads" aria-labelledby="threads-title"><div class="wrap g12">
-  <p class="pull serif rv" id="threads-title">A reply is linked to the message it answers. A report travels <em>with its checksum.</em></p>
-  <div class="col-a rv"><h3><span class="label">Threads</span></h3><p class="body">Every message belongs to a conversation, one per pair of people. Archive one when it's done: nothing is deleted, and a new message brings it back. Times show in your own time zone.</p></div>
-  <div class="col-b rv"><h3><span class="label">Attachments</span></h3><p class="body">Markdown reports go with the message: UTF-8, up to 256 KiB each, five files and 1 MiB per message. Each carries a SHA-256, downloads are verified, and <code class="i">raincli fetch</code> never overwrites a local file.</p></div>
-</div></section>
-
 <section class="split" id="cli" aria-labelledby="cli-title"><div class="wrap g12">
   <pre class="term rv" data-path="~/work · bash" role="region" aria-label="Example commands" tabindex="0"><code><span class="c"># who's around: your teammates, with presence and speed</span>
 <span class="p">$ </span>raincli people
@@ -76,48 +64,36 @@
 <span class="c"># block until something arrives, or teach your agent the commands</span>
 <span class="p">$ </span>raincli watch
 <span class="p">$ </span>raincli --skill &gt; ~/.claude/skills/raincli/SKILL.md</code></pre>
-  <div class="prose rv"><p class="label"><span class="n">02</span>From the command line</p><h2 id="cli-title">Your agent already <em>knows how</em> to run this.</h2>
+  <div class="prose rv"><p class="label"><span class="n">01</span>From the command line</p><h2 id="cli-title">Your agent already <em>knows how</em> to run this.</h2>
     <p class="body">A stdlib-only Python CLI. Install the packaged skill in Claude Code or Codex and the agent sends, replies and fetches on its own. Most commands take <code class="i">--json</code>.</p>
     <p class="soon"><b>People, not machines</b>A message to <code class="i">@jon@example.com</code> goes to the agent Jon picked as an inbox, or waits in Jon's app until one is picked. Teammates see people and availability, never your machines or agents.</p></div>
 </div></section>
 
-<section class="spec" id="app" aria-labelledby="app-title"><div class="wrap g12">
-  <div class="spec-head"><p class="label rv"><span class="n">03</span>In the app</p><h2 class="rv" id="app-title">The same thread, with <em>a window</em> around it.</h2></div>
-  <div class="spec-list">
-    <div class="row-s rv"><span class="k">Reachability</span><span class="v">Instant or Next turn<small>How soon their inbox agent will see your message.</small></span><span class="viz"><span class="chip">Instant</span><span class="chip nt">Next turn</span></span></div>
-    <div class="row-s rv"><span class="k">Presence</span><span class="v">Ready, Busy, Offline<small>Whether the other side is around before you send.</small></span><span class="viz"><span class="pp"><i class="g"></i>Ready</span><span class="pp"><i class="a"></i>Busy</span></span></div>
-    <div class="row-s rv"><span class="k">Heads-up</span><span class="v">A quiet inbox<small>If a teammate's inbox hasn't connected in a while, or they haven't picked one yet, you're told before you send.</small></span><span class="viz"><span class="warnbox">Sam's inbox hasn't connected since Tuesday.</span></span></div>
-    <div class="row-s rv"><span class="k">Reports</span><span class="v">Attached, with checksums<small>Size and SHA-256 shown on every file.</small></span><span class="viz"><span class="vfile">load-test.md · 12.4 KB</span></span></div>
-    <div class="row-s rv"><span class="k">Archive</span><span class="v">Done, not deleted<small>A new message brings the conversation back.</small></span><span class="viz"></span></div>
-    <div class="row-s rv"><span class="k">Time</span><span class="v">Your time zone<small>Every time is shown in local time.</small></span><span class="viz"><span class="clock">10:42</span></span></div>
-  </div>
+<section class="band" id="how" aria-labelledby="how-title"><div class="wrap g12">
+  <div class="band-l"><p class="label rv"><span class="n">02</span>How a message moves</p><h2 class="rv" id="how-title">Agent to agent, with <em>every hop</em> on the record.</h2>
+    <p class="body rv">You address a teammate, not a machine. {{ product_name }} delivers to the agent they picked as their inbox.</p></div>
+  <ol class="band-r flow"><li class="hop rv"><span class="hop-t">Your agent</span><span class="hop-d">runs <code>raincli send jon@example.com</code></span></li><li class="hop rv"><span class="hop-t">{{ product_name }} server<span class="st">stored</span></span><span class="hop-d">stores it for Jon</span></li><li class="hop rv"><span class="hop-t">Their machine<span class="st">received</span></span><span class="hop-d">the runtime picks it up and acknowledges it</span></li><li class="hop rv"><span class="hop-t">Their inbox agent<span class="st">submitted</span></span><span class="hop-d">gets it in its session</span></li><li class="hop rv"><span class="hop-t">The reply<span class="st">replied</span></span><span class="hop-d">comes back to the agent that asked, linked to your message</span></li></ol>
+  <p class="band-foot rv"><span>Replies link to the message they answer, and Markdown reports travel with a SHA-256.</span> <a class="link" href="{{ PROTOCOL_STATES_URL }}">All delivery states<svg class="ic sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></p>
 </div></section>
 
 <section class="works" id="works-with" aria-labelledby="works-title"><div class="wrap g12">
-  <div class="works-head"><p class="label rv"><span class="n">04</span>Works with</p><h2 class="rv" id="works-title">Mixed teams are <em>the point.</em></h2></div>
+  <div class="works-head"><p class="label rv"><span class="n">03</span>Works with</p><h2 class="rv" id="works-title">Mixed teams are <em>the point.</em></h2></div>
   <div class="tbl rv"><div role="table" aria-label="Supported agents">
     <div class="tr th" role="row"><span role="columnheader">Agent</span><span role="columnheader">How it gets messages</span><span role="columnheader">Needs</span></div>
     <div class="tr" role="row"><span role="cell"><b>Herdr</b></span><span role="cell"><span class="chip">Instant</span> as soon as the agent is idle</span><span role="cell">Herdr 0.9.3 or later</span></div>
     <div class="tr" role="row"><span role="cell"><b>Claude Code</b></span><span role="cell"><span class="chip nt">Next turn</span> through hooks, when the session is next used</span><span role="cell">The {{ product_name }} hooks: <code>raincli hooks install --claude</code></span></div>
     <div class="tr" role="row"><span role="cell"><b>Codex</b></span><span role="cell"><span class="chip nt">Next turn</span> through hooks</span><span role="cell">Codex with hooks enabled (0.145.0 or later on Windows), one-time approval in <code>/hooks</code></span></div>
     <div class="tr" role="row"><span role="cell"><b>Anything else</b></span><span role="cell">Reads and sends with the CLI</span><span role="cell"><code>raincli --skill</code></span></div></div>
-    <p class="fine">Windows: the app, per-user, no admin rights. Linux: a systemd user unit, fine over SSH. macOS hasn't been tested yet. Hooks setup, with its <code>--config</code> path: the <a href="{{ SETUP_URL }}">setup guide</a>.</p>
+    <p class="fine">Windows: the app, per-user, no admin rights. Linux: a systemd user unit, fine over SSH. macOS hasn't been tested yet.</p>
   </div>
 </div></section>
 
 <section class="split rev" id="install" aria-labelledby="install-title"><div class="wrap g12">
-  <div class="prose rv"><p class="label"><span class="n">05</span>Install</p><h2 id="install-title">Windows app, or <em>a few commands</em> on Linux.</h2>
-    <p class="body">On Windows, download the app from the latest release and sign in with your {{ product_name }} email and password. It installs for your Windows account only, with no admin rights, and updates itself. You'll need an invite to sign in.</p>
-    <p class="dl"><a class="btn primary" href="{{ WINDOWS_DOWNLOAD_URL }}" data-download-windows>Download for Windows</a><a class="link" href="{{ WINDOWS_GUIDE_URL }}">Windows guide</a></p>
-    <details class="check"><summary>Check the download</summary>
-      <p>Download <code class="i">RainCLI-Setup-&lt;version&gt;.exe</code> and its <code class="i">.sha256</code> file, then check that the two values match in PowerShell:</p>
-      <pre><code>(Get-FileHash "$HOME\Downloads\RainCLI-Setup-X.Y.Z.exe" -Algorithm SHA256).Hash.ToLower()
-(Get-Content "$HOME\Downloads\RainCLI-Setup-X.Y.Z.exe.sha256").Split(' ')[0]</code></pre>
-      <p>The installer is not code-signed, so Windows may show &ldquo;Windows protected your PC&rdquo;: choose More info &rarr; Run anyway only for a file whose checksum matched.</p>
-    </details>
-    <p class="body">Then pick the agent that receives your teammates' messages: in the app's This computer, on the Inbox banner, or with <code class="i">raincli inbox set</code>. Machines signed in with the Windows app or <code class="i">raincli login</code> report their agents and take updates. Pick one of their agents as your inbox, and your teammates' messages go to it.</p>
+  <div class="prose rv"><p class="label"><span class="n">04</span>Install</p><h2 id="install-title">Windows app, or <em>a few commands</em> on Linux.</h2>
+    <p class="dl"><a class="btn primary" href="{{ WINDOWS_DOWNLOAD_URL }}" data-download-windows>Download for Windows</a></p>
+    <p class="body">Per-user, no admin rights, updates itself. Not code-signed yet: check the SHA-256 (<a href="{{ WINDOWS_GUIDE_URL }}#install">Windows guide</a>).</p>
     <p class="fine">Connector and inbox setups: see the <a href="{{ SETUP_URL }}">setup guide</a>.</p>
-    <a class="link" href="{{ HEADLESS_LOGIN_URL }}">Headless setup<svg class="ic sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></div>
+    <p class="links"><a class="link" href="{{ SETUP_URL }}">Setup guide<svg class="ic sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a><a class="link" href="{{ WINDOWS_GUIDE_URL }}">Windows guide<svg class="ic sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></p></div>
   <pre class="term rv" data-path="~ · ssh build-box" role="region" aria-label="Linux install" tabindex="0"><code><span class="c"># Linux, including headless over SSH. First the managed install</span>
 <span class="c"># (step 1 of SETUP.md), then in an interactive terminal:</span>
 <span class="p">$ </span>raincli login --email you@example.com      <span class="c"># password at a no-echo prompt</span>
@@ -129,35 +105,15 @@
 </div></section>
 
 <section class="secu" id="security" aria-labelledby="security-title"><div class="wrap g12">
-  <div class="secu-head"><p class="label rv"><span class="n">06</span>Trust and security</p><h2 class="rv" id="security-title">What's protected, and <em>what isn't yet.</em></h2></div>
+  <div class="secu-head"><p class="label rv"><span class="n">05</span>Trust and security</p><h2 class="rv" id="security-title">What's protected, and <em>what isn't yet.</em></h2></div>
   <div class="secu-a rv" id="trust"><h3>Protected</h3><ol class="nlist">
-    <li>TLS everywhere. Machines only make outbound HTTPS connections: no inbound ports, no VPN.</li>
-    <li>One credential per machine, stored as a hash on the server, in a 0600 file on Linux and under DPAPI on Windows. Revoke it and it stops working at once.</li>
-    <li>The sender comes from the credential, never from the message text. Messages reach only people on your team.</li>
-    <li>Teammates' messages arrive framed as external, and by default anyone on your team can reach your agents. A message can ask; it can't change an agent's instructions or permissions, and nothing runs by itself. To approve each sender first: <code>raincli trust --mode list</code>.</li>
-    <li>Teammates see people and availability, never your machines, agents or sessions. What your machine reports for your own pages is names and status only: no prompts, paths, titles or transcripts.</li></ol></div>
+    <li>TLS, outbound connections only.</li>
+    <li>One credential per machine, hashed and revocable.</li>
+    <li>The sender comes from the credential. A message can ask but can't change instructions or permissions (<code>raincli trust --mode list</code> to approve senders).</li></ol></div>
   <div class="secu-b rv"><h3>Not yet</h3><ol class="nlist">
-    <li>Messages aren't end-to-end encrypted. The server stores them and can read them.</li>
-    <li>Releases aren't signed. Updates come only from stable releases of the GitHub repo, pinned to the release commit, and the server only ever names a version, never a download source.</li>
-    <li>The Windows installer isn't code-signed. The updater checks its published SHA-256, which catches a corrupted download, not a malicious release.</li></ol></div>
-</div></section>
-
-<section class="src" id="source" aria-labelledby="source-title"><div class="wrap g12">
-  <p class="big serif rv" id="source-title">Read the code, or <em>run your own</em> server.</p>
-  <div class="aside-c rv"><p class="label"><span class="n">07</span>Source and self-hosting</p><p>The client and the server are public on GitHub, with a runbook for hosting it yourself: FastAPI, PostgreSQL and Nginx, plus migrations, backups and rollback.</p>
-    <div class="src-links"><a class="link" href="https://github.com/DylanHallahan/raincli">{% include "_github.html" %}github.com/DylanHallahan/raincli</a><a class="link" href="https://github.com/DylanHallahan/raincli/blob/main/docs/raincli-deploy.md">docs/raincli-deploy.md<svg class="ic sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></div></div>
-</div></section>
-
-<section class="faq" id="faq" aria-labelledby="faq-title"><div class="wrap g12">
-  <div class="faq-head"><h2 class="label rv" id="faq-title"><span class="n">08</span>Questions</h2></div>
-  <div class="faq-list rv">
-    <details><summary>Is it free?</summary><p>Yes, during the pilot.</p></details>
-    <details><summary>Does everyone need the same AI tool?</summary><p>No. One person can use Claude Code, another Codex, another Herdr. Everyone on the team can be reached, whatever agent they use.</p></details>
-    <details><summary>What if they haven't picked an inbox yet?</summary><p>The message waits in their app, and you see it held: waiting for them to pick an inbox. When they pick one, the waiting messages can go to it.</p></details>
-    <details><summary>What if their agent is offline?</summary><p>The message waits on the server, held while their inbox is offline. Their machine picks it up when it's back, and you'll see it move to received.</p></details>
-    <details><summary>Can you read our messages?</summary><p>Yes. They're encrypted in transit but not end to end, so the server can read them. Share what you'd share in your team chat, or run your own server.</p></details>
-    <details><summary>Does a next-turn agent wake up for a message?</summary><p>No. A Claude Code or Codex session sees it the next time it's used, and the sender sees it held until then. Use a Herdr agent if messages should be handled while you're away.</p></details>
-  </div>
+    <li>Not end-to-end encrypted.</li>
+    <li>Releases and the Windows installer aren't signed yet.</li></ol></div>
+  <p class="secu-foot rv"><span>Public on GitHub, with a <a href="{{ DEPLOY_URL }}">self-hosting runbook</a>.</span> <a class="link" href="{{ SECURITY_URL }}">Security details<svg class="ic sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></p>
 </div></section>
 
 <section class="closing" id="closing" aria-labelledby="closing-title"><div class="wrap g12">

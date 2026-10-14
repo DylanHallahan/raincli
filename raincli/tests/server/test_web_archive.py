@@ -180,8 +180,7 @@ def test_next_turn_copy_names_claude_code_and_codex(app, client, world):
     agents_page = re.sub(r"\s+", " ", htmllib.unescape(pages["/app/agents"]))
     assert "<strong>Next turn</strong> (a Claude Code or Codex session through hooks, at its next turn)" in agents_page
     home = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", htmllib.unescape(pages["/"])))
-    assert "A Claude Code or Codex session sees it the next time it's used" in home  # the homepage's FAQ
-    assert "Claude Code Next turn through hooks" in home and "Codex Next turn through hooks" in home
+    assert "Claude Code Next turn through hooks" in home and "Codex Next turn through hooks" in home  # works with
     for html in pages.values():
         assert "(a Claude Code session, at its next turn)" not in html and "(Herdr or a Claude Code session)" not in html
     template = Path(__file__).resolve().parents[2] / "raincli_server" / "web" / "templates" / "app" / "agent_token.html"

@@ -152,6 +152,12 @@ templates.env.globals["SETUP_URL"] = "https://github.com/DylanHallahan/raincli/b
 templates.env.globals["HEADLESS_LOGIN_URL"] = (
     "https://github.com/DylanHallahan/raincli/blob/main/SETUP.md#headless-linux-raincli-login")
 templates.env.globals["WINDOWS_GUIDE_URL"] = "https://github.com/DylanHallahan/raincli/blob/main/docs/windows-client.md"
+# The homepage's links to the detail it leaves to the docs (pass 2). There is no SECURITY.md: the security detail
+# is the README's Boundaries section.
+templates.env.globals["PROTOCOL_STATES_URL"] = (
+    "https://github.com/DylanHallahan/raincli/blob/main/docs/raincli-protocol.md#2-delivery-semantics")
+templates.env.globals["DEPLOY_URL"] = "https://github.com/DylanHallahan/raincli/blob/main/docs/raincli-deploy.md"
+templates.env.globals["SECURITY_URL"] = "https://github.com/DylanHallahan/raincli/blob/main/README.md#boundaries"
 templates.env.globals["CONNECTION_LABELS"] = CONNECTION_LABELS
 
 

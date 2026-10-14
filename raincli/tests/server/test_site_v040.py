@@ -21,22 +21,22 @@ def text(page: str) -> str:
 
 
 def test_home_page_offers_the_windows_download_and_headless_login(client):
+    """Pass 2b: the download button and one line; the PowerShell checksum steps live in the Windows guide, which the
+    page links; the Linux terminal keeps the headless steps."""
     r = client.get("/")
     page = text(r.text)
     assert f'href="{DOWNLOAD}"' in r.text and "Download for Windows" in page
     # Release assets carry the version, so the page links the latest release, never one file.
     assert not re.search(r"releases/(?:latest/)?download/", r.text)
-    assert '(Get-FileHash "$HOME\\Downloads\\RainCLI-Setup-X.Y.Z.exe" -Algorithm SHA256).Hash.ToLower()' in page
-    assert "(Get-Content \"$HOME\\Downloads\\RainCLI-Setup-X.Y.Z.exe.sha256\").Split(' ')[0]" in page
-    assert "not code-signed" in page and "Run anyway only for a file whose checksum matched" in page
-    assert "sign in with your RainCLI email and password" in page
+    assert "Not code-signed yet: check the SHA-256" in page and f'href="{WINDOWS_GUIDE}#install"' in r.text
+    assert "Get-FileHash" not in page  # moved to the Windows guide
     for step in LOGIN_STEPS:
         assert step in page
     assert 'loginctl enable-linger "$USER"   # (may need an administrator)' in page
-    assert f'href="{HEADLESS}"' in r.text and f'href="{WINDOWS_GUIDE}"' in r.text
+    assert 'href="https://github.com/DylanHallahan/raincli/blob/main/SETUP.md"' in r.text
     assert "Connector and inbox setups: see the" in page  # the connector path: one line to the setup guide
     # §21 (v0.6): people pick an inbox; no "named agents" wording.
-    assert "Pick one of their agents as your inbox, and your teammates' messages go to it." in page
+    assert "raincli inbox set &lt;agent&gt;" in r.text or "raincli inbox set <agent>" in page
     assert "named agents" not in page
     assert "receive messages yet" not in page
     for word in NEVER:
@@ -92,11 +92,10 @@ def test_config_page_points_to_the_simpler_paths(client, world):
 
 def test_home_page_states_the_v05_trust_defaults(client):
     """Machine mode and inbox connectors default to trust_mode "team"; direct-delivery connector configs
-    to "list" (connector/config.py). The homepage (concept C) states the team default and how to switch."""
+    to "list" (connector/config.py). The homepage (concept C, pass 2b) states how to switch to approving senders."""
     page = " ".join(re.sub(r"<[^>]+>", "", text(client.get("/").text)).split())
-    assert ("Teammates' messages arrive framed as external, and by default anyone on your team can reach your "
-            "agents.") in page
-    assert "To approve each sender first: raincli trust --mode list." in page
+    assert "A message can ask but can't change instructions or permissions" in page  # pass 2b, one line
+    assert "(raincli trust --mode list to approve senders)" in page
     assert "by default asks before passing on messages" not in page
     from raincli_agent.connector.config import ConnectorConfig
     assert ConnectorConfig().trust_mode == "list"  # a direct-delivery connector ("mode": "direct") asks first

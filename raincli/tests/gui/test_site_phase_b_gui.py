@@ -200,7 +200,7 @@ def test_the_demo_plays_only_on_screen_and_while_visible(browser, live):
         state = page.evaluate(ANIMATIONS)
         assert state["count"] > 0 and state["running"] == state["count"]
         # Scrolled away: paused.
-        page.evaluate("document.getElementById('faq').scrollIntoView()")
+        page.evaluate("document.getElementById('security').scrollIntoView()")
         page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'waiting'")
         held = page.evaluate(ANIMATIONS)
         assert held["running"] == 0
@@ -260,7 +260,7 @@ def test_the_demo_stops_on_the_finished_frame_after_two_plays(browser, live):  #
         assert page.evaluate(ANIMATIONS)["running"] > 0
         assert page.get_attribute("[data-demo]", "data-demo-state") == "playing"
         # Scrolled away (paused), with the clock just before the stop: it can't reach the stop point.
-        page.evaluate("document.getElementById('faq').scrollIntoView()")
+        page.evaluate("document.getElementById('security').scrollIntoView()")
         page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'waiting'")
         page.evaluate(JUMP, 16000 + 16000 + 12800)  # setting the time of a paused animation keeps it paused
         page.wait_for_timeout(1000)
@@ -273,7 +273,7 @@ def test_the_demo_stops_on_the_finished_frame_after_two_plays(browser, live):  #
         assert page.evaluate(ANIMATIONS)["count"] == 0
         assert page.evaluate(FINISHED) == ["1"] * 9 + ["0"]
         # It stays stopped, scrolled away and back.
-        page.evaluate("document.getElementById('faq').scrollIntoView()")
+        page.evaluate("document.getElementById('security').scrollIntoView()")
         page.wait_for_timeout(300)
         page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(1500)
