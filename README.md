@@ -45,6 +45,7 @@ Markdown attachments are UTF-8, up to 256 KiB each, five files and 1 MiB total p
 - [Windows app and client](docs/windows-client.md)
 - [Release testing](docs/release-testing.md)
 - [Self-hosting and operations](docs/raincli-deploy.md)
+- [Security: supported versions, reporting a vulnerability, what's protected](SECURITY.md)
 
 ## Development
 

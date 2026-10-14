@@ -295,7 +295,7 @@ def test_the_docs_links_go_to_files_that_exist(home):
             ("docs/raincli-protocol.md", "## 2. Delivery semantics"),
         "https://github.com/DylanHallahan/raincli/blob/main/docs/windows-client.md#install":
             ("docs/windows-client.md", "### Install"),
-        "https://github.com/DylanHallahan/raincli/blob/main/README.md#boundaries": ("README.md", "## Boundaries"),
+        "https://github.com/DylanHallahan/raincli/blob/main/SECURITY.md": ("SECURITY.md", "# Security"),
         "https://github.com/DylanHallahan/raincli/blob/main/docs/raincli-deploy.md": ("docs/raincli-deploy.md", "#"),
         "https://github.com/DylanHallahan/raincli/blob/main/SETUP.md": ("SETUP.md", "#"),
     }
@@ -351,3 +351,24 @@ def test_every_command_on_the_page_parses(home, capsys):
         except SystemExit as exc:
             assert exc.code == 0, (command, capsys.readouterr().err)  # --skill prints and exits 0
         capsys.readouterr()
+
+
+def test_security_md_matches_the_code_and_the_readme():
+    """SECURITY.md (the homepage's Security details): its Boundaries mirror the README's word for word, its minimum
+    safe version is the client's, and it says how to report without a public issue."""
+    from pathlib import Path as P
+
+    from raincli_agent import __version__, security
+
+    repo = P(__file__).resolve().parents[3]
+    doc = (repo / "SECURITY.md").read_text("utf-8")
+    readme = (repo / "README.md").read_text("utf-8")
+
+    def boundaries(text, end):
+        return text.split("## Boundaries", 1)[1].split(end, 1)[0].replace("This section mirrors the README's.", "").strip()
+    assert boundaries(doc, "\n## ") == boundaries(readme, "## Documentation")
+    assert f"v{security.MIN_SAFE_VERSION} for this release" in doc and "MIN_SAFE_VERSION" in doc
+    major_minor = ".".join(__version__.split(".")[:2])
+    assert f"**{major_minor}.x**" in doc
+    assert "dylan@dylanhallahan.com" in doc and "don't open a public GitHub issue" in doc
+    assert "(SECURITY.md)" in readme
