@@ -480,10 +480,7 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
       your agents writing to you) lands in the owner's ``self`` conversation (C13 H2).
     - A reply (``in_reply_to``) is routed from its parent, whatever ``to`` says (C4, C13 M4).
     ``quotas`` (a ``quotas.Quotas``) charges attachment bytes to the sending user and the team (§18.1 item 5)."""
-    try:
-        message_id = parse_uuid(id, "id")
-    except MessagingError:
-        raise _invalid(NEW_ID) from None
+    message_id = parse_uuid(id, "id")
     reply_to = parse_uuid(in_reply_to, "in_reply_to") if in_reply_to is not None else None
     conv_id = parse_uuid(conversation_id, "conversation_id") if conversation_id is not None else None
     if conv_id is not None:  # an id merged by migration 0010 means the conversation it went into
@@ -761,9 +758,7 @@ def _idempotent_v06(session: Session, existing: Message, sender: Endpoint, team_
                     body: str, kind: str, reply_to, conv_id, files) -> tuple[Message, bool]:
     """A retried send is the same message when its sender, body, kind, parent, attachments and conversation match,
     and ``to`` names the same person (or, for a message stored before §21, the same endpoint). An id used in another
-    team is answered as an unusable id (§21.13): the same ``400`` a malformed id gets, never ``id_conflict``."""
-    if existing.team_id != team_id:
-        raise _invalid(NEW_ID)
+    team is never the same message, and gets the same ``id_conflict`` as any other conflicting id (§21.13)."""
     stored = [(a["filename"], a["sha256"]) for a in _attachment_meta(session, [existing.id])[existing.id]]
     conv_ok = conv_id is None or conv_id in (existing.conversation_id, existing.moved_from_conversation_id,
                                             existing.premerge_conversation_id)
@@ -782,10 +777,6 @@ def _idempotent_v06(session: Session, existing: Message, sender: Endpoint, team_
     if same:
         return existing, False
     raise MessagingError(409, "id_conflict", "a different message already uses this id")
-
-
-# §21.13: a malformed send id and one already used in another team get this same answer.
-NEW_ID = "id must be a uuid4 string"
 
 
 def _set_state(session: Session, message_id: uuid.UUID, state: str, reporter: uuid.UUID | None,

@@ -20,7 +20,7 @@ This is the binding contract for `raincli_server` (API + web), `raincli_agent` (
   - `sender_agent_id`, **always taken from the credential**;
   - `recipient_agent_id`;
   - `body`, plain text of 1–16000 characters with no C0/C1 controls other than `\n`/`\t`, no U+2028/2029, U+FEFF, noncharacters or lone surrogates, and not only whitespace;
-  - `created_at` and `seq`, a global bigint identity that serves as the inbox cursor;
+  - `created_at` and `seq`, a bigint that serves as the inbox cursor (numbered per team since §21.13);
   - `acked_at`, set once and only by the recipient;
   - the latest recipient-reported `delivery_state`.
 
@@ -1993,3 +1993,27 @@ A message to person P in team T is stored as follows, decided once, at send time
   - frame teammates' messages as persons.
 - **`raincli agents` and `raincli send <handle>` from those versions** degrade without crashing: the former lists the caller's own machines, the latter gets `address_people`.
 - **Clients before v0.5.0** need an update to receive messages under §21 (named delivery needs v0.5.0, §16.12 C1).
+
+### 21.13 Team scope
+Teams are separate. Nothing one team does is visible, or can be inferred, from another.
+- **An app sign-in covers one team:** the team of the machine it's signed in on.
+  - A person session (`rps_…`) is issued to a machine, and so is every app-mode web session made from it (§16.10). It covers only that machine's team.
+  - `/api/v1/person/me` lists that team alone, and a request without `team` uses it.
+  - Another team's messages, conversations and attachments answer exactly as unknown ids do (`404 not_found`). Naming another team's slug answers as an unknown slug does (`400 invalid`).
+  - The app window, its live updates and its notifications show that team only.
+  - A member of several teams signs the app in per team, on a machine of that team.
+- **A website sign-in covers all of the person's teams.** Lists show each row's team.
+- **Sends need an explicit team when the sender is in several:**
+  - a picker id (`p.<team>.<user>`) carries its team;
+  - typed text (an email or a name) is resolved in the chosen team only;
+  - with no team chosen, or a slug that isn't one of the sender's teams, the send is refused, saying when the text names people in more than one of them;
+  - the compose warning about a person's inbox is resolved in the chosen team only.
+- **Sequence numbers are per team.**
+  - A message's `seq` is its team's own number, allocated as the message is stored. A team's numbers commit in increasing order. Every reader sees this number, and every cursor uses it: the inbox, conversations, `/app/live` and `archived_through_seq`.
+  - Numbers in different teams are independent, so the same number can appear in two teams.
+  - **Compatibility:** messages stored before this change keep their number. Every team continues above the highest number issued before the change, and so does every team created later. A cursor a client stored earlier is therefore below every new message in its team.
+  - **A machine's cursor that its team never issued** is one at or above the team's next number, such as a queue kept from when the machine was signed in to another team. That poll is answered from the start, so the machine's unacknowledged messages are returned. The `cursor` answered is never below the one sent. The server remembers such a cursor until the client moves past it, so nothing is missed when the team's numbers pass it.
+- **Message ids are unique across all teams.** A send whose `id` is already used gets `409 id_conflict`. The answer is the same whichever team the id is used in, and whether or not the sender can see that message. A retry of the sender's own message is `created: false` (§3).
+- **Archive** checks that the caller may archive the conversation before it locks it.
+- **The database** keeps every machine a message, an inbox or a conversation names in that row's team (migration 0011).
+- **The per-user daily attachment quota** counts a person's sends in all their teams together. The per-team quota is separate for each team.

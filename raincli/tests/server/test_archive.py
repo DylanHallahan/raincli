@@ -327,21 +327,22 @@ def test_a_send_in_flight_makes_an_archive_wait_and_a_stale_position_keeps_it_li
 
 
 def test_opposite_direction_sends_never_let_an_archive_skip_a_lower_seq(client, world, app):
-    """L1: A->B takes the lower seq and stays uncommitted while B->A takes a higher one and commits. The
-    archive must wait for A->B, so its max(seq) covers only committed messages; the two sends never wait."""
+    """L1: A->B takes the lower seq and stays uncommitted. B->A, in the same team, waits for it to commit before
+    it takes the next number (§21.13: a team's numbers commit in order), so no lower number can commit after a
+    higher one; an archive in between waits for A->B and covers only committed messages."""
     alice, bob = world["agents"]["alice"].id, world["agents"]["bob"].id
     cid, _ = conv_of(client, world["tokens"]["alice"])
     s_low, s_high, s_archive = sessions(app, 3)
     try:
-        low = raced_send(s_low, alice, BOB, "lower seq, committed last")
+        low = raced_send(s_low, alice, BOB, "lower seq")
         high = Background(lambda: (raced_send(s_high, bob, ALICE, "higher seq"), s_high.commit())[0])
-        assert not high.blocked(pause=5)  # opposite-direction sends run concurrently
-        high = high.join()
-        assert low.seq < high.seq and low.conversation_id == high.conversation_id == uuid.UUID(cid)
+        assert high.blocked()  # the team's next number waits for the uncommitted lower one
         archived = Background(lambda: (raced_archive(s_archive, bob, cid), s_archive.commit()))
-        assert archived.blocked()  # it would otherwise read max(seq) = high.seq past the uncommitted low.seq
+        assert archived.blocked()  # and so does an archive: its max(seq) never passes the uncommitted low.seq
         s_low.commit()
+        high = high.join()
         archived.join()
+        assert low.seq < high.seq and low.conversation_id == high.conversation_id == uuid.UUID(cid)
     finally:
         for s in (s_low, s_high, s_archive):
             s.close()

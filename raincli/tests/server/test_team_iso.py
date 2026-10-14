@@ -25,6 +25,7 @@ from raincli_server.models import Message
 from test_app_mode import NAV, WEBVIEW, handoff_code
 from test_web_app import csrf_of, login
 from test_v06_web import text
+from test_v060_cli import live  # noqa: F401  (fixture: a real uvicorn server)
 
 UNKNOWN = str(uuid.uuid4())
 
@@ -262,19 +263,49 @@ def test_archiving_another_teams_conversation_takes_no_lock(session, v06_seed, c
 
 # T6: an id used in another team ------------------------------------------------------------------------------------
 
-def test_an_id_used_in_another_team_is_answered_like_a_malformed_one(client, v06_seed, contoso):  # noqa: F811
+def test_an_id_used_in_another_team_is_answered_like_any_conflicting_id(client, v06_seed, contoso):  # noqa: F811
+    """Ids are unique across teams, so one used in contoso can't be taken in northwind; it answers exactly as an id
+    taken in the sender's own team (by a message they can't see) does, so it says nothing about where."""
     t = v06_seed["machine_tokens"]
     send = lambda token, mid: client.post("/api/v1/messages", headers=auth(token),  # noqa: E731
                                           json={"id": mid, "to": "jon@example.test", "body": "hi"})
-    taken, malformed = send(t["maya"], contoso["message"]), send(t["maya"], "not-a-uuid")
-    assert taken.status_code == 400 and taken.json() == malformed.json()
-    assert taken.json()["error"]["code"] == "invalid"
+    elsewhere = send(t["maya"], contoso["message"])
+    own_team = send(t["maya"], str(v06_seed["messages"]["to_priya"].id))  # Priya's, in northwind
+    assert elsewhere.status_code == 409 and elsewhere.json() == own_team.json()
     person = client.post("/api/v1/person/send", headers=auth(v06_seed["person_tokens"]["Jon"]),
                          json={"id": contoso["message"], "to": "maya@example.test", "body": "hi"})
-    assert person.status_code == 400 and person.json() == malformed.json()
-    # In its own team an id still answers as before: a retry is the same message, a different one id_conflict.
-    mine = send(t["maya"], str(uuid.uuid4()))
-    again = client.post("/api/v1/messages", headers=auth(t["maya"]),
-                        json={"id": mine.json()["message"]["id"], "to": "jon@example.test", "body": "different"})
-    assert again.status_code == 409 and again.json()["error"]["code"] == "id_conflict"
-    assert json.loads(taken.content)["error"]["message"] == "id must be a uuid4 string"
+    assert person.status_code == 409 and person.json() == elsewhere.json()
+    assert "contoso" not in elsewhere.text.lower() and "Lee" not in elsewhere.text
+
+
+# Clients on a person session that now covers one team ---------------------------------------------------------------
+
+PERSON_FEED = """
+import os
+from raincli_agent.api import ApiClient
+from raincli_agent import person
+
+agent_cfg = os.path.join(payload["tmp"], "agent.json")
+open(agent_cfg, "w").write(json.dumps({"api_url": payload["url"], "token": payload["machine_token"]}))
+os.chmod(agent_cfg, 0o600)
+person.save_session(agent_cfg, payload["token"])
+client = person.PersonClient.for_config(agent_cfg)
+me = client.me()
+kwargs = {"routed": True} if "routed" in person.PersonClient.inbox.__code__.co_varnames else {}
+messages, cursor = client.inbox(after=0, include_acked=True, **kwargs)
+added = person.append_notifications(agent_cfg, messages, cursor, "session-1")
+print(json.dumps({"teams": [t["slug"] for t in me["teams"]], "ids": [m["id"] for m in messages], "added": added}))
+"""
+
+
+@pytest.mark.parametrize("tag", ("v0.5.6", "v0.6.0"))
+def test_released_clients_read_a_one_team_person_session(tag, live, client, v06_seed, contoso, tmp_path):  # noqa: F811
+    from test_v06_old_clients import run_old
+
+    state = tmp_path / "state"
+    state.mkdir()
+    out = run_old(tag, tmp_path, PERSON_FEED, {"url": live, "token": v06_seed["person_tokens"]["Maya"],
+                                               "machine_token": v06_seed["machine_tokens"]["maya"],
+                                               "tmp": str(state)})
+    assert out["teams"] == ["northwind"] and contoso["message"] not in out["ids"]
+    assert str(v06_seed["messages"]["by_hand"].id) in out["ids"] and out["added"] == len(out["ids"])

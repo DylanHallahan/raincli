@@ -200,33 +200,35 @@ def test_migration_0009_orders_pending_messages_by_seq(engine):
 
 # §19.8 amendments ----------------------------------------------------------------------------------------
 
-def test_out_of_order_commits_both_appear(client, world, alice_app, app, session):  # noqa: F811
-    """M1: a message that commits after a higher seq still reaches the window on the next poll."""
+def test_a_teams_numbers_commit_in_order_so_both_appear(client, world, alice_app, app, session):  # noqa: F811
+    """M1 (§21.13): a send in the same team waits until a lower number commits, so a poll's cursor never passes a
+    message that commits late; both messages reach the window, in order."""
+    from test_archive import Background, sessions
+
     webview = alice_app["webview"]
     first = person_send(client, alice_app["person"], {"person": "bob@example.test"}, "start")
     cid = first["conversation_id"]
-    age(session, first)
-    # Sends to one recipient are serialized, so the two run in opposite directions, as two senders would.
-    late_session, early_session = app.state.sessionmaker(), app.state.sessionmaker()
+    late_session, early_session = sessions(app, 2)  # a lock timeout: a wait we did not expect fails, never hangs
     try:
         alice = late_session.get(type(world["users"]["alice"]), world["users"]["alice"].id)
         late, _ = messaging.send_as_person(late_session, alice, world["teams"]["acme"].id, id=str(uuid.uuid4()),
-                                           to={"person": "bob@example.test"}, body="lower seq, committed last",
+                                           to={"person": "bob@example.test"}, body="lower seq",
                                            conversation_id=cid, max_pending=1000)
         bob_early = early_session.get(Agent, world["agents"]["bob"].id)
-        early, _ = messaging.send_message(early_session, bob_early, id=str(uuid.uuid4()),
-                                          to={"person": "alice@example.test"}, body="higher seq",
-                                          conversation_id=cid, max_pending=1000)
-        early_session.commit()
-        assert late.seq < early.seq
-        out = live(webview, conversation=cid, after=first["seq"])
-        assert [m["id"] for m in out["messages"]] == [str(early.id)]
+        early = Background(lambda: (messaging.send_message(
+            early_session, bob_early, id=str(uuid.uuid4()), to={"person": "alice@example.test"}, body="higher seq",
+            conversation_id=cid, max_pending=1000)[0], early_session.commit())[0])
+        assert early.blocked()  # waits for the lower number to commit
+        shown = [m["id"] for m in live(webview, conversation=cid, after=first["seq"])["messages"]]
+        assert str(late.id) not in shown  # nothing new is visible until it commits
         late_session.commit()
+        early = early.join()
     finally:
         late_session.close()
         early_session.close()
-    again = live(webview, conversation=cid, after=early.seq)  # the cursor is past it, the 30 s window isn't
-    assert str(late.id) in [m["id"] for m in again["messages"]]
+    assert late.seq < early.seq
+    out = live(webview, conversation=cid, after=first["seq"])
+    assert [m["id"] for m in out["messages"]][-2:] == [str(late.id), str(early.id)]  # after "start", in order
 
 
 def test_a_state_committed_before_the_polls_now_still_shows(client, world, alice_app, session):  # noqa: F811
@@ -317,7 +319,7 @@ def test_ack_is_app_mode_only(app, client, world):
 
 
 def test_live_queries_stay_on_the_conversation_index(client, world, alice_app, session, engine):  # noqa: F811
-    """F6: on a 20 000-message thread both /app/live queries use (conversation_id, seq), not a scan."""
+    """F6: on a 20 000-message thread both /app/live queries use (conversation_id, team_seq), not a scan."""
     from sqlalchemy import text
 
     first = person_send(client, alice_app["person"], {"person": "bob@example.test"}, "start")
@@ -339,7 +341,7 @@ def test_live_queries_stay_on_the_conversation_index(client, world, alice_app, s
             seen.append((statement, parameters))
     event.listen(app_engine, "before_cursor_execute", capture)
     try:
-        newest = session.scalar(text("SELECT max(seq) FROM messages WHERE conversation_id = :c"), {"c": cid})
+        newest = session.scalar(text("SELECT max(team_seq) FROM messages WHERE conversation_id = :c"), {"c": cid})
         out = live(alice_app["webview"], conversation=cid, after=newest, states_since=identity.now().isoformat())
     finally:
         event.remove(app_engine, "before_cursor_execute", capture)
@@ -347,7 +349,7 @@ def test_live_queries_stay_on_the_conversation_index(client, world, alice_app, s
     checked = 0
     with engine.connect() as conn:
         for statement, parameters in seen:
-            if "ORDER BY messages.seq" not in statement:
+            if "ORDER BY messages.team_seq" not in statement:
                 continue
             plan = "\n".join(conn.exec_driver_sql("EXPLAIN " + statement, parameters).scalars())
             assert "Seq Scan on messages" not in plan, plan
