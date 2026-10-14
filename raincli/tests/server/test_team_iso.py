@@ -113,9 +113,8 @@ def test_app_mode_answers_another_teams_resources_like_unknown_ones(maya_app, v0
     assert get(f"/app/conversations/{cid}").status_code == 404
     assert same_answer(get(f"/app/conversations/{cid}"), get(f"/app/conversations/{UNKNOWN}"))
     assert same_answer(get(f"/app/messages/{mid}/attachments/{aid}"), get(f"/app/messages/{UNKNOWN}/attachments/{aid}"))
-    live = lambda conv: get(f"/app/live?conversation={conv}&after=0").json()  # noqa: E731
-    mine, theirs = live(cid), live(UNKNOWN)
-    assert {k: v for k, v in mine.items() if k != "now"} == {k: v for k, v in theirs.items() if k != "now"}
+    live = lambda conv: get(f"/app/live?conversation={conv}&after=0")  # noqa: E731
+    assert live(cid).status_code == 404 and same_answer(live(cid), live(UNKNOWN))
     for page in ("/app/inbox", "/app/people", "/app/compose", "/app/archived", "/app/recipients"):
         body = get(page).text
         assert cid not in body and "Contoso" not in body and "Lee" not in body, page
@@ -134,8 +133,20 @@ def test_a_website_sign_in_covers_both_teams_labelled(client, v06_seed, contoso)
 
 # T2: numbers are per team ------------------------------------------------------------------------------------------
 
-def _everything(client, v06_seed):  # noqa: F811
+def _masked(value):
+    """Presence times masked (refreshed before each snapshot, so the presence words stay the same)."""
+    if isinstance(value, dict):
+        return {k: ("…" if k in ("seen_at", "last_seen_at", "expires_at") else _masked(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_masked(v) for v in value]
+    return value
+
+
+def _everything(client, session, v06_seed):  # noqa: F811
     """Everything Jon (northwind only) can fetch through his machine and his person session."""
+    for table in ("agent_presence", "machine_agents"):  # every report fresh, whatever the run's pace
+        session.execute(sql(f"UPDATE {table} SET seen_at = now()"))
+    session.commit()
     m, p = auth(v06_seed["machine_tokens"]["jon"]), auth(v06_seed["person_tokens"]["Jon"])
     out = {}
     for path in ("/api/v1/me", "/api/v1/people", "/api/v1/agents", "/api/v1/me/inbox",
@@ -148,17 +159,20 @@ def _everything(client, v06_seed):  # noqa: F811
         out[path] = client.get(path, headers=p).json()
     for conv in out["/api/v1/person/conversations?archived=include"]["conversations"]:
         out["p" + conv["id"]] = client.get(f"/api/v1/person/conversations/{conv['id']}", headers=p).json()
-    return out
+    return _masked(out)
 
 
-def test_another_teams_messages_change_nothing_a_member_can_fetch(client, v06_seed):  # noqa: F811
+def test_another_teams_messages_change_nothing_a_member_can_fetch(client, session, v06_seed):  # noqa: F811
     """The diff probe: snapshot everything a northwind member can fetch, have contoso send, snapshot again."""
-    before = _everything(client, v06_seed)
+    before = _everything(client, session, v06_seed)
     ct = v06_seed["machine_tokens"]
     for i in range(5):
         assert machine_send(client, ct["lee"], "maya@example.test", f"contoso {i}").status_code == 201
         assert machine_send(client, ct["maya_ct"], "lee@example.test", f"answer {i}").status_code == 201
-    assert _everything(client, v06_seed) == before
+    after = _everything(client, session, v06_seed)
+    assert after.keys() == before.keys()
+    for key in before:
+        assert after[key] == before[key], json.dumps([key, before[key], after[key]])
 
 
 def test_numbers_are_consecutive_in_a_team_whatever_other_teams_send(client, v06_seed):  # noqa: F811
@@ -263,4 +277,4 @@ def test_an_id_used_in_another_team_is_answered_like_a_malformed_one(client, v06
     again = client.post("/api/v1/messages", headers=auth(t["maya"]),
                         json={"id": mine.json()["message"]["id"], "to": "jon@example.test", "body": "different"})
     assert again.status_code == 409 and again.json()["error"]["code"] == "id_conflict"
-    assert json.loads(taken.content)["error"]["message"] == "id must be a new UUID: choose another id"
+    assert json.loads(taken.content)["error"]["message"] == "id must be a uuid4 string"

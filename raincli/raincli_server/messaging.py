@@ -785,7 +785,7 @@ def _idempotent_v06(session: Session, existing: Message, sender: Endpoint, team_
 
 
 # §21.13: a malformed send id and one already used in another team get this same answer.
-NEW_ID = "id must be a new UUID: choose another id"
+NEW_ID = "id must be a uuid4 string"
 
 
 def _set_state(session: Session, message_id: uuid.UUID, state: str, reporter: uuid.UUID | None,
