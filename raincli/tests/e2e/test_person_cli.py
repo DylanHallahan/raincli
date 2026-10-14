@@ -102,14 +102,21 @@ def test_person_sends_to_a_person_and_bodies_never_come_from_argv(machines):
     assert usage.returncode != 0 and "--body-file" in usage.stderr
 
 
-def test_team_required_names_the_teams(machines, world, session):
+def test_a_person_session_sends_in_its_machines_team(machines, world, session):
+    """§21.13: alice is in acme and globex; her session, from her acme machine, covers acme. No --team is needed,
+    and --team globex is answered like an unknown team."""
     from raincli_server import identity
     identity.add_member(session, world["teams"]["globex"], world["users"]["alice"])
     session.commit()
     add_person(machines, "alice")
-    refused = cli(machines, "alice", "me", "send", "bob@example.test", "--body-file", "-", input="hi", check=False)
-    assert refused.returncode != 0 and "--team" in refused.stderr and "acme" in refused.stderr
+    cli(machines, "alice", "me", "send", "bob@example.test", "--body-file", "-", input="hi")
     cli(machines, "alice", "me", "send", "bob@example.test", "--team", "acme", "--body-file", "-", input="hi")
+    other = cli(machines, "alice", "me", "send", "eve@example.test", "--team", "globex", "--body-file", "-",
+                input="hi", check=False)
+    unknown = cli(machines, "alice", "me", "send", "eve@example.test", "--team", "nope", "--body-file", "-",
+                  input="hi", check=False)
+    error = lambda r: r.stderr.strip().splitlines()[-1]  # noqa: E731  (the line before names the message id)
+    assert other.returncode != 0 and error(other) == error(unknown) == "raincli: error: 400 invalid: unknown team"
     # A reply needs no --team: the server takes the parent conversation's team (§16.16 (3)).
     mid = str(uuid.uuid4())
     cli(machines, "bob", "send", "@alice@example.test", "--body-file", "-", "--id", mid, input="question")
