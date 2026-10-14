@@ -229,6 +229,14 @@ def _team_ids(viewer: auth.Viewer) -> list[uuid.UUID]:
     return [team.id for team, _ in viewer.teams]
 
 
+def _chosen_team_ids(viewer: auth.Viewer, slug: str) -> list[uuid.UUID]:
+    """§21.13: the team a typed recipient or a warning is resolved in: the named one (none for a slug that isn't
+    one of the viewer's teams, never widened), the only one, or none until a team is chosen."""
+    if slug:
+        return [t.id for t, _ in viewer.teams if t.slug == slug]
+    return _team_ids(viewer) if len(viewer.teams) == 1 else []
+
+
 def _viewer_team(viewer: auth.Viewer, slug: str) -> tuple[Team, str]:
     for team, role in viewer.teams:
         if team.slug == slug:
@@ -750,7 +758,7 @@ async def live_ack(request: Request, db: Session = Depends(get_db)):
         if msg is None or msg.team_id not in _team_ids(viewer) or not messaging.is_unread_for(db, viewer.user.id, msg, owned):
             continue
         try:
-            _, done = messaging.person_ack(db, viewer.user, mid)
+            _, done = messaging.person_ack(db, viewer.user, mid, viewer.scope)
         except messaging.MessagingError:
             continue
         if done:
@@ -904,8 +912,9 @@ def person_warning(request: Request, to: str = "", team: str = "", db: Session =
     from raincli_server.web import thread
 
     viewer = app_viewer(request, db, app_mode_ok=True)
-    chosen = [t.id for t, _ in viewer.teams if t.slug == team] if team else _team_ids(viewer)
-    picked = queries.person_by_id(db, viewer.user, chosen, to) if to.startswith("p.") else None
+    chosen = _chosen_team_ids(viewer, team)
+    picked = queries.person_by_id(db, viewer.user, chosen if team else _team_ids(viewer), to) \
+        if to.startswith("p.") else None
     warning = thread.person_warning(db, picked[0].id, picked[1], viewer=viewer.user) if picked else \
         thread.warning_for_text(db, chosen, to, viewer.user)
     return HTMLResponse(fragment(request, "_sender_warning.html", viewer, warning=warning),
@@ -930,7 +939,7 @@ def _set_archived(request: Request, db: Session, conversation_id: str, csrf_toke
         raise not_found()
     seq = int(through) if through.isdigit() and len(through) < 19 else None
     try:
-        conv = messaging.archive_as_person(db, viewer.user, conversation_id, archived, seq)
+        conv = messaging.archive_as_person(db, viewer.user, conversation_id, archived, seq, viewer.scope)
     except messaging.MessagingError:
         raise not_found() from None
     state = messaging.archive_json(db, conv)["archived"]
@@ -975,19 +984,27 @@ def _reply_name(db: Session, viewer: auth.Viewer, parent: Message) -> str:
 
 def _typed_recipient(db: Session, viewer: auth.Viewer, text: str, team_slug: str):
     """§21 C2.1, C7.2: a typed recipient (email, unique name) or a picker id ``p.<team>.<user>`` to ``(team, to)``,
-    or a ``(None, message)`` refusal in presentation's words. One team: that one; several: the chosen team, else
-    the one where the text names a person."""
+    or a ``(None, message)`` refusal in presentation's words. A picker id carries its team. Typed text is resolved
+    in one team (§21.13): the only one, or the chosen one; with several and none chosen (or a slug that isn't one
+    of the viewer's teams) it is refused, saying when the text names people in more than one of them."""
     from raincli_server import presentation
 
     teams = [t for t, _ in viewer.teams]
     if team_slug:
-        teams = [t for t in teams if t.slug == team_slug] or teams
+        teams = [t for t in teams if t.slug == team_slug]
+        if not teams:
+            return None, CHOOSE_TEAM
     text = (text or "").strip()
     if text.startswith("p."):
         picked = queries.person_by_id(db, viewer.user, [t.id for t in teams], text)
         if picked is None:
             return None, presentation.error_text("invalid")
         return picked[0], {"person": picked[1].email}
+    if len(teams) > 1:
+        named = [t for t in teams if presentation.resolve_person_text(db, t.id, text, sender=viewer.user).kind
+                 in ("person", "ambiguous")]
+        return None, (f"{text[:80]} is in more than one of your teams. Choose a team." if len(named) > 1
+                      else CHOOSE_TEAM)
     refusal = None
     for team in teams:
         found = presentation.resolve_person_text(db, team.id, text, sender=viewer.user)
@@ -999,6 +1016,9 @@ def _typed_recipient(db: Session, viewer: auth.Viewer, text: str, team_slug: str
         if refusal is None or (error and error[1] != "address_people") or (found.mapped is not None):
             refusal = error[2] if error else refusal
     return None, refusal or presentation.error_text("invalid")
+
+
+CHOOSE_TEAM = "Choose one of your teams."
 
 
 def _conversation_page(
@@ -1036,9 +1056,10 @@ def compose(request: Request, to: str = "", db: Session = Depends(get_db)):
 def _compose_page(request, db, viewer, *, form, status: int = 200, error: str | None = None) -> HTMLResponse:
     from raincli_server.web import thread
 
-    chosen = [t.id for t, _ in viewer.teams if t.slug == form.get("team")] if form.get("team") else _team_ids(viewer)
+    chosen = _chosen_team_ids(viewer, form.get("team", ""))
     to = form.get("to", "")
-    picked = queries.person_by_id(db, viewer.user, chosen, to) if to.startswith("p.") else None
+    picked = queries.person_by_id(db, viewer.user, chosen if form.get("team") else _team_ids(viewer), to) \
+        if to.startswith("p.") else None
     if picked is None and to:  # §21 C7.2: ?to= takes an email or a unique name, pre-picked as that person
         from raincli_server import presentation
 

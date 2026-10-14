@@ -11,6 +11,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    FetchedValue,
     ForeignKeyConstraint,
     Identity,
     Integer,
@@ -76,6 +77,8 @@ class Team(Base):
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     attachment_quota_bytes: Mapped[int | None] = mapped_column(BigInteger)  # 30-day override; NULL = configured
     created_at: Mapped[datetime] = _created()
+    # §21.13 (migration 0011): the team's next message number; a trigger allocates it to each new message.
+    next_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=FetchedValue())
 
 
 class Membership(Base):
@@ -172,8 +175,12 @@ class Agent(Base):
     # Phase 2 (§16.5, §16.2): the machine's routing policy, and when it first polled with routing=1.
     routing: Mapped[str] = mapped_column(String(16), nullable=False, default="all", server_default="all")
     routing_capable_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # §21.13: the last cursor this machine polled with that was above anything its team had issued (kept from a
+    # machine that was signed in to another team); polls with it are answered from the start.
+    stale_cursor: Mapped[int | None] = mapped_column(BigInteger)
     __table_args__ = (
         UniqueConstraint("team_id", "handle", name="uq_agents_team_handle"),
+        UniqueConstraint("id", "team_id", name="uq_agents_id_team"),  # for the team foreign keys (0011)
         CheckConstraint("rotated_by IS NULL OR rotated_by IN ('app-login','website','operator')",
                         name="ck_agents_rotated_by"),
         CheckConstraint("routing IN ('all','inbox-only')", name="ck_agents_routing"),
@@ -317,6 +324,11 @@ class Conversation(Base):
         *(Index(f"ix_conversations_{c}_active", c, postgresql_where=text("archived_at IS NULL"))
           for c in ("agent_a_id", "agent_b_id", "a_user_id", "b_user_id")),
         CheckConstraint("(agent_a_id IS NULL) <> (a_user_id IS NULL)", name="ck_conversations_a_one"),
+        # §21.13: a conversation's machines are in its team.
+        ForeignKeyConstraint(["agent_a_id", "team_id"], ["agents.id", "agents.team_id"],
+                             name="fk_conversations_agent_a_team"),
+        ForeignKeyConstraint(["agent_b_id", "team_id"], ["agents.id", "agents.team_id"],
+                             name="fk_conversations_agent_b_team"),
         CheckConstraint("(agent_b_id IS NULL) <> (b_user_id IS NULL)", name="ck_conversations_b_one"),
         CheckConstraint("a_agent_name IS NULL OR agent_a_id IS NOT NULL", name="ck_conversations_a_name"),
         CheckConstraint("b_agent_name IS NULL OR agent_b_id IS NOT NULL", name="ck_conversations_b_name"),
@@ -334,7 +346,10 @@ class Conversation(Base):
 class Message(Base):
     __tablename__ = "messages"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    seq: Mapped[int] = mapped_column(BigInteger, Identity(always=True), nullable=False, unique=True)
+    # §21.13: ``seq`` is the team's own number (column team_seq, allocated by a trigger), the one every reader sees
+    # and every cursor uses. ``global_seq`` (column seq) numbers all teams' messages; it is never shown.
+    global_seq: Mapped[int] = mapped_column("seq", BigInteger, Identity(always=True), nullable=False, unique=True)
+    seq: Mapped[int] = mapped_column("team_seq", BigInteger, nullable=False, server_default=FetchedValue())
     team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
     conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversations.id"), nullable=False)
     # Migration 0008: the conversation a message was moved out of (it had another team), so a retried send
@@ -370,6 +385,12 @@ class Message(Base):
         # §18.1: a message always lives in a conversation of its own team.
         ForeignKeyConstraint(["conversation_id", "team_id"], ["conversations.id", "conversations.team_id"],
                              name="fk_messages_conversation_team"),
+        # §21.13: a message's machines are in its team.
+        ForeignKeyConstraint(["sender_agent_id", "team_id"], ["agents.id", "agents.team_id"],
+                             name="fk_messages_sender_agent_team"),
+        ForeignKeyConstraint(["recipient_agent_id", "team_id"], ["agents.id", "agents.team_id"],
+                             name="fk_messages_recipient_agent_team"),
+        UniqueConstraint("team_id", "team_seq", name="uq_messages_team_seq"),
         CheckConstraint("(sender_agent_id IS NULL) <> (sender_user_id IS NULL)", name="ck_messages_one_sender"),
         CheckConstraint("(recipient_agent_id IS NULL) <> (recipient_user_id IS NULL)", name="ck_messages_one_recipient"),
         CheckConstraint("sender_agent_name IS NULL OR sender_agent_id IS NOT NULL", name="ck_messages_sender_name"),
@@ -387,6 +408,16 @@ class Message(Base):
         Index("ix_messages_redeliver_agent", "recipient_agent_id", "seq",
               postgresql_where=text("redeliver AND acked_at IS NULL")),
         Index("ix_messages_redeliver_user", "recipient_user_id", "seq",
+              postgresql_where=text("redeliver AND acked_at IS NULL")),
+        # §21.13: the same on the team's own number, which the cursors and orderings use.
+        Index("ix_messages_recipient_team_seq", "recipient_agent_id", "team_seq"),
+        Index("ix_messages_recipient_pending_team_seq", "recipient_agent_id", "team_seq",
+              postgresql_where=text("acked_at IS NULL")),
+        Index("ix_messages_recipient_user_team_seq", "recipient_user_id", "team_seq"),
+        Index("ix_messages_conversation_team_seq", "conversation_id", "team_seq"),
+        Index("ix_messages_redeliver_agent_team_seq", "recipient_agent_id", "team_seq",
+              postgresql_where=text("redeliver AND acked_at IS NULL")),
+        Index("ix_messages_redeliver_user_team_seq", "recipient_user_id", "team_seq",
               postgresql_where=text("redeliver AND acked_at IS NULL")),
     )
 
@@ -407,6 +438,8 @@ class PersonInbox(Base):
         CheckConstraint("char_length(agent_name) BETWEEN 1 AND 64 AND agent_name NOT LIKE '-%'",
                         name="ck_person_inboxes_agent_name"),
         Index("ix_person_inboxes_agent", "agent_id"),
+        ForeignKeyConstraint(["agent_id", "team_id"], ["agents.id", "agents.team_id"],
+                             name="fk_person_inboxes_agent_team"),  # §21.13: the inbox machine is in the team
     )
 
 

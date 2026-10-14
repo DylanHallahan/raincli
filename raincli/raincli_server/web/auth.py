@@ -38,9 +38,13 @@ PRE_CSRF_TTL = 60 * 60 * 12
 
 @dataclass
 class Viewer:
+    """``teams``: the teams the session covers. A website sign-in covers all of the user's teams; an app-mode
+    session only the team of the machine its person session was issued to (§21.13), which is ``scope``."""
+
     user: User
     web_session: WebSession
     teams: list[tuple[Team, str]] = field(default_factory=list)
+    scope: uuid.UUID | None = None
 
     @property
     def app_mode(self) -> bool:
@@ -129,7 +133,12 @@ def load_viewer(db: Session, request: Request) -> Viewer | None:
     if found is None:
         return None
     ws, user = found
-    return Viewer(user=user, web_session=ws, teams=identity.teams_for_user(db, user))
+    teams, scope = identity.teams_for_user(db, user), None
+    if ws.app_mode:  # §21.13: an app sign-in covers the team of the machine it's signed in on
+        ps = db.get(PersonSession, ws.person_session_id)
+        scope = db.get(Agent, ps.machine_agent_id).team_id
+        teams = [(team, role) for team, role in teams if team.id == scope]
+    return Viewer(user=user, web_session=ws, teams=teams, scope=scope)
 
 
 def start_app_session(db: Session, ps: PersonSession, user: User, response: Response, settings: Settings,

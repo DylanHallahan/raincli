@@ -248,13 +248,15 @@ def test_picking_an_inbox_delivers_the_waiting_messages_but_not_answered_ones(cl
     moved = stored(session, third)
     assert (moved.recipient_agent_name, moved.route, moved.redeliver) == ("zq-agent-sam", "inbox", True)
     assert stored(session, first).recipient_user_id is not None  # answered: stays in the app
-    # H1: the poll returns it below the cursor, once, and the cursor never goes back.
-    page = poll(client, sam_machine_token, after=cursor + 1000)
+    # H1: the poll returns it below the cursor, once, and the cursor never goes back. The cursor is the team's
+    # newest number (§21.13: one above anything the team issued would be another team's, answered from the start).
+    high = max(cursor, stored(session, third).seq)
+    page = poll(client, sam_machine_token, after=high)
     hello = str(v06_seed["messages"]["to_sam"].id)
-    assert [m["id"] for m in page["messages"]] == [hello, third] and page["cursor"] == cursor + 1000
+    assert [m["id"] for m in page["messages"]] == [hello, third] and page["cursor"] == high
     for mid in (hello, third):
         assert client.post(f"/api/v1/messages/{mid}/ack", headers=auth(sam_machine_token)).status_code == 200
-    assert poll(client, sam_machine_token, after=cursor + 1000)["messages"] == []
+    assert poll(client, sam_machine_token, after=high)["messages"] == []
     # The same inbox again moves nothing.
     again = client.put("/api/v1/me/inbox", headers=auth(sam_machine_token), json={"agent": "zq-agent-sam"}).json()
     assert (again["moved"], again["stayed"], again["delivered_waiting"]) == (0, 0, 0)

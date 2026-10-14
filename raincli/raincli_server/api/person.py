@@ -2,7 +2,9 @@
 
 ``Authorization: Bearer rps_…`` is accepted only here (and on ``POST /app/handoff``); machine
 credentials are refused on these routes, and person sessions are refused on the agent routes.
-Every request re-checks the user, the session's lifetime and, per action, team membership.
+Every request re-checks the user, the session's lifetime and, per action, team membership. A person session covers
+only the team of the machine it was issued to (§21.13): another team's messages and conversations answer as unknown
+ones do, and only that team is listed or chosen.
 """
 
 from __future__ import annotations
@@ -63,7 +65,8 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
             raise ApiError(400, "invalid", "request body must be valid JSON") from None
 
     def teams_of(session: Session, auth: PersonAuth) -> list[Team]:
-        return [team for team, _role in identity.teams_for_user(session, auth.user)]
+        """§21.13: the session's own team, while the person is still a member of it."""
+        return [team for team, _role in identity.teams_for_user(session, auth.user) if team.id == auth.team_id]
 
     def choose_team(session: Session, auth: PersonAuth, slug: object) -> Team:
         """§16.12 C9: ``team`` is required when the user belongs to several teams."""
@@ -84,7 +87,7 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
         """The team of the parent message's conversation, when the person may see it and is still
         a member; otherwise the same 404 a reply to an unseen message gets."""
         parent = messaging.get_message_for_person(session, auth.user,
-                                                  messaging.parse_uuid(in_reply_to, "in_reply_to"))
+                                                  messaging.parse_uuid(in_reply_to, "in_reply_to"), auth.team_id)
         team = next((t for t in teams_of(session, auth) if t.id == parent.team_id), None)
         if team is None:
             raise ApiError(404, "not_found", "in_reply_to message not found")
@@ -116,7 +119,8 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
             with session_scope(sessionmaker()) as session:
                 auth = authenticate(session, request, "person:read", count=count)
                 msgs, cursor = messaging.person_inbox(session, auth.user, after=after, limit=limit,
-                                                      include_acked=include_acked, routed=bool(routed))
+                                                      include_acked=include_acked, routed=bool(routed),
+                                                      scope=auth.team_id)
                 keys = (("person", auth.person_session.id), ("user", auth.user.id))
                 return {"messages": messaging.messages_json(session, msgs, reader_user=auth.user), "cursor": cursor}, keys
         return await polls.long_poll(request, api.state.poll_slots, wait, POLL_INTERVAL, poll)
@@ -124,14 +128,15 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
     @api.post("/person/messages/{message_id}/ack")
     async def person_ack(request: Request, message_id: str):
         def work(session, auth: PersonAuth):
-            msg, acked = messaging.person_ack(session, auth.user, message_id)
+            msg, acked = messaging.person_ack(session, auth.user, message_id, auth.team_id)
             return {"message": m(session, msg, auth), "acked": acked}
         return await run(request, "person:read", work)
 
     @api.get("/person/messages/{message_id}")
     async def person_message(request: Request, message_id: str):
         def work(session, auth: PersonAuth):
-            return {"message": m(session, messaging.get_message_for_person(session, auth.user, message_id), auth)}
+            return {"message": m(session, messaging.get_message_for_person(session, auth.user, message_id, auth.team_id),
+                                 auth)}
         return await run(request, "person:read", work)
 
     @api.get("/person/conversations")
@@ -139,7 +144,8 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
                                    archived: str | None = Query(None, max_length=16)):
         def work(session, auth: PersonAuth):
             return {"conversations": messaging.list_person_conversations(session, auth.user, limit=limit,
-                                                                         archived=archived or "exclude")}
+                                                                         archived=archived or "exclude",
+                                                                         scope=auth.team_id)}
         return await run(request, "person:read", work)
 
     def _side(conv, user):
@@ -164,14 +170,14 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
         through = await archive_body(request)
 
         def work(session, auth: PersonAuth):
-            conv = messaging.archive_as_person(session, auth.user, conversation_id, True, through)
+            conv = messaging.archive_as_person(session, auth.user, conversation_id, True, through, auth.team_id)
             return {"conversation": messaging.conversation_json(session, conv, auth.user)}
         return await run(request, "person:send", work, counted=False)
 
     @api.post("/person/conversations/{conversation_id}/unarchive")
     async def person_unarchive(request: Request, conversation_id: str):
         def work(session, auth: PersonAuth):
-            conv = messaging.archive_as_person(session, auth.user, conversation_id, False)
+            conv = messaging.archive_as_person(session, auth.user, conversation_id, False, scope=auth.team_id)
             return {"conversation": messaging.conversation_json(session, conv, auth.user)}
         return await run(request, "person:send", work)
 
@@ -180,8 +186,9 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
                                   after: int = Query(0, ge=0, le=2**63 - 1),
                                   limit: int = Query(100, ge=1, le=2**63 - 1)):
         def work(session, auth: PersonAuth):
-            conv = messaging.get_person_conversation(session, auth.user, conversation_id)
-            msgs, cursor = messaging.person_conversation_messages(session, auth.user, conv.id, after=after, limit=limit)
+            conv = messaging.get_person_conversation(session, auth.user, conversation_id, auth.team_id)
+            msgs, cursor = messaging.person_conversation_messages(session, auth.user, conv.id, after=after, limit=limit,
+                                                                  scope=auth.team_id)
             return {"conversation": {"id": str(conv.id), **messaging.peer_json(session, conv, auth.user),
                                      **messaging.archive_json(session, conv)},
                     "messages": messaging.messages_json(session, msgs, reader_user=auth.user), "cursor": cursor}
@@ -250,7 +257,7 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
     async def person_attachment(request: Request, message_id: str, ref: str):
         """``ref`` is an attachment id or its 1-based position (``raincli me fetch --attachment N``)."""
         def work(session, auth: PersonAuth):
-            msg = messaging.get_message_for_person(session, auth.user, message_id)
+            msg = messaging.get_message_for_person(session, auth.user, message_id, auth.team_id)
             if ref.isdigit() and len(ref) <= 2:
                 metas = messaging.attachments_json(msg)
                 index = int(ref) - 1
@@ -259,7 +266,7 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
                 ref_id = metas[index]["id"]
             else:
                 ref_id = ref
-            att = messaging.get_attachment_for_person(session, auth.user, msg.id, ref_id)
+            att = messaging.get_attachment_for_person(session, auth.user, msg.id, ref_id, auth.team_id)
             return att.filename, att.sha256, bytes(att.content)
         filename, sha, content = await run(request, "person:read", work)
         return Response(content, media_type=None, headers=attachment_headers(filename, sha, len(content)))

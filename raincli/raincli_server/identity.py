@@ -399,8 +399,12 @@ PERSON_ABSOLUTE = timedelta(days=180)
 
 @dataclass(frozen=True)
 class PersonAuth:
+    """A person session. ``team_id``: the team of the machine it was issued to, the only team it covers
+    (§21.13: an app sign-in covers the team of the machine it's signed in on)."""
+
     person_session: PersonSession
     user: User
+    team_id: uuid.UUID
 
     def has_scope(self, scope: str) -> bool:
         return scope in self.person_session.scopes
@@ -449,7 +453,7 @@ def authenticate_person(session: Session, token: str | None, touch: bool = True)
         return None
     if touch and ts - ps.last_used_at > timedelta(seconds=30):
         ps.last_used_at = ts
-    return PersonAuth(person_session=ps, user=user)
+    return PersonAuth(person_session=ps, user=user, team_id=machine.team_id)
 
 
 def revoke_person_sessions(session: Session, *, session_id: uuid.UUID | None = None,

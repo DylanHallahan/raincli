@@ -6,13 +6,12 @@ status and protocol error code so the API can render it directly.
 
 Concurrency is enforced by PostgreSQL, not by the process:
 
-* ``send_message`` takes ``SELECT ... FOR NO KEY UPDATE`` on the recipient agent
-  row before anything else. All sends to one recipient are therefore serialized,
-  which makes the ``inbox_full`` capacity check exact and means a recipient's
-  ``seq`` values commit in increasing order, so an inbox cursor never skips a
-  message that commits late. ``NO KEY UPDATE`` does not conflict with the
-  ``KEY SHARE`` locks that foreign keys take, so A->B and B->A sends cannot
-  deadlock.
+* A message's ``seq`` is its team's own number (§21.13, migration 0011): the insert's trigger takes it from
+  ``teams.next_seq`` with a row lock held to commit, so a team's numbers commit in increasing order and an
+  inbox cursor never skips a message that commits late. Nothing else on the send path waits while holding it:
+  it is taken at the insert, after every other lock the send needs except the parent's state change, which
+  no transaction holds while waiting for a team counter.
+* A send takes ``FOR KEY SHARE`` on its recipient (the machine or the person) before the capacity check.
 * The message insert is ``INSERT ... ON CONFLICT (id) DO NOTHING``; a lost race
   re-reads the winner and answers ``created: false`` or ``id_conflict``.
 * The default conversation for a pair in a team is an upsert against the partial
@@ -40,7 +39,7 @@ from sqlalchemy.orm import Session, object_session
 
 from raincli_server import presentation, routing, security
 from raincli_server.models import (EVENT_STATES, MESSAGE_KINDS, Agent, AgentPresence, Attachment, Conversation,
-                                   DeliveryEvent, MachineAgent, Membership, Message, PersonInbox, User)
+                                   DeliveryEvent, MachineAgent, Membership, Message, PersonInbox, Team, User)
 from raincli_server.routing import Endpoint
 
 EVENT_DETAIL_MAX = 500
@@ -251,10 +250,16 @@ def owned_machine_ids(session: Session, user: User, team_id: uuid.UUID | None = 
     return set(session.scalars(stmt))
 
 
-def person_can_see(session: Session, msg: Message, user: User) -> bool:
+def in_scope(session: Session, team_id: uuid.UUID, user: User, scope: uuid.UUID | None = None) -> bool:
+    """The user is a member of ``team_id``, and it is the team their session covers (``scope``, §21.13: a person
+    session issued to a machine covers that machine's team only; None for a website sign-in)."""
+    return (scope is None or team_id == scope) and session.get(Membership, (team_id, user.id)) is not None
+
+
+def person_can_see(session: Session, msg: Message, user: User, scope: uuid.UUID | None = None) -> bool:
     """A person sees messages where they are an endpoint, plus those to or from machines they own,
-    while they are still a member of the message's team (§16.6)."""
-    if session.get(Membership, (msg.team_id, user.id)) is None:
+    while they are still a member of the message's team (§16.6), in the team their session covers (§21.13)."""
+    if not in_scope(session, msg.team_id, user, scope):
         return False
     if user.id in (msg.sender_user_id, msg.recipient_user_id):
         return True
@@ -282,10 +287,11 @@ def get_visible_message(session: Session, agent: Agent, message_id: uuid.UUID | 
     return msg
 
 
-def get_message_for_person(session: Session, user: User, message_id: uuid.UUID | str) -> Message:
+def get_message_for_person(session: Session, user: User, message_id: uuid.UUID | str,
+                           scope: uuid.UUID | None = None) -> Message:
     mid = parse_uuid(message_id, "message id", not_found=True)
     msg = _load_message(session, mid)
-    if msg is None or not person_can_see(session, msg, user):
+    if msg is None or not person_can_see(session, msg, user, scope):
         raise _not_found()
     return msg
 
@@ -395,8 +401,8 @@ def get_attachment_for_agent(session: Session, agent: Agent, message_id: uuid.UU
 
 
 def get_attachment_for_person(session: Session, user: User, message_id: uuid.UUID | str,
-                              attachment_id: uuid.UUID | str) -> Attachment:
-    msg = get_message_for_person(session, user, message_id)
+                              attachment_id: uuid.UUID | str, scope: uuid.UUID | None = None) -> Attachment:
+    msg = get_message_for_person(session, user, message_id, scope)
     aid = parse_uuid(attachment_id, "attachment id", not_found=True)
     att = session.scalar(select(Attachment).where(Attachment.id == aid, Attachment.message_id == msg.id))
     if att is None:
@@ -474,7 +480,10 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
       your agents writing to you) lands in the owner's ``self`` conversation (C13 H2).
     - A reply (``in_reply_to``) is routed from its parent, whatever ``to`` says (C4, C13 M4).
     ``quotas`` (a ``quotas.Quotas``) charges attachment bytes to the sending user and the team (§18.1 item 5)."""
-    message_id = parse_uuid(id, "id")
+    try:
+        message_id = parse_uuid(id, "id")
+    except MessagingError:
+        raise _invalid(NEW_ID) from None
     reply_to = parse_uuid(in_reply_to, "in_reply_to") if in_reply_to is not None else None
     conv_id = parse_uuid(conversation_id, "conversation_id") if conversation_id is not None else None
     if conv_id is not None:  # an id merged by migration 0010 means the conversation it went into
@@ -751,7 +760,10 @@ def _lock_recipient(session: Session, target: Endpoint) -> None:
 def _idempotent_v06(session: Session, existing: Message, sender: Endpoint, team_id: uuid.UUID, to: object,
                     body: str, kind: str, reply_to, conv_id, files) -> tuple[Message, bool]:
     """A retried send is the same message when its sender, body, kind, parent, attachments and conversation match,
-    and ``to`` names the same person (or, for a message stored before §21, the same endpoint)."""
+    and ``to`` names the same person (or, for a message stored before §21, the same endpoint). An id used in another
+    team is answered as an unusable id (§21.13): the same ``400`` a malformed id gets, never ``id_conflict``."""
+    if existing.team_id != team_id:
+        raise _invalid(NEW_ID)
     stored = [(a["filename"], a["sha256"]) for a in _attachment_meta(session, [existing.id])[existing.id]]
     conv_ok = conv_id is None or conv_id in (existing.conversation_id, existing.moved_from_conversation_id,
                                             existing.premerge_conversation_id)
@@ -770,6 +782,10 @@ def _idempotent_v06(session: Session, existing: Message, sender: Endpoint, team_
     if same:
         return existing, False
     raise MessagingError(409, "id_conflict", "a different message already uses this id")
+
+
+# §21.13: a malformed send id and one already used in another team get this same answer.
+NEW_ID = "id must be a new UUID: choose another id"
 
 
 def _set_state(session: Session, message_id: uuid.UUID, state: str, reporter: uuid.UUID | None,
@@ -883,10 +899,11 @@ def inbox(session: Session, agent: Agent, *, after: int = 0, limit: int = 100,
     if routing_capable and agent.routing_capable_at is None and reports_routing_client(session, agent):
         agent.routing_capable_at = func.now()
         session.flush()
+    start = _machine_cursor(session, agent, after)
     # §21 C13 H1: a re-targeted message comes again below the cursor until acked; the cursor never goes back.
     stmt = (
         select(Message).where(Message.recipient_agent_id == agent.id,
-                              or_(Message.seq > after, and_(Message.redeliver.is_(True), Message.acked_at.is_(None))))
+                              or_(Message.seq > start, and_(Message.redeliver.is_(True), Message.acked_at.is_(None))))
         .order_by(Message.seq).limit(_clamp(limit, 1, INBOX_LIMIT_MAX))
         .execution_options(populate_existing=True)
     )
@@ -898,12 +915,34 @@ def inbox(session: Session, agent: Agent, *, after: int = 0, limit: int = 100,
     return messages, max([after, *(m.seq for m in messages)])
 
 
+def _machine_cursor(session: Session, agent: Agent, after: int) -> int:
+    """§21.13: where to read from (the cursor answered is never below ``after``). Numbers are per team, so a cursor at or above the team's next number was
+    not issued by this team: a queue kept from when the machine was signed in to another team. It is answered from
+    the start (unacked messages only, unless asked otherwise; the client ingests by id), and remembered, because the
+    client sends it again until it sees a higher one, by which time the team's numbers may have passed it."""
+    if after <= 0:
+        return after
+    if agent.stale_cursor is not None and after == agent.stale_cursor:
+        return 0
+    if after >= session.scalar(select(Team.next_seq).where(Team.id == agent.team_id)):
+        agent.stale_cursor = after
+        session.flush()
+        return 0
+    if agent.stale_cursor is not None and after > agent.stale_cursor:
+        agent.stale_cursor = None  # the client moved past it
+        session.flush()
+    return after
+
+
 def person_inbox(session: Session, user: User, *, after: int = 0, limit: int = 100,
-                 include_acked: bool = False, routed: bool = False) -> tuple[list[Message], int]:
+                 include_acked: bool = False, routed: bool = False,
+                 scope: uuid.UUID | None = None) -> tuple[list[Message], int]:
     """Messages addressed to the person in teams they still belong to, ``seq > after`` ascending. With ``routed``
     (§21 PR6: the app's toasts), also the messages routed to the person's own machines (their inbox, replies to
     their agents), except those the person or their own machines sent; never acked by this read."""
     teams = select(Membership.team_id).where(Membership.user_id == user.id)
+    if scope is not None:
+        teams = teams.where(Membership.team_id == scope)
     mine = select(Agent.id).where(Agent.owner_user_id == user.id)
     to_me = Message.recipient_user_id == user.id
     if routed:
@@ -923,12 +962,13 @@ def person_inbox(session: Session, user: User, *, after: int = 0, limit: int = 1
     return messages, max([after, *(m.seq for m in messages)])
 
 
-def person_ack(session: Session, user: User, message_id: uuid.UUID | str) -> tuple[Message, bool]:
+def person_ack(session: Session, user: User, message_id: uuid.UUID | str,
+               scope: uuid.UUID | None = None) -> tuple[Message, bool]:
     """The person has seen a message to them (§16.4, §21 H2): only their own read state, ``person_seen_at``, used
     in their own views and unread counts. Nothing a sender can fetch changes (no event, no state, no ``acked_at``:
     that stays the machine's pickup, so a message read in the app is still delivered to an inbox picked later).
     Idempotent. A message routed to one of the person's machines may be marked seen too."""
-    msg = get_message_for_person(session, user, message_id)
+    msg = get_message_for_person(session, user, message_id, scope)
     if person_of_endpoint(session, recipient_endpoint(session, msg)) != user.id or \
             person_of_endpoint(session, sender_endpoint(session, msg)) == user.id and msg.recipient_user_id is None:
         raise MessagingError(403, "forbidden", "only the recipient can do this")
@@ -977,7 +1017,8 @@ def _conversation_rows(session: Session, where, mine, unacked_where, limit: int,
     filters by the effective archive state (§17.3 A1)."""
     stats = (
         select(Message.conversation_id.label("cid"), Message.team_id.label("tid"),
-               func.max(Message.seq).label("last_seq"), func.max(Message.created_at).label("last_at"),
+               func.max(Message.seq).label("last_seq"), func.max(Message.global_seq).label("last_global"),
+               func.max(Message.created_at).label("last_at"),
                func.count().filter(and_(unacked_where, Message.acked_at.is_(None))).label("unacked"))
         .group_by(Message.conversation_id, Message.team_id).subquery()
     )
@@ -985,7 +1026,7 @@ def _conversation_rows(session: Session, where, mine, unacked_where, limit: int,
         select(Conversation, stats.c.last_seq, stats.c.last_at, stats.c.unacked)
         # §18.1: only the conversation's own team's messages count, in every summary.
         .join(stats, and_(stats.c.cid == Conversation.id, stats.c.tid == Conversation.team_id)).where(where, archive_filter(archived, stats.c.last_seq))
-        .order_by(stats.c.last_seq.desc()).limit(_clamp(limit, 1, CONVERSATIONS_LIMIT_MAX))
+        .order_by(stats.c.last_global.desc()).limit(_clamp(limit, 1, CONVERSATIONS_LIMIT_MAX))  # §21.13: across teams
     )
     out = []
     viewer = session.get(User, viewer_id) if viewer_id is not None else None
@@ -1028,9 +1069,12 @@ def list_conversations(session: Session, agent: Agent, *, limit: int = 50, archi
 
 
 def list_person_conversations(session: Session, user: User, *, limit: int = 50,
-                              archived: str = "exclude") -> list[dict]:
-    """The person's conversations: those with the person as an endpoint, in teams they belong to (§16.4)."""
+                              archived: str = "exclude", scope: uuid.UUID | None = None) -> list[dict]:
+    """The person's conversations: those with the person as an endpoint, in teams they belong to (§16.4) and
+    their session covers (§21.13)."""
     teams = select(Membership.team_id).where(Membership.user_id == user.id)
+    if scope is not None:
+        teams = teams.where(Membership.team_id == scope)
     return _conversation_rows(
         session, and_(or_(Conversation.a_user_id == user.id, Conversation.b_user_id == user.id),
                       Conversation.team_id.in_(teams), Conversation.merged_into.is_(None)),
@@ -1117,13 +1161,19 @@ def final_conversation_id(session: Session, cid: uuid.UUID) -> uuid.UUID:
 resolve_conversation_id = final_conversation_id
 
 
-def _locked_conversation(session: Session, conversation_id: uuid.UUID | str) -> Conversation | None:
+def _conversation_for_archive(session: Session, conversation_id: uuid.UUID | str) -> Conversation | None:
+    """The conversation an archive names, read without a lock: the caller authorizes it before ``_lock``."""
     cid = final_conversation_id(session, parse_uuid(conversation_id, "conversation id", not_found=True))
-    # FOR UPDATE (§17.3 A1): a send holds KEY SHARE on this row from before it allocates its seq until it
-    # commits, so an archive waits for sends in flight and its max(seq) never precedes an uncommitted lower
-    # seq. Sends never write this row and never wait on each other here.
-    return session.scalars(select(Conversation).where(Conversation.id == cid).with_for_update()
-                           .execution_options(populate_existing=True)).first()
+    return session.get(Conversation, cid)
+
+
+def _lock(session: Session, conv: Conversation) -> Conversation:
+    """FOR UPDATE (§17.3 A1), taken only once the caller is authorized (§21.13: nobody can make another team's
+    sends wait): a send holds KEY SHARE on this row from before it allocates its seq until it commits, so an
+    archive waits for sends in flight and its max(seq) never precedes an uncommitted lower seq. Sends never write
+    this row and never wait on each other here."""
+    return session.scalars(select(Conversation).where(Conversation.id == conv.id, Conversation.team_id == conv.team_id)
+                           .with_for_update().execution_options(populate_existing=True)).one()
 
 
 def _through_seq(value) -> int | None:
@@ -1157,16 +1207,17 @@ def archive_as_machine(session: Session, agent: Agent, conversation_id: uuid.UUI
                        archived: bool, through_seq: int | None = None) -> Conversation:
     """A machine credential whose machine, or whose owner, is a side (§21 C13 M1). Anything else is ``404``,
     with no hint that the conversation exists."""
-    conv = _locked_conversation(session, conversation_id)
+    conv = _conversation_for_archive(session, conversation_id)
     side = _machine_side(conv, agent) if conv is not None and conv.team_id == agent.team_id else None
     if side is None:
         raise MessagingError(404, "not_found", "conversation not found")
-    return _set_archived(session, conv, getattr(conv, f"{side}_key"), archived, through_seq)
+    return _set_archived(session, _lock(session, conv), getattr(conv, f"{side}_key"), archived, through_seq)
 
 
-def can_archive_as_person(session: Session, user: User, conv: Conversation) -> bool:
-    """A member of the conversation's team who is an endpoint, or who owns a machine endpoint."""
-    if session.get(Membership, (conv.team_id, user.id)) is None:
+def can_archive_as_person(session: Session, user: User, conv: Conversation, scope: uuid.UUID | None = None) -> bool:
+    """A member of the conversation's team (in the team their session covers) who is an endpoint, or who owns a
+    machine endpoint."""
+    if not in_scope(session, conv.team_id, user, scope):
         return False
     if user.id in (conv.a_user_id, conv.b_user_id):
         return True
@@ -1175,11 +1226,11 @@ def can_archive_as_person(session: Session, user: User, conv: Conversation) -> b
 
 
 def archive_as_person(session: Session, user: User, conversation_id: uuid.UUID | str,
-                      archived: bool, through_seq: int | None = None) -> Conversation:
-    conv = _locked_conversation(session, conversation_id)
-    if conv is None or not can_archive_as_person(session, user, conv):
+                      archived: bool, through_seq: int | None = None, scope: uuid.UUID | None = None) -> Conversation:
+    conv = _conversation_for_archive(session, conversation_id)
+    if conv is None or not can_archive_as_person(session, user, conv, scope):
         raise MessagingError(404, "not_found", "conversation not found")
-    return _set_archived(session, conv, f"p:{user.id}", archived, through_seq)
+    return _set_archived(session, _lock(session, conv), f"p:{user.id}", archived, through_seq)
 
 
 def conversation_json(session: Session, conv: Conversation, viewer: User | None = None) -> dict:
@@ -1198,11 +1249,12 @@ def get_conversation(session: Session, agent: Agent, conversation_id: uuid.UUID 
     return conv
 
 
-def get_person_conversation(session: Session, user: User, conversation_id: uuid.UUID | str) -> Conversation:
+def get_person_conversation(session: Session, user: User, conversation_id: uuid.UUID | str,
+                            scope: uuid.UUID | None = None) -> Conversation:
     cid = final_conversation_id(session, parse_uuid(conversation_id, "conversation id", not_found=True))
     conv = session.get(Conversation, cid)
     if conv is None or user.id not in (conv.a_user_id, conv.b_user_id) or \
-            session.get(Membership, (conv.team_id, user.id)) is None:
+            not in_scope(session, conv.team_id, user, scope):
         raise MessagingError(404, "not_found", "conversation not found")
     return conv
 
@@ -1224,8 +1276,9 @@ def conversation_messages(session: Session, agent: Agent, conversation_id: uuid.
 
 
 def person_conversation_messages(session: Session, user: User, conversation_id: uuid.UUID | str, *,
-                                 after: int = 0, limit: int = 100) -> tuple[list[Message], int]:
-    return _messages_of(session, get_person_conversation(session, user, conversation_id), after, limit)
+                                 after: int = 0, limit: int = 100,
+                                 scope: uuid.UUID | None = None) -> tuple[list[Message], int]:
+    return _messages_of(session, get_person_conversation(session, user, conversation_id, scope), after, limit)
 
 
 def delivery_events(session: Session, agent: Agent, message_id: uuid.UUID | str) -> list[DeliveryEvent]:

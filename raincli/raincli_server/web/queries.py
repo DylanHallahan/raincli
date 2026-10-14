@@ -413,23 +413,24 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
         return []
     conv_ids = [c.id for c, _ in convs]
     stats = {  # §18.1: keyed by conversation and team, so only a conversation's own team's messages count
-        (cid, tid): (last_seq, count, unacked)
-        for cid, tid, last_seq, count, unacked in db.execute(
-            select(Message.conversation_id, Message.team_id, func.max(Message.seq), func.count(),
-                   func.count().filter(messaging.unread_for(user.id)))  # §21 H2: their own read state
+        (cid, tid): (last_seq, last_global, count, unacked)
+        for cid, tid, last_seq, last_global, count, unacked in db.execute(
+            select(Message.conversation_id, Message.team_id, func.max(Message.seq), func.max(Message.global_seq),
+                   func.count(), func.count().filter(messaging.unread_for(user.id)))  # §21 H2: their own read state
             .where(Message.conversation_id.in_(conv_ids)).group_by(Message.conversation_id, Message.team_id)
         )
     }
-    last_seqs = [st[0] for st in stats.values() if st[0] is not None]
-    lasts = {m.conversation_id: m for m in db.scalars(select(Message).where(Message.seq.in_(last_seqs)))} \
-        if last_seqs else {}
+    # §21.13: seq is per team, so the newest messages are found (and the list ordered) by the global number.
+    last_globals = [st[1] for st in stats.values() if st[1] is not None]
+    lasts = {m.conversation_id: m for m in db.scalars(select(Message).where(Message.global_seq.in_(last_globals)))} \
+        if last_globals else {}
     from raincli_server.web import thread
 
     names = thread.Names(db)
     rows = []
     for conv, team in convs:
         me, peer = _sides(db, conv, user, owned)
-        last_seq, count, unacked = stats.get((conv.id, conv.team_id), (None, 0, 0))
+        last_seq, _last_global, count, unacked = stats.get((conv.id, conv.team_id), (None, None, 0, 0))
         is_archived = messaging.is_archived(conv, last_seq)
         if (archived == "exclude" and is_archived) or (archived == "only" and not is_archived):
             continue
@@ -442,7 +443,7 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
                                     archived_by=_archived_by(db, conv, user, owned) if is_archived else "",
                                     name=who.label, last_sender_name=sender_name, peer_user=who.user,
                                     kind=who.kind, last_state=viewer_state(db, user, last) if last else ""))
-    rows.sort(key=lambda r: (r.last.seq if r.last else 0), reverse=True)
+    rows.sort(key=lambda r: (r.last.global_seq if r.last else 0), reverse=True)
     return rows
 
 
@@ -635,14 +636,16 @@ def attachment_meta(db: Session, message_ids: list[uuid.UUID]) -> dict[uuid.UUID
 
 def attachment_for_user(db: Session, user: User, team_ids: list[uuid.UUID], message_id: object,
                         attachment_id: object) -> Attachment | None:
-    """The attachment if the person may see its message (§16.6)."""
+    """The attachment if the person may see its message (§16.6), in one of ``team_ids`` (the teams the session
+    covers, §21.13)."""
     mid = parse_uuid(message_id)
     if mid is None or not team_ids:
         return None
     try:
-        return messaging.get_attachment_for_person(db, user, mid, attachment_id)
+        att = messaging.get_attachment_for_person(db, user, mid, attachment_id)
     except messaging.MessagingError:
         return None
+    return att if db.scalar(select(Message.team_id).where(Message.id == mid)) in team_ids else None
 
 
 def pending_for_user(db: Session, user: User, team_ids: list[uuid.UUID]) -> int:
@@ -665,7 +668,7 @@ class PersonRow:
     user: User
     team: Team
     presence: object  # presentation.PersonPresence
-    last_seq: int = 0  # the newest message between the viewer and them in that team (recent first)
+    last_seq: int = 0  # recency only (the global number of the newest message between them, §21.13); never shown
     shown: str = ""  # §18.1 item 7: the name told apart from look-alikes in the team (owners.displays)
 
     @property
@@ -691,7 +694,7 @@ def people_directory(db: Session, user: User, team_ids: list[uuid.UUID], now: da
     ).all()
     recent: dict = {}
     for team_id, a, b, last in db.execute(
-        select(Conversation.team_id, Conversation.a_user_id, Conversation.b_user_id, func.max(Message.seq))
+        select(Conversation.team_id, Conversation.a_user_id, Conversation.b_user_id, func.max(Message.global_seq))
         .join(Message, and_(Message.conversation_id == Conversation.id, Message.team_id == Conversation.team_id))
         .where(Conversation.team_id.in_(team_ids), Conversation.kind == "pair",
                or_(Conversation.a_user_id == user.id, Conversation.b_user_id == user.id))
