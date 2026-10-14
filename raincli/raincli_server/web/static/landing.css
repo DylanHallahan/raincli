@@ -270,3 +270,17 @@ main:focus{outline:none}
 .secu-foot .link{margin-top:0}
 .prose .links{display:flex;flex-wrap:wrap;gap:4px 22px;margin-top:6px}
 .prose .links .link{margin-top:0}
+
+/* ---- the demo's pause (WCAG 2.2.2): invisible at rest, shown on hover or keyboard focus ---- */
+.demo-toggle{position:absolute;top:-4px;right:84px;z-index:3;width:44px;height:44px;display:grid;place-items:center;padding:0;border:0;border-radius:999px;background:transparent;color:var(--text);cursor:pointer;opacity:0;transition:opacity .15s}
+.demo-toggle svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.demo-toggle .i-play{display:none;fill:currentColor;stroke-width:1.4}
+.demo-toggle[aria-pressed="true"] .i-pause{display:none}.demo-toggle[aria-pressed="true"] .i-play{display:block}
+.win-wrap:hover .demo-toggle,.demo-toggle:focus-visible{opacity:1}
+.demo-toggle::before{content:"";position:absolute;left:7px;top:7px;width:30px;height:30px;border-radius:999px;z-index:-1}
+.demo-toggle:hover::before{background:var(--surface-2)}
+.demo-toggle:focus-visible{outline:none}
+.demo-toggle:focus-visible::before{background:var(--surface-2);box-shadow:0 0 0 2px var(--accent)}
+.demo[data-demo-state="done"] .demo-toggle{display:none}
+@media (prefers-reduced-motion:reduce){.demo-toggle{display:none}}
+@media (max-width:720px){.demo-toggle{right:80px}}

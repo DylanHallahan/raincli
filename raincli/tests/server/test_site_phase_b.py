@@ -235,8 +235,11 @@ def test_the_demo_shows_only_the_app(home):
     for text in NOT_IN_THE_DEMO:
         assert text not in demo and text not in css, text
     assert "b-scene" not in demo and 'class="cap' not in demo and 'class="caps' not in demo  # pass 2a: no captions
-    for gone in ("<button", "data-demo-pause", "data-demo-restart", 'class="ctrl"', 'class="prog"'):
-        assert gone not in demo, gone  # pass 2a: no controls; the demo just plays
+    for gone in ("data-demo-pause", "data-demo-restart", 'class="ctrl"', 'class="prog"'):
+        assert gone not in demo, gone  # pass 2a: no visible controls
+    # WCAG 2.2.2: one small icon-only pause, outside the aria-hidden window, named and stateful.
+    assert re.findall(r"<button[^>]*>", demo) == [
+        '<button type="button" class="demo-toggle" data-demo-toggle aria-pressed="false" aria-label="Pause demo">']
     for gone in (".caps", ".cap1", ".ctrl", ".prog", "k-cap", "k-prog"):
         assert gone not in css, gone
     js = (Path(web.__file__).parent / "static" / "landing.js").read_text("utf-8")

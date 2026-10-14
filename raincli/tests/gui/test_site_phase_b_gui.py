@@ -228,11 +228,59 @@ def test_the_demo_just_plays_with_no_controls_or_captions(browser, live):  # noq
     try:
         page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
         demo = page.locator("[data-demo]")
-        assert demo.locator("button, .ctrl, .prog, .caps, [class^='cap']").count() == 0
+        assert demo.locator(".ctrl, .prog, .caps, [class^='cap']").count() == 0
+        assert demo.locator("button").count() == 1  # only the hidden-at-rest pause (WCAG 2.2.2)
+        assert page.evaluate("getComputedStyle(document.querySelector('.demo-toggle')).opacity") == "0"
         assert "Maya's agent sends a question to Jon." in demo.locator("figcaption.sr-only").text_content()
         state = page.evaluate(ANIMATIONS)
         assert state["running"] == state["count"] > 0 and state["time"] >= 11400  # the finished thread first
         assert page.evaluate("getComputedStyle(document.querySelector('.win')).opacity") == "1"
+    finally:
+        context.close()
+
+
+def test_the_demo_pause_is_hidden_at_rest_and_works_by_keyboard(browser, live):  # noqa: F811
+    """WCAG 2.2.2 with no visible chrome: the icon-only toggle is invisible at rest, Tab reaches it (and shows it), it
+    pauses and resumes, its name and aria-pressed follow, and scrolling away and back doesn't resume a pause."""
+    context, page, _ = open_home(browser, live)
+    try:
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
+        toggle = page.locator("[data-demo-toggle]")
+        opacity = "getComputedStyle(document.querySelector('[data-demo-toggle]')).opacity"
+        assert page.evaluate(opacity) == "0"  # nothing shows at rest
+        box = toggle.bounding_box()
+        assert box["width"] >= 44 and box["height"] >= 44
+        for _ in range(40):
+            page.keyboard.press("Tab")
+            if page.evaluate("document.activeElement.hasAttribute('data-demo-toggle')"):
+                break
+        else:
+            pytest.fail("the demo's pause is not reachable by Tab")
+        page.wait_for_timeout(250)
+        assert page.evaluate(opacity) == "1"
+        ring = page.evaluate("getComputedStyle(document.activeElement, '::before').boxShadow")
+        assert "2px" in ring, ring  # the visible focus ring, inside the title bar
+        assert (toggle.get_attribute("aria-label"), toggle.get_attribute("aria-pressed")) == ("Pause demo", "false")
+        page.keyboard.press("Enter")
+        assert (toggle.get_attribute("aria-label"), toggle.get_attribute("aria-pressed")) == ("Play demo", "true")
+        assert page.evaluate(ANIMATIONS)["running"] == 0
+        assert page.get_attribute("[data-demo]", "data-demo-state") == "paused"
+        page.evaluate("document.getElementById('security').scrollIntoView()")
+        page.wait_for_timeout(200)
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(300)
+        assert page.evaluate(ANIMATIONS)["running"] == 0  # still paused
+        toggle.focus()
+        page.keyboard.press("Space")
+        assert (toggle.get_attribute("aria-label"), toggle.get_attribute("aria-pressed")) == ("Pause demo", "false")
+        assert page.evaluate(ANIMATIONS)["running"] > 0
+        page.evaluate("document.activeElement.blur()")
+        page.mouse.move(5, 760)
+        page.wait_for_timeout(250)
+        assert page.evaluate(opacity) == "0"  # hidden again once it loses focus
+        page.hover(".hero .win")
+        page.wait_for_timeout(250)
+        assert page.evaluate(opacity) == "1"  # shown while the window is hovered
     finally:
         context.close()
 
@@ -279,7 +327,7 @@ def test_the_demo_stops_on_the_finished_frame_after_two_plays(browser, live):  #
         page.wait_for_timeout(1500)
         assert page.evaluate(ANIMATIONS)["count"] == 0
         assert page.get_attribute("[data-demo]", "data-demo-state") == "done"
-        assert page.locator("[data-demo] button").count() == 0
+        assert not page.is_visible("[data-demo-toggle]")  # nothing left to pause
         assert log["console"] == [] and log["errors"] == [], log
     finally:
         context.close()
@@ -292,6 +340,7 @@ def test_reduced_motion_shows_the_final_frame(browser, live, artifacts, scheme):
         page.wait_for_timeout(200)
         assert page.evaluate(ANIMATIONS)["count"] == 0
         assert page.get_attribute("[data-demo]", "data-demo-state") is None  # the script never starts it
+        assert not page.is_visible("[data-demo-toggle]")  # no pause needed: nothing moves
         assert page.evaluate(FINISHED) == ["1"] * 9 + ["0"]  # the finished frame, straight away
         assert page.locator(".b-scene, .demo .ctrl, .demo .caps").count() == 0
         frame = page.evaluate("""() => ['.win', '.m1', '.m2', '.file', '.p-ready']
