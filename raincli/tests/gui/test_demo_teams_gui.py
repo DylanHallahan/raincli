@@ -42,7 +42,7 @@ def open_page(browser, live, *, size="desktop", scheme="light", motion="no-prefe
     page.on("request", lambda r: log["requests"].append(r.url))
     page.clock.install()
     page.goto(live + path, wait_until="load")
-    page.wait_for_function("() => document.documentElement.dataset.ready === '1'")
+    page.wait_for_function("() => document.getElementById('adm').dataset.admReady === '1'")
     return context, page, log
 
 
@@ -175,6 +175,7 @@ def test_the_pause_with_a_real_mouse_and_the_keyboard(browser, live):  # noqa: F
         assert page.evaluate(OPACITY) == "1"
         page.keyboard.press("Enter")
         assert toggle.get_attribute("aria-pressed") == "false"
+        to_section(page)  # focusing the button scrolled its corner into view; it plays once really in view (S1)
         page.clock.run_for(1500)
         assert frame(page) != held
     finally:
@@ -265,11 +266,108 @@ def test_the_stage_height_matches_the_drafts_formula_without_inline_style(browse
     page = context.new_page()
     try:
         page.goto(live + "/", wait_until="load")
-        page.wait_for_function("() => document.documentElement.dataset.ready === '1'")
+        page.wait_for_function("() => document.getElementById('adm').dataset.admReady === '1'")
         h = page.evaluate("document.querySelector('#adm .adm-stage').getBoundingClientRect().height")
         w = page.evaluate("document.getElementById('adm').clientWidth")
         want = min(max(w * 720 / 1180, 520), 860) if w >= 960 else 800 * min(w / 390, 1.5)
         assert abs(h - want) <= 1, (width, h, want)
         assert page.locator("[style]").count() == 0
+    finally:
+        context.close()
+
+
+# Every Canvas stroke the animation makes: its colour, width and dash.
+RECORD_STROKES = """(() => {
+    const strokes = window.__strokes = [], orig = CanvasRenderingContext2D.prototype.stroke;
+    CanvasRenderingContext2D.prototype.stroke = function (...a) {
+        strokes.push([String(this.strokeStyle), this.lineWidth, this.getLineDash().join(',')]);
+        return orig.apply(this, a);
+    };
+})();"""
+
+
+@pytest.mark.parametrize("size", ["desktop", "phone"])
+def test_no_line_traces_a_message_route(browser, live, size):  # noqa: F811
+    """Round 4 (the user): no line traces a message's movement, neither the blue RainCLI route (2.4 px, brand blue) nor
+    the grey dotted hand-off trace in Jon's setup (dash 0.1/5). Over a whole loop, light and dark, no such stroke."""
+    for scheme, blue in (("light", "#1f5fd1"), ("dark", "#7aa7ff")):
+        context, page, log = open_page(browser, live, size=size, scheme=scheme, init=RECORD_STROKES)
+        try:
+            to_section(page)
+            for _ in range(25):
+                page.clock.run_for(1000)  # the whole 24 s loop
+            strokes = page.evaluate("window.__strokes")
+            assert len(strokes) > 500  # it really drew
+            routes = [s for s in strokes if s[0] == blue and abs(s[1] - 2.4) < 1e-6]
+            traces = [s for s in strokes if s[2] in ("0.1,5", "0.10000000149011612,5")]
+            assert routes == [] and traces == [], (scheme, routes[:3], traces[:3])
+            assert log["errors"] == []
+        finally:
+            context.close()
+    from pathlib import Path
+
+    import raincli_server
+
+    js = (Path(raincli_server.__file__).parent / "web" / "static" / "demo-teams.js").read_text("utf-8")
+    for gone in ("drawRoutes", "drawDots", "F.dots", "out1P", "ret2P", "mPreLen", "rPreLen"):
+        assert gone not in js, gone
+
+
+def _visible_share(page):
+    return page.evaluate("""() => { const r = document.getElementById('adm').getBoundingClientRect();
+        return Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0)) / r.height; }""")
+
+
+def _scroll_to_share(page, share):
+    """Scroll so the section's top `share` of its height shows at the bottom of the viewport."""
+    page.evaluate("""(share) => { const s = document.getElementById('adm');
+        const top = s.getBoundingClientRect().top + scrollY;
+        window.scrollTo({top: top + s.offsetHeight * share - innerHeight, behavior: 'instant'}); }""", share)
+    settle(page)
+
+
+def test_it_starts_only_when_really_in_view(browser, live):  # noqa: F811
+    """Review S1: at the 1440x900 fold (where the app demo plays) it waits; it starts once 40% of it is in view."""
+    context, page, _ = open_page(browser, live)
+    try:
+        page.evaluate("window.scrollTo({top: 0, behavior: 'instant'})")
+        settle(page)
+        assert 0 < _visible_share(page) < .4  # part of it shows at the fold
+        assert page.evaluate("document.querySelector('[data-demo]').dataset.demoState") == "playing"  # the app demo
+        held = frame(page)
+        page.clock.run_for(1500)
+        assert frame(page) == held  # not started alongside it
+        _scroll_to_share(page, .3)
+        page.clock.run_for(1500)
+        assert frame(page) == held
+        _scroll_to_share(page, .6)
+        page.clock.run_for(1500)
+        assert frame(page) != held  # started
+    finally:
+        context.close()
+
+
+def test_a_landscape_phone_still_plays_it(browser, live):  # noqa: F811
+    """The section is far taller than a landscape phone's viewport, so 40% of the viewport covered counts."""
+    context = browser.new_context(viewport={"width": 844, "height": 390}, has_touch=True, is_mobile=True)
+    page = context.new_page()
+    try:
+        page.clock.install()
+        page.goto(live + "/", wait_until="load")
+        page.wait_for_function("() => document.getElementById('adm').dataset.admReady === '1'")
+        to_section(page)
+        assert _visible_share(page) < .4
+        held = frame(page)
+        page.clock.run_for(1500)
+        assert frame(page) != held
+    finally:
+        context.close()
+
+
+def test_the_ready_mark_is_the_sections_own(browser, live):  # noqa: F811
+    """Review N1: the draft's page-global <html data-ready> is the section's own #adm[data-adm-ready]."""
+    context, page, _ = open_page(browser, live)
+    try:
+        assert page.evaluate("[document.documentElement.dataset.ready, document.getElementById('adm').dataset.admReady]") == [None, "1"]
     finally:
         context.close()

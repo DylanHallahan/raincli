@@ -402,3 +402,16 @@ def test_the_agent_teams_animation_sits_below_the_hero(home):
     for name in ("medium", "bold"):
         digest = hashlib.sha256((static / "fonts" / f"jetbrains-mono-{name}-v2304.woff2").read_bytes()).hexdigest()
         assert digest in readme, name
+
+
+def test_the_animations_text_alternative_names_the_product_from_the_setting(home):
+    """Review N2: the screen-reader paragraph says the product's name from the setting, not a fixed "RainCLI"."""
+    from pathlib import Path as P
+
+    from raincli_server import web
+
+    template = (P(web.__file__).parent / "templates" / "home.html").read_text("utf-8")
+    sr = re.search(r'<p class="adm-sr">(.*?)</p>', template, re.S).group(1)
+    assert "RainCLI" not in sr and sr.count("{{ product_name }}") == 2
+    rendered = re.search(r'<p class="adm-sr">(.*?)</p>', home, re.S).group(1)
+    assert "RainCLI carries the message" in rendered and "back through RainCLI" in rendered

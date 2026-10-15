@@ -94,7 +94,9 @@ def _canvas_frames(browser, url, sizes, prepare):  # noqa: F811
         page = context.new_page()
         page.clock.install()
         page.goto(url, wait_until="load")
-        page.wait_for_function("() => document.documentElement.dataset.ready === '1'", timeout=20000)
+        # the port marks #adm[data-adm-ready]; marketing's original marks <html data-ready>
+        page.wait_for_function("() => document.documentElement.dataset.ready === '1'"
+                               " || document.getElementById('adm').dataset.admReady === '1'", timeout=20000)
         prepare(page)
         done = 0.1
         for t in STRIP:

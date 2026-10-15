@@ -332,7 +332,6 @@ function buildRoutes(L) {
     R.ret2 = bez({ x: lg.x + o, y: lg.y - 8 }, { x: lg.x + o, y: lg.y - 74 }, { x: R1.x, y: R1.y + 58 }, R1);
     R.vA = 1;
   }
-  for (const k of ["out1", "out2", "ret1", "ret2"]) R[k + "P"] = makePath([R[k]]);
   L.routes = R;
 }
 
@@ -609,23 +608,6 @@ function drawLogo(t, F) {
 }
 const LOGO_BUBBLE = new Path2D("M17 12h30a7 7 0 0 1 7 7v19a7 7 0 0 1-7 7H29l-10 8v-8h-2a7 7 0 0 1-7-7V19a7 7 0 0 1 7-7z");
 
-function drawRoutes(t, F) {
-  const R = view.L.routes;
-  ctx.save();
-  ctx.lineCap = "round"; ctx.strokeStyle = pal.blue;
-  // the route exists only while a slip is travelling: it draws behind the slip, then fades once it has landed
-  const legs = [["out1P", F.rev.out1, F.done.out], ["out2P", F.rev.out2, F.done.out], ["ret1P", F.rev.ret1, F.done.ret], ["ret2P", F.rev.ret2, F.done.ret]];
-  for (const [k, rev, doneT] of legs) {
-    if (rev <= 0 || STILL) continue;
-    const fade = doneT == null ? 1 : 1 - grow(t, doneT + .1, doneT + .75, E.inOutSine);
-    if (fade <= 0) continue;
-    const P = R[k];
-    ctx.globalAlpha = .95 * fade; ctx.lineWidth = 2.4;
-    strokePath(P, 0, P.len * rev);
-  }
-  ctx.restore();
-}
-
 /* ---------- terminals ---------- */
 function drawTerm(m, t, F) {
   const L = view.L, S = L.sz;
@@ -792,16 +774,13 @@ const HS = {   // the work, from Jon's inbox agent to his other agent
 const HB = {   // the result, back to the inbox agent
   lift: 16.05, go: 16.2, hov: 16.78, drop: 16.86, land: 17.0, hand: 17.15 };
 
-function slipFlight(t, T_, F, type, revKeys, doneKey, o) {
+function slipFlight(t, T_, F, type, o) {
   const L = view.L, l1 = o.pre.len;
   const lift = L.desk ? 24 : 15;
-  F.rev[revKeys[0]] = clamp((E.inOutCubic(seg(t, T_.leg1a, T_.leg1b)) * l1 - o.preLen) / o.r1P.len, 0, 1);
   // aim at where the slot will be when the slip lands (the inbox's space is still opening on the way in)
   const slot = o.slot(Math.max(t, T_.land));
   const hov = { x: slot.cx, y: slot.cy - o.inDir * lift };
   const p2 = makePath([o.r2, vbez(o.r2.p1, hov, o.inDir * 40, o.inDir * 40)]);
-  F.rev[revKeys[1]] = clamp(E.outCubic(seg(t, T_.leg2a, T_.hov)) * p2.len / o.r2P.len, 0, 1);
-  if (t >= T_.hov) F.done[doneKey] = T_.hov;
   const passT = T_.leg1b - .05;
   F.logoPass += t > passT ? wobble(t - passT, 6.5, 17) * .9 : 0;
   if (t > passT && t < passT + .9) F.rings.push(E.outCubic(seg(t, passT, passT + .9)));
@@ -851,13 +830,11 @@ function flightGeometry() {
   const q = pillRect(A, "q", TM.lift);
   g.mHover = { x: q.cx, y: q.cy + R.vA * lift };
   g.mPre = makePath([vbez(g.mHover, R.out1.p0, R.vA * 40, R.vA * 40), R.out1]);
-  g.mPreLen = g.mPre.len - R.out1P.len;
   // reply: from Jon's inbox reply line
   const rp = pillRect(J1, "reply", TR.lift);
   g.rStart = { x: rp.cx, y: rp.cy };
   g.rHover = { x: rp.cx, y: rp.cy - 5 };     // lifts toward the camera, not up over the file line above it
   g.rPre = makePath([vbez(g.rHover, R.ret1.p0, -40, -40), R.ret1]);
-  g.rPreLen = g.rPre.len - R.ret1P.len;
   g.qStart = { x: q.cx, y: q.cy };
   flightCache = g;
   return g;
@@ -866,14 +843,11 @@ function flightGeometry() {
 function computeFlights(t) {
   const L = view.L, R = L.routes, S = L.sz, A = L.terms.A, J1 = L.terms.J1, J2 = L.terms.J2;
   const g = flightGeometry();
-  const F = { rev: { out1: 0, out2: 0, ret1: 0, ret2: 0 }, done: { out: null, ret: null }, cards: [], logoPass: 0, rings: [], dots: [], softRings: [] };
-  if (STILL) {
-    F.rev = { out1: 1, out2: 1, ret1: 1, ret2: 1 }; F.done = { out: -10, ret: -10 };
-    return F;
-  }
+  const F = { cards: [], logoPass: 0, rings: [], softRings: [] };
+  if (STILL) return F;
   // ---- message out
-  slipFlight(t, TM, F, "q", ["out1", "out2"], "out", {
-    start: g.qStart, hover0: g.mHover, pre: g.mPre, preLen: g.mPreLen, r1P: R.out1P, r2: R.out2, r2P: R.out2P,
+  slipFlight(t, TM, F, "q", {
+    start: g.qStart, hover0: g.mHover, pre: g.mPre, r2: R.out2,
     slot: tt => pillRect(J1, "in", tt), inDir: 1, w: A.pillW, h: S.pillH });
   // ---- inside Jon's setup: hand-off to another of his agents and back (grey, dotted, never via RainCLI)
   {
@@ -894,16 +868,18 @@ function computeFlights(t) {
       const P = makePath([bez(from, { x: from.x, y: from.y - 30 }, { x: ex.x - dir * 40, y: ex.y }, ex),
         bez(ex, { x: ex.x + dir * 24, y: ex.y }, { x: en.x - dir * 24, y: en.y }, en),
         bez(en, { x: en.x + dir * 16, y: en.y }, { x: hov.x - dir * 30, y: hov.y }, hov)]);
-      const k = E.inOutCubic(seg(t, HS.go, HS.hov));
-      F.dots.push({ P, rev: k, a: 1 - grow(t, HS.land + .2, HS.land + .65, E.inOutSine), arrived: t >= HS.hov });
       if (t < HS.hand) {
+        // carried, not drawn: lifted toward the camera in transit, tilting with its velocity, settling as it drops
+        const posAt = tt => {
+          if (tt < HS.hov) { const q = pathAt(P, E.inOutCubic(seg(tt, HS.go, HS.hov)) * P.len); return { x: q.x, y: q.y, up: seg(tt, HS.pop, HS.go + .15), lf: 1 }; }
+          if (tt < HS.drop) return { x: hov.x, y: hov.y + Math.sin((tt - HS.hov) * 12) * .8, up: 1, lf: 1 };
+          const d = E.inQuad(seg(tt, HS.drop, HS.land)); return { x: hov.x, y: lerp(hov.y, slot.y, d), up: 1 - d, lf: 1 - d };
+        };
+        const q = posAt(t), vx = (posAt(t + 1 / 60).x - posAt(t - 1 / 60).x) * 30;
         const pop = spring(t - HS.pop, .6, 16);
-        let x, y, sc = lerp(.4, 1, pop), lf = 1;
-        if (t < HS.hov) { const q = pathAt(P, k * P.len); x = q.x; y = q.y; }
-        else if (t < HS.drop) { x = hov.x; y = hov.y + Math.sin((t - HS.hov) * 12) * .8; }
-        else { const d = E.inQuad(seg(t, HS.drop, HS.land)); x = hov.x; y = lerp(hov.y, slot.y, d); lf = 1 - d; }
         const sq = t >= HS.land ? wobble(t - HS.land, 9, 18) : 0;
-        F.cards.push({ type: "sub", x, y, s: sc, a: Math.min(1, pop * 1.5), w: J2.pillW, h: subH, lift: lf, rot: 0, sq });
+        F.cards.push({ type: "sub", x: q.x, y: q.y, s: lerp(.4, 1, pop) * (1 + .12 * E.outCubic(q.up)), a: Math.min(1, pop * 1.5), w: J2.pillW, h: subH,
+          lift: q.lf, rot: clamp(vx * .00045, -.09, .09) * (t < HS.hov ? 1 : 0), sq });
       }
       if (t > HS.land && t < HS.land + .7) F.softRings.push({ p: E.outCubic(seg(t, HS.land, HS.land + .7)), x: J2.bx, y: slot.y - subH / 2, w: J2.pillW, h: subH });
     }
@@ -919,44 +895,31 @@ function computeFlights(t) {
       const P = makePath([bez(from, { x: from.x + (-dir) * 40, y: from.y + 26 }, { x: out.x + dir * 30, y: out.y }, out),
         bez(out, { x: out.x - dir * 24, y: out.y }, { x: inn.x + dir * 24, y: inn.y }, inn),
         bez(inn, { x: inn.x - dir * 16, y: inn.y }, { x: hov.x + dir * 40, y: hov.y }, hov)]);
-      const k = E.inOutSine(seg(t, HB.go, HB.hov));
-      F.dots.push({ P, rev: k, a: 1 - grow(t, HB.land + .2, HB.land + .65, E.inOutSine), arrived: t >= HB.hov });
       if (t < HB.hand) {
         const grow1 = E.outCubic(seg(t, HB.lift, HB.lift + .32));
-        let x, y, lf = 1;
-        if (t < HB.hov) { const q = pathAt(P, k * P.len); x = q.x; y = q.y; }
-        else if (t < HB.drop) { x = hov.x; y = hov.y + Math.sin((t - HB.hov) * 12) * .8; }
-        else { const d = E.inQuad(seg(t, HB.drop, HB.land)); x = hov.x; y = lerp(hov.y, slot.y, d); lf = 1 - d; }
+        const posAt = tt => {
+          if (tt < HB.hov) { const q = pathAt(P, E.inOutSine(seg(tt, HB.go, HB.hov)) * P.len); return { x: q.x, y: q.y, lf: 1 }; }
+          if (tt < HB.drop) return { x: hov.x, y: hov.y + Math.sin((tt - HB.hov) * 12) * .8, lf: 1 };
+          const d = E.inQuad(seg(tt, HB.drop, HB.land)); return { x: hov.x, y: lerp(hov.y, slot.y, d), lf: 1 - d };
+        };
+        const q = posAt(t), vx = (posAt(t + 1 / 60).x - posAt(t - 1 / 60).x) * 30;
         const sq = t >= HB.land ? wobble(t - HB.land, 9, 18) * .7 : 0;
-        F.cards.push({ type: "file", setup: true, x, y, k: grow1, s: lerp(1, 1.05, Math.sin(Math.PI * seg(t, HB.lift, HB.land))), a: 1, lift: lf, rot: 0, sq });
+        F.cards.push({ type: "file", setup: true, x: q.x, y: q.y, k: grow1, s: lerp(1, 1.08, Math.sin(Math.PI * seg(t, HB.lift, HB.land))), a: 1, lift: q.lf,
+          rot: clamp(vx * .00045, -.09, .09) * (t < HB.hov ? 1 : 0), sq });
       }
       if (t > HB.land && t < HB.land + .7) F.softRings.push({ p: E.outCubic(seg(t, HB.land, HB.land + .7)), x: J1.bx, y: chipTop, w: fileChipWidth(1), h: S.fileH });
     }
   }
   // ---- reply back
-  slipFlight(t, TR, F, "reply", ["ret1", "ret2"], "ret", {
-    start: g.rStart, hover0: g.rHover, pre: g.rPre, preLen: g.rPreLen, r1P: R.ret1P, r2: R.ret2, r2P: R.ret2P,
+  slipFlight(t, TR, F, "reply", {
+    start: g.rStart, hover0: g.rHover, pre: g.rPre, r2: R.ret2,
     slot: tt => pillRect(A, "q", tt), inDir: -R.vA, w: A.pillW, h: S.pillH });
   // the snap: one ring from the slot
   if (t > TR.land && t < TR.land + .8) F.dockRing = { p: E.outCubic(seg(t, TR.land, TR.land + .8)), r: pillRect(A, "q", t) };
   return F;
 }
 
-function drawDots(F) {
-  for (const d of F.dots) {
-    if (d.rev <= 0 || d.a <= 0) continue;
-    ctx.save();
-    ctx.globalAlpha = .9 * d.a; ctx.strokeStyle = pal.muted; ctx.lineWidth = 2; ctx.lineCap = "round"; ctx.lineJoin = "round";
-    ctx.setLineDash([.1, 5]);
-    strokePath(d.P, 0, d.P.len * d.rev);
-    ctx.setLineDash([]);
-    if (d.arrived) {
-      const end = pathAt(d.P, d.P.len), pre = pathAt(d.P, d.P.len - 8);
-      ctx.translate(end.x, end.y); ctx.rotate(Math.atan2(end.y - pre.y, end.x - pre.x));
-      ctx.lineWidth = 1.6; ctx.beginPath(); ctx.moveTo(-5, -3.8); ctx.lineTo(0, 0); ctx.lineTo(-5, 3.8); ctx.stroke();
-    }
-    ctx.restore();
-  }
+function drawLandingRings(F) {
   for (const r of F.softRings) {
     const g = r.p * 9;
     ctx.save(); ctx.globalAlpha = (1 - r.p) * .7; ctx.strokeStyle = pal.muted; ctx.lineWidth = 1.4;
@@ -1012,12 +975,11 @@ function render(t, still = false) {
   const F = computeFlights(t);
   drawTitle(t);
   drawEnclosure(t);
-  drawRoutes(t, F);
   for (const id of ["M2", "M3", "J2", "J3", "A", "J1"]) drawTerm(L.terms[id], t, F);
   drawNames(t);
   drawCards(F, true);
   drawLogo(t, F);
-  drawDots(F);
+  drawLandingRings(F);
   drawCards(F, false);
   noShadow(); ctx.filter = "none";
   const f = still ? 0 : E.inOutSine(seg(t, 23.3, 24));
@@ -1087,7 +1049,13 @@ btn.addEventListener("click", () => setPaused(!userPaused));
 if (matchMedia("(hover: none)").matches) {
   document.addEventListener("click", e => { root.classList.toggle("adm-touch-shown", root.contains(e.target)); });
 }
-new IntersectionObserver(es => { onScreen = es[es.length - 1].isIntersecting; update(); }, { threshold: .15 }).observe(root);
+// It starts only when really in view (review S1): 40% of the section, or of the viewport when the section is the
+// taller of the two (a landscape phone), so it doesn't start alongside the app demo at the desktop fold.
+new IntersectionObserver(es => {
+  const e = es[es.length - 1];
+  onScreen = e.isIntersecting && (e.intersectionRatio >= .4 || e.intersectionRect.height >= .4 * window.innerHeight);
+  update();
+}, { threshold: [0, .1, .2, .3, .4, .5, .6, .8, 1] }).observe(root);
 document.addEventListener("visibilitychange", update);
 mqReduce.addEventListener("change", update);
 mqDark.addEventListener("change", () => { pickTheme(); draw(); });
@@ -1101,6 +1069,6 @@ const fontsReady = Promise.all([
 ]).catch(() => {});
 Promise.race([fontsReady, new Promise(r => setTimeout(r, 1500))]).then(() => {
   ready = true; flightCache = null; resize(); update();
-  document.documentElement.dataset.ready = "1";
+  root.dataset.admReady = "1";  // the section's own ready mark (review N1), not a page-global one
 });
 })();
