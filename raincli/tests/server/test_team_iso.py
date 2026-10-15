@@ -4,7 +4,7 @@ issued her person session) and in contoso (zq-handle-maya-ct), where Lee writes 
 - An app sign-in covers one team: the person API and app mode answer contoso's resources exactly like unknown ones.
 - A website sign-in covers both teams, labelled; a typed recipient needs a team when there are several.
 - Message numbers are per team: nothing a northwind member can fetch changes when contoso sends.
-- An archive authorizes before it locks; an id used in another team is answered like a malformed one.
+- An archive authorizes before it locks; an id used in another team is answered like any conflicting id (409).
 Real PostgreSQL."""
 
 from __future__ import annotations

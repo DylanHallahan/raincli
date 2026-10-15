@@ -67,7 +67,11 @@ def upgrade():
         raise RuntimeError("migration 0011 stopped: rows whose machine is in another team: "
                            + ", ".join(f"{name} ({n})" for name, n in broken))
 
-    start = conn.execute(sa.text("SELECT coalesce(max(seq), 0) + 1 FROM messages")).scalar()
+    # Above the highest number ever issued: the identity sequence's last value, which is above max(seq) when the
+    # newest messages were deleted (a team deletion cascades to its messages) and a client may have stored it.
+    start = conn.execute(sa.text(
+        "SELECT greatest((SELECT coalesce(max(seq), 0) FROM messages), "
+        "coalesce(pg_sequence_last_value(pg_get_serial_sequence('messages', 'seq')), 0)) + 1")).scalar()
     op.add_column("teams", sa.Column("next_seq", sa.BigInteger(), nullable=True))
     op.execute(sa.text("UPDATE teams SET next_seq = :start").bindparams(start=start))
     op.alter_column("teams", "next_seq", nullable=False, server_default=sa.text(str(int(start))))

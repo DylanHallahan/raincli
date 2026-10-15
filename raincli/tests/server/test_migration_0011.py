@@ -106,6 +106,32 @@ def test_numbers_continue_per_team_and_the_downgrade_is_exact(scratch_db):  # no
     assert sorted(r for r in after["teams"] if r[1] != "new") == rows["teams"]
 
 
+def test_numbers_continue_above_the_highest_ever_issued_even_if_the_newest_were_deleted(scratch_db):  # noqa: F811
+    """The newest messages are gone before the upgrade (a deleted team's, say), but a client may have stored their
+    number as its cursor: every team continues above it, not above what is left."""
+    url, db = scratch_db
+    seed = _at_0010(url, db)
+    nw, ct = seed["teams"]
+    with db.begin() as conn:
+        issued = conn.execute(text("SELECT max(seq) FROM messages")).scalar()
+        conn.execute(text("DELETE FROM messages WHERE seq > :s"), {"s": issued - 2})
+        assert conn.execute(text("SELECT max(seq) FROM messages")).scalar() == issued - 2
+    upgrade(url, "0011")
+    with db.begin() as conn:
+        assert {r[0] for r in conn.execute(text("SELECT next_seq FROM teams"))} == {issued + 1}
+        first = _msg(conn, nw, seed["jon"][0], P(seed["users"]["jon"]), P(seed["users"]["maya"]), "after")
+        assert conn.execute(text("SELECT team_seq FROM messages WHERE id = :i"), {"i": first.id}).scalar() == issued + 1
+
+
+def test_a_database_that_never_issued_a_number_starts_at_one(scratch_db):  # noqa: F811
+    url, db = scratch_db
+    upgrade(url, "0011")
+    with db.begin() as conn:
+        team = conn.execute(text("INSERT INTO teams (id, slug, name) VALUES (gen_random_uuid(), 'n', 'N') "
+                                 "RETURNING next_seq")).scalar()
+    assert team == 1
+
+
 def test_the_upgrade_stops_on_a_row_whose_machine_is_in_another_team(scratch_db):  # noqa: F811
     url, db = scratch_db
     seed = _at_0010(url, db)

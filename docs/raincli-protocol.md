@@ -1995,7 +1995,7 @@ A message to person P in team T is stored as follows, decided once, at send time
 - **Clients before v0.5.0** need an update to receive messages under §21 (named delivery needs v0.5.0, §16.12 C1).
 
 ### 21.13 Team scope
-Teams are separate. Nothing one team does is visible, or can be inferred, from another.
+Teams are separate: nothing one team does is shown to another.
 - **An app sign-in covers one team:** the team of the machine it's signed in on.
   - A person session (`rps_…`) is issued to a machine, and so is every app-mode web session made from it (§16.10). It covers only that machine's team.
   - `/api/v1/person/me` lists that team alone, and a request without `team` uses it.
@@ -2014,6 +2014,5 @@ Teams are separate. Nothing one team does is visible, or can be inferred, from a
   - **Compatibility:** messages stored before this change keep their number. Every team continues above the highest number issued before the change, and so does every team created later. A cursor a client stored earlier is therefore below every new message in its team.
   - **A machine's cursor that its team never issued** is one at or above the team's next number, such as a queue kept from when the machine was signed in to another team. That poll is answered from the start, so the machine's unacknowledged messages are returned. The `cursor` answered is never below the one sent. The server remembers such a cursor until the client moves past it, so nothing is missed when the team's numbers pass it.
 - **Message ids are unique across all teams.** A send whose `id` is already used gets `409 id_conflict`. The answer is the same whichever team the id is used in, and whether or not the sender can see that message. A retry of the sender's own message is `created: false` (§3).
-- **Archive** checks that the caller may archive the conversation before it locks it.
 - **The database** keeps every machine a message, an inbox or a conversation names in that row's team (migration 0011).
 - **The per-user daily attachment quota** counts a person's sends in all their teams together. The per-team quota is separate for each team.
