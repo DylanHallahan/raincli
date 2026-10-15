@@ -12,42 +12,16 @@ import pytest
 
 SECTIONS = [
     ("hero", [
-        "Agent-to-agent · free during the pilot",
         "Agent Direct Messaging for your team",
         "Your agent asks a teammate's agent directly. No copy-pasting.",
         "Request access", "Read the details",
         "Agents Claude Code · Codex · Herdr · any CLI agent",
         "Runs on Windows app · Linux, headless too",
-        "Access Invite-only pilot",
+        "Access Invite-only pilot · free during the pilot",
         "The RainCLI app · fictional team",
-        "Maya's agent sends the question to Jon.",
-        "Maya can see how far it got.",
-        "Jon's agent answers and attaches its report.",
-        "Maya and Jon can both read the whole thread.",
-    ]),
-    ("how", [
-        "01 How a message moves",
-        "Agent to agent, with every hop on the record.",
-        "Built for small dev teams where everyone runs their own coding agent. You address a teammate, not a "
-        "machine: your agent sends from the CLI, and RainCLI delivers it to the agent they picked as their inbox. "
-        "Both of you can read the thread in the app.",
-        "Your agent runs raincli send jon@example.com",
-        "RainCLI server stored stores it for Jon Their machine",
-        "Their machine received the runtime picks it up and acknowledges it",
-        "Their inbox agent submitted gets it in its session",
-        "The reply replied comes back to the agent that asked, linked to your message",
-        "stored On the server. The recipient's machine hasn't picked it up yet.",
-        "held Waiting on their side: they haven't picked an inbox yet, their inbox is busy or offline, it's a "
-        "next-turn agent, or they approve senders first.",
-        "replied Their agent answered, in the same thread.",
-    ]),
-    ("threads", [
-        "A reply is linked to the message it answers. A report travels with its checksum.",
-        "Every message belongs to a conversation, one per pair of people.",
-        "Markdown reports go with the message: UTF-8, up to 256 KiB each, five files and 1 MiB per message.",
     ]),
     ("cli", [
-        "02 From the command line",
+        "01 From the command line",
         "Your agent already knows how to run this.",
         "raincli people",
         "raincli send @jon@example.com --body-file - --attach audit.md",
@@ -56,58 +30,44 @@ SECTIONS = [
         "People, not machines A message to @jon@example.com goes to the agent Jon picked as an inbox, or waits in "
         "Jon's app until one is picked. Teammates see people and availability, never your machines or agents.",
     ]),
-    ("app", [
-        "03 In the app",
-        "Instant or Next turn How soon their inbox agent will see your message.",
-        "Ready, Busy, Offline Whether the other side is around before you send.",
-        "A quiet inbox If a teammate's inbox hasn't connected in a while, or they haven't picked one yet, you're "
-        "told before you send.",
-        "Sam's inbox hasn't connected since Tuesday.",
-        "Done, not deleted A new message brings the conversation back.",
+    ("how", [
+        "02 How a message moves",
+        "Agent to agent, with every hop on the record.",
+        "You address a teammate, not a machine. RainCLI delivers to the agent they picked as their inbox.",
+        "Your agent runs raincli send jon@example.com",
+        "RainCLI server stored stores it for Jon Their machine",
+        "Their machine received the runtime picks it up and acknowledges it",
+        "Their inbox agent submitted gets it in its session",
+        "The reply replied comes back to the agent that asked, linked to your message",
+        "Replies link to the message they answer, and Markdown reports travel with a SHA-256. All delivery states",
     ]),
     ("works-with", [
-        "04 Works with",
+        "03 Works with",
         "Mixed teams are the point.",
         "Herdr Instant as soon as the agent is idle Herdr 0.9.3 or later",
         "Codex with hooks enabled (0.145.0 or later on Windows), one-time approval in /hooks",
         "macOS hasn't been tested yet.",
     ]),
     ("install", [
-        "05 Install",
+        "04 Install",
         "Windows app, or a few commands on Linux.",
         "Download for Windows",
+        "Per-user, no admin rights, updates itself. Not code-signed yet: check the SHA-256 ( Windows guide )",
+        "Connector and inbox setups: see the setup guide.",
+        "Setup guide Windows guide",
+        "raincli login --email you@example.com", "raincli runtime startup --config ~/.config/raincli/runtime.json",
         "raincli inbox show", "raincli inbox set <agent>",
     ]),
     ("security", [
-        "06 Trust and security",
+        "05 Trust and security",
         "What's protected, and what isn't yet.",
-        "TLS everywhere. Machines only make outbound HTTPS connections: no inbound ports, no VPN.",
-        "The sender comes from the credential, never from the message text. Messages reach only people on your team.",
-        "Teammates see people and availability, never your machines, agents or sessions.",
-        "Messages aren't end-to-end encrypted. The server stores them and can read them.",
-        "The Windows installer isn't code-signed. The updater checks its published SHA-256, which catches a "
-        "corrupted download, not a malicious release.",
-    ]),
-    ("source", [
-        "Read the code, or run your own server.",
-        "07 Source and self-hosting",
-        "The client and the server are public on GitHub, with a runbook for hosting it yourself: FastAPI, PostgreSQL "
-        "and Nginx, plus migrations, backups and rollback.",
-    ]),
-    ("faq", [
-        "08 Questions",
-        "Is it free? Yes, during the pilot.",
-        "Does everyone need the same AI tool? No. One person can use Claude Code, another Codex, another Herdr. "
-        "Everyone on the team can be reached, whatever agent they use.",
-        "What if they haven't picked an inbox yet? The message waits in their app, and you see it held: waiting "
-        "for them to pick an inbox. When they pick one, the waiting messages can go to it.",
-        "What if their agent is offline? The message waits on the server, held while their inbox is offline. "
-        "Their machine picks it up when it's back, and you'll see it move to received.",
-        "Can you read our messages? Yes. They're encrypted in transit but not end to end, so the server can read "
-        "them. Share what you'd share in your team chat, or run your own server.",
-        "Does a next-turn agent wake up for a message? No. A Claude Code or Codex session sees it the next time "
-        "it's used, and the sender sees it held until then. Use a Herdr agent if messages should be handled while "
-        "you're away.",
+        "Protected TLS, outbound connections only.",
+        "One credential per machine, hashed and revocable.",
+        "The sender comes from the credential. A message can ask but can't change instructions or permissions "
+        "( raincli trust --mode list to approve senders).",
+        "Not yet Not end-to-end encrypted.",
+        "Releases and the Windows installer aren't signed yet.",
+        "Public on GitHub, with a self-hosting runbook. Security details",
     ]),
     ("closing", [
         "Want it for your team?",
@@ -116,8 +76,8 @@ SECTIONS = [
         "Already invited? Sign in",
     ]),
 ]
-ORDER = ["hero", "how", "threads", "cli", "app", "works-with", "install", "security", "source", "faq", "closing"]
-HEADER = ["RainCLI", "How it works", "CLI", "Install", "Security", "GitHub", "Sign in", "Request access"]
+ORDER = ["hero", "cli", "how", "works-with", "install", "security", "closing"]
+HEADER = ["RainCLI", "CLI", "How it works", "Install", "Security", "GitHub", "Sign in", "Request access"]
 FOOTER = "RainCLI Free during the pilot TLS in transit · not end-to-end encrypted GitHub"
 MAILTO = "mailto:dylan@dylanhallahan.com"
 
@@ -176,8 +136,10 @@ def test_request_access_is_an_email_link(home):
 
 def test_free_during_the_pilot_only_in_the_hero_faq_and_footer(home):
     words = plain(home).lower()
-    assert words.count("free during the pilot") == 2  # the hero label and the footer
-    assert "Yes, during the pilot." in section(home, "faq")
+    assert words.count("free during the pilot") == 2  # the hero's Access row (pass 2b) and the footer
+    assert "Agent-to-agent" not in home
+    for tag in ('name="description"', 'property="og:description"', 'name="twitter:description"'):
+        assert re.search(rf'<meta {tag} content="[^"]*Free during the pilot\.', home), tag  # the preview tags keep it
     for promise in ("pricing", "price", "per seat", "/month", "after the pilot", "will cost", "paid plan"):
         assert promise not in words, promise
 
@@ -191,10 +153,15 @@ def test_public_on_github_never_open_source(home):
 
 
 def test_the_anchors_still_exist(home):
-    for ident in ("how", "install", "security", "closing", "hero", "demo", "app", "trust", "faq", "cli"):
+    for ident in ("how", "install", "security", "closing", "hero", "demo", "trust", "cli"):
         assert f'id="{ident}"' in home, ident
     for ident in ("how", "security", "install", "cli"):
         assert f'href="#{ident}"' in home
+    for gone in ("app", "threads", "source", "faq"):  # pass 2b cut these sections; nothing links to them
+        assert f'id="{gone}"' not in home and f'href="#{gone}"' not in home, gone
+    nav = re.search(r'<nav class="nav".*?</nav>', home, re.S).group(0)
+    assert re.findall(r'href="(#[a-z]+|https://github[^"]*)"', nav) == [
+        "#cli", "#how", "#install", "#security", "https://github.com/DylanHallahan/raincli"]
 
 
 def test_no_external_resources_and_the_logo_is_inline(home):
@@ -267,8 +234,17 @@ def test_the_demo_shows_only_the_app(home):
     demo = _demo(home)
     for text in NOT_IN_THE_DEMO:
         assert text not in demo and text not in css, text
-    assert "b-scene" not in demo and "cap5" not in demo and demo.count('<p class="cap') == 4
-    assert css.count(" 16s linear infinite") == 15  # m1 m2 file, cap1-4, four states, ready busy dot, progress
+    assert "b-scene" not in demo and 'class="cap' not in demo and 'class="caps' not in demo  # pass 2a: no captions
+    for gone in ("data-demo-pause", "data-demo-restart", 'class="ctrl"', 'class="prog"'):
+        assert gone not in demo, gone  # pass 2a: no visible controls
+    # WCAG 2.2.2: one small icon-only pause, outside the aria-hidden window, named and stateful.
+    assert re.findall(r"<button[^>]*>", demo) == [
+        '<button type="button" class="demo-toggle" data-demo-toggle aria-pressed="false" aria-label="Pause demo">']
+    for gone in (".caps", ".cap1", ".ctrl", ".prog", "k-cap", "k-prog"):
+        assert gone not in css, gone
+    js = (Path(web.__file__).parent / "static" / "landing.js").read_text("utf-8")
+    assert "data-demo-pause" not in js and "data-demo-restart" not in js
+    assert css.count(" 16s linear infinite") == 10  # m1 m2 file, four states, ready busy dot
 
 
 def test_the_demo_has_the_v06_markup(home):
@@ -292,3 +268,110 @@ def test_no_copy_claims_any_agent_routing_or_the_team_list(home):
     for phrase in NOT_TODAY:
         assert phrase not in words, phrase
     assert '<div class="grp">Team</div>' not in _demo(home)
+
+
+def test_the_blue_band_has_no_ruled_lines(home):
+    """Pass 2a (user feedback, "what's with the horizontal lines"): the band keeps its glow but no line pattern."""
+    from raincli_server import web
+
+    css = (Path(web.__file__).parent / "static" / "landing.css").read_text("utf-8")
+    band = re.search(r"\.band::before\{[^}]*\}", css).group(0)
+    assert "radial-gradient" in band and "linear-gradient" not in band
+    # Pass 2b: the seven-state glossary is gone; one line and a link to the protocol's states replace it.
+    assert 'class="gloss"' not in home and ".gloss" not in css
+    assert "All delivery states" in section(home, "how")
+
+
+def test_the_sign_in_headline_matches_the_hero(client):
+    page = client.get("/login").text
+    assert '<p class="auth-statement">Agent Direct Messaging <em>for your team</em></p>' in page
+    assert "in one place" not in page
+
+
+def test_the_docs_links_go_to_files_that_exist(home):
+    """Pass 2b moves detail to the docs; each link names a file (and section) that exists in this repository."""
+    from pathlib import Path as P
+
+    repo = P(__file__).resolve().parents[3]
+    links = {
+        "https://github.com/DylanHallahan/raincli/blob/main/docs/raincli-protocol.md#2-delivery-semantics":
+            ("docs/raincli-protocol.md", "## 2. Delivery semantics"),
+        "https://github.com/DylanHallahan/raincli/blob/main/docs/windows-client.md#install":
+            ("docs/windows-client.md", "### Install"),
+        "https://github.com/DylanHallahan/raincli/blob/main/SECURITY.md": ("SECURITY.md", "# Security"),
+        "https://github.com/DylanHallahan/raincli/blob/main/docs/raincli-deploy.md": ("docs/raincli-deploy.md", "#"),
+        "https://github.com/DylanHallahan/raincli/blob/main/SETUP.md": ("SETUP.md", "#"),
+    }
+    for url, (path, heading) in links.items():
+        assert f'href="{url}"' in home, url
+        text = (repo / path).read_text("utf-8")
+        assert any(line.startswith(heading) for line in text.splitlines()), (path, heading)
+    windows = (repo / "docs" / "windows-client.md").read_text("utf-8")
+    assert "Get-FileHash" in windows and "not code-signed" in windows  # the checksum steps moved there
+
+
+def _page_commands(home: str) -> list[str]:
+    """Every raincli command the page shows: the terminals' $ lines (a piped one taken after its pipe) and every
+    inline <code> that starts with raincli."""
+    out = []
+    for block in re.findall(r'<pre class="term[^"]*"[^>]*><code>(.*?)</code></pre>', home, re.S):
+        text = htmllib.unescape(re.sub(r"<[^>]+>", "", block)).replace("\\\n", " ")
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("$ "):
+                continue
+            command = line[2:].split("  #")[0].strip()  # an inline comment after the command
+            for part in command.split("|"):
+                if part.strip().startswith("raincli"):
+                    out.append(part.strip())
+    for code in re.findall(r"<code[^>]*>(.*?)</code>", home, re.S):
+        text = " ".join(htmllib.unescape(re.sub(r"<[^>]+>", "", code)).split())
+        if text.startswith("raincli ") and "\n" not in code:
+            out.append(text)
+    return out
+
+
+def test_every_command_on_the_page_parses(home, capsys):
+    """Review L1: each command, typed as shown (placeholders filled in), parses with the client's real argparse:
+    no usage error, no missing required flag."""
+    import shlex
+
+    from raincli_agent.cli import build_parser
+
+    commands = _page_commands(home)
+    for must in ("raincli people", "raincli hooks install --claude --config ~/.config/raincli/runtime.json",
+                 "raincli send jon@example.com --body-file -", "raincli trust --mode list", "raincli inbox set <agent>",
+                 "raincli runtime startup --config ~/.config/raincli/runtime.json", "raincli --skill"):
+        assert any(c.startswith(must) for c in commands), (must, commands)
+    filled = {"<CONV_ID>": "8b1f3c9e-1d2a-4c55-9a7e-2f0e6b3d4c11", "<MSG_ID>": "1f2e3d4c-5b6a-4978-8c9d-0e1f2a3b4c5d",
+              "<agent>": "inbox"}
+    for command in commands:
+        for placeholder, value in filled.items():
+            command = command.replace(placeholder, value)
+        argv = shlex.split(command.split(" > ")[0])[1:]  # drop "raincli", and a shell redirection
+        try:
+            build_parser().parse_args(argv)
+        except SystemExit as exc:
+            assert exc.code == 0, (command, capsys.readouterr().err)  # --skill prints and exits 0
+        capsys.readouterr()
+
+
+def test_security_md_matches_the_code_and_the_readme():
+    """SECURITY.md (the homepage's Security details): its Boundaries mirror the README's word for word, its minimum
+    safe version is the client's, and it says how to report without a public issue."""
+    from pathlib import Path as P
+
+    from raincli_agent import __version__, security
+
+    repo = P(__file__).resolve().parents[3]
+    doc = (repo / "SECURITY.md").read_text("utf-8")
+    readme = (repo / "README.md").read_text("utf-8")
+
+    def boundaries(text, end):
+        return text.split("## Boundaries", 1)[1].split(end, 1)[0].replace("This section mirrors the README's.", "").strip()
+    assert boundaries(doc, "\n## ") == boundaries(readme, "## Documentation")
+    assert f"v{security.MIN_SAFE_VERSION} for this release" in doc and "MIN_SAFE_VERSION" in doc
+    major_minor = ".".join(__version__.split(".")[:2])
+    assert f"**{major_minor}.x**" in doc
+    assert "dylan@dylanhallahan.com" in doc and "don't open a public GitHub issue" in doc
+    assert "(SECURITY.md)" in readme

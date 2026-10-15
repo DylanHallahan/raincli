@@ -200,7 +200,7 @@ def test_the_demo_plays_only_on_screen_and_while_visible(browser, live):
         state = page.evaluate(ANIMATIONS)
         assert state["count"] > 0 and state["running"] == state["count"]
         # Scrolled away: paused.
-        page.evaluate("document.getElementById('faq').scrollIntoView()")
+        page.evaluate("document.getElementById('security').scrollIntoView()")
         page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'waiting'")
         held = page.evaluate(ANIMATIONS)
         assert held["running"] == 0
@@ -221,47 +221,114 @@ def test_the_demo_plays_only_on_screen_and_while_visible(browser, live):
         context.close()
 
 
-def test_pause_and_restart_work_by_keyboard(browser, live):
+def test_the_demo_just_plays_with_no_controls_or_captions(browser, live):  # noqa: F811
+    """Pass 2a: no Pause, Restart, progress bar or captions; it plays by itself, starting on the finished thread,
+    and keeps the screen-reader description."""
     context, page, _ = open_home(browser, live)
     try:
         page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
-        for _ in range(40):  # Tab through the page to the Pause button
+        demo = page.locator("[data-demo]")
+        assert demo.locator(".ctrl, .prog, .caps, [class^='cap']").count() == 0
+        assert demo.locator("button").count() == 1  # only the hidden-at-rest pause (WCAG 2.2.2)
+        assert page.evaluate("getComputedStyle(document.querySelector('.demo-toggle')).opacity") == "0"
+        assert "Maya's agent sends a question to Jon." in demo.locator("figcaption.sr-only").text_content()
+        state = page.evaluate(ANIMATIONS)
+        assert state["running"] == state["count"] > 0 and state["time"] >= 11400  # the finished thread first
+        assert page.evaluate("getComputedStyle(document.querySelector('.win')).opacity") == "1"
+    finally:
+        context.close()
+
+
+def test_the_demo_pause_is_hidden_at_rest_and_works_by_keyboard(browser, live):  # noqa: F811
+    """WCAG 2.2.2 with no visible chrome: the icon-only toggle is invisible at rest, Tab reaches it (and shows it), it
+    pauses and resumes, its name and aria-pressed follow, and scrolling away and back doesn't resume a pause."""
+    context, page, _ = open_home(browser, live)
+    try:
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
+        toggle = page.locator("[data-demo-toggle]")
+        opacity = "getComputedStyle(document.querySelector('[data-demo-toggle]')).opacity"
+        assert page.evaluate(opacity) == "0"  # nothing shows at rest
+        box = toggle.bounding_box()
+        assert box["width"] >= 44 and box["height"] >= 44
+        for _ in range(40):
             page.keyboard.press("Tab")
-            if page.evaluate("document.activeElement.hasAttribute('data-demo-pause')"):
+            if page.evaluate("document.activeElement.hasAttribute('data-demo-toggle')"):
                 break
         else:
-            pytest.fail("Pause is not reachable by Tab")
-        outline = page.evaluate("getComputedStyle(document.activeElement).outlineStyle")
-        assert outline == "solid"  # visible focus
+            pytest.fail("the demo's pause is not reachable by Tab")
+        page.wait_for_timeout(250)
+        assert page.evaluate(opacity) == "1"
+        ring = page.evaluate("getComputedStyle(document.activeElement, '::before').boxShadow")
+        assert "2px" in ring, ring  # the visible focus ring, inside the title bar
+        assert (toggle.get_attribute("aria-label"), toggle.get_attribute("aria-pressed")) == ("Pause demo", "false")
         page.keyboard.press("Enter")
-        assert page.get_attribute("[data-demo-pause]", "aria-pressed") == "true"
-        assert page.text_content("[data-demo-pause]") == "Play"
+        assert (toggle.get_attribute("aria-label"), toggle.get_attribute("aria-pressed")) == ("Play demo", "true")
         assert page.evaluate(ANIMATIONS)["running"] == 0
-        # Scrolling away and back doesn't resume a demo the person paused.
-        page.evaluate("document.getElementById('faq').scrollIntoView()")
+        assert page.get_attribute("[data-demo]", "data-demo-state") == "paused"
+        page.evaluate("document.getElementById('security').scrollIntoView()")
         page.wait_for_timeout(200)
-        page.evaluate("document.querySelector('[data-demo]').scrollIntoView({block: 'center'})")
-        page.wait_for_timeout(200)
-        assert page.evaluate(ANIMATIONS)["running"] == 0
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(300)
+        assert page.evaluate(ANIMATIONS)["running"] == 0  # still paused
+        toggle.focus()
         page.keyboard.press("Space")
-        assert page.get_attribute("[data-demo-pause]", "aria-pressed") == "false"
+        assert (toggle.get_attribute("aria-label"), toggle.get_attribute("aria-pressed")) == ("Pause demo", "false")
         assert page.evaluate(ANIMATIONS)["running"] > 0
+        page.evaluate("document.activeElement.blur()")
+        page.mouse.move(5, 760)
+        page.wait_for_timeout(250)
+        assert page.evaluate(opacity) == "0"  # hidden again once it loses focus
+        page.hover(".hero .win")
+        page.wait_for_timeout(250)
+        assert page.evaluate(opacity) == "1"  # shown while the window is hovered
+    finally:
+        context.close()
+
+
+# The finished frame: both messages, the file and every state lit, Jon ready.
+FINISHED = """() => ['.win', '.m1', '.m2', '.file', '.p-ready', '.st-stored', '.st-received', '.st-submitted',
+    '.st-replied'].map((s) => getComputedStyle(document.querySelector(s)).opacity).concat(
+    [getComputedStyle(document.querySelector('.p-busy')).opacity])"""
+
+# Move every animation's clock on (keeps it playing), as if that much time had passed.
+JUMP = """(ms) => document.querySelector('[data-demo]').getAnimations({subtree: true}).forEach((a) => {
+    a.currentTime = ms; })"""
+
+
+def test_the_demo_stops_on_the_finished_frame_after_two_plays(browser, live):  # noqa: F811
+    """Main's decision (pass 2a): two plays, then it holds on the finished frame, with no controls. The clock is the
+    animations' own, so the off-screen pause delays the stop; the stop happens at 13 s into the second full play
+    (the first join at 11.4 s is the tail of a loop, not a play)."""
+    context, page, log = open_home(browser, live)
+    try:
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
+        # The second play, part way: still running.
+        page.evaluate(JUMP, 16000 + 16000 + 6000)
+        page.wait_for_timeout(500)
+        assert page.evaluate(ANIMATIONS)["running"] > 0
+        assert page.get_attribute("[data-demo]", "data-demo-state") == "playing"
+        # Scrolled away (paused), with the clock just before the stop: it can't reach the stop point.
+        page.evaluate("document.getElementById('security').scrollIntoView()")
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'waiting'")
+        page.evaluate(JUMP, 16000 + 16000 + 12800)  # setting the time of a paused animation keeps it paused
+        page.wait_for_timeout(1000)
+        assert page.get_attribute("[data-demo]", "data-demo-state") == "waiting"
+        assert page.evaluate(ANIMATIONS)["running"] == 0
+        # Back on screen: it plays the last moment and stops, holding the finished frame with nothing animating.
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'done'",
+                               timeout=5000)
+        assert page.evaluate(ANIMATIONS)["count"] == 0
+        assert page.evaluate(FINISHED) == ["1"] * 9 + ["0"]
+        # It stays stopped, scrolled away and back.
+        page.evaluate("document.getElementById('security').scrollIntoView()")
+        page.wait_for_timeout(300)
+        page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(1500)
-        before = page.evaluate(ANIMATIONS)["time"]
-        page.keyboard.press("Tab")
-        assert page.evaluate("document.activeElement.hasAttribute('data-demo-restart')")
-        page.keyboard.press("Enter")
-        after = page.evaluate(ANIMATIONS)
-        assert after["running"] > 0 and after["time"] < before and after["time"] < 500, (before, after)
-        # Restarting starts from 0 s with the app already visible (no fade-in of the app frame).
-        assert page.evaluate("getComputedStyle(document.querySelector('.win')).opacity") == "1"
-        # Restart while paused starts it playing.
-        page.keyboard.press("Shift+Tab")
-        page.keyboard.press("Enter")
-        page.keyboard.press("Tab")
-        page.keyboard.press("Enter")
-        assert page.get_attribute("[data-demo-pause]", "aria-pressed") == "false"
-        assert page.evaluate(ANIMATIONS)["running"] > 0
+        assert page.evaluate(ANIMATIONS)["count"] == 0
+        assert page.get_attribute("[data-demo]", "data-demo-state") == "done"
+        assert not page.is_visible("[data-demo-toggle]")  # nothing left to pause
+        assert log["console"] == [] and log["errors"] == [], log
     finally:
         context.close()
 
@@ -272,11 +339,13 @@ def test_reduced_motion_shows_the_final_frame(browser, live, artifacts, scheme):
     try:
         page.wait_for_timeout(200)
         assert page.evaluate(ANIMATIONS)["count"] == 0
-        assert not page.is_visible(".demo .ctrl") and page.locator(".b-scene").count() == 0
-        frame = page.evaluate("""() => ['.win', '.m1', '.m2', '.file', '.cap4', '.p-ready']
+        assert page.get_attribute("[data-demo]", "data-demo-state") is None  # the script never starts it
+        assert not page.is_visible("[data-demo-toggle]")  # no pause needed: nothing moves
+        assert page.evaluate(FINISHED) == ["1"] * 9 + ["0"]  # the finished frame, straight away
+        assert page.locator(".b-scene, .demo .ctrl, .demo .caps").count() == 0
+        frame = page.evaluate("""() => ['.win', '.m1', '.m2', '.file', '.p-ready']
             .map((s) => getComputedStyle(document.querySelector(s)).opacity)""")
-        assert frame == ["1"] * 6
-        assert page.evaluate("getComputedStyle(document.querySelector('.cap1')).opacity") == "0"
+        assert frame == ["1"] * 5
         assert page.evaluate("getComputedStyle(document.querySelector('.p-busy')).opacity") == "0"  # ready
         lit = page.evaluate("Array.from(document.querySelectorAll('.states span'), (e) => getComputedStyle(e).color)")
         ok = page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--ok').trim()")
@@ -300,32 +369,31 @@ FRAME = """() => {
     const op = (s) => Number(getComputedStyle(document.querySelector(s)).opacity);
     const lit = (s) => getComputedStyle(document.querySelector(s)).color === getComputedStyle(document.querySelector('.st-stored')).color
         && op(s) > 0.9;
-    return {app: op('.win'), caps: [1, 2, 3, 4].map((i) => op('.cap' + i)), m1: op('.m1'), m2: op('.m2'), file: op('.file'),
+    return {app: op('.win'), m1: op('.m1'), m2: op('.m2'), file: op('.file'),
             busy: op('.p-busy'), ready: op('.p-ready'), stored: op('.st-stored'), received: op('.st-received'),
             submitted: op('.st-submitted'), replied: op('.st-replied')};
 }"""
-TIMELINE = [  # (ms, the caption shown, expectations)
-    (1000, 1, {"busy": 0, "m2": 0}),
-    (3500, 2, {"busy": 0, "stored": 1, "received": 1, "m2": 0}),
-    (6000, 2, {"busy": 1, "ready": 0, "submitted": 1, "m2": 0}),
-    (9600, 3, {"busy": 0, "ready": 1, "m2": 1, "file": 1, "replied": 1}),
-    (13000, 4, {"busy": 0, "m1": 1, "m2": 1, "file": 1, "replied": 1}),
+TIMELINE = [  # (ms, expectations)
+    (1000, {"busy": 0, "m2": 0}),
+    (3500, {"busy": 0, "stored": 1, "received": 1, "m2": 0}),
+    (6000, {"busy": 1, "ready": 0, "submitted": 1, "m2": 0}),
+    (9600, {"busy": 0, "ready": 1, "m2": 1, "file": 1, "replied": 1}),
+    (13000, {"busy": 0, "m1": 1, "m2": 1, "file": 1, "replied": 1}),
 ]
 
 
 @pytest.mark.parametrize("scheme", ["light", "dark"])
 def test_the_timeline_matches_the_spec(browser, live, artifacts, scheme):
-    """App only, 16 s: the app is on screen for the whole loop; captions, messages, states and presence at the
+    """App only, 16 s: the app is on screen for the whole loop; messages, states and presence at the
     spec's moments; busy only between submitted (4.4 s) and the reply (7.8 s)."""
     context, page, log = open_home(browser, live, scheme=scheme)
     try:
         page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
         page.evaluate("document.querySelector('[data-demo]').scrollIntoView({block: 'center'})")
-        for ms, cap, want in TIMELINE:
+        for ms, want in TIMELINE:
             page.evaluate(SEEK, ms)
             f = page.evaluate(FRAME)
             assert f["app"] == 1, (ms, f)
-            assert [round(c) for c in f["caps"]] == [int(i == cap) for i in range(1, 5)], (ms, f)
             for key, value in want.items():
                 assert round(f[key]) == value, (ms, key, f)
             page.locator("[data-demo]").screenshot(path=str(artifacts / f"demo-{scheme}-t{ms / 1000:04.1f}s.png"))
@@ -385,10 +453,30 @@ def test_the_sign_in_page_matches_in_blue(browser, live, artifacts, scheme):  # 
         page.goto(live + "/login", wait_until="networkidle")
         button = page.evaluate("getComputedStyle(document.querySelector('.auth-card .btn')).backgroundColor")
         assert button == ("rgb(31, 95, 209)" if scheme == "light" else "rgb(122, 167, 255)"), button
+        statement = " ".join(page.text_content(".auth-statement").split())
+        assert statement == "Agent Direct Messaging for your team"  # pass 2a: the hero's line (marketing)
+        assert page.text_content(".auth-statement em") == "for your team"
         accent = page.evaluate("getComputedStyle(document.querySelector('.auth-statement em')).color")
         assert accent == button
         assert page.evaluate(CONTRAST) == []
         page.screenshot(path=str(artifacts / f"login-{scheme}.png"))
         assert log == [], log
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("path", ["/login"])
+def test_the_sign_in_page_fits_a_phone(browser, live, artifacts, path):  # noqa: F811
+    """390 px: one column (headline above the card), no horizontal scroll, even with the email field focused."""
+    context = browser.new_context(viewport={"width": 390, "height": 844})
+    page = context.new_page()
+    try:
+        page.goto(live + path, wait_until="networkidle")
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert page.evaluate("window.scrollX") == 0
+        card = page.evaluate("document.querySelector('.auth-card').getBoundingClientRect().toJSON()")
+        intro = page.evaluate("document.querySelector('.auth-intro').getBoundingClientRect().toJSON()")
+        assert card["left"] >= 0 and card["right"] <= 390 and intro["bottom"] <= card["top"], (intro, card)
+        page.screenshot(path=str(artifacts / "login-phone.png"))
     finally:
         context.close()

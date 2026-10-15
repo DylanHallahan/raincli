@@ -1,10 +1,10 @@
 // The homepage (concept C "Paper"). No inline styles: everything is a class or a Web Animations call.
 // - Header: a shadow once the page has scrolled; the phone menu closes after a link is chosen.
 // - Sections fade in as they reach the screen (not under reduced motion, and never without this script).
-// - The demo: a 16 s loop that plays only while on screen and the tab is visible. Its first play starts at 11.4 s,
-//   on the finished thread, so the first frame is never empty; Restart starts from 0. Pause (WCAG 2.2.2) and Restart
-//   are buttons under the frame. Under reduced motion the CSS shows the final frame and hides the controls, and
-//   nothing here touches it.
+// - The demo: a 16 s sequence that plays only while on screen and the tab is visible (off screen or hidden, it
+//   pauses), with one small pause button (WCAG 2.2.2) that shows only on hover or keyboard focus. It starts at 11.4 s, on the finished thread, so the first frame is never empty;
+//   after two plays it stops on the finished frame. Under reduced motion the CSS shows that frame straight away
+//   and nothing here touches it.
 (function () {
   "use strict";
   var root = document.documentElement;
@@ -32,34 +32,44 @@
 
   var demo = document.querySelector("[data-demo]");
   if (!demo || reduced) return;
-  var pause = demo.querySelector("[data-demo-pause]");
-  var restart = demo.querySelector("[data-demo-restart]");
-  var userPaused = false, onScreen = false, started = false;
+  // Two plays, then it holds: the first play joins on the finished thread (11.4 s, the tail of a loop), then the
+  // whole 16 s sequence runs twice, and the demo stops on the second play's finished frame (13 s into it). Time is
+  // the animations' own clock, so a pause off screen or in a hidden tab delays the stop.
+  var LOOP = 16000, FINISHED = 13000, STOP_AT = FINISHED + 2 * LOOP;
+  var onScreen = false, started = false, done = false, timer = null, userPaused = false;
+  var toggle = demo.querySelector("[data-demo-toggle]");
 
   function animations() { return demo.getAnimations ? demo.getAnimations({subtree: true}) : []; }
-  function start(at) {
-    demo.classList.remove("play");
-    void demo.offsetWidth;  // a reflow, so the animations start again
-    demo.classList.add("play");
-    animations().forEach(function (a) { a.currentTime = at; });
-    started = true;
+  function stop() {
+    // Without .play nothing animates, and the CSS shows the finished frame (as under reduced motion).
+    done = true;
+    clearInterval(timer);
+    demo.classList.remove("play", "paused");
+    demo.setAttribute("data-demo-state", "done");
+  }
+  function check() {
+    var all = animations();
+    if (all.length && all[0].currentTime >= STOP_AT) stop();
   }
   function apply() {
+    if (done) return;
     var hold = userPaused || !onScreen || document.visibilityState !== "visible";
-    if (!hold && !started) start(11400);
+    if (!hold && !started) {
+      demo.classList.add("play");
+      // The first play starts on the finished thread, so the first frame is never empty.
+      animations().forEach(function (a) { a.currentTime = 11400; });
+      started = true;
+      timer = setInterval(check, 200);
+    }
     demo.classList.toggle("paused", hold && started);
     demo.setAttribute("data-demo-state", hold ? (userPaused ? "paused" : "waiting") : "playing");
   }
-  function setUserPaused(on) {
-    userPaused = on;
-    pause.setAttribute("aria-pressed", on ? "true" : "false");
-    pause.textContent = on ? "Play" : "Pause";
+  // WCAG 2.2.2: the small pause (invisible at rest) pauses and resumes; scrolling away and back doesn't resume it.
+  if (toggle) toggle.addEventListener("click", function () {
+    userPaused = !userPaused;
+    toggle.setAttribute("aria-pressed", userPaused ? "true" : "false");
+    toggle.setAttribute("aria-label", userPaused ? "Play demo" : "Pause demo");
     apply();
-  }
-  if (pause) pause.addEventListener("click", function () { setUserPaused(!userPaused); });
-  if (restart) restart.addEventListener("click", function () {
-    start(0);
-    if (userPaused) setUserPaused(false); else apply();
   });
   if (window.IntersectionObserver) {
     new IntersectionObserver(function (entries) {
