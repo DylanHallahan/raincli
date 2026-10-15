@@ -276,7 +276,8 @@ main:focus{outline:none}
 .demo-toggle svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
 .demo-toggle .i-play{display:none;fill:currentColor;stroke-width:1.4}
 .demo-toggle[aria-pressed="true"] .i-pause{display:none}.demo-toggle[aria-pressed="true"] .i-play{display:block}
-.win-wrap:hover .demo-toggle,.demo-toggle:focus-visible{opacity:1}
+.demo-toggle[hidden]{display:none}
+.win-wrap:hover .demo-toggle,.demo-toggle:focus-visible,.demo.touch-shown .demo-toggle{opacity:1}
 .demo-toggle::before{content:"";position:absolute;left:7px;top:7px;width:30px;height:30px;border-radius:999px;z-index:-1}
 .demo-toggle:hover::before{background:var(--surface-2)}
 .demo-toggle:focus-visible{outline:none}
