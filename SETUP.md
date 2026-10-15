@@ -77,7 +77,7 @@ The inbox is the one agent on this machine that receives your team's messages. C
 | **Claude Code session** through hooks | `next-turn` | **Only when that session is next used**: at its next start or the next prompt you type in it | Claude Code hooks (step 6); Claude Code only |
 | **None** (CLI only) | — | Never automatically; messages to you wait in the app and in `raincli me inbox` | Nothing |
 
-**Next-turn delivery waits until the session is next used.** A message to an idle Claude Code session that nobody touches waits, durably queued, until someone starts the session or types a prompt in it. Teammates see `next-turn` next to your inbox, and a waiting message shows to its sender as `held` with the reason `next_turn`, so they know not to expect an immediate answer. Choose Herdr if messages should be handled while you're away. The next-turn inbox can be a Claude Code session or, with Codex 0.145.0 or later and its hooks trusted in `/hooks`, a Codex session (`"inbox": {"hook": "codex", "name": "<session name>"}`).
+**Next-turn delivery waits until the session is next used.** A message to an idle Claude Code session that nobody touches waits, durably queued, until someone starts the session or types a prompt in it. Teammates see `next-turn` next to your inbox, and a waiting message shows to its sender as waiting for your inbox's next turn (`inbox_next_turn`), so they know not to expect an immediate answer. Choose Herdr if messages should be handled while you're away. The next-turn inbox can be a Claude Code session or, with Codex 0.145.0 or later and its hooks trusted in `/hooks`, a Codex session (`"inbox": {"hook": "codex", "name": "<session name>"}`).
 
 For CLI only, skip steps 4–6 and go to step 7. The runtime needs a connector, so a CLI-only machine lists no agents and reports no client version; add an inbox later to get both.
 
@@ -170,7 +170,7 @@ cd ~/herdr/inbox-agent && RAINCLI_AGENT_NAME=raincli-inbox claude
 ```
 
 How next-turn delivery works:
-- A message for the inbox is written to a private file on this machine (local state `handed_over`). Its sender sees it as `held` with the reason `next_turn` until it is handed over.
+- A message for the inbox is written to a private file on this machine (local state `handed_over`). Its sender sees it as waiting for your inbox's next turn (`inbox_next_turn`) until it is handed over.
 - At the session's next start or prompt, the hook hands over every waiting message, oldest first, as additional context for that turn. The connector then marks each one `submitted`.
 - At most about **10,000 characters** are handed over per turn, because of Claude Code's limit on a hook's additional context. The rest waits for the following turn. A single message too large for a turn is held (`too_large_for_hook`) and never handed over; read it with `raincli show` instead.
 - A next-turn inbox waits for the session's next turn however long it is idle, as long as the runtime can see the session's process (Linux; Windows and macOS through a process lookup). Where it can't, an idle session counts as offline after 10 minutes and its messages wait for the next session. While the process is visible, the directory shows the session `idle`, and waiting messages are taken back only when the session ends or its process exits. The runtime can't see it when the executable isn't recognised, inside containers or a different pid namespace, or when the lookup fails; there, messages are held `offline` and the record is dropped after 1 hour. The process lookup is verified on Linux and Windows; on macOS it is implemented but not yet verified.
@@ -299,7 +299,7 @@ If the server can't be reached, `logout` keeps the local credential and exits no
 
 ## Messages, your inbox and replies
 
-**Address people, by email or by their name in your team.** A machine handle or `handle/agent` is refused with "Address people: send to *Name* (*email*)"; a name two teammates share lists both, so you can use the email.
+**Address people, by email or by their name in your team.** A machine handle or `handle/agent` is refused with "Address people: …" (naming the teammate when the handle is theirs); a name two teammates share lists both, so you can use the email.
 
 ```bash
 raincli send jon@example.com --body-file - --from-agent planner   # body from stdin; --from-agent: which of your agents writes
