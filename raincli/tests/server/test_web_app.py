@@ -855,7 +855,7 @@ def test_static_urls_carry_current_content_hash(client, world):
                 assert f'/static/{name}"' not in html  # never an unversioned URL
 
     # The homepage has its own layout (concept C); the other pages keep base.html.
-    check(("landing.css", "landing.js", "favicon.ico"), [client.get("/").text])
+    check(("landing.css", "landing.js", "demo-teams.css", "demo-teams.js", "favicon.ico"), [client.get("/").text])
     pages = [client.get("/login").text]
     login(client)
     pages.append(client.get("/app").text)
@@ -1006,7 +1006,8 @@ def test_every_web_html_redirect_and_error_response_is_no_store(client, world, s
 def test_hashed_static_urls_return_immutable(client):
     html = client.get("/").text
     urls = re.findall(r'(?:href|src)="(/static/[^"?]+\?v=[0-9a-f]{12})"', html)
-    assert {u.split("?")[0] for u in urls} == {"/static/landing.css", "/static/landing.js", "/static/favicon.ico",
+    assert {u.split("?")[0] for u in urls} == {"/static/landing.css", "/static/landing.js", "/static/demo-teams.css",
+                                               "/static/demo-teams.js", "/static/favicon.ico",
                                                "/static/mark.svg"}
     for url in urls:
         r = client.get(url)
@@ -1023,7 +1024,7 @@ def test_self_hosted_fonts_are_small_licensed_and_immutable(client):
     assert files and sum(f.stat().st_size for f in files) < 150 * 1024
     for family in ("NotoSerifDisplay", "JetBrainsMono"):  # every family shipped has its licence
         assert "SIL Open Font License" in (fonts / f"OFL-{family}.txt").read_text()
-    css = client.get("/static/app.css").text + client.get("/static/landing.css").text
+    css = "".join(client.get(f"/static/{name}").text for name in ("app.css", "landing.css", "demo-teams.css"))
     for f in files:
         assert f'url("fonts/{f.name}")' in css
         r = client.get(f"/static/fonts/{f.name}")

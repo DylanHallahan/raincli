@@ -125,7 +125,9 @@ def test_no_csp_violations_no_other_origins_and_the_layout(browser, live, artifa
         origin = urlparse(live).netloc
         assert log["requests"] and all(urlparse(u).netloc == origin for u in log["requests"]), log["requests"]
         fonts = sorted({urlparse(u).path for u in log["requests"] if "/fonts/" in urlparse(u).path})
-        assert fonts == ["/static/fonts/jetbrains-mono-regular-v2304.woff2",
+        assert fonts == ["/static/fonts/jetbrains-mono-bold-v2304.woff2",
+                         "/static/fonts/jetbrains-mono-medium-v2304.woff2",
+                         "/static/fonts/jetbrains-mono-regular-v2304.woff2",
                          "/static/fonts/noto-serif-display-light-italic-v2009.woff2",
                          "/static/fonts/noto-serif-display-light-v2009.woff2"], fonts  # self-hosted only
         assert not any(urlparse(u).path.endswith((".png", ".jpg")) for u in log["requests"])

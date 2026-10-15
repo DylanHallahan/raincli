@@ -76,7 +76,7 @@ SECTIONS = [
         "Already invited? Sign in",
     ]),
 ]
-ORDER = ["hero", "cli", "how", "works-with", "install", "security", "closing"]
+ORDER = ["hero", "adm", "cli", "how", "works-with", "install", "security", "closing"]
 HEADER = ["RainCLI", "CLI", "How it works", "Install", "Security", "GitHub", "Sign in", "Request access"]
 FOOTER = "RainCLI Free during the pilot TLS in transit · not end-to-end encrypted GitHub"
 MAILTO = "mailto:dylan@dylanhallahan.com"
@@ -192,8 +192,8 @@ def test_the_page_loads_only_its_own_css_js_and_fonts(home, client):
     from raincli_server import web
 
     static = Path(web.__file__).parent / "static"
-    assert re.findall(r'<link rel="stylesheet" href="/static/([^"?]+)', home) == ["landing.css"]
-    assert re.findall(r'<script src="/static/([^"?]+)', home) == ["landing.js"]
+    assert re.findall(r'<link rel="stylesheet" href="/static/([^"?]+)', home) == ["landing.css", "demo-teams.css"]
+    assert re.findall(r'<script src="/static/([^"?]+)', home) == ["landing.js", "demo-teams.js"]
     css = (static / "landing.css").read_text("utf-8")
     fonts = re.findall(r'url\("fonts/([^"]+)"\)', css)
     assert fonts == ["noto-serif-display-light-v2009.woff2", "noto-serif-display-light-italic-v2009.woff2",
@@ -375,3 +375,30 @@ def test_security_md_matches_the_code_and_the_readme():
     assert f"**{major_minor}.x**" in doc
     assert "dylan@dylanhallahan.com" in doc and "don't open a public GitHub issue" in doc
     assert "(SECURITY.md)" in readme
+
+
+def test_the_agent_teams_animation_sits_below_the_hero(home):
+    """demo-teams v3 "The Gap": its own full-width section right after the hero, separate from the app demo; a
+    canvas with a screen-reader text alternative; the pause rendered hidden with a fixed name; its own CSS and JS."""
+    from raincli_server import web
+
+    sections = re.findall(r'<section[^>]*\bid="([a-z-]+)"', home)
+    assert sections[:2] == ["hero", "adm"]
+    adm = re.search(r'<section class="adm" id="adm"[^>]*>(.*?)</section>', home, re.S).group(0)
+    assert 'aria-label="Animation: one agent asks a teammate&#39;s agent, through RainCLI"' in adm or \
+        "aria-label=\"Animation: one agent asks a teammate's agent, through RainCLI\"" in adm
+    assert '<div class="adm-stage" aria-hidden="true"><canvas></canvas></div>' in adm
+    assert "Maya and Jon, two people on the same team" in adm and "orders-contract.md" in adm
+    assert '<button class="adm-pp" type="button" aria-pressed="false" aria-label="Pause animation" hidden>' in adm
+    assert "wrap" not in adm.split(">", 1)[0]  # full width, outside the page's wrap
+    static = Path(web.__file__).parent / "static"
+    css = (static / "demo-teams.css").read_text("utf-8")
+    for weight, name in (("400", "regular"), ("500", "medium"), ("700", "bold")):
+        assert (f'font-family:"JetBrains Mono";font-style:normal;font-weight:{weight};font-display:swap;'
+                f'src:url("fonts/jetbrains-mono-{name}-v2304.woff2")') in css, weight
+    assert "fonts.googleapis" not in css and "data:" not in css and "url(http" not in css
+    readme = (static / "fonts" / "README.md").read_text("utf-8")
+    import hashlib
+    for name in ("medium", "bold"):
+        digest = hashlib.sha256((static / "fonts" / f"jetbrains-mono-{name}-v2304.woff2").read_bytes()).hexdigest()
+        assert digest in readme, name

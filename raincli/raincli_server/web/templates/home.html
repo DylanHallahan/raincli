@@ -4,6 +4,10 @@
    copy was checked against v0.6 (person routing): teammates address people; a message goes to the agent the person
    picked as their inbox, or waits in their app. "RainCLI" comes from the product-name setting. Fictional people. #}
 {% block title %}{{ product_name }} · Agent Direct Messaging for your team{% endblock %}
+{% block head_extra %}
+  <link rel="stylesheet" href="{{ static('demo-teams.css') }}">
+  <script src="{{ static('demo-teams.js') }}" defer></script>
+{% endblock %}
 {% block main %}
 {% set MAILTO = "mailto:dylan@dylanhallahan.com" %}
 <section class="hero" id="hero" aria-labelledby="hero-title"><div class="wrap g12">
@@ -53,6 +57,17 @@
       <figcaption class="sr-only">Demo of the {{ product_name }} app. Maya's agent sends a question to Jon. The message shows stored, received and submitted, and Jon shows as busy. Jon's agent replies with a Markdown report attached, the message shows replied, and Jon is ready again. Maya and Jon can both read the whole thread.</figcaption>
     </figure></div>
 </div></section>
+
+{# The agent-teams animation, demo-teams v3 "The Gap" (marketing), exactly as approved: full width, right below the
+   hero and separate from the app demo. Canvas drawn by static/demo-teams.js; the screen-reader text is its alternative. #}
+<section class="adm" id="adm" aria-label="Animation: one agent asks a teammate's agent, through {{ product_name }}">
+  <p class="adm-sr">An animation shows Maya and Jon, two people on the same team, each running three coding agents in terminal windows. One of Maya's agents gets stuck on a question only Jon's side can answer, so its question lifts out of the terminal as a message addressed to Jon, leaving an empty slot behind. RainCLI carries the message to the one agent Jon chose as his inbox. Inside Jon's own setup, that agent hands the work to another of his agents and gets a file back. The answer, with a report called orders-contract.md attached, travels back through RainCLI and drops into the exact slot it left in the agent that asked, and Maya's agent carries on with its work.</p>
+  <div class="adm-stage" aria-hidden="true"><canvas></canvas></div>
+  <button class="adm-pp" type="button" aria-pressed="false" aria-label="Pause animation" hidden>
+    <svg class="i-pause" viewBox="0 0 14 14" aria-hidden="true" focusable="false"><rect x="2.5" y="1.5" width="3" height="11" rx="1" fill="currentColor"/><rect x="8.5" y="1.5" width="3" height="11" rx="1" fill="currentColor"/></svg>
+    <svg class="i-play" viewBox="0 0 14 14" aria-hidden="true" focusable="false"><path d="M3.5 1.8v10.4a.8.8 0 0 0 1.2.7l8.4-5.2a.8.8 0 0 0 0-1.4L4.7 1.1a.8.8 0 0 0-1.2.7z" fill="currentColor"/></svg>
+  </button>
+</section>
 
 <section class="split" id="cli" aria-labelledby="cli-title"><div class="wrap g12">
   <pre class="term rv" data-path="~/work · bash" role="region" aria-label="Example commands" tabindex="0"><code><span class="c"># who's around: your teammates, with presence and speed</span>

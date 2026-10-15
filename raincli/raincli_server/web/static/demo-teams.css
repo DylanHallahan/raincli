@@ -1,0 +1,34 @@
+/* The homepage's agent-teams animation, demo-teams v3 "The Gap" (marketing), ported for the CSP: the draft's styles
+   minus its page and theme-override rules. The fonts are the site's own (static/fonts, README there); the canvas
+   asks for them by these family names. Light and dark follow prefers-color-scheme. Script: static/demo-teams.js. */
+@font-face{font-family:"RC Serif Display";font-style:normal;font-weight:300;font-display:swap;src:url("fonts/noto-serif-display-light-v2009.woff2") format("woff2")}
+@font-face{font-family:"RC Serif Display";font-style:italic;font-weight:300;font-display:swap;src:url("fonts/noto-serif-display-light-italic-v2009.woff2") format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/jetbrains-mono-regular-v2304.woff2") format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/jetbrains-mono-medium-v2304.woff2") format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/jetbrains-mono-bold-v2304.woff2") format("woff2")}
+.adm{--adm-bg:#f3eee4;--adm-card:#fbf8f2;--adm-ink:#1c1a16;--adm-rule:#d9cfbd;--adm-blue:#1f5fd1;
+  position:relative;width:100%;overflow:hidden;background:var(--adm-bg);-webkit-tap-highlight-color:transparent}
+@media (prefers-color-scheme:dark){.adm{--adm-bg:#13120f;--adm-card:#1b1915;--adm-ink:#efe8db;--adm-rule:#332e27;--adm-blue:#7aa7ff}}
+/* The stage's height, as the draft's script set it inline (here in CSS, so no style attribute): on a desktop the
+   width x 720/1180, clamped to 520-860 px; below 960 px the width x 800/390, at most 1200 px. */
+.adm-stage{position:relative;width:100%;aspect-ratio:1180/720;min-height:520px;max-height:860px}
+@media (max-width:959px){.adm-stage{aspect-ratio:390/800;min-height:0;max-height:1200px}}
+.adm-stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.adm-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+/* The pause (WCAG 2.2.2): invisible at rest; shown on a real mouse hover, on keyboard focus, or after a tap on a
+   touch screen (adm-touch-shown). A 44 px target around a 40 px circle. */
+.adm-pp{position:absolute;right:14px;bottom:14px;width:44px;height:44px;border-radius:50%;border:0;padding:0;
+  background:transparent;color:var(--adm-ink);display:grid;place-items:center;cursor:pointer;opacity:0;
+  transition:opacity .2s ease,transform .2s ease;isolation:isolate}
+.adm-pp[hidden]{display:none}
+.adm-pp::before{content:"";position:absolute;inset:2px;border-radius:50%;border:1px solid var(--adm-rule);background:var(--adm-card);
+  box-shadow:0 4px 14px rgba(0,0,0,.08);z-index:-1}
+.adm-pp svg{width:14px;height:14px;display:block}
+.adm-pp .i-play{display:none}
+.adm-pp[aria-pressed="true"] .i-play{display:block}
+.adm-pp[aria-pressed="true"] .i-pause{display:none}
+@media (hover:hover){.adm:hover .adm-pp{opacity:1}}
+.adm.adm-touch-shown .adm-pp{opacity:1}
+.adm-pp:focus-visible{opacity:1;outline:2px solid var(--adm-blue);outline-offset:1px}
+.adm-pp:active{transform:scale(.94)}
+.adm.is-still .adm-pp{display:none}

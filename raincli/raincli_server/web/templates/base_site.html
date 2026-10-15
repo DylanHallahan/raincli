@@ -28,6 +28,7 @@
   <link rel="preload" href="{{ url('/static/fonts/noto-serif-display-light-v2009.woff2') }}" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="{{ static('landing.css') }}">
   <script src="{{ static('landing.js') }}" defer></script>
+  {% block head_extra %}{% endblock %}
 </head>
 <body class="site">
   <a class="skip-link" href="#main">Skip to content</a>

@@ -24,5 +24,15 @@ Every font here is licensed under the SIL Open Font License 1.1, and each family
 
 - **Result:** SHA-256 `506247dc473b0d7af392796a47f99563d3426ddf8165c0a4c8a5152c2c3b12fc`, 7,868 bytes.
 
+### Medium and Bold (the homepage's agent-teams animation, `demo-teams.css`)
+- **Files:** `jetbrains-mono-medium-v2304.woff2` and `jetbrains-mono-bold-v2304.woff2`, the same Latin subset of JetBrains Mono Medium (500) and Bold (700). The animation draws its labels at 400, 500 and 700.
+- **Source:** the same official v2.304 release zip (SHA-256 `6f6376c6…7bbf`, as above):
+  - `fonts/ttf/JetBrainsMono-Medium.ttf`, SHA-256 `31c92d01a8a08528b718a43addf0ad3df0af2ca4b7b3290a452f70f358e14d3d`;
+  - `fonts/ttf/JetBrainsMono-Bold.ttf`, SHA-256 `5590990c82e097397517f275f430af4546e1c45cff408bde4255dad142479dcb`.
+- **Made with:** fontTools 4.67.0 `pyftsubset`, with the same options and `--unicodes` as Regular. Every character the animation draws (ASCII, `—`, `’`) is in that range; its check marks are drawn as paths.
+- **Results:**
+  - Medium: SHA-256 `993009a5ae2cd179441719fcbbe1eac957d54c2b3a825b1d8c937c2058c78440`, 7,964 bytes;
+  - Bold: SHA-256 `674c78f292c218e61b97e725a5e48269344096e005325bb0a9ef417a95a953a6`, 7,988 bytes.
+
 ## Versions in the filename
 The version is part of each filename because static files are served with `Cache-Control: immutable`, and the CSS refers to fonts by path. A new font ships under a new name.
