@@ -4,7 +4,9 @@
     RAINCLI_SHOTS_DIR=<dir> pytest tests/gui/shots_demo_teams_intro.py
 
 Time is Playwright's fake clock: the intro opens over the page, plays (frames at 1.6, 8.6 and 12.75 s of the
-sequence), ends and fades into the hero; then the hero with "Watch the intro", and the reopened intro.
+sequence), ends and fades into the hero; then the hero with "Watch the intro", and the reopened intro. Sizes: desktop
+1440x900, phone 390x844, and a short desktop window 1280x520 (review F1); the landscape phone 844x390 has no autoplay
+(review F4), so it is shot reopened from the link.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ OUT = Path(os.environ.get("RAINCLI_SHOTS_DIR") or "demo-teams-intro-screenshots"
 
 def test_screenshots(browser, live):  # noqa: F811
     OUT.mkdir(parents=True, exist_ok=True)
-    for size in ("desktop", "phone"):
+    for size in ("desktop", "phone", "short"):
         for scheme in ("light", "dark"):
             tag = f"{size}-{scheme}"
             context = new_context(browser, size=size, scheme=scheme)
@@ -51,6 +53,15 @@ def test_screenshots(browser, live):  # noqa: F811
             page.clock.run_for(4000)
             page.screenshot(path=str(OUT / f"reopened-{tag}.png"))
             context.close()
+    for scheme in ("light", "dark"):
+        context = new_context(browser, size="landscape", scheme=scheme)
+        page, _ = visit(context, live)
+        page.screenshot(path=str(OUT / f"landscape-phone-no-autoplay-{scheme}.png"))
+        page.click("[data-intro-open]")
+        ready(page)
+        page.clock.run_for(8500)
+        page.screenshot(path=str(OUT / f"landscape-phone-reopened-t08.60-{scheme}.png"))
+        context.close()
     for scheme in ("light", "dark"):
         context = new_context(browser, scheme=scheme, motion="reduce")
         page, _ = visit(context, live)

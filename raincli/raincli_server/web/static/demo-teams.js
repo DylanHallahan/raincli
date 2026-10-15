@@ -2,8 +2,8 @@
 // for the CSP (this file and static/demo-teams.css; the fonts self-hosted in static/fonts). The drawing, timing and
 // colours are exactly as approved; startAnimation() is the approved script with its root passed in, played once.
 // The controller at the end shows it as a full-viewport dialog over the page on a first visit (remembered in
-// localStorage), never under reduced motion, and again from "Watch the intro" (the composed still under reduced
-// motion). Skip, Esc, a scroll, a wheel, a touch or a click dismisses it at once; it fades into the hero when done.
+// localStorage; not under reduced motion, on a short landscape screen or without storage), and again from "Watch
+// the intro" (the composed still under reduced motion). Skip, Esc, a scroll, a wheel, a touch or a click dismisses it at once; it fades into the hero when done.
 (() => {
 "use strict";
 
@@ -992,18 +992,20 @@ function render(t, still = false) {
 }
 
 /* ---------- sizing ---------- */
+// One source of truth (review F1): the layout is chosen from the box the animation is fitted into (the intro's
+// full-viewport overlay), as the one that shows larger there, and set as a class (adm-desk / adm-phone). The CSS
+// sizes .adm and the stage's aspect from that class, and the canvas takes the stage's measured size, so the
+// backing store always has the element's proportions. Each layout is fitted whole, at most 1.5x its design size.
+function fitWidth(bw, bh, d, max) { return Math.min(bw, bh * d.w / d.h, max); }
 function resize() {
-  const W = Math.round(root.clientWidth) || 1;
-  const mode = W >= 960 ? "desk" : "phone";
-  let H, s;
-  if (mode === "desk") {
-    H = Math.round(clamp(W * 720 / 1180, 520, 860));
-    s = Math.min(W / 1180, H / 720);
-  } else {
-    s = Math.min(W / 390, 1.5);
-    H = Math.round(800 * s);
-  }
-  // The stage's height is the same formula in demo-teams.css (no inline style).
+  const box = root.closest(".adm-intro") || root.parentElement || root;
+  const bw = box.clientWidth || 1, bh = box.clientHeight || 1;
+  const dw = fitWidth(bw, bh, { w: 1180, h: 720 }, 1770), pw = fitWidth(bw, bh, { w: 390, h: 800 }, 585);
+  const mode = dw * dw * 720 / 1180 >= pw * pw * 800 / 390 ? "desk" : "phone";
+  root.classList.toggle("adm-desk", mode === "desk");
+  root.classList.toggle("adm-phone", mode !== "desk");
+  const W = Math.round(stage.clientWidth) || 1, H = Math.round(stage.clientHeight) || 1;
+  const s = mode === "desk" ? Math.min(W / 1180, H / 720) : Math.min(W / 390, H / 800);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
     canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
@@ -1088,8 +1090,8 @@ return {
 /* ---------- the first-visit intro ---------- */
 const KEY = "raincli-intro-seen";
 let seenThisPage = false;
-// "Seen" lives in localStorage. Any access can throw (private modes, blocked storage): then sessionStorage, and
-// failing that this page's memory, so it plays at most once per session.
+// "Seen" lives in localStorage. Any access can throw (private modes, blocked storage): then sessionStorage. When
+// neither can be written, markSeen() says so and the intro doesn't autoplay (it would replay on every visit).
 function seen() {
   if (seenThisPage) return true;
   for (const area of ["localStorage", "sessionStorage"]) {
@@ -1100,27 +1102,37 @@ function seen() {
 function markSeen() {
   seenThisPage = true;
   for (const area of ["localStorage", "sessionStorage"]) {
-    try { window[area].setItem(KEY, "1"); return; } catch (_) { /* try the next */ }
+    try { window[area].setItem(KEY, "1"); return true; } catch (_) { /* try the next */ }
   }
+  return false;
 }
 
 const template = document.getElementById("adm-intro");
 const reopen = document.querySelector("[data-intro-open]");
 const motionOff = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 let open = null;
+// html[data-intro-open] is set while the intro is open or about to open; landing.js holds the hero's app demo
+// meanwhile and re-checks on "raincli:intro" (review F2), so a first-time visitor sees that demo from its start.
+function setIntroOpen(on) {
+  if (on) document.documentElement.dataset.introOpen = "1";
+  else delete document.documentElement.dataset.introOpen;
+  document.dispatchEvent(new Event("raincli:intro"));
+}
 
 function close(how) {
   if (!open) return;
-  const { overlay, anim, cleanup } = open;
+  const { overlay, anim, cleanup, opener } = open;
   open = null;
   cleanup();
   anim.destroy();
   for (const el of document.body.children) {
     if (el !== overlay && el.dataset.introInert) { el.inert = false; el.removeAttribute("aria-hidden"); delete el.dataset.introInert; }
   }
-  // Focus goes back to the page's top: the hero's headline.
+  // Focus goes back to what opened it ("Watch the intro"), or after the first-visit autoplay to the page's top: the
+  // hero's headline.
   const h1 = document.getElementById("hero-title");
-  if (h1) { h1.setAttribute("tabindex", "-1"); h1.focus({ preventScroll: true }); }
+  if (opener && opener.isConnected) opener.focus({ preventScroll: true });
+  else if (h1) { h1.setAttribute("tabindex", "-1"); h1.focus({ preventScroll: true }); }
   if (how === "end" && !motionOff()) {
     overlay.classList.add("adm-intro-out");  // fade into the hero
     overlay.dataset.introState = "fading";
@@ -1129,10 +1141,12 @@ function close(how) {
     overlay.remove();  // a dismissal is instant
   }
   document.documentElement.dataset.introClosed = how;
+  setIntroOpen(false);
 }
 
-function show({ still, entering }) {
+function show({ still, entering, opener }) {
   if (open || !template) return;
+  setIntroOpen(true);
   const overlay = template.content.firstElementChild.cloneNode(true);
   if (entering) {  // it fades in over the page that has just painted
     overlay.classList.add("adm-intro-in");
@@ -1160,7 +1174,10 @@ function show({ still, entering }) {
     }
   };
   const onClick = e => { if (!(pause && pause.contains(e.target))) close(e.target === skip || skip.contains(e.target) ? "skip" : "click"); };
-  const onScroll = () => close("scroll");
+  // A scroll counts once the page has moved since the intro opened: a scroll event still in flight from before (the
+  // tap on "Watch the intro" that ended a scroll) doesn't close it.
+  const scrolledFrom = window.scrollY;
+  const onScroll = () => { if (Math.abs(window.scrollY - scrolledFrom) > 1) close("scroll"); };
   const onWheel = () => close("wheel");
   // A touch dismisses; preventDefault keeps its follow-up mouse events and click off the page underneath.
   const onTouch = e => { if (!(pause && pause.contains(e.target))) { e.preventDefault(); close("touch"); } };
@@ -1175,14 +1192,14 @@ function show({ still, entering }) {
     window.removeEventListener("wheel", onWheel);
     window.removeEventListener("touchstart", onTouch);
   };
-  open = { overlay, anim, cleanup };
+  open = { overlay, anim, cleanup, opener };
   skip.focus({ preventScroll: true });
   performance.mark("intro-shown");  // after the page's first paint (the tests compare the two)
 }
 
 if (reopen) {
   reopen.hidden = false;  // rendered hidden: without this script there is no intro to reopen
-  reopen.addEventListener("click", e => { e.preventDefault(); show({ still: motionOff() }); });
+  reopen.addEventListener("click", e => { e.preventDefault(); show({ still: motionOff(), opener: reopen }); });
 }
 // The page paints first: the intro shows only once the page has loaded and its fonts are in (so its own text has
 // painted), then two frames later; at most 2.5 s. The page's first paint and LCP are what they'd be without it.
@@ -1194,16 +1211,20 @@ function afterPagePaint(fn) {
   else window.addEventListener("load", settled, { once: true });
   setTimeout(go, 2500);
 }
+// It autoplays on a first visit only, never under reduced motion, nor on a short landscape screen (a phone on its
+// side, where it would be tiny), nor when "seen" can't be stored. "Watch the intro" works in every case.
 // Someone already using the page before it shows (a scroll, a click, a touch, a key) isn't interrupted.
-if (template && !motionOff() && !seen()) {
-  markSeen();
+const shortLandscape = () => window.innerHeight < 500 && window.innerWidth < 960;
+if (template && !motionOff() && !shortLandscape() && !seen() && markSeen()) {
+  setIntroOpen(true);  // pending: the hero's demo waits for it
   let busy = false;
   const used = () => { busy = true; };
   const events = ["scroll", "wheel", "pointerdown", "touchstart", "keydown"];
   for (const ev of events) window.addEventListener(ev, used, { passive: true, once: true });
   afterPagePaint(() => {
     for (const ev of events) window.removeEventListener(ev, used);
-    if (!busy) show({ still: false, entering: true });
+    if (busy) setIntroOpen(false);
+    else show({ still: false, entering: true });
   });
 }
 })();

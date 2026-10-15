@@ -9,10 +9,10 @@
 .adm{--adm-bg:#f3eee4;--adm-card:#fbf8f2;--adm-ink:#1c1a16;--adm-rule:#d9cfbd;--adm-blue:#1f5fd1;
   position:relative;width:100%;overflow:hidden;background:var(--adm-bg);-webkit-tap-highlight-color:transparent}
 @media (prefers-color-scheme:dark){.adm{--adm-bg:#13120f;--adm-card:#1b1915;--adm-ink:#efe8db;--adm-rule:#332e27;--adm-blue:#7aa7ff}}
-/* The stage's height, as the draft's script set it inline (here in CSS, so no style attribute): on a desktop the
-   width x 720/1180, clamped to 520-860 px; below 960 px the width x 800/390, at most 1200 px. */
-.adm-stage{position:relative;width:100%;aspect-ratio:1180/720;min-height:520px;max-height:860px}
-@media (max-width:959px){.adm-stage{aspect-ratio:390/800;min-height:0;max-height:1200px}}
+/* The stage's proportions follow the layout demo-teams.js chooses (adm-desk 1180x720, adm-phone 390x800), from the
+   same box it measures: never a viewport media query, so the canvas and its element always agree (review F1). */
+.adm-stage{position:relative;width:100%;aspect-ratio:1180/720}
+.adm-phone .adm-stage{aspect-ratio:390/800}
 .adm-stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 .adm-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 /* The pause (WCAG 2.2.2): invisible at rest; shown on a real mouse hover, on keyboard focus, or after a tap on a
@@ -34,25 +34,22 @@
 .adm.is-still .adm-pp{display:none}
 
 /* ---- the first-visit intro: a full-viewport dialog over the page (static/demo-teams.js shows it) ---- */
-.adm-intro{position:fixed;inset:0;z-index:100;display:grid;place-items:center;background:var(--adm-bg,#f3eee4);
-  --adm-bg:#f3eee4;opacity:1;transition:opacity .6s ease;overscroll-behavior:contain}
-@media (prefers-color-scheme:dark){.adm-intro{--adm-bg:#13120f}}
-.adm-intro.adm-intro-out{opacity:0;pointer-events:none}
-.adm-intro.adm-intro-in{opacity:0;transition:none}
-.adm-intro{transition:opacity .25s ease}
-.adm-intro.adm-intro-out{transition:opacity .6s ease}
-/* The animation as large as fits: its stage keeps its own proportions (above), so the width is limited by the
-   viewport's height. */
-.adm-intro .adm{width:min(100vw, calc(100vh * 1180 / 720))}
-@media (max-width:959px){.adm-intro .adm{width:min(100vw, calc(100vh * 390 / 800))}}
+.adm-intro{position:fixed;inset:0;z-index:100;display:grid;place-items:center;container-type:size;overscroll-behavior:contain;
+  --adm-bg:#f3eee4;--adm-card:#fbf8f2;--adm-ink:#1c1a16;--adm-rule:#d9cfbd;--adm-blue:#1f5fd1;
+  background:var(--adm-bg);opacity:1;transition:opacity .25s ease}
+@media (prefers-color-scheme:dark){.adm-intro{--adm-bg:#13120f;--adm-card:#1b1915;--adm-ink:#efe8db;--adm-rule:#332e27;--adm-blue:#7aa7ff}}
+.adm-intro.adm-intro-in{opacity:0;transition:none}                       /* just shown: fades in */
+.adm-intro.adm-intro-out{opacity:0;pointer-events:none;transition:opacity .6s ease}  /* played through: fades into the hero */
+@media (prefers-reduced-motion:reduce){.adm-intro,.adm-intro.adm-intro-out{transition:none}}
+/* The animation as large as fits in the overlay (container units: the box the script measures), its layout whole,
+   at most 1.5x its design size. The vw/vh lines are for browsers without container units. */
+.adm-intro .adm{width:min(100vw, calc(100vh * 1180 / 720), 1770px);width:min(100cqw, calc(100cqh * 1180 / 720), 1770px)}
+.adm-intro .adm.adm-phone{width:min(100vw, calc(100vh * 390 / 800), 585px);width:min(100cqw, calc(100cqh * 390 / 800), 585px)}
 .adm-skip{position:absolute;top:16px;right:16px;z-index:2;min-height:44px;min-width:44px;padding:0 18px;border-radius:999px;
   border:1px solid var(--adm-rule);background:var(--adm-card);color:var(--adm-ink);font:600 .9rem/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.08)}
-.adm-intro{--adm-card:#fbf8f2;--adm-ink:#1c1a16;--adm-rule:#d9cfbd;--adm-blue:#1f5fd1}
-@media (prefers-color-scheme:dark){.adm-intro{--adm-card:#1b1915;--adm-ink:#efe8db;--adm-rule:#332e27;--adm-blue:#7aa7ff}}
 .adm-skip:hover{border-color:var(--adm-ink)}
 .adm-skip:focus-visible{outline:2px solid var(--adm-blue);outline-offset:3px}
-@media (prefers-reduced-motion:reduce){.adm-intro{transition:none}}
 /* "Watch the intro", in the hero */
 .intro-link{margin-top:14px}
 .intro-link .link{margin-top:0;background:none;border:0;padding:0 2px;font:inherit;font-size:.92rem;cursor:pointer}

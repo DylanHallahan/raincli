@@ -1,7 +1,9 @@
 """The homepage's first-visit intro (demo-teams v3 "The Gap", round 4) in headless Chromium: a full-viewport dialog
 over the page on a first visit only, never under reduced motion; it plays once and fades into the hero; Skip, Esc,
 a scroll, a wheel, a touch or a click dismisses it at once and focus returns to the page's top; "Watch the intro"
-reopens it (the still under reduced motion). CSP-clean, self-hosted fonts only, first paint not delayed, the draft's
+reopens it (the still under reduced motion) and gets the focus back. No autoplay on a short landscape screen or
+without storage. The layout and the canvas follow one measured box at any window size, and the hero's app demo waits
+for the intro. CSP-clean, self-hosted fonts only, first paint not delayed, the draft's
 query hooks inert, the Safari no-blur fallback, no line tracing a message.
 
 Time is Playwright's fake clock (it drives requestAnimationFrame and setTimeout), so canvas frames compare exactly.
@@ -19,7 +21,8 @@ from .test_app_mode_gui import browser, live  # noqa: F401 - fixtures
 
 pytest.importorskip("playwright.sync_api")
 
-SIZES = {"desktop": (1440, 900), "phone": (390, 844)}
+SIZES = {"desktop": (1440, 900), "phone": (390, 844), "short": (1280, 520), "small": (960, 540),
+         "landscape": (844, 390)}
 OVERLAY = ".adm-intro"
 CANVAS = "() => document.querySelector('.adm-intro canvas').toDataURL()"
 OPACITY = "() => getComputedStyle(document.querySelector('.adm-intro .adm-pp')).opacity"
@@ -84,6 +87,10 @@ def overlay_count(page) -> int:
 
 def focus_on_top(page) -> bool:
     return page.evaluate("document.activeElement === document.getElementById('hero-title')")
+
+
+def focus_on_link(page) -> bool:
+    return page.evaluate("document.activeElement === document.querySelector('[data-intro-open]')")
 
 
 INERT_CLEARED = "Array.from(document.body.children).every((e) => !e.inert && !e.hasAttribute('aria-hidden'))"
@@ -175,18 +182,19 @@ def test_without_localstorage_session_storage_remembers_it(browser, live):  # no
         context.close()
 
 
-def test_with_all_storage_throwing_it_plays_once_and_nothing_breaks(browser, live):  # noqa: F811
+def test_with_all_storage_throwing_there_is_no_autoplay_but_the_link_works(browser, live):  # noqa: F811
+    """With nowhere to remember it, it would replay on every visit: no autoplay (review F3, main's call)."""
     context = new_context(browser, init=(NO_LOCAL, NO_SESSION))
     try:
         page, log = visit(context, live)
-        ready(page)
-        assert overlay_count(page) == 1
-        page.keyboard.press("Escape")
+        page.clock.run_for(3000)
         assert overlay_count(page) == 0
-        page.clock.run_for(2000)
-        assert overlay_count(page) == 0  # seen for the rest of this page
+        assert page.evaluate("!('introOpen' in document.documentElement.dataset)")  # the app demo isn't held
         page.click("[data-intro-open]")
-        assert overlay_count(page) == 1  # and it can still be reopened
+        ready(page)
+        assert overlay_count(page) == 1 and page.evaluate(STATE) == "playing"
+        page.keyboard.press("Escape")
+        assert overlay_count(page) == 0 and focus_on_link(page)
         assert log["console"] == [] and log["errors"] == [], log
     finally:
         context.close()
@@ -209,7 +217,7 @@ def test_reduced_motion_has_no_intro_and_the_link_shows_the_still(browser, live,
         assert frame(page) == still  # no motion
         assert not page.is_visible(".adm-intro .adm-pp")
         page.keyboard.press("Escape")
-        assert overlay_count(page) == 0 and focus_on_top(page)
+        assert overlay_count(page) == 0 and focus_on_link(page)  # back to the control that opened it
         assert log["console"] == [] and log["errors"] == []
     finally:
         context.close()
@@ -268,6 +276,17 @@ def test_watch_the_intro_reopens_it(browser, live):  # noqa: F811
         held = frame(page)
         page.clock.run_for(3000)
         assert frame(page) != held  # it plays again, from the start
+        page.locator("[data-intro-skip]").click()
+        assert overlay_count(page) == 0 and focus_on_link(page)  # focus returns to "Watch the intro" (review F5)
+        assert page.evaluate(INERT_CLEARED)
+        link.click()
+        ready(page)
+        for _ in range(120):  # played through (24 s): the fade, then focus on the link too
+            page.clock.run_for(250)
+            if overlay_count(page) == 0 or page.get_attribute(OVERLAY, "data-intro-state") == "fading":
+                break
+        assert page.evaluate("document.documentElement.dataset.introClosed") == "end"
+        assert focus_on_link(page)
     finally:
         context.close()
 
@@ -481,5 +500,83 @@ def test_someone_already_using_the_page_is_not_interrupted(browser, live):  # no
         assert overlay_count(page) == 0
         assert page.evaluate(f"localStorage.getItem('{KEY}')") == "1"  # still counted as seen
         assert page.is_visible("[data-intro-open]")
+    finally:
+        context.close()
+
+
+ASPECTS = """() => { const c = document.querySelector('.adm-intro canvas'), r = c.getBoundingClientRect(),
+    a = document.querySelector('.adm-intro .adm'), s = document.querySelector('.adm-intro .adm-stage').getBoundingClientRect();
+    return {css: r.width / r.height, backing: c.width / c.height, mode: a.classList.contains('adm-desk') ? 'desk' :
+            a.classList.contains('adm-phone') ? 'phone' : '',
+            fits: s.top >= -1 && s.bottom <= innerHeight + 1 && s.left >= -1 && s.right <= innerWidth + 1}; }"""
+
+
+@pytest.mark.parametrize("size,mode", [("short", "desk"), ("desktop", "desk"), ("small", "desk"), ("phone", "phone"),
+                                       ("landscape", "desk")])
+def test_the_canvas_has_the_elements_proportions_at_any_window_size(browser, live, size, mode):  # noqa: F811
+    """One source of truth (review F1): the layout is chosen from the box the animation is fitted into, and the
+    stage's aspect follows that choice, so the backing store is never squashed (it was 2.3x at 1280x520)."""
+    context = new_context(browser, size=size)
+    try:
+        page, log = visit(context, live)
+        if not overlay_count(page):  # a short landscape screen: no autoplay (review F4), so from the link
+            page.click("[data-intro-open]")
+        ready(page)
+        page.clock.run_for(2000)
+        got = page.evaluate(ASPECTS)
+        assert abs(got["backing"] / got["css"] - 1) < 0.01, (size, got)
+        design = 1180 / 720 if got["mode"] == "desk" else 390 / 800
+        assert abs(got["css"] / design - 1) < 0.01, (size, got)
+        assert got["mode"] == mode and got["fits"], (size, got)
+        assert log["errors"] == [] and page.locator("[style]").count() == 0
+    finally:
+        context.close()
+
+
+def test_a_short_landscape_screen_gets_no_autoplay_but_the_link_works(browser, live):  # noqa: F811
+    """A phone on its side (under 500 px tall and under 960 px wide): the intro would be tiny (review F4, main's
+    call). It isn't counted as seen, so it can still autoplay on a later visit upright."""
+    context = new_context(browser, size="landscape", touch=True)
+    try:
+        page, log = visit(context, live)
+        page.clock.run_for(3000)
+        assert overlay_count(page) == 0
+        assert page.evaluate(f"localStorage.getItem('{KEY}')") is None
+        page.click("[data-intro-open]")
+        ready(page)
+        assert overlay_count(page) == 1 and page.evaluate(STATE) == "playing"
+        assert log["errors"] == []
+    finally:
+        context.close()
+
+
+DEMO = """() => { const d = document.querySelector('[data-demo]'), a = d.getAnimations({subtree: true});
+    return {state: d.dataset.demoState, play: d.classList.contains('play'), t: a.length ? a[0].currentTime : null}; }"""
+
+
+def test_the_heros_app_demo_waits_for_the_intro(browser, live):  # noqa: F811
+    """Review F2: the app demo doesn't play unseen under the intro; it starts from its beginning (11.4 s, the
+    finished thread) once the intro closes."""
+    context = new_context(browser)
+    try:
+        page, _ = visit(context, live)
+        ready(page)
+        page.clock.run_for(5000)
+        page.wait_for_timeout(300)  # IntersectionObserver delivery and CSS animation time are real time
+        assert page.evaluate("document.documentElement.dataset.introOpen") == "1"
+        held = page.evaluate(DEMO)
+        assert held["state"] == "waiting" and not held["play"], held
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        assert page.evaluate("!('introOpen' in document.documentElement.dataset)")
+        now = page.evaluate(DEMO)
+        assert now["state"] == "playing" and now["play"] and 11400 <= now["t"] < 12500, now
+        page.click("[data-intro-open]")  # reopened: held again
+        ready(page)
+        page.wait_for_timeout(200)
+        assert page.evaluate(DEMO)["state"] == "waiting"
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+        assert page.evaluate(DEMO)["state"] == "playing"
     finally:
         context.close()

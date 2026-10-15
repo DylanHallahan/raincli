@@ -1,11 +1,11 @@
 // The homepage (concept C "Paper"). No inline styles: everything is a class or a Web Animations call.
 // - Header: a shadow once the page has scrolled; the phone menu closes after a link is chosen.
 // - Sections fade in as they reach the screen (not under reduced motion, and never without this script).
-// - The demo: a 16 s sequence that plays only while on screen and the tab is visible (off screen or hidden, it
-//   pauses), with one small pause button (WCAG 2.2.2) that shows only on hover, keyboard focus or, on a touch
-//   screen, after a tap on the window. It starts at 11.4 s, on the finished thread, so the first frame is never empty;
-//   after two plays it stops on the finished frame. Under reduced motion the CSS shows that frame straight away
-//   and nothing here touches it.
+// - The demo: a 16 s sequence that plays only while on screen, the tab is visible and the homepage's intro isn't open
+//   (html[data-intro-open], set by demo-teams.js); otherwise it pauses. One small pause button (WCAG 2.2.2) shows
+//   only on hover, keyboard focus or, on a touch screen, after a tap on the window. It starts at 11.4 s, on the
+//   finished thread, so the first frame is never empty; after two plays it stops on the finished frame. Under
+//   reduced motion the CSS shows that frame straight away and nothing here touches it.
 (function () {
   "use strict";
   var root = document.documentElement;
@@ -59,7 +59,7 @@
   }
   function apply() {
     if (done) return;
-    var hold = userPaused || !onScreen || document.visibilityState !== "visible";
+    var hold = userPaused || !onScreen || document.visibilityState !== "visible" || root.hasAttribute("data-intro-open");
     if (!hold && !started) {
       demo.classList.add("play");
       // The first play starts on the finished thread, so the first frame is never empty.
@@ -99,5 +99,6 @@
     onScreen = true;
   }
   document.addEventListener("visibilitychange", apply);
+  document.addEventListener("raincli:intro", apply);
   apply();
 }());
