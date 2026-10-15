@@ -2,7 +2,8 @@
 // - Header: a shadow once the page has scrolled; the phone menu closes after a link is chosen.
 // - Sections fade in as they reach the screen (not under reduced motion, and never without this script).
 // - The demo: a 16 s sequence that plays only while on screen and the tab is visible (off screen or hidden, it
-//   pauses), with one small pause button (WCAG 2.2.2) that shows only on hover or keyboard focus. It starts at 11.4 s, on the finished thread, so the first frame is never empty;
+//   pauses), with one small pause button (WCAG 2.2.2) that shows only on hover, keyboard focus or, on a touch
+//   screen, after a tap on the window. It starts at 11.4 s, on the finished thread, so the first frame is never empty;
 //   after two plays it stops on the finished frame. Under reduced motion the CSS shows that frame straight away
 //   and nothing here touches it.
 (function () {
@@ -44,6 +45,11 @@
     // Without .play nothing animates, and the CSS shows the finished frame (as under reduced motion).
     done = true;
     clearInterval(timer);
+    if (toggle && document.activeElement === toggle) {  // the pause goes; its focus moves to the demo itself
+      demo.setAttribute("tabindex", "-1");
+      demo.focus({preventScroll: true});
+    }
+    demo.classList.remove("touch-shown");
     demo.classList.remove("play", "paused");
     demo.setAttribute("data-demo-state", "done");
   }
@@ -65,12 +71,25 @@
     demo.setAttribute("data-demo-state", hold ? (userPaused ? "paused" : "waiting") : "playing");
   }
   // WCAG 2.2.2: the small pause (invisible at rest) pauses and resumes; scrolling away and back doesn't resume it.
-  if (toggle) toggle.addEventListener("click", function () {
-    userPaused = !userPaused;
-    toggle.setAttribute("aria-pressed", userPaused ? "true" : "false");
-    toggle.setAttribute("aria-label", userPaused ? "Play demo" : "Pause demo");
-    apply();
-  });
+  // Its name stays "Pause demo"; aria-pressed (true = paused) is the state, and the icon follows it in the CSS.
+  if (toggle) {
+    toggle.hidden = false;  // rendered hidden, so a page without this script has no dead control
+    toggle.addEventListener("click", function () {
+      userPaused = !userPaused;
+      toggle.setAttribute("aria-pressed", userPaused ? "true" : "false");
+      apply();
+    });
+    // A touch screen has no hover: a tap on the window shows the pause, and it stays until the demo stops or the
+    // person taps elsewhere on the page.
+    var touchOnly = window.matchMedia && window.matchMedia("(hover: none)").matches;
+    if (touchOnly) {
+      var frame = demo.querySelector(".win-wrap");
+      document.addEventListener("click", function (e) {
+        if (done) return;
+        demo.classList.toggle("touch-shown", frame.contains(e.target));
+      });
+    }
+  }
   if (window.IntersectionObserver) {
     new IntersectionObserver(function (entries) {
       entries.forEach(function (entry) { onScreen = entry.isIntersecting; });

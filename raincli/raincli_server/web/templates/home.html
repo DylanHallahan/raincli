@@ -45,8 +45,10 @@
         </div>
       </div>
       {# WCAG 2.2.2: an icon-only pause, invisible at rest (the user removed the visible controls); it shows while the
-         window is hovered or it has keyboard focus. Not inside .win, which is aria-hidden. #}
-      <button type="button" class="demo-toggle" data-demo-toggle aria-pressed="false" aria-label="Pause demo"><svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6v12M15 6v12"/></svg><svg class="i-play" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l11-6.5z"/></svg></button>
+         window is hovered or it has keyboard focus, and on a touch screen after a tap on the window. Not inside .win,
+         which is aria-hidden. Rendered hidden: landing.js reveals it, so without JavaScript there is no dead control.
+         Its name stays "Pause demo"; aria-pressed (true = paused) carries the state, the icon is visual only. #}
+      <button type="button" class="demo-toggle" data-demo-toggle aria-pressed="false" aria-label="Pause demo" hidden><svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6v12M15 6v12"/></svg><svg class="i-play" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l11-6.5z"/></svg></button>
       </div>
       <figcaption class="sr-only">Demo of the {{ product_name }} app. Maya's agent sends a question to Jon. The message shows stored, received and submitted, and Jon shows as busy. Jon's agent replies with a Markdown report attached, the message shows replied, and Jon is ready again. Maya and Jon can both read the whole thread.</figcaption>
     </figure></div>

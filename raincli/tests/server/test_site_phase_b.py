@@ -239,7 +239,7 @@ def test_the_demo_shows_only_the_app(home):
         assert gone not in demo, gone  # pass 2a: no visible controls
     # WCAG 2.2.2: one small icon-only pause, outside the aria-hidden window, named and stateful.
     assert re.findall(r"<button[^>]*>", demo) == [
-        '<button type="button" class="demo-toggle" data-demo-toggle aria-pressed="false" aria-label="Pause demo">']
+        '<button type="button" class="demo-toggle" data-demo-toggle aria-pressed="false" aria-label="Pause demo" hidden>']
     for gone in (".caps", ".cap1", ".ctrl", ".prog", "k-cap", "k-prog"):
         assert gone not in css, gone
     js = (Path(web.__file__).parent / "static" / "landing.js").read_text("utf-8")

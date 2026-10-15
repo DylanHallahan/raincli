@@ -241,7 +241,8 @@ def test_the_demo_just_plays_with_no_controls_or_captions(browser, live):  # noq
 
 def test_the_demo_pause_is_hidden_at_rest_and_works_by_keyboard(browser, live):  # noqa: F811
     """WCAG 2.2.2 with no visible chrome: the icon-only toggle is invisible at rest, Tab reaches it (and shows it), it
-    pauses and resumes, its name and aria-pressed follow, and scrolling away and back doesn't resume a pause."""
+    pauses and resumes, its name stays "Pause demo" while aria-pressed follows, and scrolling away and back doesn't
+    resume a pause."""
     context, page, _ = open_home(browser, live)
     try:
         page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
@@ -262,7 +263,8 @@ def test_the_demo_pause_is_hidden_at_rest_and_works_by_keyboard(browser, live): 
         assert "2px" in ring, ring  # the visible focus ring, inside the title bar
         assert (toggle.get_attribute("aria-label"), toggle.get_attribute("aria-pressed")) == ("Pause demo", "false")
         page.keyboard.press("Enter")
-        assert (toggle.get_attribute("aria-label"), toggle.get_attribute("aria-pressed")) == ("Play demo", "true")
+        # Review F2: the name stays; aria-pressed (true = paused) carries the state.
+        assert (toggle.get_attribute("aria-label"), toggle.get_attribute("aria-pressed")) == ("Pause demo", "true")
         assert page.evaluate(ANIMATIONS)["running"] == 0
         assert page.get_attribute("[data-demo]", "data-demo-state") == "paused"
         page.evaluate("document.getElementById('security').scrollIntoView()")
@@ -281,6 +283,65 @@ def test_the_demo_pause_is_hidden_at_rest_and_works_by_keyboard(browser, live): 
         page.hover(".hero .win")
         page.wait_for_timeout(250)
         assert page.evaluate(opacity) == "1"  # shown while the window is hovered
+    finally:
+        context.close()
+
+
+def test_the_demo_pause_on_a_touch_screen(browser, live):  # noqa: F811
+    """Main's decision on review F1: with no hover (a phone), nothing shows at rest; a tap on the demo window shows
+    the pause and it stays (focusable) until the demo stops or a tap elsewhere; the pause works."""
+    context = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True)
+    page = context.new_page()
+    try:
+        page.goto(live + "/", wait_until="load")
+        assert page.evaluate("matchMedia('(hover: none)').matches")
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
+        opacity = "getComputedStyle(document.querySelector('[data-demo-toggle]')).opacity"
+        assert page.evaluate(opacity) == "0"  # invisible at rest
+        page.tap(".hero .win", position={"x": 150, "y": 220})
+        page.wait_for_timeout(600)  # longer than a hover flash
+        assert page.evaluate(opacity) == "1"  # shown, and it stays
+        page.wait_for_timeout(600)
+        assert page.evaluate(opacity) == "1"
+        page.tap("[data-demo-toggle]")
+        toggle = page.locator("[data-demo-toggle]")
+        assert (toggle.get_attribute("aria-label"), toggle.get_attribute("aria-pressed")) == ("Pause demo", "true")
+        assert page.evaluate(ANIMATIONS)["running"] == 0
+        assert page.evaluate(opacity) == "1"
+        page.tap("#hero-title")  # elsewhere on the page
+        page.wait_for_timeout(400)
+        assert page.evaluate(opacity) == "0"
+        assert page.evaluate(ANIMATIONS)["running"] == 0  # hiding it doesn't resume a pause
+    finally:
+        context.close()
+
+
+def test_without_javascript_there_is_no_pause_button(browser, live):  # noqa: F811
+    """Review F5: the toggle is rendered hidden and only the script reveals it, so no JavaScript, no dead control."""
+    context = browser.new_context(viewport={"width": 1366, "height": 768}, java_script_enabled=False)
+    page = context.new_page()
+    try:
+        page.goto(live + "/", wait_until="load")
+        assert page.locator("[data-demo-toggle]").count() == 1
+        assert not page.is_visible("[data-demo-toggle]")
+        assert page.evaluate("getComputedStyle(document.querySelector('[data-demo-toggle]')).display") == "none"
+    finally:
+        context.close()
+
+
+def test_when_the_demo_stops_focus_moves_from_the_pause_to_the_demo(browser, live):  # noqa: F811
+    """Review F5: the pause goes when the demo stops; if it had focus, focus moves to the demo figure."""
+    context, page, _ = open_home(browser, live)
+    try:
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
+        page.locator("[data-demo-toggle]").focus()
+        page.evaluate("""() => document.querySelector('[data-demo]').getAnimations({subtree: true})
+            .forEach((a) => { a.currentTime = 16000 + 16000 + 12600; })""")
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'done'",
+                               timeout=5000)
+        assert page.evaluate("document.activeElement === document.querySelector('[data-demo]')")
+        assert page.get_attribute("[data-demo]", "tabindex") == "-1"
+        assert not page.is_visible("[data-demo-toggle]")
     finally:
         context.close()
 

@@ -1,5 +1,5 @@
 """Screenshots of the demo's pause (WCAG 2.2.2): at rest (invisible), hovered, focused by keyboard and paused, in
-light and dark, desktop and phone, and reduced motion (no toggle). Not collected by default. Run it explicitly:
+light and dark, desktop and phone, a touch screen (rest and after a tap), and reduced motion (no toggle). Not collected by default. Run it explicitly:
 
     RAINCLI_SHOTS_DIR=<dir> pytest tests/gui/shots_demo_toggle.py
 """
@@ -44,6 +44,18 @@ def test_screenshots(browser, live):  # noqa: F811
             page.wait_for_timeout(250)
             win.screenshot(path=str(OUT / f"toggle-paused-{tag}.png"))
             context.close()
+    for scheme in ("light", "dark"):  # a touch screen: nothing at rest; a tap on the window shows the pause
+        context = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True,
+                                      color_scheme=scheme)
+        page = context.new_page()
+        page.goto(live + "/", wait_until="load")
+        page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
+        win = page.locator(".hero .win-wrap")
+        win.screenshot(path=str(OUT / f"toggle-touch-rest-390-{scheme}.png"))
+        page.tap(".hero .win", position={"x": 150, "y": 220})
+        page.wait_for_timeout(600)
+        win.screenshot(path=str(OUT / f"toggle-touch-tapped-390-{scheme}.png"))
+        context.close()
     context = browser.new_context(viewport={"width": 1366, "height": 768}, reduced_motion="reduce")
     page = context.new_page()
     page.goto(live + "/", wait_until="networkidle")
