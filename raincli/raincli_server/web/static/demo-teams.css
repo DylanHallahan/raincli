@@ -32,3 +32,30 @@
 .adm-pp:focus-visible{opacity:1;outline:2px solid var(--adm-blue);outline-offset:1px}
 .adm-pp:active{transform:scale(.94)}
 .adm.is-still .adm-pp{display:none}
+
+/* ---- the first-visit intro: a full-viewport dialog over the page (static/demo-teams.js shows it) ---- */
+.adm-intro{position:fixed;inset:0;z-index:100;display:grid;place-items:center;background:var(--adm-bg,#f3eee4);
+  --adm-bg:#f3eee4;opacity:1;transition:opacity .6s ease;overscroll-behavior:contain}
+@media (prefers-color-scheme:dark){.adm-intro{--adm-bg:#13120f}}
+.adm-intro.adm-intro-out{opacity:0;pointer-events:none}
+.adm-intro.adm-intro-in{opacity:0;transition:none}
+.adm-intro{transition:opacity .25s ease}
+.adm-intro.adm-intro-out{transition:opacity .6s ease}
+/* The animation as large as fits: its stage keeps its own proportions (above), so the width is limited by the
+   viewport's height. */
+.adm-intro .adm{width:min(100vw, calc(100vh * 1180 / 720))}
+@media (max-width:959px){.adm-intro .adm{width:min(100vw, calc(100vh * 390 / 800))}}
+.adm-skip{position:absolute;top:16px;right:16px;z-index:2;min-height:44px;min-width:44px;padding:0 18px;border-radius:999px;
+  border:1px solid var(--adm-rule);background:var(--adm-card);color:var(--adm-ink);font:600 .9rem/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.08)}
+.adm-intro{--adm-card:#fbf8f2;--adm-ink:#1c1a16;--adm-rule:#d9cfbd;--adm-blue:#1f5fd1}
+@media (prefers-color-scheme:dark){.adm-intro{--adm-card:#1b1915;--adm-ink:#efe8db;--adm-rule:#332e27;--adm-blue:#7aa7ff}}
+.adm-skip:hover{border-color:var(--adm-ink)}
+.adm-skip:focus-visible{outline:2px solid var(--adm-blue);outline-offset:3px}
+@media (prefers-reduced-motion:reduce){.adm-intro{transition:none}}
+/* "Watch the intro", in the hero */
+.intro-link{margin-top:14px}
+.intro-link .link{margin-top:0;background:none;border:0;padding:0 2px;font:inherit;font-size:.92rem;cursor:pointer}
+.intro-link [hidden]{display:none}
+/* Where focus lands when the intro closes: a heading, not a control, so no ring. */
+#hero-title:focus{outline:none}

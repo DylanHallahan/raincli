@@ -93,10 +93,15 @@ def artifacts(tmp_path) -> Path:
     return path
 
 
+# These tests are about the page: as a returning visitor, so the first-visit intro (test_demo_teams_gui) stays shut.
+SEEN = "try { localStorage.setItem('raincli-intro-seen', '1'); } catch (e) {}"
+
+
 def open_home(browser, live, *, size="desktop", scheme="light", motion="no-preference"):
     width, height = SIZES[size]
     context = browser.new_context(viewport={"width": width, "height": height}, color_scheme=scheme,
                                   reduced_motion=motion, device_scale_factor=1)
+    context.add_init_script(SEEN)
     page = context.new_page()
     log = {"console": [], "requests": [], "errors": []}
     page.on("console", lambda m: log["console"].append(f"{m.type}: {m.text}") if m.type in ("error", "warning") else None)
@@ -125,9 +130,7 @@ def test_no_csp_violations_no_other_origins_and_the_layout(browser, live, artifa
         origin = urlparse(live).netloc
         assert log["requests"] and all(urlparse(u).netloc == origin for u in log["requests"]), log["requests"]
         fonts = sorted({urlparse(u).path for u in log["requests"] if "/fonts/" in urlparse(u).path})
-        assert fonts == ["/static/fonts/jetbrains-mono-bold-v2304.woff2",
-                         "/static/fonts/jetbrains-mono-medium-v2304.woff2",
-                         "/static/fonts/jetbrains-mono-regular-v2304.woff2",
+        assert fonts == ["/static/fonts/jetbrains-mono-regular-v2304.woff2",
                          "/static/fonts/noto-serif-display-light-italic-v2009.woff2",
                          "/static/fonts/noto-serif-display-light-v2009.woff2"], fonts  # self-hosted only
         assert not any(urlparse(u).path.endswith((".png", ".jpg")) for u in log["requests"])
@@ -293,10 +296,13 @@ def test_the_demo_pause_on_a_touch_screen(browser, live):  # noqa: F811
     """Main's decision on review F1: with no hover (a phone), nothing shows at rest; a tap on the demo window shows
     the pause and it stays (focusable) until the demo stops or a tap elsewhere; the pause works."""
     context = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True)
+    context.add_init_script(SEEN)
     page = context.new_page()
     try:
         page.goto(live + "/", wait_until="load")
         assert page.evaluate("matchMedia('(hover: none)').matches")
+        # on a phone the app demo sits below the hero (and its "Watch the intro" link): scroll it into view
+        page.evaluate("document.querySelector('[data-demo]').scrollIntoView({block: 'center', behavior: 'instant'})")
         page.wait_for_function("() => document.querySelector('[data-demo]').dataset.demoState === 'playing'")
         opacity = "getComputedStyle(document.querySelector('[data-demo-toggle]')).opacity"
         assert page.evaluate(opacity) == "0"  # invisible at rest

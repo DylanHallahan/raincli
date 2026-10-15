@@ -1,15 +1,17 @@
-// The homepage's agent-teams animation, demo-teams v3 "The Gap" (marketing), ported from demo-teams-v3.html for the
-// CSP: this file and static/demo-teams.css, the fonts self-hosted in static/fonts. The drawing, timing and colours are
-// exactly as approved. One Canvas 2D pass per frame, a pure function of time: it plays only while on screen and the
-// tab is visible, holds the composed end state under reduced motion, and has one small pause (hover, keyboard focus,
-// or a tap on a touch screen; nothing visible at rest).
+// The homepage's first-visit intro: the agent-teams animation, demo-teams v3 "The Gap" (marketing, round 4), ported
+// for the CSP (this file and static/demo-teams.css; the fonts self-hosted in static/fonts). The drawing, timing and
+// colours are exactly as approved; startAnimation() is the approved script with its root passed in, played once.
+// The controller at the end shows it as a full-viewport dialog over the page on a first visit (remembered in
+// localStorage), never under reduced motion, and again from "Watch the intro" (the composed still under reduced
+// motion). Skip, Esc, a scroll, a wheel, a touch or a click dismisses it at once; it fades into the hero when done.
 (() => {
 "use strict";
+
+function startAnimation(root, opts) {
 const T = 24;                                   // loop length, seconds
 // Production: no query-string hooks (the draft's ?t and ?theme are removed); the theme is prefers-color-scheme.
 const HOLD = null;
 
-const root = document.getElementById("adm");
 const stage = root.querySelector(".adm-stage");
 const canvas = stage.querySelector("canvas");
 const ctx = canvas.getContext("2d");
@@ -1012,32 +1014,37 @@ function resize() {
 }
 
 /* ---------- playback ---------- */
+// The draft looped; the intro plays the 24 s sequence once (it ends on empty paper, the page's own colour) and
+// calls opts.onEnd. opts.still: the composed end state, no motion (reduced motion). destroy() stops everything.
 const mqReduce = matchMedia("(prefers-reduced-motion: reduce)");
-let clock = 0, last = 0, raf = 0, userPaused = false, onScreen = true, ready = false;
+let clock = 0, last = 0, raf = 0, userPaused = false, onScreen = true, ready = false, ended = false, dead = false;
 const STILL_T = 22.75;
-function reduced() { return mqReduce.matches && HOLD == null; }
+function reduced() { return (mqReduce.matches || !!opts.still) && HOLD == null; }
 function draw() {
-  if (!ready) return;
+  if (!ready || dead) return;
   if (HOLD != null) render(HOLD, mqReduce.matches);
   else if (reduced()) render(STILL_T, true);
-  else render(clock % T);
+  else render(Math.min(clock, T - 1e-3));
 }
-function shouldPlay() { return ready && HOLD == null && !reduced() && !userPaused && onScreen && !document.hidden; }
+function shouldPlay() { return ready && !dead && !ended && HOLD == null && !reduced() && !userPaused && onScreen && !document.hidden; }
 function tick(now) {
   raf = 0;
   if (!shouldPlay()) return;
   const dt = last ? Math.min(.1, (now - last) / 1000) : 0;
-  last = now; clock = (clock + dt) % T;
-  render(clock);
+  last = now; clock = Math.min(T, clock + dt);
+  render(Math.min(clock, T - 1e-3));
+  if (clock >= T) { ended = true; root.dataset.admState = "ended"; if (opts.onEnd) opts.onEnd(); return; }
   raf = requestAnimationFrame(tick);
 }
 function update() {
+  if (dead) return;
   root.classList.toggle("is-still", HOLD == null && reduced());
   if (shouldPlay()) { if (!raf) { last = 0; raf = requestAnimationFrame(tick); } }
   else { if (raf) cancelAnimationFrame(raf); raf = 0; draw(); }
+  if (!ended) root.dataset.admState = reduced() ? "still" : shouldPlay() ? "playing" : userPaused ? "paused" : "waiting";
 }
 // The pause (WCAG 2.2.2): its name stays "Pause animation"; aria-pressed (true = paused) carries the state and the
-// icon follows it in the CSS. It is rendered hidden, so a page without this script has no dead control.
+// icon follows it in the CSS. It shows on a mouse hover or keyboard focus. (In the intro a touch dismisses it.)
 function setPaused(p) {
   userPaused = p;
   btn.setAttribute("aria-pressed", p ? "true" : "false");
@@ -1045,21 +1052,14 @@ function setPaused(p) {
 }
 btn.hidden = false;
 btn.addEventListener("click", () => setPaused(!userPaused));
-// A touch screen has no hover: a tap on the animation shows the pause, and it stays until a tap elsewhere.
-if (matchMedia("(hover: none)").matches) {
-  document.addEventListener("click", e => { root.classList.toggle("adm-touch-shown", root.contains(e.target)); });
-}
-// It starts only when really in view (review S1): 40% of the section, or of the viewport when the section is the
-// taller of the two (a landscape phone), so it doesn't start alongside the app demo at the desktop fold.
-new IntersectionObserver(es => {
-  const e = es[es.length - 1];
-  onScreen = e.isIntersecting && (e.intersectionRatio >= .4 || e.intersectionRect.height >= .4 * window.innerHeight);
-  update();
-}, { threshold: [0, .1, .2, .3, .4, .5, .6, .8, 1] }).observe(root);
+const io = new IntersectionObserver(es => { onScreen = es[es.length - 1].isIntersecting; update(); });
+io.observe(root);
+const ro = new ResizeObserver(resize);
+ro.observe(root);
+const onTheme = () => { pickTheme(); draw(); };
 document.addEventListener("visibilitychange", update);
 mqReduce.addEventListener("change", update);
-mqDark.addEventListener("change", () => { pickTheme(); draw(); });
-new ResizeObserver(resize).observe(root);
+mqDark.addEventListener("change", onTheme);
 window.addEventListener("resize", resize);
 
 pickTheme();
@@ -1068,7 +1068,142 @@ const fontsReady = Promise.all([
   document.fonts.load(`500 12px ${MONO}`), document.fonts.load(`700 12px ${MONO}`)
 ]).catch(() => {});
 Promise.race([fontsReady, new Promise(r => setTimeout(r, 1500))]).then(() => {
+  if (dead) return;
   ready = true; flightCache = null; resize(); update();
-  root.dataset.admReady = "1";  // the section's own ready mark (review N1), not a page-global one
+  root.dataset.admReady = "1";  // the animation's own ready mark (review N1), not a page-global one
 });
+return {
+  destroy() {
+    dead = true;
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0; io.disconnect(); ro.disconnect();
+    document.removeEventListener("visibilitychange", update);
+    mqReduce.removeEventListener("change", update);
+    mqDark.removeEventListener("change", onTheme);
+    window.removeEventListener("resize", resize);
+  }
+};
+}
+
+/* ---------- the first-visit intro ---------- */
+const KEY = "raincli-intro-seen";
+let seenThisPage = false;
+// "Seen" lives in localStorage. Any access can throw (private modes, blocked storage): then sessionStorage, and
+// failing that this page's memory, so it plays at most once per session.
+function seen() {
+  if (seenThisPage) return true;
+  for (const area of ["localStorage", "sessionStorage"]) {
+    try { if (window[area].getItem(KEY) === "1") return true; } catch (_) { /* try the next */ }
+  }
+  return false;
+}
+function markSeen() {
+  seenThisPage = true;
+  for (const area of ["localStorage", "sessionStorage"]) {
+    try { window[area].setItem(KEY, "1"); return; } catch (_) { /* try the next */ }
+  }
+}
+
+const template = document.getElementById("adm-intro");
+const reopen = document.querySelector("[data-intro-open]");
+const motionOff = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+let open = null;
+
+function close(how) {
+  if (!open) return;
+  const { overlay, anim, cleanup } = open;
+  open = null;
+  cleanup();
+  anim.destroy();
+  for (const el of document.body.children) {
+    if (el !== overlay && el.dataset.introInert) { el.inert = false; el.removeAttribute("aria-hidden"); delete el.dataset.introInert; }
+  }
+  // Focus goes back to the page's top: the hero's headline.
+  const h1 = document.getElementById("hero-title");
+  if (h1) { h1.setAttribute("tabindex", "-1"); h1.focus({ preventScroll: true }); }
+  if (how === "end" && !motionOff()) {
+    overlay.classList.add("adm-intro-out");  // fade into the hero
+    overlay.dataset.introState = "fading";
+    setTimeout(() => overlay.remove(), 700);
+  } else {
+    overlay.remove();  // a dismissal is instant
+  }
+  document.documentElement.dataset.introClosed = how;
+}
+
+function show({ still, entering }) {
+  if (open || !template) return;
+  const overlay = template.content.firstElementChild.cloneNode(true);
+  if (entering) {  // it fades in over the page that has just painted
+    overlay.classList.add("adm-intro-in");
+    requestAnimationFrame(() => requestAnimationFrame(() => overlay.classList.remove("adm-intro-in")));
+  }
+  const skip = overlay.querySelector("[data-intro-skip]");
+  if (still) skip.textContent = "Close";
+  document.body.appendChild(overlay);
+  // Everything else is inert while the dialog is open.
+  for (const el of document.body.children) {
+    if (el !== overlay && !el.inert) { el.inert = true; el.setAttribute("aria-hidden", "true"); el.dataset.introInert = "1"; }
+  }
+  const root = overlay.querySelector(".adm");
+  const anim = startAnimation(root, { still, onEnd: () => close("end") });
+  overlay.dataset.introState = still ? "still" : "playing";
+  const pause = root.querySelector(".adm-pp");
+  // Dismissal: Skip, Esc, a scroll, a wheel, a touch, or a click anywhere but on the pause.
+  const onKey = e => {
+    if (e.key === "Escape") { e.preventDefault(); close("escape"); return; }
+    if (e.key === "Tab") {  // the focus stays in the dialog
+      const items = [skip, pause].filter(el => el && !el.hidden && el.offsetParent !== null);
+      const i = items.indexOf(document.activeElement);
+      e.preventDefault();
+      items[(i + (e.shiftKey ? items.length - 1 : 1)) % items.length].focus();
+    }
+  };
+  const onClick = e => { if (!(pause && pause.contains(e.target))) close(e.target === skip || skip.contains(e.target) ? "skip" : "click"); };
+  const onScroll = () => close("scroll");
+  const onWheel = () => close("wheel");
+  // A touch dismisses; preventDefault keeps its follow-up mouse events and click off the page underneath.
+  const onTouch = e => { if (!(pause && pause.contains(e.target))) { e.preventDefault(); close("touch"); } };
+  document.addEventListener("keydown", onKey, true);
+  overlay.addEventListener("click", onClick);
+  window.addEventListener("scroll", onScroll, { passive: true });
+  window.addEventListener("wheel", onWheel, { passive: true });
+  window.addEventListener("touchstart", onTouch, { passive: false });
+  const cleanup = () => {
+    document.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("scroll", onScroll);
+    window.removeEventListener("wheel", onWheel);
+    window.removeEventListener("touchstart", onTouch);
+  };
+  open = { overlay, anim, cleanup };
+  skip.focus({ preventScroll: true });
+  performance.mark("intro-shown");  // after the page's first paint (the tests compare the two)
+}
+
+if (reopen) {
+  reopen.hidden = false;  // rendered hidden: without this script there is no intro to reopen
+  reopen.addEventListener("click", e => { e.preventDefault(); show({ still: motionOff() }); });
+}
+// The page paints first: the intro shows only once the page has loaded and its fonts are in (so its own text has
+// painted), then two frames later; at most 2.5 s. The page's first paint and LCP are what they'd be without it.
+function afterPagePaint(fn) {
+  let done = false;
+  const go = () => { if (!done) { done = true; requestAnimationFrame(() => requestAnimationFrame(fn)); } };
+  const settled = () => Promise.resolve(document.fonts && document.fonts.ready).then(go, go);
+  if (document.readyState === "complete") settled();
+  else window.addEventListener("load", settled, { once: true });
+  setTimeout(go, 2500);
+}
+// Someone already using the page before it shows (a scroll, a click, a touch, a key) isn't interrupted.
+if (template && !motionOff() && !seen()) {
+  markSeen();
+  let busy = false;
+  const used = () => { busy = true; };
+  const events = ["scroll", "wheel", "pointerdown", "touchstart", "keydown"];
+  for (const ev of events) window.addEventListener(ev, used, { passive: true, once: true });
+  afterPagePaint(() => {
+    for (const ev of events) window.removeEventListener(ev, used);
+    if (!busy) show({ still: false, entering: true });
+  });
+}
 })();

@@ -76,7 +76,7 @@ SECTIONS = [
         "Already invited? Sign in",
     ]),
 ]
-ORDER = ["hero", "adm", "cli", "how", "works-with", "install", "security", "closing"]
+ORDER = ["hero", "cli", "how", "works-with", "install", "security", "closing"]
 HEADER = ["RainCLI", "CLI", "How it works", "Install", "Security", "GitHub", "Sign in", "Request access"]
 FOOTER = "RainCLI Free during the pilot TLS in transit · not end-to-end encrypted GitHub"
 MAILTO = "mailto:dylan@dylanhallahan.com"
@@ -377,20 +377,23 @@ def test_security_md_matches_the_code_and_the_readme():
     assert "(SECURITY.md)" in readme
 
 
-def test_the_agent_teams_animation_sits_below_the_hero(home):
-    """demo-teams v3 "The Gap": its own full-width section right after the hero, separate from the app demo; a
-    canvas with a screen-reader text alternative; the pause rendered hidden with a fixed name; its own CSS and JS."""
+def test_the_intro_is_a_template_and_a_link_near_the_hero(home):
+    """demo-teams v3 as a first-visit intro: no section on the page (the under-hero placement is withdrawn); a
+    template the deferred script shows as a full-viewport dialog, with its screen-reader text, the canvas, the pause
+    rendered hidden and a Skip button; and a "Watch the intro" button in the hero, rendered hidden for no-JS."""
     from raincli_server import web
 
-    sections = re.findall(r'<section[^>]*\bid="([a-z-]+)"', home)
-    assert sections[:2] == ["hero", "adm"]
-    adm = re.search(r'<section class="adm" id="adm"[^>]*>(.*?)</section>', home, re.S).group(0)
-    assert 'aria-label="Animation: one agent asks a teammate&#39;s agent, through RainCLI"' in adm or \
-        "aria-label=\"Animation: one agent asks a teammate's agent, through RainCLI\"" in adm
-    assert '<div class="adm-stage" aria-hidden="true"><canvas></canvas></div>' in adm
-    assert "Maya and Jon, two people on the same team" in adm and "orders-contract.md" in adm
-    assert '<button class="adm-pp" type="button" aria-pressed="false" aria-label="Pause animation" hidden>' in adm
-    assert "wrap" not in adm.split(">", 1)[0]  # full width, outside the page's wrap
+    assert 'id="adm"' not in home and '<section class="adm"' not in home
+    tpl = re.search(r'<template id="adm-intro">(.*?)</template>', home, re.S).group(1)
+    assert ('<div class="adm-intro" role="dialog" aria-modal="true" aria-label="Intro: Agent Direct Messaging for '
+            'your team" aria-describedby="adm-intro-desc">') in tpl
+    assert '<p class="adm-sr" id="adm-intro-desc">' in tpl and "Maya and Jon, two people on the same team" in tpl
+    assert '<div class="adm-stage" aria-hidden="true"><canvas></canvas></div>' in tpl
+    assert '<button class="adm-pp" type="button" aria-pressed="false" aria-label="Pause animation" hidden>' in tpl
+    assert '<button type="button" class="adm-skip" data-intro-skip>Skip intro</button>' in tpl
+    hero = re.search(r'<section class="hero".*?</section>', home, re.S).group(0)
+    assert '<button type="button" class="link" data-intro-open hidden>Watch the intro</button>' in hero
+    assert re.search(r'<script src="/static/demo-teams\.js\?v=[0-9a-f]{12}" defer></script>', home)
     static = Path(web.__file__).parent / "static"
     css = (static / "demo-teams.css").read_text("utf-8")
     for weight, name in (("400", "regular"), ("500", "medium"), ("700", "bold")):
@@ -403,7 +406,6 @@ def test_the_agent_teams_animation_sits_below_the_hero(home):
         digest = hashlib.sha256((static / "fonts" / f"jetbrains-mono-{name}-v2304.woff2").read_bytes()).hexdigest()
         assert digest in readme, name
 
-
 def test_the_animations_text_alternative_names_the_product_from_the_setting(home):
     """Review N2: the screen-reader paragraph says the product's name from the setting, not a fixed "RainCLI"."""
     from pathlib import Path as P
@@ -411,7 +413,7 @@ def test_the_animations_text_alternative_names_the_product_from_the_setting(home
     from raincli_server import web
 
     template = (P(web.__file__).parent / "templates" / "home.html").read_text("utf-8")
-    sr = re.search(r'<p class="adm-sr">(.*?)</p>', template, re.S).group(1)
+    sr = re.search(r'<p class="adm-sr"[^>]*>(.*?)</p>', template, re.S).group(1)
     assert "RainCLI" not in sr and sr.count("{{ product_name }}") == 2
-    rendered = re.search(r'<p class="adm-sr">(.*?)</p>', home, re.S).group(1)
+    rendered = re.search(r'<p class="adm-sr"[^>]*>(.*?)</p>', home, re.S).group(1)
     assert "RainCLI carries the message" in rendered and "back through RainCLI" in rendered
