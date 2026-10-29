@@ -391,3 +391,19 @@ def test_presence_rows_for_groups(session, g):
     session.delete(session.get(AgentPresence, g["machines"]["priya"].id))
     session.commit()
     assert not groups.taking_part(session, g["teams"]["northwind"].id, g["people"]["Priya"].id)
+
+
+def test_capability_loss_withdraws_held_copies_too(client, session, g):
+    """H1: a copy a groups client stored and still holds (acked, held) is withdrawn when the machine goes back to an
+    older client: no older connector lists it, so it would never be delivered. Delivered ones stay."""
+    held_pid = post(client, g["t"]["maya"], g["checkout"], "held").json()["post"]["id"]
+    done_pid = post(client, g["t"]["maya"], g["checkout"], "done").json()["post"]["id"]
+    held, done = copies(session, held_pid)[g["machines"]["jon"].id], copies(session, done_pid)[g["machines"]["jon"].id]
+    for c, state in ((held, "held"), (done, "submitted")):
+        assert client.post(f"/api/v1/messages/{c.id}/ack", headers=auth(g["t"]["jon"])).status_code == 200
+        assert client.post(f"/api/v1/messages/{c.id}/events", headers=auth(g["t"]["jon"]),
+                           json={"state": state, "detail": "busy" if state == "held" else "delivered"}).status_code == 200
+    poll(client, g["t"]["jon"], groups_flag=False)  # the rolled-back connector's poll
+    session.expire_all()
+    assert session.get(Message, held.id).withdrawn_at is not None
+    assert session.get(Message, done.id).withdrawn_at is None

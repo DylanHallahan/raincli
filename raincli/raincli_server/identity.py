@@ -526,9 +526,10 @@ def remove_member(session: Session, team: Team, user: User, actor: User | None =
     # §22 M2: the person's group rows first (by id), then the memberships.
     from raincli_server import groups
     groups.lock_groups_of(session, user.id, team.id)
-    # Lock the team's memberships so two concurrent removals cannot both pass the last-owner check.
+    # Lock the team's memberships so two concurrent removals cannot both pass the last-owner check, by user id
+    # (§22.6: a post holds its recipients' rows in the same order, so the two never wait on each other in a cycle).
     rows = session.scalars(
-        select(Membership).where(Membership.team_id == team.id).with_for_update()
+        select(Membership).where(Membership.team_id == team.id).order_by(Membership.user_id).with_for_update()
         .execution_options(populate_existing=True)
     ).all()
     target = next((m for m in rows if m.user_id == user.id), None)
