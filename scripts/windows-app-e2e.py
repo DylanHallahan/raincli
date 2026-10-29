@@ -82,6 +82,16 @@ E. A stale or foreign saved setup (protocol §16.17, §16.18), each case on a fr
       (RainCLI's hooks written, the /hooks approval sentence), then Disconnect (§16.19 item 3).
    Skipped with --real.
 
+G. Group chats (protocol §22; brief "RainCLI group chats", screenshots 1-4 of the Windows window), on a fresh
+   install of this ref: the brief's screenshot seed in its own team (Maya, whose machine is the window's, signed in
+   from the CLI; Jon and Priya on groups clients; Sam with no inbox; Ryan on an old client; "checkout" with Maya,
+   Jon, Priya and Ryan, "infra" with Sam and Maya), made with the operator commands and the real API: Maya's post
+   from her machine's CLI (`raincli group send`), Jon's and Priya's replies through the API after acking their
+   copies. The window then opens the group at launch (D12) and is captured light and dark at 1180x780 and 760x520:
+   the list with the Groups section, the read-only thread ("Delivered to 2 of 2", no composer), the member panel
+   (Ryan and Sam "not taking part", no controls) and the launch. Screenshots go to build/e2e-artifacts
+   (groups-win-*). ``--only groups-shots`` runs just the server and this part. Skipped with --real.
+
 Release traffic goes to the REAL hostnames (api.github.com, github.com,
 objects.githubusercontent.com, release-assets.githubusercontent.com): a hosts-file entry points
 them at 127.0.0.1:443, where a fake release endpoint serves a certificate from a test root CA
@@ -1836,6 +1846,152 @@ def free_port():
         return s.getsockname()[1]
 
 
+# -- group chats: the brief's Windows-window screenshots (part G) ------------------------------------------------
+
+G_TEAM = "northwind"
+G_PEOPLE = {  # key: (display name, email); Dylan owns the team (the member panel's "Ask Dylan ...")
+    "dylan": ("Dylan", "g-dylan@example.invalid"), "maya": ("Maya", "g-maya@example.invalid"),
+    "jon": ("Jon", "g-jon@example.invalid"), "priya": ("Priya", "g-priya@example.invalid"),
+    "sam": ("Sam", "g-sam@example.invalid"), "ryan": ("Ryan", "g-ryan@example.invalid")}
+G_MACHINES = {"maya": "g-maya-laptop", "jon": "g-jon-laptop", "priya": "g-priya-laptop", "ryan": "g-ryan-laptop"}
+G_AGENTS = {"maya": "g-maya-inbox", "jon": "g-jon-api", "priya": "g-priya-web", "ryan": "g-ryan-old"}
+G_SIZES = ((1180, 780), (760, 520))
+G_ASK = "@Jon @Priya the orders API renamed `total` to `total_cents`. Check your side."
+
+
+def g_presence(server, token, agent, version):
+    """A presence report naming ``agent`` (idle, next-turn) and the client ``version`` (§14.1)."""
+    agents = [{"key": hashlib.sha256(agent.encode()).hexdigest()[:16], "name": agent, "type": "claude",
+               "status": "idle", "source": "hook", "reachability": "next-turn"}]
+    return api(server, token, "/api/v1/presence", {"status": "ready", "agents": agents, "client": {
+        "version": version, "update_mode": "manual", "update_state": "current"}}, method="PUT")
+
+
+def g_copy_of(server, token, post_id):
+    """The machine's copy of ``post_id`` from a ``groups=1`` poll (which also keeps the machine group-capable)."""
+    messages = api(server, token, "/api/v1/inbox?routing=1&groups=1&wait=0&limit=100").get("messages") or []
+    return next((m for m in messages if m.get("post_id") == post_id), None)
+
+
+def g_members(server):
+    return server.admin("group-members", G_TEAM, "checkout").stdout
+
+
+def part_g(app, server, installers, work):
+    """Group chats: the brief's Windows-window screenshots 1-4; see G in the module docstring."""
+    from playwright.sync_api import sync_playwright
+
+    passwords = {key: SECRETS.add(secrets.token_urlsafe(18)) for key in G_PEOPLE}
+    for key, (name, email) in G_PEOPLE.items():
+        server.admin("create-user", "--email", email, "--name", name, input=passwords[key] + "\n")
+    server.admin("create-team", "--slug", G_TEAM, "--name", "Northwind", "--owner", G_PEOPLE["dylan"][1])
+    for key in ("maya", "jon", "priya", "sam", "ryan"):
+        server.admin("add-member", "--team", G_TEAM, "--email", G_PEOPLE[key][1])
+    tokens = {}
+    for key in ("jon", "priya", "ryan"):  # their machines are API-only here; Maya's is the window's
+        staged = server.work / f"{G_MACHINES[key]}.json"
+        server.admin("register-agent", "--team", G_TEAM, "--owner", G_PEOPLE[key][1], "--handle", G_MACHINES[key],
+                     "--out", str(staged))
+        tokens[key] = SECRETS.add(json.loads(staged.read_text())["token"])
+        staged.unlink()
+    # G1. Maya's machine is the window's: a fresh install of this ref, signed in from the CLI.
+    app.install(NEW, installers, "groups")
+    app.quit()
+    login_through_conpty(app, server, passwords["maya"], G_MACHINES["maya"], email=G_PEOPLE["maya"][1])
+    tokens["maya"] = machine_token()
+    # Jon and Priya on a groups client; Ryan on an old one (0.5.6: never takes part); Sam has no inbox.
+    for key, version in (("jon", "0.6.1"), ("priya", "0.6.1"), ("ryan", "0.5.6")):
+        g_presence(server, tokens[key], G_AGENTS[key], version)
+    for key in ("maya", "jon", "priya", "ryan"):
+        server.admin("set-inbox", "--team", G_TEAM, "--email", G_PEOPLE[key][1], "--handle", G_MACHINES[key],
+                     "--agent", G_AGENTS[key], "--no-deliver-waiting")
+    # Maya's machine reports its own client (this ref's build) through the app's runtime; then groups=1 polls.
+    wait_for("the window machine's client version", lambda: ((entry(server, tokens["maya"], G_MACHINES["maya"]) or {})
+                                                            .get("machine") or {}).get("client_version"), timeout=240)
+    for key in ("maya", "jon", "priya"):
+        api(server, tokens[key], "/api/v1/inbox?routing=1&groups=1&wait=0&limit=1")  # groups=1: capable
+    emails = {key: G_PEOPLE[key][1] for key in G_PEOPLE}
+    server.admin("group-create", G_TEAM, "checkout", emails["maya"], emails["jon"], emails["priya"], emails["ryan"])
+    server.admin("group-create", G_TEAM, "infra", emails["sam"], emails["maya"])
+    # An older 1:1 conversation (Jon to Maya), so the list has both kinds and the group's post is the newest.
+    send(server, tokens["jon"], {"person": emails["maya"]}, "Is the orders migration done on your side?")
+    time.sleep(1)
+    # Maya's agent posts from her machine's CLI; Jon's and Priya's machines ack their copies and reply.
+    ask_id = str(uuid.uuid4())
+    app.cli("group", "send", "checkout", "--from-agent", G_AGENTS["maya"], "--body", G_ASK, "--id", ask_id)
+    replies = {"jon": "Done on my side: the client reads `total_cents`.", "priya": "Updated the web totals too."}
+    for key in ("jon", "priya"):
+        copy = wait_for(f"{key}'s copy of Maya's post", lambda: g_copy_of(server, tokens[key], ask_id), timeout=60)
+        api(server, tokens[key], f"/api/v1/messages/{copy['id']}/ack", {}, method="POST")
+        api(server, tokens[key], "/api/v1/messages", {"id": str(uuid.uuid4()), "in_reply_to": copy["id"],
+                                                     "body": replies[key], "from_agent": G_AGENTS[key]})
+        time.sleep(1)
+    for key in ("jon", "priya", "maya"):  # keep the groups clients capable for the member panel
+        api(server, tokens[key], "/api/v1/inbox?routing=1&groups=1&wait=0&limit=1")
+    members = g_members(server)
+    say("G seed, raincli-admin group-members:\n" + SECRETS.scrub(members))
+    for line in ("Maya\t" + emails["maya"] + "\ttaking part",
+                 "Jon\t" + emails["jon"] + "\ttaking part", "Priya\t" + emails["priya"] + "\ttaking part",
+                 "Ryan\t" + emails["ryan"] + "\tnot taking part"):
+        check(line in members, f"the seed's member list lacks {line!r}")
+    say("PASS: G1. the screenshot seed: northwind with Maya (the window's machine), Jon and Priya taking part, Ryan "
+        "on 0.5.6 and Sam with no inbox not taking part; checkout and infra by the operator; Maya's post from her "
+        "CLI, Jon's and Priya's replies after acking their copies; an older 1:1 message from Jon")
+
+    # G2. The window: it opens the group at launch (D12); then the four views, light and dark, at both sizes.
+    hidden = [G_MACHINES[k] for k in ("jon", "priya", "ryan")] + [G_AGENTS[k] for k in ("jon", "priya", "ryan")]
+    port = open_window_cdp(app)
+    with sync_playwright() as pw:
+        window = WindowCDP(pw, port)
+        page = window.page(("app/groups/", "app/inbox", "app/conversations/"), timeout=180)
+        wait_for("the launch to open the group", lambda: "/app/groups/" in url_of(page), timeout=60, interval=1)
+        page.wait_for_selector(".rc-post")
+        group_path = urlsplit(url_of(page)).path
+        hwnd = wait_for("the app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
+        scale = window_scale(hwnd)
+        for width, height in G_SIZES:
+            resize_window(hwnd, round(width * scale), round(height * scale))
+            wait_for(f"the page at about {width} px", lambda: abs(page.evaluate("innerWidth") - width) < 40,
+                     timeout=30, interval=0.5)
+            size = f"{width}x{height}"
+            for scheme in ("light", "dark"):
+                if (width, height) == G_SIZES[0] and scheme == "light":
+                    shot_name = f"groups-win-4-launch-opens-the-group-{size}-{scheme}"
+                    themed_shot(page, scheme, shot_name)  # the launch itself, before any navigation
+                else:
+                    page.click("nav.rc-nav a:has-text('Inbox')")  # Inbox opens the newest again: the group
+                    wait_for("Inbox to open the group", lambda: "/app/groups/" in url_of(page), timeout=60, interval=1)
+                    page.wait_for_selector(".rc-post")
+                    themed_shot(page, scheme, f"groups-win-4-launch-opens-the-group-{size}-{scheme}")
+                check(page.locator(".rc-post").count() == 3 and page.locator("textarea").count() == 0,
+                      "the group page has not three posts, or has a composer")
+                check(page.inner_text(".rc-delivered") == "Delivered to 2 of 2",
+                      f"Maya's post shows {page.inner_text('.rc-delivered')!r}")
+                themed_shot(page, scheme, f"groups-win-2-checkout-read-only-{size}-{scheme}")
+                page.click(".rc-members > summary")
+                panel = page.inner_text(".rc-members-panel")
+                check("Ryan" in panel and "not taking part" in panel and "Ask Dylan" in panel
+                      and page.locator(".rc-members-panel button, .rc-members-panel a, .rc-members-panel input").count() == 0,
+                      f"the member panel: {panel!r}")
+                themed_shot(page, scheme, f"groups-win-3-member-panel-{size}-{scheme}")
+                page.click(".rc-members > summary")
+                page.click(".rc-convs:not(.rc-groups) .rc-conv:has-text('Jon')")
+                page.wait_for_selector(".rc-thread")
+                check(page.locator(".rc-groups .rc-conv").count() == 2, "the list's Groups section lacks a group")
+                check(not list_fits(page), f"at {size} the list does not fit: {list_fits(page)}")
+                themed_shot(page, scheme, f"groups-win-1-list-with-groups-{size}-{scheme}")
+                found = [h for h in hidden if h in page.content()]
+                check(not found, f"teammates' machine or agent names on Maya's pages: {found}")
+        page.emulate_media(color_scheme="null")
+        page.goto(server.url + group_path)
+        window.close()
+    say("PASS: G2. the window opened checkout at launch (D12); the list with the Groups section, the read-only "
+        "thread (three posts, Delivered to 2 of 2, no composer), the member panel (Ryan not taking part, no "
+        "controls) and the launch, light and dark at 1180x780 and 760x520, in build/e2e-artifacts (groups-win-*)")
+    app.quit()
+    app.uninstall(signout=True, label="g")
+
+
 # -- stale or foreign setups (part E) --------------------------------------------------------------------
 
 OTHER_EMAIL, OTHER_TEAM = "e2e-other@example.invalid", "e2e-other-team"
@@ -2506,15 +2662,18 @@ def run_e2e(args, work, stack):
     server.work.mkdir()
     server.prepare()
     # Everything that needs the real GitHub happens before the hosts file changes.
-    old_venv = prepare_old_pip_client(work)
-    say(f"PASS: old pip client {OLD_PIP} installed from its release archive")
-    v051_venv = prepare_old_pip_client(work, OLD_V051)  # v0.6, not yet run on Windows (B2, C10.1)
-    say(f"PASS: pip client {OLD_V051} installed from its release archive")
-    managed = prepare_managed_install(work)
-    codex = None if args.real else codex_smoke.fetch_codex(work)  # before the hosts file: the real GitHub
-    stack.callback(lambda: release_e2e.kill_marked({str(managed)}))
-    say(f"PASS: managed {OLD_MANAGED} installed in {managed} through the real updater")
-    rollback = None if args.real else build_rollback_installer(work)
+    if args.only:  # part G alone needs none of the old clients, Codex or the rollback build
+        old_venv = v051_venv = managed = codex = rollback = None
+    else:
+        old_venv = prepare_old_pip_client(work)
+        say(f"PASS: old pip client {OLD_PIP} installed from its release archive")
+        v051_venv = prepare_old_pip_client(work, OLD_V051)  # v0.6, not yet run on Windows (B2, C10.1)
+        say(f"PASS: pip client {OLD_V051} installed from its release archive")
+        managed = prepare_managed_install(work)
+        codex = None if args.real else codex_smoke.fetch_codex(work)  # before the hosts file: the real GitHub
+        stack.callback(lambda: release_e2e.kill_marked({str(managed)}))
+        say(f"PASS: managed {OLD_MANAGED} installed in {managed} through the real updater")
+        rollback = None if args.real else build_rollback_installer(work)
     pg = Path(tempfile.gettempdir()) / f"raincli-app-pg-{secrets.token_hex(6)}"
     pg.mkdir()
     stack.callback(shutil.rmtree, pg, True)
@@ -2555,7 +2714,8 @@ def run_e2e(args, work, stack):
     if args.real:
         say(f"PASS: published installers of v{OLD} and v{NEW} downloaded and checksum-verified")
     else:
-        fake.add_release(rollback, BROKEN)
+        if rollback is not None:
+            fake.add_release(rollback, BROKEN)
         hosts = HostsEntry()
         hosts.add()
         stack.callback(hosts.remove)
@@ -2571,6 +2731,9 @@ def run_e2e(args, work, stack):
     check(not app.root.exists() and app.run_value() is None, "the runner already has a RainCLI app install")
     menu = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "RainCLI"
     stub_command = f'"{app.root}\\RainCLI.exe" --background'
+    if args.only == "groups-shots":
+        part_g(app, server, installers, work)
+        return
 
     # == A. a fresh install, signed in from the CLI ==========================================
     # A1. silent per-user install
@@ -2685,6 +2848,13 @@ def run_e2e(args, work, stack):
         say("SKIP: E. the published v0.4 installers have no v0.5.1 stale-setup handling")
     else:
         part_e(app, server, installers, password, observer, teammate, work, codex=codex)
+
+    # == G. group chats: the brief's Windows-window screenshots ===========================================
+    if args.real:
+        say("SKIP: G. the published v0.4 installers have no group pages")
+    else:
+        fresh_slate(app)
+        part_g(app, server, installers, work)
 
     # == B. an old pip client's foreground connector ============================================
     fresh_slate(app)
@@ -2881,7 +3051,11 @@ def main(argv=None):
     source.add_argument("--real", nargs=2, metavar=("FROM", "TO"),
                         help="published releases vX.Y.Z (v0.4.0 or later) whose installer assets to use")
     parser.add_argument("--server-python", help="an existing Python with raincli/requirements.lock installed")
+    parser.add_argument("--only", choices=("groups-shots",),
+                        help="run only the server and part G (the group chats screenshots)")
     args = parser.parse_args(argv)
+    if args.only and args.real:
+        parser.error("--only needs this ref's installers (--installers)")
     if args.real:
         tags = args.real
         if (not all(updates.TAG_RE.fullmatch(t) for t in tags) or updates.version_key(tags[0]) < (0, 4, 0)

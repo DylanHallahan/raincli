@@ -24,6 +24,12 @@ on:
         description: Published release to push (newer than real_from); used only with real_from
         required: false
         default: ''
+      only:
+        description: Run only one part on this ref's test installers (groups-shots, part G); empty runs everything
+        type: choice
+        options: ['', 'groups-shots']
+        required: false
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -67,8 +73,14 @@ jobs:
           # Only for the e2e's own api.github.com setup lookups (the unauthenticated limit is shared per runner IP);
           # the script removes it from its environment first, so nothing it launches inherits it.
           RAINCLI_E2E_GITHUB_TOKEN: ${{ github.token }}
+          # The input reaches the script as data, never as shell text; argparse allows only its one choice.
+          ONLY: ${{ inputs.only }}
         # The image's PostgreSQL (PGBIN) runs as a fresh initdb cluster on a random loopback port.
-        run: python scripts/windows-app-e2e.py --installers dist/e2e
+        shell: pwsh
+        run: |
+          if ($env:ONLY) { python scripts/windows-app-e2e.py --installers dist/e2e --only "$env:ONLY" }
+          else { python scripts/windows-app-e2e.py --installers dist/e2e }
+          exit $LASTEXITCODE
       - name: Install, sign in, update, downgrade, migrate and uninstall (published release assets)
         if: inputs.real_from != ''
         env:
