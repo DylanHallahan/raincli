@@ -1,0 +1,15 @@
+{# One post in a group's read-only thread (§22 G6). Rendered by the page and by GET /app/live, which needs: line. The
+   meta is "Jon · agent" (presentation), never a handle or an agent name. A reply names the post it answers; your
+   own agent's posts show "Delivered to N of M" (copy states only, PR5). No Reply link, no trail, never acked. #}
+{% from "_state.html" import time %}
+{% set p = line.post %}
+<li class="rc-msg rc-post{{ ' rc-out' if line.own else '' }}" id="p-{{ p.id }}" data-seq="{{ p.seq }}">
+  <span class="rc-avatar" aria-hidden="true">{{ line.initials or '?' }}</span>
+  <div class="rc-msg-body">
+    <div class="rc-who"><span><strong>{{ line.author }}</strong> · {{ time(p.created_at) }}</span></div>
+    {% if line.reply_to %}<p class="rc-post-reply">{% if line.reply_to_shown %}<a href="#p-{{ line.reply_to_id }}">Reply to {{ line.reply_to }}</a>{% else %}Reply to {{ line.reply_to }}{% endif %}</p>{% endif %}
+    {% if line.mentions %}<p class="rc-mentions"><span class="sr-only">Mentioned: </span>{% for name in line.mentions %}<span class="rc-mention">@{{ name }}</span>{% if not loop.last %}<span class="sr-only">, </span>{% endif %}{% endfor %}</p>{% endif %}
+    <div class="rc-msg-content"><div class="md">{{ p.body|markdown }}</div></div>
+    {% if line.delivered %}<p class="rc-delivered" data-delivered="{{ p.id }}">Delivered to {{ line.delivered[0] }} of {{ line.delivered[1] }}</p>{% endif %}
+  </div>
+</li>

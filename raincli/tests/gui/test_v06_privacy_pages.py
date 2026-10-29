@@ -18,6 +18,7 @@ import pytest
 from fastapi.routing import APIRoute
 from starlette.routing import Mount
 
+from conftest_groups import groups_seed  # noqa: F401  (fixture)
 from conftest_v06 import OWN_STRINGS, PASSWORD, TEAMMATE_STRINGS, v06_seed  # noqa: F401  (fixture)
 
 from .test_app_mode_gui import INSTALL_HASH, api, app_user_agent, browser, live  # noqa: F401
@@ -28,7 +29,8 @@ pytest.importorskip("playwright.sync_api")
 COVERED = {f"GET {p}" for p in (
     "/app", "/app/inbox", "/app/people", "/app/compose", "/app/conversations/{conversation_id}", "/app/archived",
     "/app/live", "/app/recipients", "/app/person-warning", "/app/agents", "/app/teams/{slug}", "/app/team",
-    "/app/account", "/app/local/{page}")} | {
+    "/app/account", "/app/local/{page}",
+    "/app/groups/{group_id}")} | {  # §22 G6: scanned on the group seed (test_group_pages_*)
     "POST /app/send",  # driven: the member's in-place sends, their JSON (message_html) scanned
     "POST /app/inbox",  # driven: picking her inbox from the banner, and a teammate's machine (refused)
     "POST /app/conversations/{conversation_id}/send",  # driven: refused sends by handle; a website send
@@ -292,6 +294,74 @@ def test_a_team_owner_sees_machines_and_versions_but_no_agents(live, browser, v0
                   "zq-agent-maya-notes"):
         assert agent not in machines and agent not in team, agent
     assert "zq-handle-lee" not in machines  # another team
+
+
+# §22 G6 (C19): the group pages, on the group seed ------------------------------------------------------------
+
+def _group_pages(scan, page, base, seed, label):
+    """The viewer's Inbox (which may open a group), every group page with its member panel open, after a poll, and
+    the live JSON of each group."""
+    _visit(scan, page, base, "/app/inbox", f"{label} inbox")
+    for name, group in seed["groups"].items():
+        _visit(scan, page, base, f"/app/groups/{group.id}", f"{label} group {name}")
+        if page.locator(".rc-members > summary").count():
+            page.click(".rc-members > summary")
+        page.evaluate("() => window.rcLive && window.rcLive.poll()")
+        page.wait_for_timeout(300)
+        scan.snapshot(page, f"{label} group {name}, members open, after a poll")
+        r = page.request.get(f"{base}/app/live?group={group.id}&after=0")
+        scan.texts.append((f"{label} GET /app/live?group={name}", json.dumps(dict(r.headers)) + " " + r.text()))
+
+
+def test_group_pages_never_show_a_members_machine_or_agent(live, browser, groups_seed):  # noqa: F811
+    """As the poster (Maya) and as a teammate in the group (Jon): posts show "<Name> · agent", never the machine, its
+    handle or the stated agent name (zq-agent-maya-laptop is the first post's author_agent_name); the member panel
+    shows people only."""
+    seed = groups_seed
+    scan = Scan(live)
+    context, page = _app(browser, live, seed["person_tokens"]["Maya"])
+    scan.watch(page)
+    try:
+        _group_pages(scan, page, live, seed, "maya")
+    finally:
+        context.close()
+    assert len(scan.texts) > 8 and any("Delivered to 2 of 2" in t for _, t in scan.texts)
+    assert scan.leaks(TEAMMATE_STRINGS) == []
+    assert scan.leaks(OWN_STRINGS, _own_allowed) == []
+    jon = Scan(live)
+    context, page = _app(browser, live, seed["person_tokens"]["Jon"])
+    jon.watch(page)
+    try:
+        _group_pages(jon, page, live, seed, "jon")
+    finally:
+        context.close()
+    assert any("Maya · agent" in t for _, t in jon.texts)
+    assert jon.leaks(OWN_STRINGS) == []  # Maya's machine and agent names, never on Jon's pages
+    strangers = tuple(s for s in TEAMMATE_STRINGS if not s.startswith(("zq-handle-jon", "zq-agent-jon")))
+    assert jon.leaks(strangers, _own_allowed) == []
+
+
+def test_group_pages_show_non_members_nothing(live, browser, groups_seed):  # noqa: F811
+    """Sam (in infra only) and Olive (the team owner, in neither): checkout reads like an unknown id, with nothing of
+    its members or posts."""
+    seed = groups_seed
+    for who in ("Sam", "Olive"):
+        scan = Scan(live)
+        context, page = _app(browser, live, seed["person_tokens"][who])
+        scan.watch(page)
+        try:
+            checkout = seed["groups"]["checkout"]
+            r = page.request.get(f"{live}/app/groups/{checkout.id}")
+            unknown = page.request.get(f"{live}/app/groups/{uuid.uuid4()}")
+            assert (r.status, r.text()) == (unknown.status, unknown.text()) and r.status == 404, who
+            _visit(scan, page, live, "/app/inbox", f"{who} inbox")
+        finally:
+            context.close()
+        for text in (t for _, t in scan.texts):
+            assert "checkout" not in text and str(checkout.id) not in text and "orders API" not in text, who
+        assert scan.leaks(tuple(s for s in TEAMMATE_STRINGS + OWN_STRINGS
+                                if not s.startswith((f"zq-handle-{who.lower()}", f"zq-agent-{who.lower()}")))
+                          , _own_allowed) == [], who
 
 
 # The poll's clock and the compose form's fresh message id differ on every fetch.

@@ -1,15 +1,16 @@
 {% extends "base_app.html" %}
 {% block title %}Inbox · {{ product_name }}{% endblock %}
 {# Below the app-mode breakpoint (browser only), Inbox shows the list; with no conversations, the first-run steps. #}
-{% block body_class %} rc-inbox{% if not conversations %} rc-first-run{% endif %}{% endblock %}
+{% block body_class %} rc-inbox{% if not conversations and not groups %} rc-first-run{% endif %}{% endblock %}
 {% block list %}{% with current_id=None %}{% include "app_mode/_conv_list.html" %}{% endwith %}{% endblock %}
 {% block main %}
 {# §20.6 M1, §20.7: app-mode.js opens the latest conversation only with this marker (a 0.5.5+ app window). #}
-{% if open_latest and conversations %}<div data-open-latest hidden></div>{% endif %}
+{# D12 (§22 G12 L4): it opens the link marked data-newest, a 1:1 conversation or a group, whichever is newest. #}
+{% if open_latest and (conversations or groups) %}<div data-open-latest hidden></div>{% endif %}
 {% include "app_mode/_owner_warnings.html" %}
 {% include "_inbox_banner.html" %}
 <div class="rc-scroll">
-  {% if conversations %}
+  {% if conversations or groups %}
   <div class="rc-center">
     <h2>Select a conversation</h2>
     <p class="rc-help">Message a teammate. Messages to you appear here.</p>

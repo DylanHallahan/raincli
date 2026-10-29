@@ -568,7 +568,12 @@ def _app_inbox(request: Request, db: Session, viewer: auth.Viewer, team_ids, row
     # §20.6 M1: Inbox keeps the owner's notice in its main pane as well as at the top of the list; computed once.
     banners = _inbox_banner(db, viewer)
     # §21 C7.3: while there is an inbox to pick, Inbox shows the banner; P2 (opening the latest conversation) waits.
+    from raincli_server.web import groups_pages
+
+    # D12 (§22 G12 L4): "open latest" opens the 1:1 conversation or the group with the newest activity.
+    newest = groups_pages.newest_activity(rows, extras["groups"])
     return render(request, "app_mode/inbox.html", viewer=viewer, conversations=rows,
+                  newest=newest, newest_id=newest[1] if newest else None,
                   owner_warnings=extras["list_owner_warnings"], banners=banners,
                   my_inbox=present.my_inbox(db, viewer.user, first_team), first_person=people[0] if people else None,
                   open_latest=present.opens_latest(viewer, request.headers.get("user-agent"))
@@ -590,6 +595,23 @@ def conversation(request: Request, conversation_id: str, reply_to: str = "", db:
         db.commit()
         view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id)
     return _conversation_page(request, db, viewer, view, reply_to=reply_to)
+
+
+@router.get("/app/groups/{group_id}", response_class=HTMLResponse)
+def group_page(request: Request, group_id: str, db: Session = Depends(get_db)):
+    """§22 G6 (D9): a group, read-only: its posts as "<Name> · agent" with mention chips and local times, "Delivered
+    to N of M" on the viewer's own agent's posts, and the member panel. No composer, no trail, no ack. App mode only
+    (no website pages in v1); anyone but a current member gets the unknown-id answer (D7)."""
+    from raincli_server.web import groups_pages
+
+    viewer = app_viewer(request, db, app_mode_ok=True)
+    view = groups_pages.group_view(db, viewer.user, viewer.scope, group_id) if viewer.app_mode else None
+    if view is None:
+        raise not_found()
+    return render(request, "app_mode/group.html", viewer=viewer, view=view, current_id=view.group.id,
+                  conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)),
+                  group_operator=groups_pages.GROUP_OPERATOR,
+                  live_now=identity.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"), **_list_extras(db, viewer))
 
 
 # Live updates in app mode (§19.1, §19.2) ---------------------------------------------------------------
@@ -630,6 +652,8 @@ def _live_list(request: Request, db: Session, viewer: auth.Viewer, current_id, c
         [[str(r.conversation.id), r.last.seq if r.last else 0, r.unacked, r.archived, r.name] for r in rows],
         [[w.handle, w.kind, w.since.isoformat() if w.since else None] for w in warnings],
         str(current_id or ""),
+        # §22 G6: the viewer's own groups only (id, latest post number, name, member count); nothing per copy.
+        [[str(g.group.id), g.latest_seq or 0, g.group.name, g.members_n] for g in extras["groups"]],
     ], separators=(",", ":"))
     rev = hashlib.sha256(digest.encode()).hexdigest()[:16]
     if rev == client_rev:
@@ -648,13 +672,17 @@ def _list_extras(db: Session, viewer: auth.Viewer) -> dict:
     section any more; only the owner's own notice."""
     from raincli_server.web import thread
 
+    from raincli_server import groups
+
     # §20.6 M1: the owner's "not connected" notice also sits at the top of the list on every app-mode page.
-    return {"list_owner_warnings": thread.owner_warnings(db, viewer.user, _team_ids(viewer))}
+    # §22 G6: the Groups section (the viewer's groups in the session's team, newest activity first); app mode only.
+    return {"list_owner_warnings": thread.owner_warnings(db, viewer.user, _team_ids(viewer)),
+            "groups": groups.groups_of(db, viewer.user, _team_ids(viewer)) if viewer.app_mode else []}
 
 
 @router.get("/app/live")
 def live(request: Request, conversation: str = "", after: int = 0, states_since: str = "", list_rev: str = "",
-         db: Session = Depends(get_db)):
+         group: str = "", db: Session = Depends(get_db)):
     """One call per open window every 5 s (§19.1): the open thread's new messages (rendered with the page's own
     templates and Markdown renderer), the viewer's own messages whose delivery state changed, the header's
     presence, the sender warning, and the conversation list when it changed. Indexed queries only: messages by
@@ -731,11 +759,43 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
         if warning is not None:  # null when there is none (§19.1); the client's empty slot is signed "none"
             warning_html = fragment(request, "_sender_warning.html", viewer, warning=warning)
             out["warning"] = {"kind": warning.kind, "html": warning_html, "sig": live_sig(warning_html)}
+    elif group:
+        current_id = _live_group(request, db, viewer, group, after, now, out)
     html, rev = _live_list(request, db, viewer, current_id, list_rev)
     out["list_rev"] = rev
     if html is not None:
         out["list"] = {"html": html}
     return JSONResponse(out, headers={"Cache-Control": "no-store"})  # application/json (§19.8 L5)
+
+
+def _live_group(request: Request, db: Session, viewer: auth.Viewer, group_id: str, after: int, now, out: dict):
+    """§22 G6: ``GET /app/live?group=<id>&after=<post number>``: the group's new posts (the same 30 s window as
+    messages, §19.8 M1: a post that committed late with a lower number comes again; the client merges by id), and
+    "Delivered to N of M" for the viewer's own agent's posts in view, from copy states only. Never acks."""
+    from raincli_server import groups
+    from raincli_server.models import GroupPost
+    from raincli_server.web import groups_pages
+
+    view_group = groups.visible_group(db, group_id, user=viewer.user, scope=viewer.scope)
+    if view_group is None:
+        raise not_found()
+    after = max(0, min(after, 2**63 - 1))
+    in_group = (GroupPost.conversation_id == view_group.id, GroupPost.team_id == view_group.team_id)
+    recent_window = now - LIVE_RECENT
+    newest_rows = (select(GroupPost.seq, GroupPost.created_at).where(*in_group)
+                   .order_by(GroupPost.seq.desc()).limit(LIVE_IN_VIEW).subquery())
+    recent_floor = db.scalar(select(func.min(newest_rows.c.seq)).where(newest_rows.c.created_at > recent_window))
+    lower = min(after, recent_floor - 1) if recent_floor is not None else after
+    fresh = list(db.scalars(
+        select(GroupPost).where(*in_group, GroupPost.seq > lower,
+                                or_(GroupPost.seq > after, GroupPost.created_at > recent_window))
+        .order_by(GroupPost.seq).limit(LIVE_PAGE)))
+    for line in groups_pages.post_lines(db, viewer.user, view_group, fresh, shown_ids=set()):
+        out["messages"].append({"id": str(line.post.id), "seq": line.post.seq,
+                                "html": fragment(request, "app_mode/_post.html", viewer, line=line)})
+    out["delivered"] = [{"id": str(pid), "text": groups_pages.delivered_text(n, m)}
+                        for pid, n, m in groups_pages.own_delivered(db, viewer.user, view_group)]
+    return view_group.id
 
 
 @router.post("/app/ack")
@@ -761,6 +821,8 @@ async def live_ack(request: Request, db: Session = Depends(get_db)):
         msg = db.get(Message, mid)
         # §21 H2: what the person sees in their app, to them or routed to their machines; person_ack refuses the rest
         if msg is None or msg.team_id not in _team_ids(viewer) or not messaging.is_unread_for(db, viewer.user.id, msg, owned):
+            continue
+        if msg.route == "group":  # §22 C18: nothing in a group is ever acked from the app
             continue
         try:
             _, done = messaging.person_ack(db, viewer.user, mid, viewer.scope)
