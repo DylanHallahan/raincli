@@ -97,14 +97,24 @@ class Agent:
                                    log=lambda line: None, sleep=lambda s: None, sessions_state=str(folder / "sessions"))
         self.seen = 0
         self.online = True
+        self.handed = {}  # copy id -> first hand-over time: a turn per DISTINCT copy (a re-prompt isn't a new turn)
+        self.cli_posts = []  # (t, post id) for each CLI success that printed "posted: <id>"
+        self.cli_other = []  # (t, first line) for CLI successes that didn't print a new post
 
     def note(self, kind):
         self.events.append((time.monotonic() - self.start, kind))
 
+    WAITING = ("received", "held", "agent_received", "agent_held", "attachment_pending")
+
     def local_backlog(self):
-        """Group records this connector has taken (acked) but not yet handed to its agent: turns still owed."""
-        waiting = ("received", "held", "agent_received", "agent_held", "attachment_pending")
-        return sum(1 for r in self.connector.queue.all() if r.get("group") and r.get("state") in waiting)
+        """Group records this connector has taken (stored AND acked) but not yet handed to its agent."""
+        return sum(1 for r in self.connector.queue.all()
+                   if r.get("group") and r.get("state") in self.WAITING and r.get("acked"))
+
+    def ack_pending(self):
+        """Group records stored locally whose ack the limit refused so far: the server still counts them untaken."""
+        return sum(1 for r in self.connector.queue.all()
+                   if r.get("group") and r.get("state") in self.WAITING and not r.get("acked"))
 
     def step(self, deadline):
         """One connector iteration, then a turn (and a group reply) for each copy handed to the agent."""
@@ -117,8 +127,16 @@ class Agent:
         new = self.herdr.prompts[self.seen:]
         self.seen = len(self.herdr.prompts)
         for _, text, _ in new:
-            self.note("turn")  # a copy handed to the agent: one agent turn
-            copy_id = text.split("\n", 1)[0].rsplit(" ", 1)[1].rstrip("]")
+            header = text.split("\n", 1)[0]
+            if not header.startswith("[RainCLI group post "):
+                self.note("one_to_one_prompt")  # the seed's 1:1 messages to this machine: not part of the loop
+                continue
+            copy_id = header.rsplit(" ", 1)[1].rstrip("]")
+            if copy_id in self.handed:
+                self.note("re_prompt")  # the same copy handed over again: not a new turn, no new reply
+                continue
+            self.handed[copy_id] = time.monotonic() - self.start
+            self.note("turn")  # a distinct copy handed to the agent: one agent turn
             left = deadline - time.monotonic()
             if left <= 0:
                 return
@@ -134,6 +152,11 @@ class Agent:
                 return
             if result.returncode == 0:
                 self.note("post")
+                first = (result.stdout.splitlines() or [""])[0]
+                if first.startswith("posted: "):
+                    self.cli_posts.append((time.monotonic() - self.start, first.split()[1]))
+                else:
+                    self.cli_other.append((time.monotonic() - self.start, first[:120]))
             elif "rate_limited" in result.stderr or "429" in result.stderr or "too many" in result.stderr:
                 self.note("post_refused_at_limit")
             else:
@@ -164,8 +187,9 @@ def test_three_always_reply_agents_for_ninety_seconds(live_default_limit, sessio
     for a in agents.values():  # the first poll makes each machine group-capable (0.6.1, groups=1)
         a.connector.run_once()
     from raincli_agent.api import ApiClient
+    kickoff = str(uuid.uuid4())
     ApiClient(url, s["machine_tokens"]["maya"]).group_post(group.id, "@Jon @Priya kick-off: reply to everything.",
-                                                           post_id=uuid.uuid4())
+                                                           post_id=kickoff)
     hard_stop = start + WINDOW
     samples = {"local_backlog": {n: [] for n in agents}, "server_unacked": [], "server_taken_not_handed": []}
 
@@ -200,33 +224,90 @@ def test_three_always_reply_agents_for_ninety_seconds(live_default_limit, sessio
     sample()
 
     session.expire_all()
-    posts = session.query(GroupPost).filter_by(conversation_id=group.id).count()
-    copies_total = session.query(Message).filter_by(conversation_id=group.id, route="group").count()
     minutes = 2
-    delivered = {name: [0] * minutes for name in agents}  # copies each connector took (its ack), by minute
+    names_by_machine = {mid: n for n, mid in machines.items()}
+
+    def minute_of(ts):
+        m = int((ts - start_wall).total_seconds() // 60)
+        return m if 0 <= m < minutes else None
+
+    # From the database, the source of truth: posts by author and minute (the scripted kick-off and the seed's
+    # three posts excluded: they aren't agent replies), and the copies each connector took (its ack) by minute.
+    run_posts = [p for p in session.query(GroupPost).filter(GroupPost.conversation_id == group.id,
+                                                          GroupPost.created_at >= start_wall)
+                 if str(p.id) != kickoff]
+    posted = {name: [0] * minutes for name in agents}
+    for p in run_posts:
+        m = minute_of(p.created_at)
+        if m is not None and p.author_agent_id in names_by_machine:
+            posted[names_by_machine[p.author_agent_id]][m] += 1
+    copies_total = session.query(Message).filter(Message.conversation_id == group.id, Message.route == "group",
+                                                 Message.created_at >= start_wall).count()
+    delivered = {name: [0] * minutes for name in agents}
+    acked_since_start = {name: 0 for name in agents}
     for copy in session.query(Message).filter(Message.conversation_id == group.id, Message.route == "group",
-                                              Message.acked_at.is_not(None)):
-        minute = int((copy.acked_at - start_wall).total_seconds() // 60)
-        name = next((n for n, mid in machines.items() if mid == copy.recipient_agent_id), None)
-        if name is not None and 0 <= minute < minutes:
-            delivered[name][minute] += 1
+                                              Message.acked_at >= start_wall):
+        name = names_by_machine.get(copy.recipient_agent_id)
+        if name is None:
+            continue
+        acked_since_start[name] += 1
+        m = minute_of(copy.acked_at)
+        if m is not None:
+            delivered[name][m] += 1
     per_agent = {name: {"copies_delivered_to_connector": delivered[name],
-                        "handed_to_agent_turns": _per_minute(a.events, "turn", minutes),
-                        "posts": _per_minute(a.events, "post", minutes),
+                        "handed_to_agent_turns": _per_minute(a.events, "turn", minutes),  # distinct copies
+                        "posts": posted[name],  # from group_posts
                         "refused_at_limit": [p + q for p, q in zip(_per_minute(a.events, "poll_refused", minutes),
                                                                    _per_minute(a.events, "post_refused_at_limit",
                                                                                minutes))],
                         "local_backlog_at_minute_end": [_at(samples["local_backlog"][name], 60),
                                                         _at(samples["local_backlog"][name], WINDOW + 1)],
-                        "requests": _per_minute(a.events, "request", minutes)}
+                        "requests": _per_minute(a.events, "request", minutes),
+                        "re_prompts": sum(1 for _, k in a.events if k == "re_prompt"),
+                        "one_to_one_prompts_ignored": sum(1 for _, k in a.events if k == "one_to_one_prompt")}
                  for name, a in agents.items()}
-    turns = sum(sum(v["handed_to_agent_turns"]) for v in per_agent.values())
+
+    # The identities the record rests on (R1). Copies a connector acked = distinct copies handed to its agent + its
+    # local backlog, give or take the few in flight (being handed over) when the samples were taken.
+    in_flight = {}
+    for name, a in agents.items():
+        handed = len(a.handed)
+        backlog_now = a.local_backlog()
+        in_flight[name] = acked_since_start[name] - handed - backlog_now
+        if abs(in_flight[name]) > 3:  # diagnose: which ids disagree, and what they are
+            server_ids = {str(c.id): c for c in session.query(Message).filter(
+                Message.recipient_agent_id == machines[name], Message.route == "group")}
+            local = {r["id"]: r for r in a.connector.queue.all() if r.get("group")}
+            backlog_ids = {i for i, r in local.items() if r.get("state") in a.WAITING and r.get("acked")}
+            acked_ids = {i for i, c in server_ids.items() if c.acked_at is not None and c.acked_at >= start_wall}
+            extra = (set(a.handed) | backlog_ids) - acked_ids
+            both = set(a.handed) & backlog_ids
+            raise AssertionError((name, acked_since_start[name], handed, backlog_now, len(both), sorted(
+                (local[i]["state"] if i in local else "-", str(server_ids[i].acked_at)[:26] if i in server_ids else "?",
+                 server_ids[i].created_at >= start_wall if i in server_ids else "?") for i in extra)))
+    # Every post the CLI reported is in the database, once; the database has no agent post the CLI didn't report.
+    cli_ids = [pid for a in agents.values() for _, pid in a.cli_posts]
+    db_ids = {str(p.id) for p in run_posts}
+    assert len(cli_ids) == len(set(cli_ids)) and set(cli_ids) <= db_ids, (len(cli_ids), len(db_ids))
+    unreported = db_ids - set(cli_ids)  # made by a reply the hard stop cut after the server stored it
+    assert sum(sum(v["posts"]) for v in per_agent.values()) == len(db_ids)
+
+    turns = sum(len(a.handed) for a in agents.values())
     requests = sum(sum(v["requests"]) for v in per_agent.values())
-    owed = copies_total - turns  # copies made that no agent has had yet: future turns
+    # Owed: copies no agent has had yet = each connector's acked backlog + the server's untaken copies (which include
+    # the records a connector stored but couldn't ack yet).
+    owed = sum(a.local_backlog() for a in agents.values()) + _at(samples["server_unacked"], WINDOW + 1)
     record = {
         "window_seconds": WINDOW, "stopped_after_seconds": stopped_after, "limit_per_minute_per_credential": 120,
-        "members_taking_part": 3, "posts_total": posts, "copies_total": copies_total,
+        "members_taking_part": 3, "agent_posts": len(db_ids), "copies_made": copies_total,
         "turns_taken": turns, "turns_owed_at_stop": owed,
+        "identities": {"acked_since_start": acked_since_start, "handed_distinct": {n: len(a.handed) for n, a in
+                                                                                   agents.items()},
+                       "local_backlog_at_stop": {n: a.local_backlog() for n, a in agents.items()},
+                       "stored_ack_pending_at_stop": {n: a.ack_pending() for n, a in agents.items()},
+                       "in_flight": in_flight, "posts_cli_reported": len(cli_ids), "posts_in_database": len(db_ids),
+                       "posts_stored_but_cut_at_stop": len(unreported),
+                       "cli_successes_without_a_new_post": sum(len(a.cli_other) for a in agents.values())},
         "requests_per_turn": round(requests / max(1, turns), 1),
         "turns_per_agent_minute": round(turns / 3 / (WINDOW / 60), 1),
         "copies_per_agent_minute": round(copies_total / 3 / (WINDOW / 60), 1),
@@ -242,12 +323,17 @@ def test_three_always_reply_agents_for_ninety_seconds(live_default_limit, sessio
     before = len(priya.herdr.prompts)
     time.sleep(61)  # the limit's window passes: she returns to a fresh minute, as after a real absence
     priya.connector.poll(0)  # one poll takes the whole backlog (up to 100 a page)
-    taken = priya.local_backlog()
+    taken = priya.local_backlog() + priya.ack_pending()
     turns_back = 0
-    for _ in range(taken + 5):  # every iteration hands over one copy: one turn each
+
+    def distinct_group_prompts():
+        return {text.split("\n", 1)[0].rsplit(" ", 1)[1].rstrip("]") for _, text, _ in priya.herdr.prompts[before:]
+                if text.startswith("[RainCLI group post ")}
+    for _ in range(taken + 5):  # every iteration hands over one copy: one turn each (acks the limit refused retried)
+        priya.connector.retry_acks()
         priya.connector.process_named()
         priya.connector.process()
-        turns_back = len(priya.herdr.prompts) - before
+        turns_back = len(distinct_group_prompts())
         if turns_back >= taken:
             break
     record["offline_return"] = {"offline_seconds": round(WINDOW - OFFLINE_FROM, 1), "copies_waiting_on_server": backlog,
@@ -257,9 +343,10 @@ def test_three_always_reply_agents_for_ninety_seconds(live_default_limit, sessio
     record["extrapolated_5_minutes"] = {
         "method": "the measured rates after the first 10 s held for 300 s; the general limit caps them, so the growth "
                   "is linear once it is reached",
-        "posts": round(posts / max(1.0, WINDOW - 10) * 300), "copies_made": round(copies_total / max(1.0, WINDOW - 10) * 300),
+        "posts": round(len(db_ids) / max(1.0, WINDOW - 10) * 300),
+        "copies_made": round(copies_total / max(1.0, WINDOW - 10) * 300),
         "turns_taken": round(rate * 300),
-        "turns_owed": round((copies_total - turns) / max(1.0, WINDOW - 10) * 300)}
+        "turns_owed": round(owed / max(1.0, WINDOW - 10) * 300)}
     out = os.environ.get("RAINCLI_C27_OUT")
     if out:
         Path(out).mkdir(parents=True, exist_ok=True)
@@ -268,16 +355,29 @@ def test_three_always_reply_agents_for_ninety_seconds(live_default_limit, sessio
     print(json.dumps(record, indent=2, default=str))
 
     # Evidence, not a gate: the loop ran, every copy went to a member other than its poster, and nothing was lost.
-    assert posts > 1 and copies_total >= 2 * (posts - 1)
+    assert len(db_ids) > 1 and copies_total >= 2 * len(db_ids)
     assert all(sum(v["handed_to_agent_turns"]) for v in per_agent.values())  # every agent took turns
     assert turns_back == taken  # the returning machine hands over its whole local backlog, one turn each
+
+
+def _identities(i):
+    return "; ".join(f"{n}: {i['acked_since_start'][n]} = {i['handed_distinct'][n]} + {i['local_backlog_at_stop'][n]}"
+                     + (f" {'+' if i['in_flight'][n] > 0 else '-'} {abs(i['in_flight'][n])} in flight"
+                        if i['in_flight'][n] else "") for n in i["acked_since_start"])
 
 
 def _markdown(r):
     lines = [f"# C27 record ({r['window_seconds']} s window, every agent stopped by {r['stopped_after_seconds']} s; "
              f"limit {r['limit_per_minute_per_credential']}/min per credential)", "",
-             f"- Posts: {r['posts_total']}; copies made: {r['copies_total']}; turns taken: {r['turns_taken']}; "
-             f"**turns owed at the stop: {r['turns_owed_at_stop']}** (copies made that no agent has had yet).",
+             f"- Agent posts (from the database, the scripted kick-off excluded): {r['agent_posts']}; copies made: "
+             f"{r['copies_made']}; turns taken (distinct copies handed to an agent): {r['turns_taken']}; "
+             f"**turns owed at the stop: {r['turns_owed_at_stop']}** (each connector's local backlog plus the "
+             "server's untaken copies: copies no agent has had yet).",
+             f"- The identities hold: for each agent, copies acked = distinct copies handed + local backlog, give "
+             f"or take the few in flight ({_identities(r['identities'])}); every post the CLI reported is in the "
+             f"database once ({r['identities']['posts_cli_reported']} reported, {r['identities']['posts_in_database']} "
+             f"stored; {r['identities']['posts_stored_but_cut_at_stop']} stored by a reply the hard stop cut before it "
+             "could print).",
              f"- Measured: about **{r['requests_per_turn']} requests per turn** (the connector's poll, ack and events, "
              "and the CLI's two for the reply).", "",
              "| Agent | Minute | Copies delivered to the connector | Handed to the agent (turns) | Posts | "
