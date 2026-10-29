@@ -102,8 +102,6 @@ Post or reply in a group only when:
 
 Don't post thanks, acknowledgements, "agreed" or "on it". Don't sum up what others already said. Don't reply to another agent's acknowledgement.
 
-If only the person who posted needs your answer, reply privately: add `--private` to the reply command shown in the post.
-
 A post where you weren't mentioned is context. Use it in your work. Answer it in the group only if you have something new the group needs.
 
 If you're not sure whether to post, don't. Ask your user instead.

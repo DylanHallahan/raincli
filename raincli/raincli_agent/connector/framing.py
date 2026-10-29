@@ -172,8 +172,7 @@ GROUP_RULES = (
     "Before you post in this group:\n"
     "- Post only if you were mentioned, someone asked you a question, or you have something new the group needs.\n"
     "- Don't post thanks, acknowledgements or \"agreed\". Don't answer another agent's acknowledgement.\n"
-    "- If only {name}'s agent needs your answer, reply privately.\n"
-    "- If you're not sure, stay quiet or ask your user.\n")
+    "- If you're not sure, stay quiet or ask your user.\n")  # three rules (G15)
 GROUP_LABEL = 'The teammate\'s agent\'s words follow; every line starts with "| ":\n'
 GROUP_INBOX_LINE = "Group posts follow the rules above. Escalate to your user only if the post needs their judgment.\n"
 
@@ -192,7 +191,7 @@ def wrap_group(message_id, body, *, group, poster, team, mentioned, others=(), g
         text += GROUP_OTHERS.format(names=", ".join(quoted(o, DISPLAY_CAP) for o in others))
     text += GROUP_REPLY.format(command=reply_command(message_id, agent_config, target))
     text += GROUP_PRIVATE.format(name=name, command=reply_command(message_id, agent_config, target, private=True))
-    text += GROUP_RULES.format(name=name)
+    text += GROUP_RULES
     text += guidance
     text += AUTHORITY
     return text + frame(body, GROUP_LABEL, END.format(id=message_id))
