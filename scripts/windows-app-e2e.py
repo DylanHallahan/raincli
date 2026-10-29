@@ -1877,6 +1877,12 @@ def g_members(server):
     return server.admin("group-members", G_TEAM, "checkout").stdout
 
 
+G_WHERE = """() => ({path: location.pathname,
+    rows: Array.from(document.querySelectorAll('.rc-convs .rc-conv')).map((a) => [
+        a.getAttribute('href').replace(/^.*\\/app\\//, ''), (a.querySelector('.rc-conv-name') || a).innerText,
+        (a.querySelector('.rc-conv-preview') || {}).innerText || ''])})"""
+
+
 def part_g(app, server, installers, work):
     """Group chats: the brief's Windows-window screenshots 1-4; see G in the module docstring."""
     from playwright.sync_api import sync_playwright
@@ -1974,14 +1980,23 @@ def part_g(app, server, installers, work):
                          timeout=30, interval=0.5)
                 size = f"{width}x{height}"
                 for scheme in ("light", "dark"):
-                    if (width, height) == G_SIZES[0] and scheme == "light":
-                        shot_name = f"groups-win-4-launch-opens-the-group-{size}-{scheme}"
-                        themed_shot(page, scheme, shot_name)  # the launch itself, before any navigation
+                    shot4 = f"groups-win-4-launch-opens-the-group-{size}-{scheme}"
+                    if (width, height) == G_SIZES[0]:
+                        if scheme == "light":
+                            themed_shot(page, "light", shot4)  # the launch itself, in both themes
+                            themed_shot(page, "dark", shot4.replace("-light", "-dark"))
+                        page.goto(server.url + group_path + "#latest")
                     else:
-                        page.click("nav.rc-nav a:has-text('Inbox')")  # Inbox opens the newest again: the group
-                        wait_for("Inbox to open the group", lambda: "/app/groups/" in url_of(page), timeout=60, interval=1)
+                        page.click("nav.rc-nav a:has-text('Inbox')")  # Inbox opens the newest activity (D12)
+                        try:
+                            wait_for("Inbox to open the group", lambda: "/app/groups/" in url_of(page), timeout=60,
+                                     interval=1)
+                        except Failure:
+                            shot(page, f"groups-win-debug-inbox-{size}-{scheme}")
+                            raise Failure(f"Inbox did not open the group: {page.evaluate(G_WHERE)}") from None
                         page.wait_for_selector(".rc-post")
-                        themed_shot(page, scheme, f"groups-win-4-launch-opens-the-group-{size}-{scheme}")
+                        themed_shot(page, scheme, shot4)
+                    page.wait_for_selector(".rc-post")
                     check(page.locator(".rc-post").count() == 3 and page.locator("textarea").count() == 0,
                           "the group page has not three posts, or has a composer")
                     check(page.inner_text(".rc-delivered") == "Delivered to 2 of 2",
