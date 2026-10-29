@@ -2157,3 +2157,30 @@ For a copy (`route = 'group'`), the connector frames:
 - the "Mentioned:" line: the other mentioned members, in stored order.
 
 Every quoted value is escaped as in the 1:1 frame. Both reply commands are the 1:1 reply command, the second with `--private`.
+
+### 22.10 The app's group pages (app mode only)
+**The website** has no group pages or rows in v1.
+
+**The list:**
+- **A Groups section** sits below the 1:1 conversations. It holds the viewer's groups in the session's team, newest
+  activity first, each with its name, member count and latest post's time, and no unread badge.
+- **The list revision** (`list_rev`, §19.8 L2) also covers each group's id, latest post number, name and member
+  count.
+
+**`GET /app/groups/{id}`, read-only:**
+- **Posts** are in post-number order, as "<Name> · agent", with `@Name` mention chips and local times. A reply names
+  the post it answers.
+- **Delivered:** the viewer's own agent's posts show "Delivered to N of M" (§22.5).
+- **The member panel** shows people only, with "not taking part" where it applies, and no controls.
+- **It has** no composer, no Reply link, no trail and nothing unread.
+- **Anyone but a current member,** including an app session in another team, gets the unknown-id answer.
+
+**`GET /app/live?group=<id>&after=<post number>`:**
+- **Posts:** the group's new posts, with the same 30 s late-commit window as messages (§19.8 M1), merged by id.
+- **Delivered:** `delivered: [{id, text}]` for the viewer's own posts among the newest 200.
+- **The list,** when it changed.
+- **It never acks;** `POST /app/ack` skips any group copy.
+
+**Open latest (D12):** Inbox opens the newest activity, compared by team number: the 1:1 conversation with the
+highest last message number, or the group with the highest post number. Both are numbers in the session's one team
+(§21.13).

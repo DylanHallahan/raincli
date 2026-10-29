@@ -5,14 +5,15 @@
   "use strict";
   var body = document.body;
 
-  // §20.6 M1 (P2): Inbox opens the latest conversation, the first in the list (ordered by last seq, archived ones
-  // excluded), when the list is visible: above the app-mode breakpoint. Below it, Inbox shows the list. A toast
+  // §20.6 M1 (P2): Inbox opens the latest conversation (archived ones excluded; with groups, the newest activity of
+  // either kind), when the list is visible: above the app-mode breakpoint. Below it, Inbox shows the list. A toast
   // opens its own thread directly (the handoff's ``next``), so it never passes through here.
   function openLatest() {
     // §20.7: only where the server marks it (an app whose hidden window keeps its page hidden, 0.5.5 or later).
     if (!body.classList.contains("rc-inbox") || !document.querySelector("[data-open-latest]")) return false;
     var list = document.querySelector("section.rc-list"), main = document.querySelector(".rc-main");
-    var first = list && list.querySelector(".rc-convs .rc-conv");
+    // D12 (§22 G12 L4): the server marks the newest activity, a 1:1 conversation or a group (data-newest).
+    var first = list && (list.querySelector(".rc-convs .rc-conv[data-newest]") || list.querySelector(".rc-convs .rc-conv"));
     // Above the breakpoint both show; below it Inbox shows only the list (its main pane is hidden), and stays.
     if (!first || !main || getComputedStyle(list).display === "none" || getComputedStyle(main).display === "none") return false;
     location.replace(first.href);

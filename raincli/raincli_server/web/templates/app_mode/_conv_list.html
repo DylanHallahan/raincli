@@ -10,7 +10,7 @@
   {# Day headings (Today, Yesterday, Earlier) are added by app.js in local time; without JavaScript there are none. #}
   <ul class="rc-convs" data-day-groups>
     {% for row in conversations %}
-    <li class="rc-conv-item"><a class="rc-conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}#latest" {% if current_id == row.conversation.id %}aria-current="page"{% endif %}>
+    <li class="rc-conv-item"><a class="rc-conv" href="{{ url('/app/conversations/' ~ row.conversation.id) }}#latest" {% if current_id == row.conversation.id %}aria-current="page"{% endif %}{% if newest_id is defined and newest_id == row.conversation.id %} data-newest{% endif %}>
       <span class="rc-conv-top"><span class="rc-conv-name">{{ row.name }}</span>{% if row.unacked %}<span class="rc-count" title="Not yet read">{{ row.unacked }}<span class="sr-only"> unread</span></span>{% endif %}<span class="rc-conv-time">{{ time(row.last.created_at if row.last else row.conversation.created_at) }}</span></span>
       {# §20.4 R8, §21: "You:" only for your own messages; your own agents' conversation names its sender ("Maya ·
          agent"); otherwise the text alone. #}
@@ -18,8 +18,21 @@
     </a></li>
     {% endfor %}
   </ul>
-  {% else %}
+  {% elif not groups %}
   <p class="rc-empty">No conversations yet.</p>
+  {% endif %}
+  {# §22 G6 (D9): the viewer's groups, newest activity first: the name, the member count, and no unread badge
+     (groups have no read state, C18). App mode only. #}
+  {% if groups %}
+  <h2 class="rc-list-sub" id="groups-title">Groups</h2>
+  <ul class="rc-convs rc-groups" aria-labelledby="groups-title">
+    {% for g in groups %}
+    <li class="rc-conv-item"><a class="rc-conv" href="{{ url('/app/groups/' ~ g.group.id) }}#latest" {% if current_id == g.group.id %}aria-current="page"{% endif %}{% if newest_id is defined and newest_id == g.group.id %} data-newest{% endif %}>
+      <span class="rc-conv-top"><span class="rc-conv-name"><svg class="rc-icon rc-group-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="9" r="3"/><circle cx="16.5" cy="10.5" r="2.5"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M14 19a4 4 0 0 1 7 0"/></svg>{{ g.group.name }}</span><span class="rc-conv-time">{{ time(g.latest_at) }}</span></span>
+      <span class="rc-conv-preview">{{ g.members_n }} member{{ '' if g.members_n == 1 else 's' }}</span>
+    </a></li>
+    {% endfor %}
+  </ul>
   {% endif %}
   {% include "app_mode/_whoami.html" %}
 </section>

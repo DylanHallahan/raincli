@@ -369,3 +369,28 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-dot.rc-presence-dot-ready { background: var(--rc-ok); }
 .rc-dot.rc-presence-dot-busy { background: var(--rc-warn); }
 .rc-people .rc-team-name { color: var(--rc-muted); }
+
+/* Group chats (§22 G6, D9): the list's Groups section, the read-only thread and the member panel. */
+.rc-list-sub { margin: var(--rc-s-4) var(--rc-s-3) var(--rc-s-1); font-size: var(--rc-fs-xs); font-weight: 600; color: var(--rc-muted);
+  text-transform: uppercase; letter-spacing: .04em; }
+.rc-groups .rc-conv-top { align-items: center; }
+.rc-groups .rc-conv-name { display: inline-flex; align-items: center; gap: var(--rc-s-1); }
+.rc-group-icon { color: var(--rc-muted); }
+.rc-post-reply { margin: 2px 0 0; font-size: var(--rc-fs-xs); color: var(--rc-muted); }
+.rc-mentions { margin: 4px 0 0; display: flex; flex-wrap: wrap; gap: var(--rc-s-1); }
+.rc-mention { font-size: var(--rc-fs-xs); font-weight: 600; padding: 1px var(--rc-s-2); border-radius: var(--rc-radius-pill);
+  background: var(--rc-accent-soft); color: var(--rc-accent); }
+.rc-delivered { margin: 6px 0 0; font-size: var(--rc-fs-xs); color: var(--rc-muted); }
+.rc-members { position: relative; flex: none; }
+.rc-members > summary { list-style: none; cursor: pointer; }
+.rc-members > summary::-webkit-details-marker { display: none; }
+.rc-members-panel { position: absolute; right: 0; top: calc(100% + var(--rc-s-1)); z-index: 5; width: min(300px, calc(100vw - 2 * var(--rc-s-3)));
+  max-height: min(420px, 70vh); overflow: auto; background: var(--rc-bg); border: 1px solid var(--rc-border); border-radius: var(--rc-radius);
+  box-shadow: var(--rc-shadow); padding: var(--rc-s-3); }
+.rc-members-panel h3 { margin: 0 0 var(--rc-s-2); font-size: var(--rc-fs-sm); }
+.rc-member-list { list-style: none; margin: 0 0 var(--rc-s-2); padding: 0; display: grid; gap: var(--rc-s-2); }
+.rc-member-list li { display: flex; align-items: center; gap: var(--rc-s-2); min-width: 0; }
+.rc-member-list .rc-avatar { width: 28px; height: 28px; }
+.rc-member-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-member-note { font-size: var(--rc-fs-xs); color: var(--rc-muted); white-space: nowrap; }
+.app-mode .rc-group-head > .rc-members { align-self: start; margin-top: 6px; }
