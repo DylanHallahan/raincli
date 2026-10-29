@@ -38,7 +38,7 @@ def make_group(session, team, name, members):
 def make_post(session, group, author, author_agent, body, *, mentions=(), in_reply_to=None, states=None):
     """A post by ``author`` (a machine) and one copy per member taking part other than the author's owner, as
     fan-out makes them. ``states``: a copy's delivery state by recipient person id (default "stored")."""
-    from raincli_server import groups
+    from raincli_server import groups, identity
     from raincli_server.models import GroupMember, GroupPost, Message, PersonInbox
 
     post = GroupPost(id=uuid.uuid4(), team_id=group.team_id, conversation_id=group.id, author_agent_id=author.id,
@@ -56,6 +56,8 @@ def make_post(session, group, author, author_agent, body, *, mentions=(), in_rep
                        route="group", post_id=post.id, sender_agent_id=author.id, sender_agent_name=author_agent,
                        recipient_agent_id=inbox.agent_id, recipient_agent_name=inbox.agent_name,
                        delivery_state=(states or {}).get(member.user_id, "stored"))
+        if copy.delivery_state != "stored":  # picked up by the member's machine
+            copy.acked_at = copy.created_at = identity.now()
         session.add(copy)
         copies.append(copy)
     post.recipients_m = len(copies)

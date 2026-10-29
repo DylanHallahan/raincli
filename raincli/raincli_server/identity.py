@@ -523,6 +523,9 @@ def remove_member(session: Session, team: Team, user: User, actor: User | None =
         m = membership(session, team.id, actor.id)
         if m is None or m.role != "owner":
             raise PermissionDenied("only team owners can remove members")
+    # §22 M2: the person's group rows first (by id), then the memberships.
+    from raincli_server import groups
+    groups.lock_groups_of(session, user.id, team.id)
     # Lock the team's memberships so two concurrent removals cannot both pass the last-owner check.
     rows = session.scalars(
         select(Membership).where(Membership.team_id == team.id).with_for_update()
@@ -533,6 +536,7 @@ def remove_member(session: Session, team: Team, user: User, actor: User | None =
         raise IdentityError("that user is not a member of this team")
     if target.role == "owner" and sum(1 for m in rows if m.role == "owner") <= 1:
         raise IdentityError("cannot remove the last owner of a team")
+    groups.leave_all(session, user.id, team.id)  # §22 G4: out of the team's groups, copies withdrawn
     session.delete(target)
     _revoke_owned_agents(session, user, team.id)
     _revoke_open_invitations(session, user, team.id)
@@ -547,6 +551,10 @@ def set_user_active(session: Session, user: User, active: bool, actor: User | No
         raise PermissionDenied("only the operator can enable or disable users")
     user.is_active = bool(active)
     if not active:
+        from raincli_server import groups
+        for team_id in session.scalars(select(Membership.team_id).where(Membership.user_id == user.id)):
+            groups.lock_groups_of(session, user.id, team_id)  # §22 M2: group rows first
+            groups.leave_all(session, user.id, team_id)  # out of every group, copies withdrawn
         bump_credential_epoch(user)  # §18.1: a disable ends every recognised device too
         _revoke_web_sessions(session, user)
         revoke_person_sessions(session, user_id=user.id)  # §16.12 C6
