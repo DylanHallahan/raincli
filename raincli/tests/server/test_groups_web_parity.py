@@ -29,8 +29,9 @@ def test_app_mode_answers_a_group_id_like_an_unknown_one(maya_app, groups_seed):
         post = lambda ident: maya_app.post(f"/app/conversations/{ident}/{verb}", data={"csrf_token": csrf},  # noqa
                                            follow_redirects=False)
         assert same_answer(post(gid), post(UNKNOWN)), verb
-    for page in ("/app/inbox", "/app/archived"):
-        assert gid not in maya_app.get(page).text, page
+    for page in ("/app/inbox", "/app/archived"):  # the app's Groups section links /app/groups/<id> (§22.10)
+        assert f"/app/conversations/{gid}" not in maya_app.get(page).text, page
+    assert gid not in maya_app.get("/app/archived").text
 
 
 def test_the_website_answers_a_group_id_like_an_unknown_one(client, groups_seed):  # noqa: F811

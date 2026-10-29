@@ -8,6 +8,8 @@
 // Read state (§19.2, §19.8 M3): a message to you is acknowledged only when the window has focus and its visible
 // height is at least min(half the message, half the viewport) (POST /app/ack). Loading by poll never acks.
 // The cursors are hints (§19.8 M1): each reply may repeat recent messages and current states; both merge by id.
+// A group page (§22 G6) polls with group= instead: its new posts (#p-<id>) and "Delivered to N of M" on the viewer's
+// own agent's posts. Nothing on a group page is ever acked (no post carries data-unread).
 (function () {
   "use strict";
   var body = document.body;
@@ -16,6 +18,8 @@
   var ackUrl = body.getAttribute("data-ack-url");
   var config = document.querySelector("[data-live]");
   var conversation = config ? config.getAttribute("data-conversation") : "";
+  var group = config ? config.getAttribute("data-group") || "" : "";
+  var idPrefix = group ? "p-" : "m-";
   var after = config ? Number(config.getAttribute("data-after")) || 0 : 0;
   var statesSince = config ? config.getAttribute("data-states-since") || "" : "";
   var csrf = config ? config.getAttribute("data-csrf") || "" : (body.getAttribute("data-csrf") || "");
@@ -55,7 +59,7 @@
     var added = null;
     items.forEach(function (item) {
       if (item.seq > after) after = item.seq;
-      if (document.getElementById("m-" + item.id)) return;  // merged by id (§19.8 M1)
+      if (document.getElementById(idPrefix + item.id)) return;  // merged by id (§19.8 M1)
       var li = firstElement(item.html);
       if (!li) return;
       li.classList.add("rc-arrived");
@@ -149,6 +153,7 @@
     inFlight = true;
     var q = "after=" + encodeURIComponent(after) + "&list_rev=" + encodeURIComponent(listRev);
     if (conversation) q += "&conversation=" + encodeURIComponent(conversation) + "&states_since=" + encodeURIComponent(statesSince);
+    else if (group) q += "&group=" + encodeURIComponent(group);
     fetch(liveUrl + "?" + q, {credentials: "same-origin", headers: {"Accept": "application/json"}, cache: "no-store"})
       .then(function (r) {
         if (!r.ok) throw new Error("status " + r.status);
@@ -212,10 +217,23 @@
     }
   }
 
+  // §22 G6: "Delivered to N of M", replaced as text only when it changed.
+  function updateDelivered(items) {
+    items.forEach(function (item) {
+      var el = document.querySelector('[data-delivered="' + CSS.escape(String(item.id)) + '"]');
+      if (el && el.textContent !== item.text) { el.textContent = item.text; el.classList.add("rc-changed"); }
+    });
+  }
+
   function apply(reply) {
     if (reply.now) statesSince = reply.now;
     addMessages(reply.messages || []);
+    if (group && reply.messages && reply.messages.length) {
+      var empty = document.querySelector("[data-group-empty]");
+      if (empty) empty.hidden = true;
+    }
     updateStates(reply.states || []);
+    updateDelivered(reply.delivered || []);
     replaceIfChanged(document.querySelector("[data-live-header]"), reply.header);
     if (conversation) replaceIfChanged(document.querySelector("[data-live-warning]"), reply.warning || {html: "", sig: "none"});
     if (reply.list && reply.list.html) swapList(reply.list.html);
