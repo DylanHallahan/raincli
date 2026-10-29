@@ -291,3 +291,18 @@ def test_every_command_in_the_skill_section_runs(fake_api, group, as_agent, caps
     assert "--private" in argv
     code, out, err = run(argv, capsys, stdin="privately", monkeypatch=monkeypatch)
     assert code == 0 and out.startswith("sent: "), err
+
+
+def test_every_client_poll_says_groups_so_nothing_is_withdrawn(fake_api, group, bob_cli, capsys, connector_env):
+    """The review's client point: on 0.6.1 EVERY machine-credential poll (the connector, raincli inbox, its
+    watch and paging) sends groups=1, so no CLI call ends the capability and withdraws pending copies."""
+    post = group.post()
+    cid = copy_id(fake_api, post["id"])
+    bob = fake_api.state.tokens[fake_api.bob]
+    for argv in (["inbox"], ["inbox", "--all"], ["inbox", "--json"]):
+        assert run(argv, capsys)[0] == 0, argv
+    client_for(fake_api, fake_api.bob).inbox(after=0)
+    client_for(fake_api, fake_api.bob).inbox(after=0, routing=True, include_acked=True)
+    assert bob in fake_api.state.groups_capable and not fake_api.state.messages[cid].get("withdrawn")
+    connector_env.connector().run_once()  # and the connector takes it
+    assert fake_api.state.messages[cid]["acked_at"] is not None

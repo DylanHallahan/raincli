@@ -10,6 +10,7 @@ from agent.fake_server import ApiFail, FakeState
 from api_helpers import auth
 from conftest_groups import groups_seed  # noqa: F401  (fixture)
 from conftest_v06 import _machine, v06_seed  # noqa: F401  (fixture)
+from test_v060_cli import live  # noqa: F401  (fixture: a real uvicorn server)
 
 
 def shape(value):
@@ -128,3 +129,23 @@ def test_the_fake_answers_like_the_server(client, session, groups_seed):  # noqa
                          json={"id": str(uuid.uuid4()), "body": "m"}).json()["post"]["recipients_m"]
     fake_m = fake.locked(fake.st.group_post, fake.caller("maya"), fake.group, {"id": str(uuid.uuid4()), "body": "m"})[1]
     assert real_m == fake_m["post"]["recipients_m"] == 1  # Jon only: Priya's poll ended her capability
+
+
+def test_the_real_client_polls_keep_the_capability(live, client, session, groups_seed):  # noqa: F811
+    """On the real server: the 0.6.1 client's polls (with and without routing, paging, include_acked) all send
+    groups=1, so a pending copy stays and the machine keeps taking part."""
+    from raincli_agent.api import ApiClient
+    from raincli_server.models import Agent, Message
+
+    s = groups_seed
+    pid = str(uuid.uuid4())
+    client.post(f"/api/v1/groups/{s['groups']['checkout'].id}/posts", headers=auth(s["machine_tokens"]["maya"]),
+                json={"id": pid, "body": "pending"})
+    jon = ApiClient(live, s["machine_tokens"]["jon"])
+    jon.inbox(after=0)
+    jon.inbox(after=0, routing=True, include_acked=True, limit=1)
+    session.expire_all()
+    copy = session.query(Message).filter_by(post_id=uuid.UUID(pid), recipient_agent_id=s["machines"]["jon"].id).one()
+    assert copy.withdrawn_at is None and session.get(Agent, s["machines"]["jon"].id).groups_capable_at is not None
+    messages, _ = jon.inbox(after=0, routing=True)
+    assert str(copy.id) in [m["id"] for m in messages]
