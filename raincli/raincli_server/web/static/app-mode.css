@@ -373,6 +373,7 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 /* Group chats (§22 G6, D9): the list's Groups section, the read-only thread and the member panel. */
 .rc-list-sub { margin: var(--rc-s-4) var(--rc-s-3) var(--rc-s-1); font-size: var(--rc-fs-xs); font-weight: 600; color: var(--rc-muted);
   text-transform: uppercase; letter-spacing: .04em; }
+.rc-groups .rc-conv-top { align-items: center; }
 .rc-groups .rc-conv-name { display: inline-flex; align-items: center; gap: var(--rc-s-1); }
 .rc-group-icon { color: var(--rc-muted); }
 .rc-post-reply { margin: 2px 0 0; font-size: var(--rc-fs-xs); color: var(--rc-muted); }

@@ -292,7 +292,8 @@ def test_open_latest_opens_a_group_when_its_post_is_newest_and_a_conversation_ot
 VOLATILE = r'data-states-since="[^"]*"|name="message_id" value="[^"]*"|"now":"[^"]*"'
 
 
-def test_a_copy_being_delivered_changes_only_delivered_on_the_posters_pages(windows, groups_seed, session):  # noqa: F811
+def test_a_copy_being_delivered_changes_only_delivered_on_the_posters_pages(windows, groups_seed, session,  # noqa: F811
+                                                                           client):
     s = groups_seed
     post, copies = make_post(session, s["groups"]["checkout"], s["machines"]["maya"], "zq-agent-maya-laptop",
                              "Can someone check the totals rounding?")
@@ -304,9 +305,13 @@ def test_a_copy_being_delivered_changes_only_delivered_on_the_posters_pages(wind
         return {p: re.sub(VOLATILE, "", maya.get(p).text) for p in paths}
 
     before = snapshot()
-    for c in copies:  # Jon's and Priya's machines pick up and act on their copies
-        c.delivery_state, c.acked_at = "replied", identity.now()
-    session.commit()
+    tokens = {s["machines"][k].id: s["machine_tokens"][k] for k in ("jon", "priya")}
+    for c in copies:  # Jon's and Priya's machines ack their copies through the API
+        r = client.post(f"/api/v1/messages/{c.id}/ack", headers=auth(tokens[c.recipient_agent_id]))
+        assert r.status_code == 200, r.text
+    session.expire_all()
+    assert all(m.delivery_state == "received" for m in session.scalars(select(Message).where(
+        Message.post_id == post.id)))
     after = snapshot()
     assert after["/app/inbox"] == before["/app/inbox"]
     for p in (paths[0], paths[2]):
