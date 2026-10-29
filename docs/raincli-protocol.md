@@ -2095,7 +2095,7 @@ A group is a named circle of people in one team. Each member's inbox agent recei
 - **A copy, as its recipient reads it** (only from a `groups=1` poll), is message JSON (§21.6) plus:
   - `group: {id, name, members_n}`;
   - `post_id` and `in_reply_to_post`;
-  - `mentions: [{display_name, email}]`;
+  - `mentions: [{display_name, email}]`: the other mentioned members, never the reader;
   - `mentioned`, which says whether the reader's person is mentioned.
 
   The sender is shown as a person; the reader's own machine keeps its endpoint; `from_kind` is `agent`.
