@@ -206,9 +206,11 @@ def test_three_always_reply_agents_for_ninety_seconds(live_default_limit, sessio
         session.expire_all()
         copies = session.query(Message).filter(Message.conversation_id == group.id, Message.route == "group",
                                                Message.withdrawn_at.is_(None))
-        samples["server_unacked"].append((at, copies.filter(Message.acked_at.is_(None)).count()))
-        samples["server_taken_not_handed"].append((at, copies.filter(
-            Message.acked_at.is_not(None), Message.delivery_state.in_(("received", "held"))).count()))
+        samples["server_unacked"].append((at, copies.filter(Message.acked_at.is_(None),  # the run's own copies
+                                                            Message.created_at >= start_wall).count()))
+        samples["server_taken_not_handed"].append((at, copies.filter(  # the run's own copies too
+            Message.acked_at.is_not(None), Message.delivery_state.in_(("received", "held")),
+            Message.created_at >= start_wall).count()))
         for name, a in agents.items():
             samples["local_backlog"][name].append((at, a.local_backlog()))
 
@@ -292,15 +294,19 @@ def test_three_always_reply_agents_for_ninety_seconds(live_default_limit, sessio
     unreported = db_ids - set(cli_ids)  # made by a reply the hard stop cut after the server stored it
     assert sum(sum(v["posts"]) for v in per_agent.values()) == len(db_ids)
 
-    turns = sum(len(a.handed) for a in agents.values())
+    turns_all = sum(len(a.handed) for a in agents.values())
     requests = sum(sum(v["requests"]) for v in per_agent.values())
-    # Owed: copies no agent has had yet = each connector's acked backlog + the server's untaken copies (which include
-    # the records a connector stored but couldn't ack yet).
-    owed = sum(a.local_backlog() for a in agents.values()) + _at(samples["server_unacked"], WINDOW + 1)
+    # The run's own copies only (the seed's earlier copies, made before the start, are reported apart): turns taken on
+    # them, and those owed, copies made in the run that no agent has had yet.
+    run_ids = {str(c.id) for c in session.query(Message).filter(Message.conversation_id == group.id,
+                                                                Message.route == "group",
+                                                                Message.created_at >= start_wall)}
+    turns = sum(len(set(a.handed) & run_ids) for a in agents.values())
+    owed = copies_total - turns
     record = {
         "window_seconds": WINDOW, "stopped_after_seconds": stopped_after, "limit_per_minute_per_credential": 120,
         "members_taking_part": 3, "agent_posts": len(db_ids), "copies_made": copies_total,
-        "turns_taken": turns, "turns_owed_at_stop": owed,
+        "turns_taken": turns, "turns_owed_at_stop": owed, "turns_on_seed_copies": turns_all - turns,
         "identities": {"acked_since_start": acked_since_start, "handed_distinct": {n: len(a.handed) for n, a in
                                                                                    agents.items()},
                        "local_backlog_at_stop": {n: a.local_backlog() for n, a in agents.items()},
@@ -308,7 +314,7 @@ def test_three_always_reply_agents_for_ninety_seconds(live_default_limit, sessio
                        "in_flight": in_flight, "posts_cli_reported": len(cli_ids), "posts_in_database": len(db_ids),
                        "posts_stored_but_cut_at_stop": len(unreported),
                        "cli_successes_without_a_new_post": sum(len(a.cli_other) for a in agents.values())},
-        "requests_per_turn": round(requests / max(1, turns), 1),
+        "requests_per_turn": round(requests / max(1, turns_all), 1),
         "turns_per_agent_minute": round(turns / 3 / (WINDOW / 60), 1),
         "copies_per_agent_minute": round(copies_total / 3 / (WINDOW / 60), 1),
         "per_agent": per_agent, "samples": samples,
@@ -371,8 +377,9 @@ def _markdown(r):
              f"limit {r['limit_per_minute_per_credential']}/min per credential)", "",
              f"- Agent posts (from the database, the scripted kick-off excluded): {r['agent_posts']}; copies made: "
              f"{r['copies_made']}; turns taken (distinct copies handed to an agent): {r['turns_taken']}; "
-             f"**turns owed at the stop: {r['turns_owed_at_stop']}** (each connector's local backlog plus the "
-             "server's untaken copies: copies no agent has had yet).",
+             f"**turns owed at the stop: {r['turns_owed_at_stop']}** (copies made in the run that no agent has had yet: "
+             f"in the connectors' local queues or still on the server). Counts are of the run's own copies; the "
+             f"seed's earlier copies took {r['turns_on_seed_copies']} more turns at the start.",
              f"- The identities hold: for each agent, copies acked = distinct copies handed + local backlog, give "
              f"or take the few in flight ({_identities(r['identities'])}); every post the CLI reported is in the "
              f"database once ({r['identities']['posts_cli_reported']} reported, {r['identities']['posts_in_database']} "
