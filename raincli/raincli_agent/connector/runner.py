@@ -16,7 +16,7 @@ import uuid
 from .. import attachments as att
 from ..config import standard_config_path
 from .config import HANDLE_RE
-from ..errors import ApiError, ConfigError, RainError, Unauthorized
+from ..errors import ApiError, ConfigError, NotFound, RainError, Unauthorized
 from ..text import escape_line, escape_text
 from . import queue as q
 from ..runtime import sessions
@@ -390,6 +390,23 @@ class Connector:
                           "size": meta["size"], "sha256": meta["sha256"]})
         return local
 
+    def _withdrawn(self, record):
+        """§22: a group copy the server no longer knows (withdrawn: the machine went back to an older client and was
+        upgraded again, or its person's inbox changed) is dropped here, logged once, and never handed to an agent.
+        Asked just before a hand-over, and when the server answers an event with not_found. Any other error leaves
+        the record as it is."""
+        if not record.get("group"):
+            return False
+        try:
+            self.api.get_message(record["id"])
+        except NotFound:
+            self.queue.remove(record["id"])
+            self.log(f"group post copy {record['id']} was withdrawn by the server; dropped, not delivered")
+            return True
+        except (RainError, OSError):
+            return False
+        return False
+
     def _ack(self, record):
         try:
             self.api.ack(record["id"])
@@ -470,6 +487,8 @@ class Connector:
                     # Held, never truncated: Windows caps a command line (checked before "submitting").
                     self._hold(record, "too_large_for_command_line",
                                "the framed prompt would exceed the command-line bound; it is never truncated")
+                    continue
+                if self._withdrawn(record):
                     continue
                 chosen = (record["id"], self._begin_submit(record))
                 submitted = True
@@ -608,6 +627,8 @@ class Connector:
                     # Checked before "submitting": a bad inbox directory only holds.
                     self._hold(record, "offline", f"cannot hand over to the session: {type(exc).__name__}")
                     continue
+                if self._withdrawn(record):
+                    continue
                 text = self._prompt_text(record)
                 kind = self.config.inbox_hook[0]
                 if not sessions.fits_one_turn(text, kind):
@@ -717,6 +738,8 @@ class Connector:
                 if fits is not None and not fits(name, self._prompt_text(record)):
                     self._hold(record, "too_large_for_command_line",
                                "the framed prompt would exceed the command-line bound; it is never truncated")
+                    continue
+                if self._withdrawn(record):
                     continue
                 chosen = (record["id"], name, self._begin_submit(record))
                 prompted = True
@@ -1010,6 +1033,11 @@ class Connector:
                     self.api.event(record["id"], want[0], want[1])
                 except Unauthorized:
                     raise
+                except NotFound as exc:
+                    if self._withdrawn(record):
+                        continue
+                    self.log(f"event {want[0]} for {record['id']} not reported yet: {exc}")
+                    continue
                 except ApiError as exc:
                     self.log(f"event {want[0]} for {record['id']} not reported yet: {exc}")
                     continue

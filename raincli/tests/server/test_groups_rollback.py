@@ -99,3 +99,15 @@ def test_a_rollback_never_delivers_a_held_group_copy(tag, live, client, session,
                         headers=auth(s["machine_tokens"]["maya"]),
                         json={"id": str(uuid.uuid4()), "body": "after the rollback"}).json()["post"]
     assert later["recipients_m"] == 1  # Priya only
+
+    # Re-upgrade (the client review's C2): the 0.6.1 connector comes back on the same state directory, its agent
+    # idle. The held record's copy is withdrawn on the server, so it is dropped, never handed over.
+    ready = FakeHerdr()
+    for name in ("inbox-agent", "zq-agent-jon-api"):
+        ready.add(name, status="idle")
+    again = Connector(cfg, ApiClient(live, token), ready, Queue(cfg.state_dir), identity={}, log=lambda line: None,
+                      sleep=lambda s: None, sessions_state=str(tmp_path / "sessions-new"))
+    again.run_once()
+    again.run_once()
+    assert not [p for p in ready.prompts if str(copy.id) in p[1]]
+    assert not (tmp_path / "queue" / "group-messages" / f"{copy.id}.json").exists()

@@ -157,6 +157,13 @@ class Queue:
         record["updated_at"] = now_iso()
         atomic_write_json(self.path(record["id"], group=bool(record.get("group"))), record)
 
+    def remove(self, message_id):
+        """Forget a record (§22: a group copy the server withdrew). Nothing else is ever removed this way."""
+        try:
+            os.remove(self.path(message_id))
+        except FileNotFoundError:
+            pass
+
     def all(self):
         records = []
         for folder in (self.messages_dir, self.group_messages_dir):
