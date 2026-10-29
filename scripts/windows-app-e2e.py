@@ -1946,7 +1946,20 @@ def part_g(app, server, installers, work):
     with sync_playwright() as pw:
         window = WindowCDP(pw, port)
         page = window.page(("app/groups/", "app/inbox", "app/conversations/"), timeout=180)
-        wait_for("the launch to open the group", lambda: "/app/groups/" in url_of(page), timeout=60, interval=1)
+        try:
+            wait_for("the launch to open the group", lambda: "/app/groups/" in url_of(page), timeout=60, interval=1)
+        except Failure:
+            shot(page, "groups-win-debug-launch")
+            seen = page.evaluate("""() => { const newest = document.querySelector('[data-newest]'),
+                list = document.querySelector('section.rc-list'), main = document.querySelector('.rc-main');
+                return {path: location.pathname, body: document.body.className,
+                        open_latest: !!document.querySelector('[data-open-latest]'),
+                        newest: newest ? newest.getAttribute('href') : null,
+                        groups: document.querySelectorAll('.rc-groups .rc-conv').length,
+                        list: list ? getComputedStyle(list).display : null,
+                        main: main ? getComputedStyle(main).display : null, size: [innerWidth, innerHeight],
+                        ua_version: (navigator.userAgent.match(/RainCLIAppVersion\\/[0-9.]+/) || [null])[0]}; }""")
+            raise Failure(f"the launch did not open the group: {seen}") from None
         page.wait_for_selector(".rc-post")
         group_path = urlsplit(url_of(page)).path
         hwnd = wait_for("the app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
