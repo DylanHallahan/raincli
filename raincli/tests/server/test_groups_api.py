@@ -65,7 +65,7 @@ def test_a_post_reaches_every_other_member_taking_part(client, session, g):
     assert len(jon) == 1
     copy = jon[0]
     assert copy["group"] == {"id": g["checkout"], "name": "checkout", "members_n": 4}
-    assert copy["mentioned"] is True and copy["mentions"] == p["mentions"] and copy["from_kind"] == "agent"
+    assert copy["mentioned"] is True and copy["mentions"] == [] and copy["from_kind"] == "agent"  # never the reader
     assert copy["from_endpoint"] == {"person": "maya@example.test", "display_name": "Maya"}
     assert copy["to_endpoint"] == {"machine": "zq-handle-jon", "agent": "zq-agent-jon-api"}  # its own endpoint
     priya = next(x for x in poll(client, g["t"]["priya"]) if x.get("post_id") == p["id"])
@@ -407,3 +407,15 @@ def test_capability_loss_withdraws_held_copies_too(client, session, g):
     session.expire_all()
     assert session.get(Message, held.id).withdrawn_at is not None
     assert session.get(Message, done.id).withdrawn_at is None
+
+
+def test_a_copys_mentions_leave_out_its_reader(client, session, g):
+    """The client review's C3: the reader has ``mentioned``; ``mentions`` lists only the others, in stored order."""
+    pid = post(client, g["t"]["maya"], g["checkout"], "@Jon @Priya both of you").json()["post"]["id"]
+    seen = {name: next(x for x in poll(client, g["t"][key]) if x.get("post_id") == pid)
+            for name, key in (("Jon", "jon"), ("Priya", "priya"))}
+    assert seen["Jon"]["mentioned"] and [m["email"] for m in seen["Jon"]["mentions"]] == ["priya@example.test"]
+    assert seen["Priya"]["mentioned"] and [m["email"] for m in seen["Priya"]["mentions"]] == ["jon@example.test"]
+    # The post itself (its author's answer) still lists everyone mentioned.
+    other = post(client, g["t"]["maya"], g["checkout"], "@Jon only").json()["post"]
+    assert [m["email"] for m in other["mentions"]] == ["jon@example.test"]

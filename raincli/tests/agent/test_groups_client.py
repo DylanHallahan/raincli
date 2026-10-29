@@ -306,3 +306,23 @@ def test_every_client_poll_says_groups_so_nothing_is_withdrawn(fake_api, group, 
     assert bob in fake_api.state.groups_capable and not fake_api.state.messages[cid].get("withdrawn")
     connector_env.connector().run_once()  # and the connector takes it
     assert fake_api.state.messages[cid]["acked_at"] is not None
+
+
+def test_a_withdrawn_held_copy_is_dropped_not_delivered(fake_api, connector_env, group):
+    """The client review's C2: a held group record whose copy the server withdrew (a rollback, then a re-upgrade) is
+    dropped at the next hand-over, logged once, never delivered."""
+    connector = connector_env.connector()
+    post = group.post()
+    connector_env.herdr.add("bob-claude", status="working", pane_id="w9:p1", cwd="/work/bob")
+    connector.run_once()
+    cid = copy_id(fake_api, post["id"])
+    assert connector.queue.get(cid)["state"] == q.HELD
+    fake_api.state.messages[cid]["withdrawn"] = True  # what the server does when the machine loses the capability
+    logs = []
+    connector.log = logs.append
+    connector_env.herdr.add("bob-claude", status="idle", pane_id="w9:p1", cwd="/work/bob")
+    connector.run_once()
+    connector.run_once()
+    assert connector_env.herdr.prompts == [] and connector.queue.load(cid) is None
+    assert [line for line in logs if "withdrawn" in line] == [
+        f"group post copy {cid} was withdrawn by the server; dropped, not delivered"]

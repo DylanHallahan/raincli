@@ -225,7 +225,7 @@ class _GroupsMixin:
         post, g = self.group_posts[m["post_id"]], self.groups[m["conversation_id"]]
         return {"group": {"id": m["conversation_id"], "name": g["name"], "members_n": len(g["members"])},
                 "post_id": post["id"], "in_reply_to_post": post["in_reply_to_post"],
-                "mentions": [{"display_name": self.name_of(e), "email": e} for e in post["mentions"]],
+                "mentions": [{"display_name": self.name_of(e), "email": e} for e in post["mentions"] if e != viewer],
                 "mentioned": viewer in post["mentions"]}
 
     def group_post(self, caller, gid, body, reply_copy=None):
