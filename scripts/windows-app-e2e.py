@@ -1883,6 +1883,14 @@ G_WHERE = """() => ({path: location.pathname,
         (a.querySelector('.rc-conv-preview') || {}).innerText || ''])})"""
 
 
+def g_path(page):
+    """The page's own location.pathname: after Inbox's location.replace (D12) Playwright's page.url can lag."""
+    try:
+        return page.evaluate("location.pathname")
+    except Exception:  # noqa: BLE001 - a frame in the middle of a navigation
+        return ""
+
+
 def part_g(app, server, installers, work):
     """Group chats: the brief's Windows-window screenshots 1-4; see G in the module docstring."""
     from playwright.sync_api import sync_playwright
@@ -1956,7 +1964,8 @@ def part_g(app, server, installers, work):
         window = WindowCDP(pw, port)
         page = window.page(("app/groups/", "app/inbox", "app/conversations/"), timeout=180)
         try:
-            wait_for("the launch to open the group", lambda: "/app/groups/" in url_of(page), timeout=60, interval=1)
+            wait_for("the launch to open the group", lambda: g_path(page).startswith("/app/groups/"), timeout=60,
+                     interval=1)
         except Failure:
             shot(page, "groups-win-debug-launch")
             seen = page.evaluate("""() => { const newest = document.querySelector('[data-newest]'),
@@ -1970,7 +1979,7 @@ def part_g(app, server, installers, work):
                         ua_version: (navigator.userAgent.match(/RainCLIAppVersion\\/[0-9.]+/) || [null])[0]}; }""")
             raise Failure(f"the launch did not open the group: {seen}") from None
         page.wait_for_selector(".rc-post")
-        group_path = urlsplit(url_of(page)).path
+        group_path = g_path(page)
         try:
             hwnd = wait_for("the app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
             scale = window_scale(hwnd)
@@ -1989,7 +1998,7 @@ def part_g(app, server, installers, work):
                     else:
                         page.click("nav.rc-nav a:has-text('Inbox')")  # Inbox opens the newest activity (D12)
                         try:
-                            wait_for("Inbox to open the group", lambda: "/app/groups/" in url_of(page), timeout=60,
+                            wait_for("Inbox to open the group", lambda: g_path(page) == group_path, timeout=60,
                                      interval=1)
                         except Failure:
                             shot(page, f"groups-win-debug-inbox-{size}-{scheme}")
