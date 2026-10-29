@@ -168,7 +168,7 @@ def upgraded(scratch_db, settings):  # noqa: F811
     seed = _at_0010(url, db)
     with db.connect() as conn:
         top = conn.execute(text("SELECT max(seq) FROM messages")).scalar()
-    upgrade(url, "0011")
+    upgrade(url)  # 0011, and every later revision: today's server runs at head
     nw, ct = seed["teams"]
     with Session(db) as s:
         maya_ct = s.scalar(text("SELECT id FROM agents WHERE handle = 'maya-ct'"))

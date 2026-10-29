@@ -178,6 +178,9 @@ class Agent(Base):
     # §21.13: the last cursor this machine polled with that was above anything its team had issued (kept from a
     # machine that was signed in to another team); polls with it are answered from the start.
     stale_cursor: Mapped[int | None] = mapped_column(BigInteger)
+    # §22: when the machine last qualified for group copies (a ``groups=1`` poll on a client of at least
+    # GROUPS_CLIENT); cleared when it stops qualifying.
+    groups_capable_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         UniqueConstraint("team_id", "handle", name="uq_agents_team_handle"),
         UniqueConstraint("id", "team_id", name="uq_agents_id_team"),  # for the team foreign keys (0011)
@@ -311,10 +314,16 @@ class Conversation(Base):
         ForeignKey("conversations.id", name="fk_conversations_merged_into"))
     premerge_is_default: Mapped[bool | None] = mapped_column(Boolean)
     premerge_archive: Mapped[dict | None] = mapped_column(JSONB)  # a reused row's archive state, or {"created": true}
+    # §22 (migration 0012): ``kind = 'group'`` is a group chat. It has a ``name``, no side columns, the keys
+    # ``group:<id>`` and ``group:<id>:``, and is never default, archived or merged.
+    name: Mapped[str | None] = mapped_column(String(40))
     __table_args__ = (
         CheckConstraint("a_key < b_key", name="ck_conversations_order"),
-        CheckConstraint("kind IN ('pair','self','own_agents')", name="ck_conversations_kind"),
-        CheckConstraint(OWN_SHAPE, name="ck_conversations_own_shape"),
+        CheckConstraint("kind IN ('pair','self','own_agents','group')", name="ck_conversations_kind"),
+        CheckConstraint(f"kind = 'group' OR ({OWN_SHAPE})", name="ck_conversations_own_shape"),
+        CheckConstraint("(kind = 'group') = (name IS NOT NULL)", name="ck_conversations_group_name"),
+        Index("uq_conversations_group_name", "team_id", text("lower(name)"), unique=True,
+              postgresql_where=text("kind = 'group'")),
         Index("uq_conversations_self", "team_id", "a_user_id", unique=True, postgresql_where=text("kind = 'self'")),
         Index("uq_conversations_own_agents", "team_id", "a_user_id", unique=True,
               postgresql_where=text("kind = 'own_agents'")),
@@ -323,13 +332,15 @@ class Conversation(Base):
                         "(archived_at IS NULL) = (archived_through_seq IS NULL)", name="ck_conversations_archived"),
         *(Index(f"ix_conversations_{c}_active", c, postgresql_where=text("archived_at IS NULL"))
           for c in ("agent_a_id", "agent_b_id", "a_user_id", "b_user_id")),
-        CheckConstraint("(agent_a_id IS NULL) <> (a_user_id IS NULL)", name="ck_conversations_a_one"),
+        CheckConstraint("kind = 'group' OR ((agent_a_id IS NULL) <> (a_user_id IS NULL))",
+                        name="ck_conversations_a_one"),
         # §21.13: a conversation's machines are in its team.
         ForeignKeyConstraint(["agent_a_id", "team_id"], ["agents.id", "agents.team_id"],
                              name="fk_conversations_agent_a_team"),
         ForeignKeyConstraint(["agent_b_id", "team_id"], ["agents.id", "agents.team_id"],
                              name="fk_conversations_agent_b_team"),
-        CheckConstraint("(agent_b_id IS NULL) <> (b_user_id IS NULL)", name="ck_conversations_b_one"),
+        CheckConstraint("kind = 'group' OR ((agent_b_id IS NULL) <> (b_user_id IS NULL))",
+                        name="ck_conversations_b_one"),
         CheckConstraint("a_agent_name IS NULL OR agent_a_id IS NOT NULL", name="ck_conversations_a_name"),
         CheckConstraint("b_agent_name IS NULL OR agent_b_id IS NOT NULL", name="ck_conversations_b_name"),
         # §18.1: one default thread per pair in each team; (id, team_id) is what messages reference.
@@ -364,6 +375,10 @@ class Message(Base):
     # is the machine's pickup.
     person_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     route: Mapped[str | None] = mapped_column(String(8))
+    # §22: a group post's copy for one member's inbox (``route = 'group'``), and when it was withdrawn (never to be
+    # delivered: the member's inbox changed to one that can't take group copies, or they left the group).
+    post_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("group_posts.id", name="fk_messages_post"))
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     in_reply_to: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("messages.id"))
     # Endpoints (§16.1): a machine (agent id), an agent on a machine (agent id plus name) or a person.
     sender_agent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id"))
@@ -404,7 +419,13 @@ class Message(Base):
         Index("ix_messages_recipient_user_seq", "recipient_user_id", "seq"),
         Index("ix_messages_sender_user", "sender_user_id"),
         Index("ix_messages_conversation_seq", "conversation_id", "seq"),
-        CheckConstraint("route IN ('inbox','reply','person','self')", name="ck_messages_route"),
+        CheckConstraint("route IN ('inbox','reply','person','self','group')", name="ck_messages_route"),
+        CheckConstraint("(route IS NOT DISTINCT FROM 'group') = (post_id IS NOT NULL)",
+                        name="ck_messages_group_post"),
+        CheckConstraint("route <> 'group' OR (recipient_agent_id IS NOT NULL AND recipient_user_id IS NULL)",
+                        name="ck_messages_group_to_machine"),
+        CheckConstraint("withdrawn_at IS NULL OR route IS NOT DISTINCT FROM 'group'",
+                        name="ck_messages_withdrawn_group"),
         Index("ix_messages_redeliver_agent", "recipient_agent_id", "seq",
               postgresql_where=text("redeliver AND acked_at IS NULL")),
         Index("ix_messages_redeliver_user", "recipient_user_id", "seq",
@@ -419,6 +440,54 @@ class Message(Base):
               postgresql_where=text("redeliver AND acked_at IS NULL")),
         Index("ix_messages_redeliver_user_team_seq", "recipient_user_id", "team_seq",
               postgresql_where=text("redeliver AND acked_at IS NULL")),
+    )
+
+
+class GroupMember(Base):
+    """A person in a group (§22). Written only by the operator commands; removal paths delete these rows themselves
+    (no cascade from the team membership), withdrawing the person's copies."""
+
+    __tablename__ = "group_members"
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    __table_args__ = (
+        ForeignKeyConstraint(["conversation_id", "team_id"], ["conversations.id", "conversations.team_id"],
+                             name="fk_group_members_group_team"),
+        ForeignKeyConstraint(["team_id", "user_id"], ["memberships.team_id", "memberships.user_id"],
+                             name="fk_group_members_membership"),
+        Index("ix_group_members_user", "user_id", "team_id"),
+    )
+
+
+class GroupPost(Base):
+    """A group post, stored once (§22). ``seq`` is its team number (column team_seq, from the same counter and
+    trigger as messages); each member's copy is a message with ``post_id``."""
+
+    __tablename__ = "group_posts"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    seq: Mapped[int] = mapped_column("team_seq", BigInteger, nullable=False, server_default=FetchedValue())
+    author_agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    author_agent_name: Mapped[str | None] = mapped_column(String(64))
+    author_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    mentions: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False,
+                                                      server_default=text("'{}'"))
+    in_reply_to_post: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("group_posts.id"))
+    recipients_m: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    created_at: Mapped[datetime] = _created()
+    __table_args__ = (
+        ForeignKeyConstraint(["conversation_id", "team_id"], ["conversations.id", "conversations.team_id"],
+                             name="fk_group_posts_group_team"),
+        ForeignKeyConstraint(["author_agent_id", "team_id"], ["agents.id", "agents.team_id"],
+                             name="fk_group_posts_author_team"),
+        UniqueConstraint("team_id", "team_seq", name="uq_group_posts_team_seq"),
+        CheckConstraint("char_length(body) BETWEEN 1 AND 16000", name="ck_group_posts_body_len"),
+        CheckConstraint("recipients_m >= 0", name="ck_group_posts_recipients_m"),
+        Index("ix_group_posts_group_seq", "conversation_id", "team_seq"),
     )
 
 
