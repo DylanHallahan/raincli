@@ -1942,6 +1942,9 @@ def part_g(app, server, installers, work):
 
     # G2. The window: it opens the group at launch (D12); then the four views, light and dark, at both sizes.
     hidden = [G_MACHINES[k] for k in ("jon", "priya", "ryan")] + [G_AGENTS[k] for k in ("jon", "priya", "ryan")]
+    # The runner starts at 1024x768: 1920x1080 at 100% so a 1180x780 window fits (as D5h); restored after the shots.
+    display = display_state()
+    set_display(1920, 1080, 100)
     port = open_window_cdp(app)
     with sync_playwright() as pw:
         window = WindowCDP(pw, port)
@@ -1962,41 +1965,44 @@ def part_g(app, server, installers, work):
             raise Failure(f"the launch did not open the group: {seen}") from None
         page.wait_for_selector(".rc-post")
         group_path = urlsplit(url_of(page)).path
-        hwnd = wait_for("the app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
-        scale = window_scale(hwnd)
-        for width, height in G_SIZES:
-            resize_window(hwnd, round(width * scale), round(height * scale))
-            wait_for(f"the page at about {width} px", lambda: abs(page.evaluate("innerWidth") - width) < 40,
-                     timeout=30, interval=0.5)
-            size = f"{width}x{height}"
-            for scheme in ("light", "dark"):
-                if (width, height) == G_SIZES[0] and scheme == "light":
-                    shot_name = f"groups-win-4-launch-opens-the-group-{size}-{scheme}"
-                    themed_shot(page, scheme, shot_name)  # the launch itself, before any navigation
-                else:
-                    page.click("nav.rc-nav a:has-text('Inbox')")  # Inbox opens the newest again: the group
-                    wait_for("Inbox to open the group", lambda: "/app/groups/" in url_of(page), timeout=60, interval=1)
-                    page.wait_for_selector(".rc-post")
-                    themed_shot(page, scheme, f"groups-win-4-launch-opens-the-group-{size}-{scheme}")
-                check(page.locator(".rc-post").count() == 3 and page.locator("textarea").count() == 0,
-                      "the group page has not three posts, or has a composer")
-                check(page.inner_text(".rc-delivered") == "Delivered to 2 of 2",
-                      f"Maya's post shows {page.inner_text('.rc-delivered')!r}")
-                themed_shot(page, scheme, f"groups-win-2-checkout-read-only-{size}-{scheme}")
-                page.click(".rc-members > summary")
-                panel = page.inner_text(".rc-members-panel")
-                check("Ryan" in panel and "not taking part" in panel and "Ask Dylan" in panel
-                      and page.locator(".rc-members-panel button, .rc-members-panel a, .rc-members-panel input").count() == 0,
-                      f"the member panel: {panel!r}")
-                themed_shot(page, scheme, f"groups-win-3-member-panel-{size}-{scheme}")
-                page.click(".rc-members > summary")
-                page.click(".rc-convs:not(.rc-groups) .rc-conv:has-text('Jon')")
-                page.wait_for_selector(".rc-thread")
-                check(page.locator(".rc-groups .rc-conv").count() == 2, "the list's Groups section lacks a group")
-                check(not list_fits(page), f"at {size} the list does not fit: {list_fits(page)}")
-                themed_shot(page, scheme, f"groups-win-1-list-with-groups-{size}-{scheme}")
-                found = [h for h in hidden if h in page.content()]
-                check(not found, f"teammates' machine or agent names on Maya's pages: {found}")
+        try:
+            hwnd = wait_for("the app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
+            scale = window_scale(hwnd)
+            for width, height in G_SIZES:
+                resize_window(hwnd, round(width * scale), round(height * scale))
+                wait_for(f"the page at about {width} px", lambda: abs(page.evaluate("innerWidth") - width) < 40,
+                         timeout=30, interval=0.5)
+                size = f"{width}x{height}"
+                for scheme in ("light", "dark"):
+                    if (width, height) == G_SIZES[0] and scheme == "light":
+                        shot_name = f"groups-win-4-launch-opens-the-group-{size}-{scheme}"
+                        themed_shot(page, scheme, shot_name)  # the launch itself, before any navigation
+                    else:
+                        page.click("nav.rc-nav a:has-text('Inbox')")  # Inbox opens the newest again: the group
+                        wait_for("Inbox to open the group", lambda: "/app/groups/" in url_of(page), timeout=60, interval=1)
+                        page.wait_for_selector(".rc-post")
+                        themed_shot(page, scheme, f"groups-win-4-launch-opens-the-group-{size}-{scheme}")
+                    check(page.locator(".rc-post").count() == 3 and page.locator("textarea").count() == 0,
+                          "the group page has not three posts, or has a composer")
+                    check(page.inner_text(".rc-delivered") == "Delivered to 2 of 2",
+                          f"Maya's post shows {page.inner_text('.rc-delivered')!r}")
+                    themed_shot(page, scheme, f"groups-win-2-checkout-read-only-{size}-{scheme}")
+                    page.click(".rc-members > summary")
+                    panel = page.inner_text(".rc-members-panel")
+                    check("Ryan" in panel and "not taking part" in panel and "Ask Dylan" in panel
+                          and page.locator(".rc-members-panel button, .rc-members-panel a, .rc-members-panel input").count() == 0,
+                          f"the member panel: {panel!r}")
+                    themed_shot(page, scheme, f"groups-win-3-member-panel-{size}-{scheme}")
+                    page.click(".rc-members > summary")
+                    page.click(".rc-convs:not(.rc-groups) .rc-conv:has-text('Jon')")
+                    page.wait_for_selector(".rc-thread")
+                    check(page.locator(".rc-groups .rc-conv").count() == 2, "the list's Groups section lacks a group")
+                    check(not list_fits(page), f"at {size} the list does not fit: {list_fits(page)}")
+                    themed_shot(page, scheme, f"groups-win-1-list-with-groups-{size}-{scheme}")
+                    found = [h for h in hidden if h in page.content()]
+                    check(not found, f"teammates' machine or agent names on Maya's pages: {found}")
+        finally:
+            set_display(display[0], display[1], display[2])
         page.emulate_media(color_scheme="null")
         page.goto(server.url + group_path)
         window.close()
