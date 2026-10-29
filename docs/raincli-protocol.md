@@ -2065,7 +2065,7 @@ A group is a named circle of people in one team. Each member's inbox agent recei
 - **Numbers:** posts and copies are numbered from the team's counter, like messages (§21.13).
 - **No limits:** no mention gate, chain depth, group rate or pause. Only the general request limits apply.
 - **Group copies don't count toward `inbox_full`.**
-- **Retries:** a retried post with the same content answers `200` with `"duplicate": true` and makes no new copies. A different post under a used id, or any id already used by a message, is `409 id_conflict`, as for messages.
+- **Retries:** a retried post with the same content answers `200` with `"duplicate": true` and makes no new copies, also when it races the original. A different post under a used id, or any id already used by a message, is `409 id_conflict`, as for messages. Its mentions are resolved again, so a retry after the group's members changed can answer `409`.
 - **The answer** of both posting endpoints: `{"post": {id, group: {id, name}, seq, in_reply_to_post, mentions: [{display_name, email}], recipients_m}, "duplicate": bool}`. It never carries copy ids. `201` when made, `200` on a retry.
 
 ### 22.4 Replies, moves and withdrawal
@@ -2121,7 +2121,7 @@ A group is a named circle of people in one team. Each member's inbox agent recei
 
 - **A post** takes its group `FOR KEY SHARE`, then each member's membership and inbox rows `FOR KEY SHARE` in user-id order, then inserts the post and its copies.
 - **The operator's group commands** take the group `FOR UPDATE`.
-- **A team removal and a disable** take the person's group rows `FOR UPDATE` before the memberships.
+- **A team removal and a disable** take the person's group rows `FOR UPDATE` before the memberships; a team removal then locks the team's memberships in user-id order.
 - **Inbox writes** take no group lock.
 - A post of up to 19 copies holds the team counter until it commits. Other sends in that team wait for it.
 

@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import and_, delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from raincli_server import presentation
@@ -378,8 +380,7 @@ def post(session: Session, machine: Agent, group_ref: object, *, id: object, bod
     # M2 lock order: the group row, then the members' membership and inbox rows by user id, then the inserts.
     session.execute(select(Conversation.id).where(Conversation.id == group.id)
                     .with_for_update(read=True, key_share=True))
-    members = sorted(session.scalars(select(GroupMember.user_id).where(GroupMember.conversation_id == group.id)),
-                     key=str)
+    members = sorted(session.scalars(select(GroupMember.user_id).where(GroupMember.conversation_id == group.id)))
     if owner not in members:
         raise _unknown()
     inboxes = {uid: _lock_inbox_row(session, uid, group.team_id, write=False) for uid in members}
@@ -387,11 +388,23 @@ def post(session: Session, machine: Agent, group_ref: object, *, id: object, bod
         raise MessagingError(403, "group_inbox_only", GROUP_INBOX_ONLY)
     mentioned = resolve_mentions(session, group, explicit, body, owner)
 
-    created = GroupPost(id=post_id, team_id=group.team_id, conversation_id=group.id, author_agent_id=machine.id,
-                        author_agent_name=from_agent, author_user_id=owner, body=body, mentions=mentioned,
-                        in_reply_to_post=parent.id if parent else None)
-    session.add(created)
-    session.flush()  # the post's number first (the team counter, last of the locks)
+    # The post's number first (the team counter, last of the locks). A concurrent post with the same id (a retry
+    # racing the original) waits here for it, then is answered as a retry: the same post, or 409.
+    inserted = session.scalar(pg_insert(GroupPost).values(
+        id=post_id, team_id=group.team_id, conversation_id=group.id, author_agent_id=machine.id,
+        author_agent_name=from_agent, author_user_id=owner, body=body, mentions=mentioned,
+        in_reply_to_post=parent.id if parent else None).on_conflict_do_nothing(index_elements=["id"])
+        .returning(GroupPost.id))
+    if inserted is None:
+        existing = session.scalars(select(GroupPost).where(GroupPost.id == post_id)
+                                   .execution_options(populate_existing=True)).one()
+        if existing.conversation_id == group.id and existing.author_agent_id == machine.id \
+                and existing.author_agent_name == from_agent and existing.body == body \
+                and existing.in_reply_to_post == (parent.id if parent else None) and existing.mentions == mentioned:
+            return existing, False
+        raise MessagingError(409, "id_conflict", "a different message already uses this id")
+    created = session.scalars(select(GroupPost).where(GroupPost.id == post_id)
+                              .execution_options(populate_existing=True)).one()
     copies = 0
     for uid in members:
         if uid == owner:
@@ -511,11 +524,15 @@ def create_group(session: Session, team: Team, name: str, emails: list[str]) -> 
     people = _people(session, team, emails)
     if len(people) > MAX_MEMBERS:
         raise GroupRuleError(f"a group has at most {MAX_MEMBERS} members")
-    gid = uuid.uuid4()
+    gid, slug = uuid.uuid4(), team.slug
     group = Conversation(id=gid, team_id=team.id, kind="group", name=value, a_key=f"group:{gid}",
                          b_key=f"group:{gid}:", is_default=False)
     session.add(group)
-    session.flush()
+    try:
+        session.flush()
+    except IntegrityError:  # another group-create with the same name won the race
+        raise GroupRuleError(f'{slug} already has a group "{value}" (names are unique, whatever the case)') \
+            from None
     for person in people:
         session.add(GroupMember(conversation_id=gid, user_id=person.id, team_id=team.id))
     session.flush()
