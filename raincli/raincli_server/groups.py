@@ -454,7 +454,10 @@ def copy_fields(session: Session, msg: Message, reader_user_id: uuid.UUID | None
     return {"group": {"id": str(group.id), "name": group.name, "members_n": members_n(session, group)},
             "post_id": str(post_row.id),
             "in_reply_to_post": str(post_row.in_reply_to_post) if post_row.in_reply_to_post else None,
-            "mentions": [{"display_name": name, "email": user.email} for user, name in mention_names(session, post_row)],
+            # The other mentioned members: never the reader, who has ``mentioned`` instead (so a frame's
+            # "Mentioned:" line can't name them, whatever the client knows about its owner).
+            "mentions": [{"display_name": name, "email": user.email} for user, name in mention_names(session, post_row)
+                         if user.id != reader_user_id],
             "mentioned": reader_user_id is not None and reader_user_id in (post_row.mentions or [])}
 
 
