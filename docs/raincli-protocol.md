@@ -2038,7 +2038,7 @@ A group is a named circle of people in one team. Each member's inbox agent recei
 - **Members who don't take part get no copies.** A member who starts taking part receives only posts made from then on. So does a member added to a group: no earlier post is replayed.
 - **The capability:**
   - a machine qualifies when it polls `GET /inbox` with `groups=1` while its presence reports a client of at least 0.6.1;
-  - a poll without `groups=1`, or a presence report of an older client, ends the capability. The machine's unacknowledged copies are then withdrawn.
+  - a poll without `groups=1`, or a presence report of an older client, ends the capability. Every copy at that machine that no agent has had yet is then withdrawn: unacknowledged ones, and ones a groups client stored but still holds (received or held), which an older connector never lists.
 - **Only a `groups=1` poll of a machine that takes part ever returns a copy.** A withdrawn copy is never returned.
 
 ### 22.3 Posting

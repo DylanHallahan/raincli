@@ -242,11 +242,18 @@ def move_copies_of(session: Session, user: User, team_id: uuid.UUID, target) -> 
 
 
 def lose_capability(session: Session, machine: Agent) -> int:
-    """H1: the machine no longer takes group copies (an older client, or a poll without ``groups=1``). Its unacked
-    copies are withdrawn, and fan-out skips it until it qualifies again."""
+    """H1: the machine no longer takes group copies (an older client, or a poll without ``groups=1``). Every copy
+    there that no agent has had yet is withdrawn: unacked ones, and ones a groups client stored and still holds
+    (received or held), which an older connector never lists. Fan-out skips the machine until it qualifies again."""
+    from raincli_server import identity
+
     machine.groups_capable_at = None
     session.flush()
-    return withdraw(session, Message.recipient_agent_id == machine.id)
+    result = session.execute(update(Message).where(
+        Message.route == "group", Message.recipient_agent_id == machine.id, Message.withdrawn_at.is_(None),
+        Message.delivery_state.in_(("stored", "received", "held"))).values(withdrawn_at=identity.now(), redeliver=False)
+        .execution_options(synchronize_session=False))
+    return result.rowcount or 0
 
 
 def note_poll(session: Session, machine: Agent, groups_flag: bool) -> None:
