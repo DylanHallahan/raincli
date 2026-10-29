@@ -1899,6 +1899,7 @@ def part_g(app, server, installers, work):
     app.quit()
     login_through_conpty(app, server, passwords["maya"], G_MACHINES["maya"], email=G_PEOPLE["maya"][1])
     tokens["maya"] = machine_token()
+    app.launch_run_value()  # as at logon: the app's runtime reports this machine's client (quit before the window)
     # Jon and Priya on a groups client; Ryan on an old one (0.5.6: never takes part); Sam has no inbox.
     for key, version in (("jon", "0.6.1"), ("priya", "0.6.1"), ("ryan", "0.5.6")):
         g_presence(server, tokens[key], G_AGENTS[key], version)
@@ -1934,6 +1935,7 @@ def part_g(app, server, installers, work):
                  "Jon\t" + emails["jon"] + "\ttaking part", "Priya\t" + emails["priya"] + "\ttaking part",
                  "Ryan\t" + emails["ryan"] + "\tnot taking part"):
         check(line in members, f"the seed's member list lacks {line!r}")
+    app.quit()  # the window is opened below with the CDP switch for that launch only
     say("PASS: G1. the screenshot seed: northwind with Maya (the window's machine), Jon and Priya taking part, Ryan "
         "on 0.5.6 and Sam with no inbox not taking part; checkout and infra by the operator; Maya's post from her "
         "CLI, Jon's and Priya's replies after acking their copies; an older 1:1 message from Jon")
