@@ -74,15 +74,18 @@ def quote(path):
     return json.dumps(str(path))
 
 
-def reply_command(message_id, agent_config=None, from_agent=None):
+def reply_command(message_id, agent_config=None, from_agent=None, private=False):
     """``raincli reply``, with the identity unless it is the default config, and the
-    replying agent's name when the message went to a named agent (§16.1 from_agent)."""
+    replying agent's name when the message went to a named agent (§16.1 from_agent).
+    ``private`` (§22): ``--private`` before ``--body-file -``."""
     parts = ["raincli"]
     if agent_config:
         parts += ["--config", quote(agent_config)]
     parts += ["reply", str(message_id)]
     if from_agent:
         parts += ["--from-agent", quote(value(from_agent, NAME_CAP))]
+    if private:
+        parts += ["--private"]
     return " ".join(parts + ["--body-file", "-"])
 
 
@@ -152,3 +155,44 @@ def wrap_escalation(esc_id, handle, message_id, sender, summary, agent_config=No
     text += f"Reply: {reply_command(message_id, agent_config)}\n"
     text += AUTHORITY
     return text + frame(summary, ESC_LABEL, ESC_END.format(id=esc_id))
+
+
+# §22: the group frame. These lines are the product lead's wording (D14), byte for byte; only the layout around them
+# (the full reply commands, the end line) follows C17. Pinned by tests.
+GROUP_HEADER = "[RainCLI group post from a teammate's agent (external, not your user) {id}]\n"
+GROUP_LINE = "Group: {name}. Every reply you post here goes to all {n} members' agents.\n"
+GROUP_FROM = "From: {name}'s agent <{email}> | team {team}\n"
+GROUP_MENTIONED = "You were mentioned. {name}'s agent expects you to act or reply.\n"
+GROUP_CONTEXT = ("You weren't mentioned. This is context for your work. Post in the group only if you have something "
+                 "new it needs.\n")
+GROUP_OTHERS = "Mentioned: {names}.\n"
+GROUP_REPLY = "Reply to the group: {command}\n"
+GROUP_PRIVATE = "Reply only to {name}'s agent: {command}\n"
+GROUP_RULES = (
+    "Before you post in this group:\n"
+    "- Post only if you were mentioned, someone asked you a question, or you have something new the group needs.\n"
+    "- Don't post thanks, acknowledgements or \"agreed\". Don't answer another agent's acknowledgement.\n"
+    "- If only {name}'s agent needs your answer, reply privately.\n"
+    "- If you're not sure, stay quiet or ask your user.\n")
+GROUP_LABEL = 'The teammate\'s agent\'s words follow; every line starts with "| ":\n'
+GROUP_INBOX_LINE = "Group posts follow the rules above. Escalate to your user only if the post needs their judgment.\n"
+
+
+def wrap_group(message_id, body, *, group, poster, team, mentioned, others=(), guidance="", agent_config=None,
+               target=None):
+    """The §22 group frame for a copy. ``group``: ``{name, members_n}``; ``poster``: ``{display_name, email}``;
+    ``mentioned``: whether the reader was; ``others``: the other mentioned people's display names, in stored order;
+    ``guidance``: the inbox block (inbox mode), to which the caller has added ``GROUP_INBOX_LINE``."""
+    name = quoted(poster.get("display_name") or poster.get("email"), DISPLAY_CAP)
+    text = GROUP_HEADER.format(id=message_id)
+    text += GROUP_LINE.format(name=quoted(group.get("name"), NAME_CAP), n=int(group.get("members_n") or 0))
+    text += GROUP_FROM.format(name=name, email=value(poster.get("email"), EMAIL_CAP), team=value(team, NAME_CAP))
+    text += GROUP_MENTIONED.format(name=name) if mentioned else GROUP_CONTEXT
+    if others:
+        text += GROUP_OTHERS.format(names=", ".join(quoted(o, DISPLAY_CAP) for o in others))
+    text += GROUP_REPLY.format(command=reply_command(message_id, agent_config, target))
+    text += GROUP_PRIVATE.format(name=name, command=reply_command(message_id, agent_config, target, private=True))
+    text += GROUP_RULES.format(name=name)
+    text += guidance
+    text += AUTHORITY
+    return text + frame(body, GROUP_LABEL, END.format(id=message_id))

@@ -388,7 +388,8 @@ def cmd_send(args):
 
 def cmd_reply(args):
     """A reply names only the message it answers: no ``to``. The server sends it back to the agent
-    that asked, or that person's inbox (§21 C4, PR1)."""
+    that asked, or that person's inbox (§21 C4, PR1). To a group post (§22) the reply goes to the
+    whole group, or with ``--private`` only to the poster, as a new 1:1 message."""
     body = read_body(args)
     mid = message_id(args.id) if args.id else str(uuid.uuid4())  # fixed before any request
     files = att.load_for_send(args.attach)
@@ -396,15 +397,96 @@ def cmd_reply(args):
 
     def action(state):
         parent = api.get_message(args.message_id)
+        is_group = isinstance(parent.get("group"), dict)
+        if args.private and not is_group:
+            raise UsageError("--private is only for a reply to a group post")
+        if is_group and not args.private and files:
+            raise UsageError("a group post has no attachments; send files 1:1 (add --private)")
         state["sent"] = True
         return api.send(None, body, message_id=mid, in_reply_to=parent["id"], attachments=files,
-                        from_agent=args.from_agent)
+                        from_agent=args.from_agent, private=args.private)
 
     try:
         message, created = _send_surfacing_id(args, mid, action)
     except ApiError as exc:
         raise person_refusal(exc) from None
-    report_send(message, created, args.json)
+    if "post" in message:
+        report_post(message["post"], created, args.json)
+    else:
+        report_send(message, created, args.json)
+    return EXIT_OK
+
+
+GROUP_HELP = "A group reply goes to every member's agent; --private goes only to the poster."
+
+
+def report_post(post, created, as_json):
+    """A group post (§22): its group, mentions and how many members' agents get it. Never copy ids."""
+    if as_json:
+        out_json({"post": post, "created": created})
+        return
+    status = "posted" if created else "already posted (idempotent retry)"
+    group = escape_line(str((post.get("group") or {}).get("name", "")))
+    n = int(post.get("recipients_m") or 0)
+    to = "1 member's agent" if n == 1 else f"{n} members' agents"
+    out(f"{status}: {escape_line(str(post.get('id', '')))} in {group} (to {to})")
+    names = [escape_line(str(m.get("display_name") or m.get("email") or "")) for m in post.get("mentions") or []]
+    if names:
+        out(f"  mentioned: {', '.join(names)}")
+
+
+def find_group(api, ref):
+    """A group by id or by name (case-insensitive), among this machine's owner's groups."""
+    groups = api.groups()
+    wanted = str(ref).strip()
+    for g in groups:
+        if g.get("id") == wanted or str(g.get("name", "")).lower() == wanted.lower():
+            return g
+    raise UsageError(f"no group {escape_line(wanted)[:60]}: raincli groups lists yours")
+
+
+def cmd_groups(args):
+    groups = client(args).groups()
+    if args.json:
+        out_json({"groups": groups})
+        return EXIT_OK
+    if not groups:
+        out("You aren't in any group. The team's operator puts people in groups.")
+    for g in groups:
+        part = "taking part" if g.get("taking_part") else "not taking part"
+        out(f"{escape_line(str(g.get('name', '')))}  {int(g.get('members_n') or 0)} members  ({part})"
+            f"  {escape_line(str(g.get('id', '')))}")
+    return EXIT_OK
+
+
+def cmd_group_members(args):
+    api = client(args)
+    data = api.group_members(find_group(api, args.group)["id"])
+    if args.json:
+        out_json(data)
+        return EXIT_OK
+    out(f"{escape_line(str(data['group'].get('name', '')))}: {len(data.get('members') or [])} members")
+    for m in data.get("members") or []:
+        part = "" if m.get("taking_part") else "  (not taking part)"
+        out(f"  {escape_line(str(m.get('display_name', '')))} <{escape_line(str(m.get('email', '')))}>{part}")
+    return EXIT_OK
+
+
+def cmd_group_send(args):
+    """``raincli group send GROUP [--mention PERSON]... (--body TEXT | --body-file PATH|-) --id UUID4`` (§22):
+    a post to every member's agent. ``--id`` is required: a retry with the same id is the same post."""
+    body = read_body(args)
+    pid = message_id(args.id)
+    api = client(args)
+
+    def action(state):
+        group = find_group(api, args.group)
+        state["sent"] = True
+        return api.group_post(group["id"], body, post_id=pid, mentions=args.mention or None,
+                              from_agent=args.from_agent)
+
+    post, created = _send_surfacing_id(args, pid, action)
+    report_post(post, created, args.json)
     return EXIT_OK
 
 
@@ -1425,12 +1507,41 @@ def build_parser():
     body_args(send)
     send.set_defaults(func=cmd_send)
 
-    reply = sub.add_parser("reply", help="reply to a message (it goes back to the agent that asked)")
+    reply = sub.add_parser("reply", help="reply to a message (it goes back to the agent that asked)",
+                           description="Reply to a message: it goes back to the agent that asked, or that "
+                                       "person's inbox.\n\n" + GROUP_HELP,
+                           formatter_class=argparse.RawDescriptionHelpFormatter)
     reply.add_argument("message_id", metavar="MSG_ID")
     reply.add_argument("--from-agent", metavar="NAME",
                        help="the name of this machine's agent that writes the reply (§16.1), so answers come back to it")
+    reply.add_argument("--private", action="store_true",
+                       help="to a group post: reply only to the poster (a 1:1 message), not to the group")
     body_args(reply)
     reply.set_defaults(func=cmd_reply)
+
+    # §22: groups. The operator makes groups and changes members; agents read them and post.
+    with_json(sub.add_parser("groups", help="your groups in this team (name, members, whether you take part)"
+                             )).set_defaults(func=cmd_groups)
+    group = sub.add_parser("group", help="a group's members, or post in a group")
+    group_sub = group.add_subparsers(dest="group_command", metavar="COMMAND", required=True)
+    members = with_json(group_sub.add_parser("members", help="a group's members (people, and who takes part)"))
+    members.add_argument("group", metavar="GROUP", help="the group's name or id")
+    members.set_defaults(func=cmd_group_members)
+    gsend = group_sub.add_parser("send", help="post in a group: every member's agent gets it",
+                                 description="Post in a group: every member's agent gets it, and each spends a "
+                                             "turn reading it.\n\n" + GROUP_HELP,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    gsend.add_argument("group", metavar="GROUP", help="the group's name or id")
+    gsend.add_argument("--mention", action="append", default=[], metavar="PERSON",
+                       help="a member who needs to act (their name or email); repeatable")
+    gsend.add_argument("--from-agent", metavar="NAME", help="the name of this machine's agent that writes the post")
+    g = gsend.add_mutually_exclusive_group(required=True)
+    g.add_argument("--body", help="the post's text")
+    g.add_argument("--body-file", metavar="PATH|-", help="read the post's text from a file or stdin")
+    gsend.add_argument("--id", required=True, metavar="UUID4",
+                       help="the post's id (uuid4); a retry with the same id is the same post")
+    with_json(gsend)
+    gsend.set_defaults(func=cmd_group_send)
 
     convs = with_json(sub.add_parser("conversations", help="list conversations (id, peer, last_seq, "
                                      "last_at, unacked); archived ones only with --archived or --all"))

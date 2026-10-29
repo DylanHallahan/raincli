@@ -221,8 +221,10 @@ class ApiClient:
         return self.request("PUT", "/me/inbox", body={"none": True})[1]
 
     def send(self, to, body, *, message_id=None, conversation_id=None, in_reply_to=None,
-             attachments=None, from_agent=None, kind=None):
-        """Send a message. Returns ``(message, created)``.
+             attachments=None, from_agent=None, kind=None, private=False):
+        """Send a message. Returns ``(message, created)``; for a reply to a group copy (§22), which the server
+        posts in that group, ``({"post": post}, created)``. ``private`` (§22): a reply to a group copy that goes
+        only to the post's author.
 
         ``to`` is a person (§21 C2): ``{"person": email}``, ``{"person_name": name}`` or the text
         forms. A reply (``in_reply_to``) passes ``to=None``: the key is then omitted and the server
@@ -242,8 +244,33 @@ class ApiClient:
             payload["from_agent"] = from_agent  # §16.1: which of this machine's agents wrote it
         if kind:
             payload["kind"] = kind
+        if private:
+            payload["private"] = True
         _, data = self.request("POST", "/messages", body=payload)
+        if "post" in data:  # §22: a reply to a group copy became a post in its group
+            return {"post": data["post"]}, not data.get("duplicate")
         return data["message"], bool(data.get("created"))
+
+    # -- groups (§22) -------------------------------------------------------
+
+    def groups(self):
+        """``GET /groups``: this machine's owner's groups in its team."""
+        return self.request("GET", "/groups")[1]["groups"]
+
+    def group_members(self, group_id):
+        return self.request("GET", f"/groups/{_path_id(group_id)}/members")[1]
+
+    def group_post(self, group_id, body, *, post_id, mentions=None, from_agent=None, in_reply_to=None):
+        """``POST /groups/{id}/posts``. Returns ``(post, created)``: a retry with the same id is the same post."""
+        payload = {"id": str(post_id), "body": body}
+        if mentions:
+            payload["mentions"] = list(mentions)
+        if from_agent:
+            payload["from_agent"] = from_agent
+        if in_reply_to:
+            payload["in_reply_to"] = in_reply_to
+        data = self.request("POST", f"/groups/{_path_id(group_id)}/posts", body=payload)[1]
+        return data["post"], not data.get("duplicate")
 
     def inbox(self, *, after=0, limit=100, wait=0, include_acked=False, timeout=None, routing=False):
         """``routing=True`` (``?routing=1``, §16.2) also returns messages to named agents
@@ -253,6 +280,9 @@ class ApiClient:
                  "include_acked": "true" if include_acked else "false"}
         if routing:
             query["routing"] = 1
+        # §22: this client takes group copies. Every poll says so; a poll without it would end the machine's
+        # capability (and withdraw its undelivered copies).
+        query["groups"] = 1
         if timeout is None:
             timeout = max(self.timeout, wait + 15)
         data = self.request("GET", "/inbox", query=query, timeout=timeout)[1]

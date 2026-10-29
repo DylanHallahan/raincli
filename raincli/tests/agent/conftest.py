@@ -112,9 +112,9 @@ def connector_env(tmp_path, fake_api):
                             "herdr": herdr, "state_dir": str(tmp_path / "state")})
 
 
-from raincli_agent.connector.framing import ESC_LABEL, LABEL
+from raincli_agent.connector.framing import ESC_LABEL, GROUP_LABEL, LABEL
 
-LABELS = (LABEL.rstrip("\n"), ESC_LABEL.rstrip("\n"))
+LABELS = (LABEL.rstrip("\n"), ESC_LABEL.rstrip("\n"), GROUP_LABEL.rstrip("\n"))
 
 
 def is_body_label(line):

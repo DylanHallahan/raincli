@@ -84,9 +84,13 @@ class Queue:
         # ~/.local is trusted; only what we create below it must be link-free.
         self.state_dir = os.path.realpath(os.path.abspath(state_dir))
         self.messages_dir = os.path.join(self.state_dir, "messages")
+        # §22 (H1): group copies live apart, so a connector older than the groups client, reading the same state
+        # directory after a rollback, never lists them (it would frame a group post as a 1:1 message).
+        self.group_messages_dir = os.path.join(self.state_dir, "group-messages")
         self.escalations_dir = os.path.join(self.state_dir, "escalations")
         ensure_private_dir(self.state_dir)
         ensure_private_dir(self.messages_dir)
+        ensure_private_dir(self.group_messages_dir)
         ensure_private_dir(self.escalations_dir)
         self._run_lock_fd = None
 
@@ -121,8 +125,13 @@ class Queue:
 
     # -- records ---------------------------------------------------------
 
-    def path(self, message_id):
-        return os.path.join(self.messages_dir, normalize_id(message_id) + ".json")
+    def path(self, message_id, group=None):
+        """A record's file. ``group``: True for a group copy, False for any other message, None to find it (a
+        group copy's file when there is one)."""
+        name = normalize_id(message_id) + ".json"
+        if group is None:
+            group = os.path.exists(os.path.join(self.group_messages_dir, name))
+        return os.path.join(self.group_messages_dir if group else self.messages_dir, name)
 
     def exists(self, message_id):
         return os.path.exists(self.path(message_id))
@@ -146,13 +155,14 @@ class Queue:
     def save(self, record):
         """Atomic, fsynced write. Returns only once the record is durable."""
         record["updated_at"] = now_iso()
-        atomic_write_json(self.path(record["id"]), record)
+        atomic_write_json(self.path(record["id"], group=bool(record.get("group"))), record)
 
     def all(self):
         records = []
-        for name in os.listdir(self.messages_dir):
-            if name.endswith(".json") and not name.startswith("."):
-                records.append(self._load_json(os.path.join(self.messages_dir, name)))
+        for folder in (self.messages_dir, self.group_messages_dir):
+            for name in os.listdir(folder):
+                if name.endswith(".json") and not name.startswith("."):
+                    records.append(self._load_json(os.path.join(folder, name)))
         records.sort(key=lambda r: (r.get("seq") or 0, r["id"]))
         return records
 

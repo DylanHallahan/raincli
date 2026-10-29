@@ -23,8 +23,8 @@ from ..runtime import sessions
 from .herdr import READY_STATUSES, HerdrError, HerdrRejected, HerdrTimeout
 
 # Protocol §11.1 framing, as replaced by §16.12 C17: one module builds every prompt.
-from .framing import (ATTACHMENTS_LABEL, frame, quote, reply_command, wrap_escalation,  # noqa: F401
-                      wrap_message)
+from .framing import (ATTACHMENTS_LABEL, GROUP_INBOX_LINE, frame, quote, reply_command,  # noqa: F401
+                      wrap_escalation, wrap_group, wrap_message)
 
 INBOX_GUIDANCE = (
     "[Inbox for {handle}: answer, ask follow-ups and continue the conversation with the reply command. "
@@ -62,6 +62,8 @@ def frame_record(record, identity, guidance="", agent_config=None, held_seconds=
     person = origin if isinstance(origin, dict) and "person" in origin else None
     person = {"display_name": person.get("display_name"), "email": person.get("person")} if person else None
     team = message.get("team") or identity.get("team", "")
+    if isinstance(message.get("group"), dict):  # §22: a group copy has its own frame on every path
+        return _frame_group(record, message, person or {}, team, identity, guidance, agent_config)
     from_kind = message.get("from_kind") if message.get("from_kind") in ("app", "agent") else None
     return wrap_message(record["id"], record["sender"], team, message["body"],
                         record.get("attachments_local") or (), guidance, agent_config,
@@ -70,6 +72,17 @@ def frame_record(record, identity, guidance="", agent_config=None, held_seconds=
                         owner=_from_owner(message, person), from_kind=from_kind,
                         # §21: a v0.6 server's message (from_kind) reaches this machine as its owner's inbox
                         inbox_of=identity.get("owner") if from_kind else None)
+
+
+def _frame_group(record, message, poster, team, identity, guidance, agent_config):
+    reader = (identity.get("owner_email") or "").lower()
+    others = [m.get("display_name") or m.get("email") for m in message.get("mentions") or []
+              if isinstance(m, dict) and (m.get("email") or "").lower() != reader]
+    if guidance:  # inbox mode: the inbox block gains the group line
+        guidance += GROUP_INBOX_LINE
+    return wrap_group(record["id"], message.get("body"), group=message["group"], poster=poster, team=team,
+                      mentioned=bool(message.get("mentioned")), others=others, guidance=guidance,
+                      agent_config=agent_config, target=record.get("target"))
 
 
 def _from_owner(message, person):
@@ -308,6 +321,8 @@ class Connector:
             if record is None:
                 record = {"version": 1, "id": message_id, "seq": message.get("seq"),
                           "sender": message.get("from", ""), "message": message,
+                          # §22 (H1): a group copy is stored apart (queue.group_messages_dir)
+                          "group": isinstance(message.get("group"), dict),
                           "approved": False, "acked": False, "reported": None,
                           "attempts": 0, "received_at": q.now_iso()}
                 record["attachments_local"] = []
@@ -796,7 +811,8 @@ class Connector:
         if "owner" not in identity and self.api is not None:
             try:
                 owner = (self.api.me() or {}).get("owner") or {}
-                identity = {**identity, "owner": owner.get("display_name") or owner.get("email")}
+                identity = {**identity, "owner": owner.get("display_name") or owner.get("email"),
+                            "owner_email": owner.get("email")}  # §22: who "Mentioned:" leaves out
             except (ApiError, RainError, OSError, ValueError, TypeError, AttributeError):
                 return identity  # offline: the old To line now, the owner next time
             self.identity = identity
