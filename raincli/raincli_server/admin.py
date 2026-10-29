@@ -19,9 +19,10 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from raincli_server import identity, presence
+from raincli_server import groups, identity, presence
 from raincli_server.db import make_engine, make_sessionmaker, session_scope
-from raincli_server.models import Agent, AgentCredential, AgentPresence, ClientTarget, Team, User
+from raincli_server.groups import GroupRuleError
+from raincli_server.models import Agent, AgentCredential, AgentPresence, ClientTarget, Conversation, Team, User
 
 
 class AdminError(Exception):
@@ -200,6 +201,19 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--team", required=True, metavar="SLUG")
 
     sub.add_parser("migrate", help="upgrade the database schema to head")
+    # §22 G8: groups, by the operator only. Members are people (emails) of the team.
+    for name, text in (("group-create", "create a group of members of a team"),
+                       ("group-add", "add members to a group (their agents get only posts made from now on)"),
+                       ("group-remove", "remove members from a group (their undelivered copies are withdrawn)")):
+        c = sub.add_parser(name, help=text)
+        c.add_argument("team", metavar="TEAM")
+        c.add_argument("name", metavar="NAME")
+        c.add_argument("emails", metavar="EMAIL", nargs="+")
+    c = sub.add_parser("group-list", help="list a team's groups")
+    c.add_argument("team", metavar="TEAM")
+    c = sub.add_parser("group-members", help="list a group's members (people, and whether they take part)")
+    c.add_argument("team", metavar="TEAM")
+    c.add_argument("name", metavar="NAME")
     return p
 
 
@@ -223,6 +237,9 @@ def main(argv: list[str] | None = None, *, env=None, stdin: TextIO | None = None
                 _dispatch(args, session, env, stdin, stdout, stderr, prompt)
         finally:
             engine.dispose()
+    except GroupRuleError as exc:  # §22 G8: a refused group command
+        print(f"raincli-admin: {exc}", file=stderr)
+        return 2
     except (AdminError, identity.IdentityError) as exc:
         print(f"raincli-admin: {exc}", file=stderr)
         return 1
@@ -309,6 +326,44 @@ def _dispatch(args, session: Session, env, stdin, stdout, stderr, prompt) -> Non
         _set_client_version(session, _team(session, args.team), args, stdout, stderr)
     elif cmd == "client-status":
         _client_status(session, _team(session, args.team), stdout)
+    elif cmd.startswith("group-"):
+        _group_command(session, cmd, args, stdout)
+
+
+def _members_out(session: Session, group, stdout) -> None:
+    """People only: name, email and whether they take part. Never machines or agents."""
+    for row in groups.members_with_taking_part(session, group):
+        print("\t".join([row.name, row.user.email, "taking part" if row.taking_part else "not taking part"]),
+              file=stdout)
+
+
+def _group_command(session: Session, cmd: str, args, stdout) -> None:
+    team = _team(session, args.team)
+    if cmd == "group-create":
+        group = groups.create_group(session, team, args.name, args.emails)
+        print(f'created group "{group.name}" in {team.slug} with {len(args.emails)} members', file=stdout)
+        _members_out(session, group, stdout)
+    elif cmd == "group-add":
+        group = groups.add_members(session, team, args.name, args.emails)
+        print(f'added {len(args.emails)} to "{group.name}"; their agents get only posts made from now on',
+              file=stdout)
+        _members_out(session, group, stdout)
+    elif cmd == "group-remove":
+        group, withdrawn = groups.remove_members(session, team, args.name, args.emails)
+        print(f'removed {len(args.emails)} from "{group.name}"; {withdrawn} undelivered copies withdrawn', file=stdout)
+        _members_out(session, group, stdout)
+    elif cmd == "group-list":
+        rows = session.scalars(select(Conversation).where(Conversation.team_id == team.id,
+                                                          Conversation.kind == "group")
+                               .order_by(func.lower(Conversation.name))).all()
+        for group in rows:
+            print(f"{group.name}\t{groups.members_n(session, group)} members", file=stdout)
+        if not rows:
+            print(f"{team.slug} has no groups", file=stdout)
+    elif cmd == "group-members":
+        group = groups.named_group(session, team, args.name)
+        print(f'"{group.name}" in {team.slug}: {groups.members_n(session, group)} members', file=stdout)
+        _members_out(session, group, stdout)
 
 
 ROUTING_MIN_CLIENT = (0, 5, 0)  # the first routing-capable client (protocol §16.12 C1)

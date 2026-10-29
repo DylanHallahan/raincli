@@ -13,6 +13,7 @@ import logging
 import math
 import threading
 import time
+import uuid
 from collections import deque
 from typing import Callable
 
@@ -26,7 +27,7 @@ from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message as ASGIMessage, Receive, Scope, Send
 
-from raincli_server import identity, messaging, presence, presentation, security
+from raincli_server import groups, identity, messaging, presence, presentation, security
 from raincli_server import quotas
 from raincli_server.api import polls
 from raincli_server.db import session_scope
@@ -320,9 +321,11 @@ def build_api(parent: FastAPI) -> FastAPI:
     @api.put("/presence")
     async def update_presence(request: Request):
         data = await authed_json_body(request, "messages:ack")
-        return await run(request, "messages:ack",
-                         lambda session, auth: presence.publish(session, auth.agent, data),
-                         counted=False)
+        def work(session, auth: AgentAuth):
+            reply = presence.publish(session, auth.agent, data)
+            groups.note_presence(session, auth.agent)  # §22 H1: an older client ends the group capability
+            return reply
+        return await run(request, "messages:ack", work, counted=False)
 
     @api.post("/messages")
     async def send(request: Request):
@@ -330,14 +333,74 @@ def build_api(parent: FastAPI) -> FastAPI:
 
         def work(session, auth: AgentAuth):
             req = messaging.SendRequest.parse(data, auth.agent.handle)
+            copy = messaging.group_copy_for_reply(session, auth.agent, req.in_reply_to)
+            if copy is not None and not req.private:  # §22: a reply to a group copy is a post in its group
+                if req.attachments or req.kind != "message" or req.conversation_id is not None:
+                    raise ApiError(400, "invalid", "a group reply takes only id, body, in_reply_to and from_agent")
+                if req.to is not None:
+                    raise ApiError(400, "invalid", "a group reply goes to the group: leave out to")
+                post, created = groups.post(session, auth.agent, copy.conversation_id, id=req.id, body=req.body,
+                                            from_agent=req.from_agent, reply_copy=copy)
+                return created, {"post": groups.post_json(session, post), "duplicate": not created}
             msg, created = messaging.send_message(
                 session, auth.agent, id=req.id, to=req.to, body=req.body,
                 conversation_id=req.conversation_id, in_reply_to=req.in_reply_to,
                 max_pending=settings.max_pending, attachments=req.attachments,
                 quotas=quotas.Quotas.from_settings(settings),
-                from_agent=req.from_agent, kind=req.kind,
+                from_agent=req.from_agent, kind=req.kind, private=req.private,
             )
             return created, {"message": m(session, msg, auth), "created": created}
+        created, body = await run(request, "messages:send", work, counted=False)
+        return JSONResponse(body, status_code=201 if created else 200)
+
+    # Groups (§22): read your groups and their members, and post. No route creates groups or changes members.
+    GROUP_POST_FIELDS = frozenset({"id", "body", "mentions", "in_reply_to", "from_agent"})
+
+    @api.get("/groups")
+    async def list_groups(request: Request):
+        def work(session, auth: AgentAuth):
+            owner = session.get(User, auth.agent.owner_user_id)
+            return {"groups": [groups.group_json(session, row.group, owner.id)
+                               for row in groups.groups_of(session, owner, [auth.team.id])]}
+        return await run(request, "messages:read", work)
+
+    @api.get("/groups/{group_id}/members")
+    async def group_members(request: Request, group_id: str):
+        def work(session, auth: AgentAuth):
+            group = groups.visible_group(session, group_id, machine=auth.agent)
+            if group is None:
+                raise ApiError(404, "not_found", "group not found")
+            return {"group": groups.group_json(session, group, auth.agent.owner_user_id),
+                    "members": [r.json() for r in groups.members_with_taking_part(session, group)]}
+        return await run(request, "messages:read", work)
+
+    @api.post("/groups/{group_id}/posts")
+    async def group_post(request: Request, group_id: str):
+        data = await authed_json_body(request, "messages:send")
+
+        def work(session, auth: AgentAuth):
+            if not isinstance(data, dict):
+                raise ApiError(400, "invalid", "request body must be a JSON object")
+            unknown = set(data) - GROUP_POST_FIELDS
+            if unknown:
+                raise ApiError(400, "invalid", f"unknown fields: {', '.join(sorted(unknown))}")
+            post_id = data.get("id")
+            try:
+                if not isinstance(post_id, str) or uuid.UUID(post_id).version != 4:
+                    raise ValueError
+            except ValueError:
+                raise ApiError(400, "invalid", "id must be a uuid4 string") from None
+            from_agent = data.get("from_agent")
+            if from_agent is not None and (not isinstance(from_agent, str) or not presence.valid_agent_name(from_agent)
+                                           or from_agent != from_agent.strip()):
+                raise ApiError(400, "invalid", "from_agent must be a directory name: 1-64 characters, no control "
+                                               "or format characters")
+            reply = data.get("in_reply_to")
+            if reply is not None and not isinstance(reply, str):
+                raise ApiError(400, "invalid", "in_reply_to must be a UUID string or null")
+            post, created = groups.post(session, auth.agent, group_id, id=post_id, body=data.get("body"),
+                                        mentions=data.get("mentions"), in_reply_to=reply, from_agent=from_agent)
+            return created, {"post": groups.post_json(session, post), "duplicate": not created}
         created, body = await run(request, "messages:send", work, counted=False)
         return JSONResponse(body, status_code=201 if created else 200)
 
@@ -349,8 +412,10 @@ def build_api(parent: FastAPI) -> FastAPI:
         wait: float = Query(0, ge=0),
         include_acked: bool = Query(False),
         routing: int = Query(0, ge=0, le=1),
+        groups: int = Query(0, ge=0, le=1),
     ):
         wait = min(wait, MAX_WAIT_SECONDS)
+        groups_flag = bool(groups)
         limit = min(limit, messaging.INBOX_LIMIT_MAX)
 
         def poll(count: bool):
@@ -359,7 +424,7 @@ def build_api(parent: FastAPI) -> FastAPI:
                 auth = authenticate(session, request, "messages:read", count=count)
                 msgs, cursor = messaging.inbox(
                     session, auth.agent, after=after, limit=limit, include_acked=include_acked,
-                    routing_capable=bool(routing))
+                    routing_capable=bool(routing), groups_capable=groups_flag)
                 keys = (("credential", auth.credential.id), ("user", auth.agent.owner_user_id))
                 return {"messages": messaging.messages_json(session, msgs, reader_agent=auth.agent), "cursor": cursor}, keys
         return await polls.long_poll(request, api.state.poll_slots, wait, POLL_INTERVAL, poll)

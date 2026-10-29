@@ -37,7 +37,7 @@ from sqlalchemy import and_, case, func, or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, object_session
 
-from raincli_server import presentation, routing, security
+from raincli_server import groups, presentation, routing, security
 from raincli_server.models import (EVENT_STATES, MESSAGE_KINDS, Agent, AgentPresence, Attachment, Conversation,
                                    DeliveryEvent, MachineAgent, Membership, Message, PersonInbox, Team, User)
 from raincli_server.routing import Endpoint
@@ -208,6 +208,7 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
         "delivery_updated_at": iso(msg.delivery_updated_at) if msg.recipient_user_id is None
         or viewer_id == msg.recipient_user_id or msg.delivery_state == "replied" else iso(msg.created_at),
         "attachments": attachments,
+        **(groups.copy_fields(session, msg, viewer_id) if msg.route == "group" else {}),
     }
 
 
@@ -261,10 +262,39 @@ def person_can_see(session: Session, msg: Message, user: User, scope: uuid.UUID 
     while they are still a member of the message's team (§16.6), in the team their session covers (§21.13)."""
     if not in_scope(session, msg.team_id, user, scope):
         return False
+    if msg.route == "group":
+        return _group_copy_visible(session, msg, user.id)
     if user.id in (msg.sender_user_id, msg.recipient_user_id):
         return True
     machines = {msg.sender_agent_id, msg.recipient_agent_id} - {None}
     return bool(machines & owned_machine_ids(session, user, msg.team_id))
+
+
+def group_copy_for_reply(session: Session, agent: Agent, ref: object) -> Message | None:
+    """§22: the group copy a reply names, when it is one: only its current recipient machine may reply to it
+    (anything else, a withdrawn copy included, is answered as an unknown message). None for anything else."""
+    if ref is None:
+        return None
+    try:
+        msg = _load_message(session, parse_uuid(ref, "in_reply_to"))
+    except MessagingError:
+        return None
+    if msg is None or msg.route != "group":
+        return None
+    if msg.recipient_agent_id != agent.id or not machine_can_see(session, msg, agent):
+        raise MessagingError(404, "not_found", "in_reply_to message not found")
+    return msg
+
+
+def _group_copy_visible(session: Session, msg: Message, user_id: uuid.UUID) -> bool:
+    """§22 M3: a group copy is visible only to its recipient machine and that machine's owner, while the owner is
+    a current member of the group and the copy isn't withdrawn. Everyone else, the poster included, gets the
+    unknown-id answer."""
+    from raincli_server.models import GroupMember
+
+    recipient = session.get(Agent, msg.recipient_agent_id)
+    return (msg.withdrawn_at is None and recipient is not None and recipient.owner_user_id == user_id
+            and session.get(GroupMember, (msg.conversation_id, user_id)) is not None)
 
 
 def machine_can_see(session: Session, msg: Message, agent: Agent) -> bool:
@@ -272,6 +302,8 @@ def machine_can_see(session: Session, msg: Message, agent: Agent) -> bool:
     data)."""
     if msg.team_id != agent.team_id:
         return False
+    if msg.route == "group":  # §22 M3: only the copy's recipient machine, never the poster
+        return msg.recipient_agent_id == agent.id and _group_copy_visible(session, msg, agent.owner_user_id)
     if _is_participant(msg, agent):
         return True
     owner = session.get(User, agent.owner_user_id)
@@ -323,8 +355,8 @@ def _pending_count(session: Session, recipient: Endpoint) -> int:
                 answer.c.sender_agent_id.in_(select(Agent.id).where(Agent.owner_user_id == uid)))).exists()
         # Messages from before v0.6 (no route) aren't waiting for anything (not in the waiting set either).
         where = and_(Message.recipient_user_id == uid, Message.route.is_not(None), ~answered)
-    else:
-        where = Message.recipient_agent_id == recipient.agent.id
+    else:  # §22 M5: group copies never count toward a machine's 1:1 cap
+        where = and_(Message.recipient_agent_id == recipient.agent.id, Message.route.is_distinct_from("group"))
     return session.scalar(
         select(func.count()).select_from(Message).where(where, Message.acked_at.is_(None))) or 0
 
@@ -432,6 +464,7 @@ def send_message(
     from_agent: str | None = None,
     kind: str = "message",
     quotas=None,
+    private: bool = False,
 ) -> tuple[Message, bool]:
     """Store a message from a machine credential (§3, §16.1). ``to`` is any §16.1 endpoint form;
     ``to_handle`` is the v0.4 machine-endpoint shorthand. Returns ``(message, created)``."""
@@ -444,7 +477,7 @@ def send_message(
     return send(session, machine_endpoint(sender_agent, from_agent), sender_agent.team_id, id=id,
                 to=to if to is not None else to_handle, body=body, conversation_id=conversation_id,
                 in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments, kind=kind,
-                quotas=quotas)
+                quotas=quotas, private=private)
 
 
 def send_as_person(session: Session, user: User, team_id: uuid.UUID, *, id, to: object, body: str,  # noqa: A002
@@ -472,7 +505,7 @@ def _sends_as(sender: Endpoint, msg: Message, side: str) -> bool:
 def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: object, body: str,  # noqa: A002
          conversation_id=None, in_reply_to=None, max_pending: int,
          attachments: list[tuple[str, bytes]] | None = None, kind: str = "message",
-         quotas=None) -> tuple[Message, bool]:
+         quotas=None, private: bool = False) -> tuple[Message, bool]:
     """The one send path for every sender (§21): teammates address people, never machines or agents.
 
     - A new message names a person (C2); it goes to that person's inbox in the team, or waits for them in their
@@ -494,10 +527,27 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
     if me is None or not me.is_active or session.get(Membership, (team_id, me.id)) is None:
         raise MessagingError(403, "forbidden", "you are not a member of that team")
 
-    # Idempotency is decided before any other state or capacity check.
+    # §22: a reply to a group copy goes in the group (the API routes it to groups.post) or, ``private``, to the
+    # post's author as a new 1:1 thread with no in_reply_to. A person never replies to a copy.
+    group_parent = _load_message(session, reply_to) if reply_to is not None else None
+    if group_parent is not None and group_parent.route != "group":
+        group_parent = None
+    if group_parent is not None and (not private or sender.kind == "person"
+                                     or group_parent.recipient_agent_id != sender.machine_id
+                                     or group_parent.withdrawn_at is not None
+                                     or not machine_can_see(session, group_parent, sender.agent)):
+        raise MessagingError(404, "not_found", "in_reply_to message not found")
+    if private and group_parent is None:
+        raise _invalid("private is only for a reply to a group post")
+    stored_reply = None if group_parent is not None else reply_to
+
+    # Idempotency is decided before any other state or capacity check. Posts share the id namespace (§22).
     existing = _load_message(session, message_id)
     if existing is not None:
-        return _idempotent_v06(session, existing, sender, team_id, to, body, kind, reply_to, conv_id, files)
+        return _idempotent_v06(session, existing, sender, team_id, to, body, kind, stored_reply, conv_id, files)
+    from raincli_server.models import GroupPost
+    if session.get(GroupPost, message_id) is not None:
+        raise MessagingError(409, "id_conflict", "a different message already uses this id")
 
     parent: Message | None = None
     if reply_to is not None:
@@ -508,7 +558,10 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
         target, route, other = _reply_target(session, sender, me, parent)
         if to is not None and _person_named(session, team_id, to, me) != other.id:
             raise _invalid("a reply goes to the other person of the message it answers")
-        parent_conv = final_conversation_id(session, parent.conversation_id)
+        if group_parent is not None:  # a private reply: their pair conversation, never the group
+            parent_conv = _pair_conversation(session, team_id, me, other).id
+        else:
+            parent_conv = final_conversation_id(session, parent.conversation_id)
         if conv_id is not None and conv_id != parent_conv:
             raise _invalid("conversation_id does not match the parent message")
         conversation = session.get(Conversation, parent_conv)
@@ -542,7 +595,7 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
     session.execute(select(Conversation.id).where(Conversation.id == conversation.id)
                     .with_for_update(read=True, key_share=True))
     values = dict(
-        id=message_id, team_id=team_id, conversation_id=conversation.id, in_reply_to=reply_to, body=body,
+        id=message_id, team_id=team_id, conversation_id=conversation.id, in_reply_to=stored_reply, body=body,
         delivery_state="stored", kind=kind, route=route,
         sender_agent_id=sender.machine_id, sender_agent_name=sender.name if sender.kind == "agent" else None,
         sender_user_id=sender.user.id if sender.kind == "person" else None,
@@ -554,7 +607,7 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
         pg_insert(Message).values(**values).on_conflict_do_nothing(index_elements=["id"]).returning(Message.id))
     msg = _load_message(session, message_id)
     if inserted is None:  # lost a race with a concurrent send of the same id
-        return _idempotent_v06(session, msg, sender, team_id, to, body, kind, reply_to, conv_id, files)
+        return _idempotent_v06(session, msg, sender, team_id, to, body, kind, stored_reply, conv_id, files)
     for position, (name, data, sha) in enumerate(files):
         session.add(Attachment(message_id=message_id, position=position, filename=name,
                                media_type=security.ATTACHMENT_MEDIA_TYPE, size=len(data), sha256=sha,
@@ -809,9 +862,11 @@ def ack(session: Session, agent: Agent, message_id: uuid.UUID | str) -> tuple[Me
     mid = parse_uuid(message_id, "message id", not_found=True)
     msg = _load_message(session, mid)
     if msg is not None and msg.team_id == agent.team_id and msg.recipient_agent_id != agent.id \
-            and msg.route in ("inbox", "person", "reply") \
+            and msg.route in ("inbox", "person", "reply", "group") \
             and person_of_endpoint(session, recipient_endpoint(session, msg)) == agent.owner_user_id:
         return msg, False
+    if msg is not None and msg.route == "group" and msg.recipient_agent_id == agent.id and msg.withdrawn_at:
+        return msg, False  # §22 G4: a withdrawn copy is never delivered; its ack is a no-op
     msg = _recipient_message(session, agent, message_id)
     updated = session.execute(
         update(Message)
@@ -880,7 +935,8 @@ def reports_routing_client(session: Session, agent: Agent) -> bool:
 
 
 def inbox(session: Session, agent: Agent, *, after: int = 0, limit: int = 100,
-          include_acked: bool = False, routing_capable: bool = False) -> tuple[list[Message], int]:
+          include_acked: bool = False, routing_capable: bool = False,
+          groups_capable: bool = False) -> tuple[list[Message], int]:
     """Messages to ``agent`` with ``seq > after``, ascending. Returns ``(messages, cursor)``.
 
     §16.2 capability gate: without ``routing_capable`` (``?routing=1``), messages to a named agent and
@@ -890,6 +946,7 @@ def inbox(session: Session, agent: Agent, *, after: int = 0, limit: int = 100,
     if routing_capable and agent.routing_capable_at is None and reports_routing_client(session, agent):
         agent.routing_capable_at = func.now()
         session.flush()
+    groups.note_poll(session, agent, groups_capable)  # §22 G2, H1: a poll without groups=1 ends the capability
     start = _machine_cursor(session, agent, after)
     # §21 C13 H1: a re-targeted message comes again below the cursor until acked; the cursor never goes back.
     stmt = (
@@ -900,6 +957,10 @@ def inbox(session: Session, agent: Agent, *, after: int = 0, limit: int = 100,
     )
     if not routing_capable:
         stmt = stmt.where(Message.recipient_agent_name.is_(None), Message.sender_user_id.is_(None))
+    # §22: group copies only ever go to a groups=1 poll of a machine that takes them; withdrawn ones never.
+    stmt = stmt.where(Message.withdrawn_at.is_(None))
+    if not (groups_capable and agent.groups_capable_at is not None):
+        stmt = stmt.where(Message.route.is_distinct_from("group"))
     if not include_acked:
         stmt = stmt.where(Message.acked_at.is_(None))
     messages = list(session.scalars(stmt))
@@ -941,7 +1002,7 @@ def person_inbox(session: Session, user: User, *, after: int = 0, limit: int = 1
                                 or_(Message.sender_user_id.is_(None), Message.sender_user_id != user.id),
                                 or_(Message.sender_agent_id.is_(None), Message.sender_agent_id.not_in(mine))))
     stmt = (
-        select(Message).where(to_me, Message.team_id.in_(teams),
+        select(Message).where(to_me, Message.team_id.in_(teams), Message.route.is_distinct_from("group"),
                               or_(Message.seq > after, and_(Message.redeliver.is_(True), Message.person_seen_at.is_(None),
                                                            Message.acked_at.is_(None))))
         .order_by(Message.seq).limit(_clamp(limit, 1, INBOX_LIMIT_MAX))
@@ -972,7 +1033,7 @@ def person_ack(session: Session, user: User, message_id: uuid.UUID | str,
 
 def is_unread_for(session: Session, user_id: uuid.UUID, msg: Message, owned: set | None = None) -> bool:
     """``unread_for`` for one loaded message (templates). ``owned``: the user's machine ids, if already known."""
-    if msg.person_seen_at is not None:
+    if msg.person_seen_at is not None or msg.route == "group":  # §22 C18: groups have no reads
         return False
     if msg.recipient_user_id is not None:
         return msg.recipient_user_id == user_id  # to them as a person, from anyone (their own agents' escalations too)
@@ -989,7 +1050,8 @@ def unread_for(user_id: uuid.UUID):
     routed_to_me = and_(Message.recipient_user_id.is_(None), Message.recipient_agent_id.in_(mine),
                         or_(Message.sender_user_id.is_(None), Message.sender_user_id != user_id),
                         or_(Message.sender_agent_id.is_(None), Message.sender_agent_id.not_in(mine)))
-    return and_(or_(Message.recipient_user_id == user_id, routed_to_me), Message.person_seen_at.is_(None))
+    return and_(or_(Message.recipient_user_id == user_id, routed_to_me), Message.person_seen_at.is_(None),
+                Message.route.is_distinct_from("group"))  # §22 C18: groups have no reads
 
 
 def conversation_endpoint(session: Session, conv: Conversation, side: str) -> Endpoint:
@@ -1291,9 +1353,10 @@ class SendRequest:
     attachments: list[tuple[str, bytes]]
     from_agent: str | None = None
     kind: str = "message"
+    private: bool = False  # §22: a reply to a group copy that goes only to the post's author, 1:1
 
     ALLOWED = frozenset({"id", "to", "body", "conversation_id", "in_reply_to", "attachments", "from", "sender",
-                         "from_agent", "kind"})
+                         "from_agent", "kind", "private"})
 
     @classmethod
     def parse(cls, data: object, caller_handle: str) -> "SendRequest":
@@ -1326,8 +1389,12 @@ class SendRequest:
         for name, value in (("conversation_id", conv), ("in_reply_to", reply)):
             if value is not None and not isinstance(value, str):
                 raise _invalid(f"{name} must be a UUID string or null")
+        private = data.get("private", False)
+        if not isinstance(private, bool) or (private and reply is None):
+            raise _invalid("private must be true or false, and only on a reply")
         return cls(id=msg_id, to=to, body=body, conversation_id=conv, in_reply_to=reply,
-                   attachments=_decode_attachments(data.get("attachments")), from_agent=from_agent, kind=kind)
+                   attachments=_decode_attachments(data.get("attachments")), from_agent=from_agent, kind=kind,
+                   private=private)
 
 
 def _decode_attachments(value: object) -> list[tuple[str, bytes]]:
@@ -1463,6 +1530,7 @@ def set_person_inbox(session: Session, user: User, team_id: uuid.UUID, machine_i
         moved = _retarget(session, where, target, route)
     if deliver_waiting:
         delivered = _retarget(session, waiting_messages(session, user, team_id), target, route)
+    groups.move_copies_of(session, user, team_id, target)  # §22 G4: to a groups inbox, else withdrawn
     session.flush()
     return {"inbox": inbox_json(session, row), "moved": moved, "stayed": stayed, "delivered_waiting": delivered}
 
@@ -1474,6 +1542,7 @@ def clear_person_inbox(session: Session, user: User, team_id: uuid.UUID, *, via:
         return {"inbox": None, "moved": 0, "stayed": 0, "delivered_waiting": 0}
     moved = _retarget(session, _previous_inbox_messages(session, team_id, row), Endpoint("person", user=user),
                       "person")
+    groups.withdraw_copies_of(session, user.id, team_id)  # §22 G4: no inbox, no copies (never to the app)
     session.delete(row)
     session.flush()
     return {"inbox": None, "moved": moved, "stayed": 0, "delivered_waiting": 0}
