@@ -1021,6 +1021,8 @@ def person_ack(session: Session, user: User, message_id: uuid.UUID | str,
     that stays the machine's pickup, so a message read in the app is still delivered to an inbox picked later).
     Idempotent. A message routed to one of the person's machines may be marked seen too."""
     msg = get_message_for_person(session, user, message_id, scope)
+    if msg.route == "group":  # §22 C18: groups have no reads
+        raise MessagingError(403, "forbidden", "only the recipient can do this")
     if person_of_endpoint(session, recipient_endpoint(session, msg)) != user.id or \
             person_of_endpoint(session, sender_endpoint(session, msg)) == user.id and msg.recipient_user_id is None:
         raise MessagingError(403, "forbidden", "only the recipient can do this")

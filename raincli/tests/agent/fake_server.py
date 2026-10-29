@@ -29,7 +29,10 @@ from raincli_agent import attachments as att
 from raincli_agent.text import body_problem
 
 SEND_KEYS = {"id", "to", "body", "conversation_id", "in_reply_to", "from", "sender", "attachments",
-             "from_agent", "kind"}
+             "from_agent", "kind", "private"}
+GROUP_POST_KEYS = {"id", "body", "mentions", "in_reply_to", "from_agent"}
+GROUP_INBOX_ONLY = "Post from the machine that holds your inbox."
+GROUPS_CLIENT = (0, 6, 1)
 EVENT_STATES = {"held", "submitted", "submission_uncertain", "rejected"}
 # presentation.EVENT_CODES (§21 C5.5): the only event details the server accepts.
 EVENT_CODES = frozenset({
@@ -129,7 +132,167 @@ def presence_problem(body):
     return None
 
 
-class FakeState:
+class _GroupsMixin:
+    """§22 groups for FakeState, as raincli_server.groups does them (a parity test pins the shapes)."""
+
+    def add_group(self, team, name, emails):
+        """Test helper: what the operator's group-create makes."""
+        gid = str(uuid.uuid4())
+        self.groups[gid] = {"name": name, "team": team, "members": list(emails)}
+        return gid
+
+    def make_groups_capable(self, handle, team="alpha"):
+        """Test helper: the machine has polled with groups=1 on a groups client."""
+        self.groups_capable.add(self.agent_by_handle(team, handle)["id"])
+
+    def takes_groups(self, agent_id):
+        client = self.clients.get(self.agents[agent_id]["handle"])
+        version_ok = client is None or tuple(int(x) for x in client["version"].split(".")[:3]) >= GROUPS_CLIENT
+        return agent_id in self.groups_capable and self.agents[agent_id]["active"] and version_ok
+
+    def taking_part(self, email, team):
+        row = self.inbox_of(email, team)
+        return row is not None and self.takes_groups(row["machine"])
+
+    def note_poll(self, caller, groups_flag):
+        client = self.clients.get(caller["handle"])
+        current = client is None or tuple(int(x) for x in client["version"].split(".")[:3]) >= GROUPS_CLIENT
+        if groups_flag and current:
+            self.groups_capable.add(caller["id"])
+        elif caller["id"] in self.groups_capable:
+            self.groups_capable.discard(caller["id"])
+            for m in self.messages.values():  # H1: its unacked copies are withdrawn
+                if m.get("route") == "group" and m["recipient"] == caller["id"] and m["acked_at"] is None:
+                    m["withdrawn"], m["redeliver"] = True, False
+
+    def visible_group(self, caller, gid):
+        g = self.groups.get(gid)
+        if g is None or g["team"] != caller["team"] or self.owners.get(caller["id"]) not in g["members"]:
+            raise ApiFail(404, "not_found", "group not found")
+        return g
+
+    def group_json(self, gid, email):
+        g = self.groups[gid]
+        return {"id": gid, "name": g["name"], "members_n": len(g["members"]),
+                "taking_part": self.taking_part(email, g["team"])}
+
+    def members_json(self, gid):
+        g = self.groups[gid]
+        rows = [{"display_name": self.name_of(e), "email": e, "taking_part": self.taking_part(e, g["team"])}
+                for e in g["members"]]
+        return sorted(rows, key=lambda r: (r["display_name"].lower(), r["email"]))
+
+    def resolve_mentions(self, gid, explicit, text, poster):
+        cands = {}
+        for e in self.groups[gid]["members"]:
+            for key in {e, self.name_of(e)}:
+                cands.setdefault(key.lower(), set()).add(e)
+        out = []
+
+        def add(e):
+            if e != poster and e not in out:
+                out.append(e)
+        if explicit is not None:
+            if not isinstance(explicit, list) or not all(isinstance(x, str) and x for x in explicit):
+                raise ApiFail(400, "invalid", "mentions must be a list of people (a name or an email)")
+            for item in explicit:
+                found = cands.get(item.strip().removeprefix("@").strip().lower(), set())
+                if len(found) != 1:
+                    raise ApiFail(400, "invalid", f"{item.strip()[:80]} isn't one member of this group: mention "
+                                                  "a member by their name or email")
+                add(next(iter(found)))
+        keys = sorted((k for k, v in cands.items() if len(v) == 1), key=len, reverse=True)
+        low = text.lower()
+        i = low.find("@")
+        while i != -1:
+            rest = low[i + 1:]
+            for key in keys:
+                end = len(key)
+                if rest.startswith(key) and (end == len(rest) or not (rest[end].isalnum() or rest[end] in "_-")):
+                    add(next(iter(cands[key])))
+                    break
+            i = low.find("@", i + 1)
+        return out
+
+    def post_json(self, post):
+        g = self.groups[post["group"]]
+        return {"id": post["id"], "group": {"id": post["group"], "name": g["name"]}, "seq": post["seq"],
+                "in_reply_to_post": post["in_reply_to_post"],
+                "mentions": [{"display_name": self.name_of(e), "email": e} for e in post["mentions"]],
+                "recipients_m": post["recipients_m"]}
+
+    def copy_fields(self, m, viewer):
+        post, g = self.group_posts[m["post_id"]], self.groups[m["conversation_id"]]
+        return {"group": {"id": m["conversation_id"], "name": g["name"], "members_n": len(g["members"])},
+                "post_id": post["id"], "in_reply_to_post": post["in_reply_to_post"],
+                "mentions": [{"display_name": self.name_of(e), "email": e} for e in post["mentions"]],
+                "mentioned": viewer in post["mentions"]}
+
+    def group_post(self, caller, gid, body, reply_copy=None):
+        if not isinstance(body, dict) or set(body) - GROUP_POST_KEYS:
+            raise ApiFail(400, "invalid", "unknown fields")
+        try:
+            pid = body.get("id")
+            if not isinstance(pid, str) or uuid.UUID(pid).version != 4:
+                raise ValueError
+        except ValueError:
+            raise ApiFail(400, "invalid", "id must be a uuid4 string") from None
+        text = body.get("body")
+        if body_problem(text):
+            raise ApiFail(400, "invalid", "body must be 1-16000 characters of plain text")
+        g = self.visible_group(caller, gid)
+        me = self.owners.get(caller["id"])
+        parent = None
+        if reply_copy is not None:
+            parent = reply_copy["post_id"]
+        elif body.get("in_reply_to") is not None:
+            ref = body["in_reply_to"]
+            m = self.messages.get(ref)
+            if m is not None and m.get("route") == "group":
+                if m["recipient"] != caller["id"] or m.get("withdrawn") or m["conversation_id"] != gid:
+                    raise ApiFail(404, "not_found", "group not found")
+                parent = m["post_id"]
+            elif ref in self.group_posts and self.group_posts[ref]["group"] == gid:
+                parent = ref
+            else:
+                raise ApiFail(404, "not_found", "group not found")
+        existing = self.group_posts.get(pid)
+        if existing is not None or pid in self.messages:
+            if existing is not None and existing["group"] == gid and existing["author"] == caller["id"] \
+                    and existing["from_agent"] == body.get("from_agent") and existing["body"] == text \
+                    and existing["in_reply_to_post"] == parent \
+                    and existing["mentions"] == self.resolve_mentions(gid, body.get("mentions"), text, me):
+                return 200, {"post": self.post_json(existing), "duplicate": True}
+            raise ApiFail(409, "id_conflict")
+        row = self.inbox_of(me, g["team"])
+        if row is None or row["machine"] != caller["id"]:
+            raise ApiFail(403, "group_inbox_only", GROUP_INBOX_ONLY)
+        mentions = self.resolve_mentions(gid, body.get("mentions"), text, me)
+        self.seq += 1
+        post = {"id": pid, "group": gid, "seq": self.seq, "author": caller["id"], "from_agent": body.get("from_agent"),
+                "body": text, "mentions": mentions, "in_reply_to_post": parent, "recipients_m": 0}
+        self.group_posts[pid] = post
+        for email in sorted(g["members"]):
+            if email == me or not self.taking_part(email, g["team"]):
+                continue
+            machine, agent_name, _person, _route = self.inbox_target(email, g["team"])
+            self.seq += 1
+            ts = now()
+            cid = str(uuid.uuid4())
+            self.messages[cid] = {
+                "id": cid, "team": g["team"], "conversation_id": gid, "in_reply_to": None, "sender": caller["id"],
+                "person": None, "agent": agent_name, "from_agent": body.get("from_agent"), "kind": "message",
+                "recipient": machine, "recipient_person": None, "route": "group", "post_id": pid,
+                "redeliver": False, "body": text, "created_at": ts, "seq": self.seq, "acked_at": None,
+                "delivery_state": "stored", "delivery_updated_at": ts, "hold": None, "attachments": []}
+            post["recipients_m"] += 1
+        if reply_copy is not None:
+            reply_copy["delivery_state"], reply_copy["delivery_updated_at"] = "replied", now()
+        self.lock.notify_all()
+        return 201, {"post": self.post_json(post), "duplicate": False}
+
+
+class FakeState(_GroupsMixin):
     def __init__(self):
         self.lock = threading.Condition()
         self.agents = {}  # id -> {handle, display_name, team, active}
@@ -173,6 +336,10 @@ class FakeState:
         self.archive_calls = []  # (handle, conversation id, archived?, archived_through_seq sent)
         self.conversation_queries = []  # the archived= parameter of each GET /conversations
         self.me_owner = True  # False: an older server, whose /me has no "owner" (§16.16)
+        # Groups (§22): id -> {"name", "team", "members": [email]}; posts by id; the machines that take copies.
+        self.groups = {}
+        self.group_posts = {}
+        self.groups_capable = set()  # agent ids that polled with groups=1 on a groups client
 
     # -- setup -----------------------------------------------------------
 
@@ -526,7 +693,8 @@ class FakeState:
                                                                     or m["delivery_state"] == "replied")
                 else m["created_at"],
                 "attachments": [{k: a[k] for k in ("id", "filename", "media_type", "size", "sha256")}
-                                for a in m["attachments"]]}
+                                for a in m["attachments"]],
+                **(self.copy_fields(m, viewer) if m.get("route") == "group" else {})}
 
     def same_owner(self, m):
         """§16.16 (2), as the server decides it: a message to a machine from a machine, or a person, with that
@@ -542,6 +710,11 @@ class FakeState:
 
     def visible(self, caller, message_id):
         m = self.messages.get(message_id)
+        if m is not None and m.get("route") == "group":  # §22 M3: only its recipient machine, while a member
+            if m["recipient"] != caller["id"] or m.get("withdrawn") or \
+                    self.owners.get(caller["id"]) not in self.groups[m["conversation_id"]]["members"]:
+                raise ApiFail(404, "not_found")
+            return m
         if m is None or not (caller["id"] in (m["sender"], m["recipient"])
                              or self.can_see(self.owners.get(caller["id"]), caller["team"], m)):
             raise ApiFail(404, "not_found")
@@ -597,7 +770,26 @@ class FakeState:
                                        or re.search("[\x00-\x1f\x7f-\x9f]", from_agent)):
             raise ApiFail(400, "invalid", "from_agent must be a directory name")
         team, me = caller["team"], self.owners.get(caller["id"])
+        private = body.get("private", False)
+        if not isinstance(private, bool) or (private and in_reply_to is None):
+            raise ApiFail(400, "invalid", "private must be true or false, and only on a reply")
+        copy = self.messages.get(in_reply_to) if in_reply_to else None
+        if copy is not None and copy.get("route") == "group":  # §22: a reply to a group copy
+            if copy["recipient"] != caller["id"] or copy.get("withdrawn") \
+                    or me not in self.groups[copy["conversation_id"]]["members"]:
+                raise ApiFail(404, "not_found", "in_reply_to message not found")
+            if not private:
+                if body.get("attachments") or kind != "message" or body.get("conversation_id") is not None:
+                    raise ApiFail(400, "invalid", "a group reply takes only id, body, in_reply_to and from_agent")
+                if to is not None:
+                    raise ApiFail(400, "invalid", "a group reply goes to the group: leave out to")
+                return self.group_post(caller, copy["conversation_id"],
+                                       {"id": mid, "body": text, "from_agent": from_agent}, reply_copy=copy)
+        elif private:
+            raise ApiFail(400, "invalid", "private is only for a reply to a group post")
         files = self.decode_attachments(body.get("attachments"))
+        if mid in self.group_posts:  # one id namespace for posts and messages
+            raise ApiFail(409, "id_conflict")
         existing = self.messages.get(mid)
         if existing is not None:  # idempotency is decided before anything else
             same = (existing["sender"] == caller["id"] and existing["body"] == text
@@ -614,12 +806,13 @@ class FakeState:
         parent = None
         if in_reply_to:
             parent = self.messages.get(in_reply_to)
-            if parent is None or not self.can_see(me, team, parent):
+            if parent is None or not (self.can_see(me, team, parent) or parent.get("route") == "group"):
                 raise ApiFail(404, "not_found", "in_reply_to message not found")
             machine, agent_name, person, route, other = self.reply_target(caller, me, parent)
             if to is not None and self.person_named(team, to, me) != other:
                 raise ApiFail(400, "invalid", "a reply goes to the other person of the message it answers")
-            conv = parent["conversation_id"]
+            conv = parent["conversation_id"] if parent.get("route") != "group" else \
+                self.conversation_for(team, {me, other})  # a private reply: their pair conversation
             if body.get("conversation_id") and body["conversation_id"] != conv:
                 raise ApiFail(400, "invalid", "conversation_id does not match the parent message")
         else:
@@ -641,7 +834,9 @@ class FakeState:
             raise ApiFail(429, "inbox_full")
         self.seq += 1
         ts = now()
-        m = {"id": mid, "team": team, "conversation_id": conv, "in_reply_to": in_reply_to, "sender": caller["id"],
+        m = {"id": mid, "team": team, "conversation_id": conv,
+             "in_reply_to": None if parent is not None and parent.get("route") == "group" else in_reply_to,
+             "sender": caller["id"],
              "person": None, "agent": agent_name, "from_agent": from_agent, "kind": kind,
              "recipient": machine, "recipient_person": person, "route": route, "redeliver": False,
              "body": text, "created_at": ts, "seq": self.seq, "acked_at": None, "delivery_state": "stored",
@@ -708,7 +903,9 @@ class FakeState:
         wait = min(float(query.get("wait", ["0"])[0]), 25)
         include_acked = query.get("include_acked", ["false"])[0] == "true"
         routing = query.get("routing", ["0"])[0] == "1"
+        groups_flag = query.get("groups", ["0"])[0] == "1"
         self.inbox_queries.append((caller["handle"], routing))
+        self.note_poll(caller, groups_flag)
 
         def matches():
             # §16.2 capability gate: without routing=1, no named-agent or person-sent messages. C13 H1: a re-targeted
@@ -717,6 +914,8 @@ class FakeState:
                            if m["recipient"] == caller["id"]
                            and (m["seq"] > after or (m["redeliver"] and m["acked_at"] is None))
                            and (routing or (not m.get("agent") and not m.get("person")))
+                           and not m.get("withdrawn")
+                           and (m.get("route") != "group" or (groups_flag and caller["id"] in self.groups_capable))
                            and (include_acked or m["acked_at"] is None)),
                           key=lambda m: m["seq"])[:limit]
 
@@ -731,9 +930,11 @@ class FakeState:
     def ack(self, caller, mid):
         m = self.messages.get(mid)
         if m is not None and m["team"] == caller["team"] and m["recipient"] != caller["id"] \
-                and m.get("route") in ("inbox", "person", "reply") \
+                and m.get("route") in ("inbox", "person", "reply", "group") \
                 and self.recipient_person(m) == self.owners.get(caller["id"]):
             return 200, {"message": self.render(m, caller), "acked": False}  # C13 L1: re-targeted away from here
+        if m is not None and m.get("route") == "group" and m["recipient"] == caller["id"] and m.get("withdrawn"):
+            return 200, {"message": self.render(m, caller), "acked": False}  # §22 G4: never delivered
         m = self.visible(caller, mid)
         if m["recipient"] != caller["id"]:
             raise ApiFail(403, "forbidden", "only the recipient may ack")
@@ -1135,6 +1336,18 @@ class _Handler(BaseHTTPRequestHandler):
                                         if a["team"] == caller["team"] and st.owners.get(a["id"]) == me]}
             if method == "GET" and route == "/people":
                 return st.people(caller)
+            if method == "GET" and route == "/groups":  # §22
+                me = st.owners.get(caller["id"])
+                return 200, {"groups": [st.group_json(gid, me) for gid, g in st.groups.items()
+                                        if g["team"] == caller["team"] and me in g["members"]]}
+            match = re.fullmatch(r"/groups/([^/]+)/members", route)
+            if method == "GET" and match:
+                st.visible_group(caller, match.group(1))
+                return 200, {"group": st.group_json(match.group(1), st.owners.get(caller["id"])),
+                             "members": st.members_json(match.group(1))}
+            match = re.fullmatch(r"/groups/([^/]+)/posts", route)
+            if method == "POST" and match:
+                return st.group_post(caller, match.group(1), body)
             if route == "/me/inbox" and method == "GET":
                 return st.my_inbox(caller)
             if route == "/me/inbox" and method == "PUT":

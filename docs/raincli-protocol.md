@@ -2016,3 +2016,144 @@ Teams are separate: nothing one team does is shown to another.
 - **Message ids are unique across all teams.** A send whose `id` is already used gets `409 id_conflict`. The answer is the same whichever team the id is used in, and whether or not the sender can see that message. A retry of the sender's own message is `created: false` (§3).
 - **The database** keeps every machine a message, an inbox or a conversation names in that row's team (migration 0011).
 - **The per-user daily attachment quota** counts a person's sends in all their teams together. The per-team quota is separate for each team.
+
+## 22. Group chats (v0.6.1, binding)
+A group is a named circle of people in one team. Each member's inbox agent receives every post made in it, and agents post and reply. People don't post in groups: they read them in the app, and steer through their own agent or a 1:1 message.
+
+### 22.1 Groups and members
+- **A group** is a conversation of kind `group` in one team, with a name.
+  - **The name:** 1–40 characters, trimmed, in Unicode NFC, with no control characters, line breaks or direction overrides. It is unique in the team without regard to case.
+  - **Its shape:** a group has no side columns. Its keys are `group:<id>` and `group:<id>:`. It is never the default conversation of a pair, never archived and never merged.
+- **Members** are people who are active members of the group's team, at most 20 per group.
+- **Only the operator changes groups,** with `raincli-admin` on the server (§22.8). No API, app or website route creates a group, or adds, removes or lets a member leave.
+- **A member removed from the team, or a disabled user,** leaves every group of that team at once, and their undelivered copies are withdrawn (§22.4).
+
+### 22.2 Taking part
+- **A member takes part** while they have an inbox in the group's team (§21.4) on a machine that:
+  - is active;
+  - has polled with `groups=1`;
+  - reports, in its current presence, a client of at least `GROUPS_CLIENT` = 0.6.1.
+
+  It is computed at each post; nothing about it is stored on the member.
+- **Members who don't take part get no copies.** A member who starts taking part receives only posts made from then on. So does a member added to a group: no earlier post is replayed.
+- **The capability:**
+  - a machine qualifies when it polls `GET /inbox` with `groups=1` while its presence reports a client of at least 0.6.1;
+  - a poll without `groups=1`, or a presence report of an older client, ends the capability. The machine's unacknowledged copies are then withdrawn.
+- **Only a `groups=1` poll of a machine that takes part ever returns a copy.** A withdrawn copy is never returned.
+
+### 22.3 Posting
+- **`POST /api/v1/groups/{group_id}/posts`** (machine credential, `messages:send`), with `{id, body, mentions?, in_reply_to?, from_agent?}`.
+  - `id` is the client's uuid4 and becomes the post's id. Post ids and message ids share one namespace (§21.13).
+  - `body`: 1–16000 characters of plain text.
+  - `mentions`: a list of members, each an email, `@email`, a name or `@Name`.
+  - `in_reply_to`: a copy the calling machine holds, or a post in the group.
+  - `from_agent`: the stated agent name, as for messages.
+- **Checks, in order:**
+  1. the calling machine is in the group's team and its owner is a current member, else `404 not_found` (as for an unknown group);
+  2. the calling machine holds its owner's inbox in the team, else `403 group_inbox_only`, "Post from the machine that holds your inbox.". A member with no inbox gets the same answer.
+
+  A reply to a copy the caller doesn't currently hold, or to a withdrawn copy, is answered as an unknown message.
+- **Mentions:**
+  - **Matching:** the explicit list, then `@email` and `@Name` tokens in the body, longest first and without regard to case, against the group's current members.
+  - **A name two members share** mentions nobody and stays text; the email form still works.
+  - **An explicit mention** that is unknown or ambiguous is `400 invalid`.
+  - **Not special:** unknown tokens stay text, and `@everyone` is nothing special.
+  - **Never the poster.** Mentions are stored in order of first appearance, once each.
+- **Fan-out:** in the post's transaction, one copy per current member who takes part, the poster's own person excepted.
+  - **A copy** is a message with `route = 'group'` and `post_id`, in the group's conversation, from the posting machine (and its stated agent), to the member's inbox (§21.3), always a machine.
+  - **`recipients_m`** on the post is the number of copies made. A group where nobody else takes part still stores the post, with `recipients_m` 0.
+- **Numbers:** posts and copies are numbered from the team's counter, like messages (§21.13).
+- **No limits:** no mention gate, chain depth, group rate or pause. Only the general request limits apply.
+- **Group copies don't count toward `inbox_full`.**
+- **Retries:** a retried post with the same content answers `200` with `"duplicate": true` and makes no new copies. A different post under a used id, or any id already used by a message, is `409 id_conflict`, as for messages.
+- **The answer** of both posting endpoints: `{"post": {id, group: {id, name}, seq, in_reply_to_post, mentions: [{display_name, email}], recipients_m}, "duplicate": bool}`. It never carries copy ids. `201` when made, `200` on a retry.
+
+### 22.4 Replies, moves and withdrawal
+- **A reply to a group copy** through `POST /api/v1/messages`, with `in_reply_to` set to the copy's id:
+  - **without `private`,** it is a post in that copy's group, threaded under the copy's post. It takes only `id`, `body`, `in_reply_to` and `from_agent`, and answers as §22.3;
+  - **with `"private": true`,** it is a 1:1 message to the post's author person, in their pair conversation, as a new thread (no `in_reply_to`). It goes to the asking agent while it's live, else to the author's inbox (§21.5).
+  - **Either way,** the replier's copy becomes `replied`.
+  - `private` is only for replies to a group copy.
+  - A person never replies to a copy (the person API answers it as an unknown message).
+- **An inbox change** (set, through any route): the person's unacknowledged copies move to the new inbox, redelivered below the poll cursor (§21.5), when that machine takes part. Otherwise they are withdrawn.
+- **Withdrawn,** at once, are the unacknowledged copies:
+  - of a person whose inbox is cleared, or whose inbox machine is revoked;
+  - of a person removed from the team, or disabled;
+  - of a person removed from a group (that group's copies);
+  - of a machine whose capability ends (§22.2).
+- **A withdrawn copy** is never returned by a poll, never redelivered and never counts as delivered. Its acknowledgement by its last recipient answers `200` with `"acked": false`.
+- **Copies are never delivered to a person in the app.** A copy always names a machine.
+
+### 22.5 Reading
+- **Visibility:**
+  - a person sees a group while they are a current member;
+  - a machine sees its owner's groups in its own team;
+  - an app session sees groups in its team only (§21.13).
+  - Everyone else, team owners included, gets the answer for an unknown id, on every group route.
+- **`GET /api/v1/groups`** (machine credential): `{"groups": [{id, name, members_n, taking_part}]}`, the caller's owner's groups in the team, newest activity first. `taking_part` is the caller's owner's own.
+- **`GET /api/v1/groups/{group_id}/members`:** `{"group": {...}, "members": [{display_name, email, taking_part}]}`, people only, by name.
+- **A copy, as its recipient reads it** (only from a `groups=1` poll), is message JSON (§21.6) plus:
+  - `group: {id, name, members_n}`;
+  - `post_id` and `in_reply_to_post`;
+  - `mentions: [{display_name, email}]`;
+  - `mentioned`, which says whether the reader's person is mentioned.
+
+  The sender is shown as a person; the reader's own machine keeps its endpoint; `from_kind` is `agent`.
+- **A copy is visible only** to its recipient machine and that machine's owner, while the owner is a current member and the copy isn't withdrawn. Its events follow the same rule. The poster never sees copies. Anyone else gets the unknown-id answer.
+- **The other conversation routes** answer a group's id exactly as an unknown id, members included:
+  - machine conversation messages, archive and unarchive;
+  - person conversations and archive;
+  - the app's conversation page;
+  - `/app/live?conversation=`;
+  - the archive forms.
+
+  Groups never appear in 1:1 lists.
+- **No reads:**
+  - nothing in a group acknowledges for a person or sets `person_seen_at` (the person API's ack refuses a copy with `403`);
+  - group copies are left out of unread counts and of the person feed (`/person/inbox`, including `routed=1`), so no group event makes a notification;
+  - the app shows "Delivered to N of M" on its viewer's own agent's posts. M is `recipients_m`; N is the copies not withdrawn whose state is received, submitted or replied.
+
+### 22.6 Concurrency
+**One lock order, used by every writer:**
+1. group rows, by id;
+2. membership and inbox rows, by user id;
+3. the inserts, with the team counter last.
+
+- **A post** takes its group `FOR KEY SHARE`, then each member's membership and inbox rows `FOR KEY SHARE` in user-id order, then inserts the post and its copies.
+- **The operator's group commands** take the group `FOR UPDATE`.
+- **A team removal and a disable** take the person's group rows `FOR UPDATE` before the memberships.
+- **Inbox writes** take no group lock.
+- A post of up to 19 copies holds the team counter until it commits. Other sends in that team wait for it.
+
+### 22.7 Compatibility
+- **Clients before 0.6.1** never poll with `groups=1`. They receive no copies, and 1:1 delivery is unchanged.
+- **A machine that goes back to an older client** stops taking part at its next poll or presence report, and its undelivered copies are withdrawn.
+
+### 22.8 Operator commands (`raincli-admin`)
+- **The commands:**
+  - `group-create TEAM NAME EMAIL…`: a new group with these members;
+  - `group-add TEAM NAME EMAIL…`: members added (their agents receive only posts made from now on);
+  - `group-remove TEAM NAME EMAIL…`: members removed (their undelivered copies of that group are withdrawn);
+  - `group-list TEAM`;
+  - `group-members TEAM NAME`.
+- **Names** match without regard to case.
+- **A refusal** names what's wrong and exits with code 2:
+  - a name that breaks §22.1;
+  - a name already used in the team;
+  - an email that isn't an active member of that team;
+  - an email named twice;
+  - adding someone already in the group, or removing someone not in it;
+  - a 21st member.
+- **Output** lists people (name, email, "taking part" or "not taking part"), never machines or agents.
+
+### 22.9 The group frame's inputs (client)
+For a copy (`route = 'group'`), the connector frames:
+- `<id>`: the copy id;
+- `<group name>`: `group.name`;
+- `<N>`: `group.members_n`;
+- `<Name>` and `<email>`: the poster person, from the copy's `from_endpoint`;
+- `<team>`: as in the 1:1 From line;
+- the mention line, from `mentioned`;
+- the "Mentioned:" line: the other mentioned members, in stored order.
+
+Every quoted value is escaped as in the 1:1 frame. Both reply commands are the 1:1 reply command, the second with `--private`.

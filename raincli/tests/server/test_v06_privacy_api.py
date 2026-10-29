@@ -12,6 +12,7 @@ from fastapi.routing import APIRoute
 
 from api_helpers import auth
 from conftest_v06 import OWN_STRINGS, TEAMMATE_STRINGS, v06_seed  # noqa: F401  (fixture)
+from test_groups_privacy_api import GROUP_DRIVEN, GROUP_GETS  # the group routes, scanned with group data there
 
 # GET routes under /api/v1 and why each is covered; anything else fails the scan.
 COVERED = {
@@ -215,9 +216,9 @@ def test_every_api_route_is_scanned_or_exempted(app):
     routes = {r for r in _routes(app) if r[1].startswith("/api/v1")}
     assert len(routes) >= len(COVERED) + len(DRIVEN), "the route walk found too few routes: it would pass vacuously"
     gets = {p for m, p in routes if m == "GET"}
-    unknown_gets = gets - COVERED - set(EXEMPT)
+    unknown_gets = gets - COVERED - GROUP_GETS - set(EXEMPT)
     assert unknown_gets == set(), f"GET routes not in the privacy scan: {sorted(unknown_gets)}"
     mutating = {r for r in routes if r[0] != "GET"}
-    unknown = mutating - DRIVEN - set(MUTATING_EXEMPT)
+    unknown = mutating - DRIVEN - GROUP_DRIVEN - set(MUTATING_EXEMPT)
     assert unknown == set(), f"mutating routes not in the privacy scan: {sorted(unknown)}"
     assert re.match(r"^the /app pages", APP_PAGES)
