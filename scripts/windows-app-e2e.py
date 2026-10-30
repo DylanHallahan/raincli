@@ -88,9 +88,10 @@ G. Group chats (protocol §22; brief "RainCLI group chats", screenshots 1-4 of t
    Jon, Priya and Ryan, "infra" with Sam and Maya), made with the operator commands and the real API: Maya's post
    from her machine's CLI (`raincli group send`), Jon's and Priya's replies through the API after acking their
    copies. The window then opens the group at launch (D12) and is captured light and dark at 1180x780 and 760x520:
-   the list with the Groups section, the read-only thread ("Delivered to 2 of 2", no composer), the member panel
-   (Ryan and Sam "not taking part", no controls) and the launch. Screenshots go to build/e2e-artifacts
-   (groups-win-*). ``--only groups-shots`` runs just the server and this part. Skipped with --real.
+   the list with the groups in it, the read-only thread ("Delivered to 2 of 2", no composer), the member panel
+   (Ryan and Sam "not taking part", no controls) and the launch; and for the list and nav polish, the list with a
+   group mixed in and the icon-only rail (names, tooltips, 44px targets, a keyboard focus ring). Screenshots go to
+   build/e2e-artifacts (groups-win-*, listnav-*). ``--only groups-shots`` runs just the server and this part. Skipped with --real.
 
 Release traffic goes to the REAL hostnames (api.github.com, github.com,
 objects.githubusercontent.com, release-assets.githubusercontent.com): a hosts-file entry points
@@ -1856,6 +1857,7 @@ G_PEOPLE = {  # key: (display name, email); Dylan owns the team (the member pane
 G_MACHINES = {"maya": "g-maya-laptop", "jon": "g-jon-laptop", "priya": "g-priya-laptop", "ryan": "g-ryan-laptop"}
 G_AGENTS = {"maya": "g-maya-inbox", "jon": "g-jon-api", "priya": "g-priya-web", "ryan": "g-ryan-old"}
 G_SIZES = ((1180, 780), (760, 520))
+G_NAV = ("Inbox", "People", "Archived", "This computer", "Settings")  # the rail's names (icons only)
 G_ASK = "@Jon @Priya the orders API renamed `total` to `total_cents`. Check your side."
 
 
@@ -1996,7 +1998,7 @@ def part_g(app, server, installers, work):
                             themed_shot(page, "dark", shot4.replace("-light", "-dark"))
                         page.goto(server.url + group_path + "#latest")
                     else:
-                        page.click("nav.rc-nav a:has-text('Inbox')")  # Inbox opens the newest activity (D12)
+                        page.click("nav.rc-nav a[aria-label='Inbox']")  # Inbox opens the newest activity (D12)
                         try:
                             wait_for("Inbox to open the group", lambda: g_path(page) == group_path, timeout=60,
                                      interval=1)
@@ -2018,11 +2020,33 @@ def part_g(app, server, installers, work):
                           f"the member panel: {panel!r}")
                     themed_shot(page, scheme, f"groups-win-3-member-panel-{size}-{scheme}")
                     page.click(".rc-members > summary")
-                    page.click(".rc-convs:not(.rc-groups) .rc-conv:has-text('Jon')")
+                    page.click(".rc-conv:not(.rc-conv-group):has-text('Jon')")
                     page.wait_for_selector(".rc-thread")
-                    check(page.locator(".rc-groups .rc-conv").count() == 2, "the list's Groups section lacks a group")
+                    # The groups are rows of the one list (list and nav polish), newest activity first: checkout,
+                    # then Jon's 1:1 conversation, then infra (no posts yet).
+                    rows = page.evaluate("""() => Array.from(document.querySelectorAll('.rc-convs .rc-conv'))
+                        .map((a) => a.classList.contains('rc-conv-group') ? 'group' : 'conversation')""")
+                    check(rows == ["group", "conversation", "group"] and page.locator(".rc-list-sub").count() == 0,
+                          f"the list's rows are {rows}")
                     check(not list_fits(page), f"at {size} the list does not fit: {list_fits(page)}")
                     themed_shot(page, scheme, f"groups-win-1-list-with-groups-{size}-{scheme}")
+                    themed_shot(page, scheme, f"listnav-1-list-with-a-group-{size}-{scheme}")
+                    # The rail is icons only: named by aria-label, the same word as its tooltip, 44px targets.
+                    rail = page.evaluate("""() => Array.from(document.querySelectorAll('nav.rc-nav a')).map((a) => {
+                        const r = a.getBoundingClientRect();
+                        return [a.innerText.trim(), a.getAttribute('aria-label'), a.getAttribute('title'),
+                                Math.round(r.width), Math.round(r.height)]; })""")
+                    check([(t, n, w, h) for t, n, _, w, h in rail] == [("", n, 44, 44) for n in G_NAV]
+                          and all(n == title for _, n, title, _, _ in rail), f"the rail: {rail}")
+                    page.goto(server.url + "/app/people")
+                    page.wait_for_selector("nav.rc-nav a[aria-current=page][aria-label='People']")
+                    page.evaluate("document.activeElement && document.activeElement.blur()")
+                    for _ in range(12):  # keyboard focus on a rail link shows its ring
+                        page.keyboard.press("Tab")
+                        if page.evaluate("!!document.activeElement.closest('nav.rc-nav')"):
+                            break
+                    page.keyboard.press("Tab")  # from Inbox to People (the current page): both states in one shot
+                    themed_shot(page, scheme, f"listnav-2-icon-nav-{size}-{scheme}")
                     found = [h for h in hidden if h in page.content()]
                     check(not found, f"teammates' machine or agent names on Maya's pages: {found}")
         finally:
