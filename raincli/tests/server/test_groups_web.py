@@ -1,5 +1,5 @@
 """The app's group pages (protocol §22 G6, D9, D12; C14–C18) on the shared group seed (tests/conftest_groups.py):
-the Groups section of the conversation list, the read-only thread, "Delivered to N of M", the member panel, the live
+the groups in the conversation list (one list, newest activity first), the read-only thread, "Delivered to N of M", the member panel, the live
 update, open latest (G12 L4) and the unknown-id answers (D7, G12 M4). App mode only: the website has no group pages.
 
 Checkout is Maya, Jon, Priya and Ryan (an old client: not taking part); infra is Sam and Maya. Olive owns the team
@@ -60,23 +60,38 @@ def gid(seed, name="checkout"):
     return str(seed["groups"][name].id)
 
 
-def group_list(html):
-    """The list's Groups section: (name, member line) per row, in order."""
-    section = html.split('<ul class="rc-convs rc-groups"', 1)
+def list_rows(html):
+    """Every row of the conversation list, in order: (kind, name, preview, raw), kind "group" or "conversation"."""
+    section = html.split('<ul class="rc-convs" data-day-groups>', 1)
     if len(section) < 2:
         return []
     rows = re.findall(r'<li class="rc-conv-item">(.*?)</li>', section[1].split("</ul>", 1)[0], re.S)
-    return [(text(re.search(r'<span class="rc-conv-name">(.*?)</span>', r, re.S).group(1)),
-             text(re.search(r'<span class="rc-conv-preview">(.*?)</span>', r, re.S).group(1)), r) for r in rows]
+    preview = lambda r: re.search(r'<span class="rc-conv-preview">(.*?)</span>\n', r, re.S)  # noqa: E731
+    return [("group" if "rc-conv-group" in r else "conversation",
+             text(re.search(r'<span class="rc-conv-name">(.*?)</span><span class="rc-conv-time', r, re.S).group(1)
+                  if "rc-conv-group" in r else re.search(r'<span class="rc-conv-name">(.*?)</span>', r, re.S).group(1)),
+             text(preview(r).group(1)) if preview(r) else "", r) for r in rows]
 
 
-# C14: the Groups section -----------------------------------------------------------------------------------------
+def group_list(html):
+    """The group rows of the list: (name, preview, raw), in the list's order."""
+    return [(n, p, r) for kind, n, p, r in list_rows(html) if kind == "group"]
 
-def test_the_list_shows_your_groups_with_member_counts_and_no_unread_badge(windows, groups_seed):  # noqa: F811
-    rows = group_list(windows("Maya").get("/app/inbox").text)
-    assert [(n, m) for n, m, _ in rows] == [("checkout", "4 members"), ("infra", "2 members")]  # newest first
-    assert all("rc-count" not in r and "unread" not in r for _, _, r in rows)
-    assert [(n, m) for n, m, _ in group_list(windows("Sam").get("/app/inbox").text)] == [("infra", "2 members")]
+
+# C14: groups in the conversation list ---------------------------------------------------------------------------
+
+def test_groups_are_rows_of_the_one_list_with_their_latest_post_and_no_unread_badge(windows, groups_seed):  # noqa: F811
+    inbox = windows("Maya").get("/app/inbox").text
+    assert 'id="groups-title"' not in inbox and "rc-list-sub" not in inbox and ">Groups<" not in inbox
+    rows = list_rows(inbox)
+    # One list, newest activity first: checkout's posts are newer than the seed's 1:1 messages; infra (no posts) last.
+    assert rows[0][:2] == ("group", "checkout (group)") and rows[-1][:2] == ("group", "infra (group)"), rows
+    assert [k for k, *_ in rows[1:-1]] == ["conversation"] * (len(rows) - 2)
+    groups = group_list(inbox)
+    assert [(n, p) for n, p, _ in groups] == [("checkout (group)", "Last post from Priya · agent: Updated the web totals too."),
+                                               ("infra (group)", "2 members")]
+    assert all("rc-count" not in r and "unread" not in r and "rc-group-icon" in r for _, _, r in groups)
+    assert [(n, p) for n, p, _ in group_list(windows("Sam").get("/app/inbox").text)] == [("infra (group)", "2 members")]
     assert group_list(windows("Olive").get("/app/inbox").text) == []  # the team owner is in neither
     # Every app page with the list shows it; the open group is the current row.
     page = windows("Maya").get(f"/app/groups/{gid(groups_seed)}").text
@@ -210,8 +225,7 @@ def test_conversation_routes_answer_a_group_id_like_an_unknown_one(windows, grou
     # Groups never appear in the 1:1 lists.
     for page in ("/app/inbox", "/app/archived", "/app/compose", "/app/people"):
         body = maya.get(page).text
-        rows = body.split('<ul class="rc-convs rc-groups"', 1)[0]
-        assert f"/app/conversations/{g}" not in rows, page
+        assert f"/app/conversations/{g}" not in body, page
 
 
 # Live (§19.1 for groups) and no reads (C18) ----------------------------------------------------------------------
@@ -259,13 +273,13 @@ def test_nothing_in_a_group_is_ever_acked_from_the_app(windows, groups_seed, ses
     session.refresh(copy)
     assert copy.acked_at is None and copy.person_seen_at is None and copy.delivery_state == "stored"
     # The 1:1 unread counts don't include group copies.
-    assert 'rc-count' not in maya.get("/app/inbox").text.split('<ul class="rc-convs rc-groups"', 1)[-1]
+    assert all("rc-count" not in r for _, _, r in group_list(maya.get("/app/inbox").text))
 
 
 # D12 (G12 L4): open latest -----------------------------------------------------------------------------------
 
 def _newest(html):
-    m = re.search(r'<a class="rc-conv" href="[^"]*/app/(conversations|groups)/([^"#]+)#latest"[^>]*data-newest', html)
+    m = re.search(r'<a class="rc-conv[^"]*" href="[^"]*/app/(conversations|groups)/([^"#]+)#latest"[^>]*data-newest', html)
     return (m.group(1), m.group(2)) if m else None
 
 
@@ -359,3 +373,25 @@ def test_another_teams_groups_and_posts_change_nothing_on_a_members_group_pages(
     for who in ("Maya", "Jon"):
         assert str(there.id) not in windows(who).get("/app/inbox").text
         assert same_answer(windows(who).get(f"/app/groups/{there.id}"), windows(who).get(f"/app/groups/{UNKNOWN}"))
+
+
+def test_the_merged_order_follows_new_activity_live(windows, groups_seed, client, session):  # noqa: F811
+    """A new 1:1 message moves its conversation above the group; a new post moves the group back to the top. The
+    live list (and its revision) follows the same order."""
+    s = groups_seed
+    maya = windows("Maya")
+    first = maya.get("/app/live?after=0").json()
+    assert list_rows(first["list"]["html"])[0][:2] == ("group", "checkout (group)")
+    r = client.post("/api/v1/messages", headers=auth(s["machine_tokens"]["jon"]),
+                    json={"id": str(uuid.uuid4()), "to": "maya@example.test", "body": "Newest now."})
+    assert r.status_code == 201, r.text
+    moved = maya.get(f"/app/live?after=0&list_rev={first['list_rev']}").json()
+    assert moved["list"] is not None and moved["list_rev"] != first["list_rev"]
+    rows = list_rows(moved["list"]["html"])
+    assert rows[0][0] == "conversation" and rows[0][2].endswith("Newest now.") and rows[1][:2] == ("group", "checkout (group)")
+    make_post(session, s["groups"]["checkout"], s["machines"]["jon"], "zq-agent-jon-api", "And `currency` too.")
+    session.commit()
+    back = maya.get(f"/app/live?after=0&list_rev={moved['list_rev']}").json()
+    rows = list_rows(back["list"]["html"])
+    assert rows[0][:3] == ("group", "checkout (group)", "Last post from Jon · agent: And `currency` too."), rows[0]
+    assert list_rows(maya.get("/app/inbox").text)[0][:2] == ("group", "checkout (group)")  # the page agrees

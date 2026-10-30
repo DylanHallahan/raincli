@@ -155,7 +155,10 @@ def test_layout_rail_list_thread_compose_in_light_and_dark(people, browser, arti
     for scheme in ("light", "dark"):
         context, page = open_app(browser, base, people["alice"]["person_session"], scheme)
         rail = page.locator("nav.rc-nav a")
-        assert [t.strip() for t in rail.all_inner_texts()] == ["Inbox", "People", "Archived", "This computer", "Settings"]
+        # Icons only: no visible words; each link is named by its aria-label, with the same word as its tooltip.
+        assert [t.strip() for t in rail.all_inner_texts()] == [""] * 5
+        assert [(rail.nth(i).get_attribute("aria-label"), rail.nth(i).get_attribute("title")) for i in range(5)] == [
+            (w, w) for w in ("Inbox", "People", "Archived", "This computer", "Settings")]
         assert page.locator(".site-footer").count() == 0 and page.locator(".site-header").count() == 0
         page.click(".rc-conv")
         assert page.locator(".rc-thread .rc-msg .md strong").inner_text() == "Alice"
@@ -235,7 +238,7 @@ def test_people_and_the_picker(people, browser, artifacts):
     context, page = open_app(browser, base, people["alice"]["person_session"])
     recipients = []
     page.on("response", lambda r: recipients.append(r.text()) if r.url.endswith("/app/recipients") else None)
-    page.click("nav.rc-nav a:has-text('People')")
+    page.click("nav.rc-nav a[aria-label='People']")
     page.screenshot(path=str(artifacts / "app-mode-people-light.png"))
     row = page.locator(".rc-people li", has_text="Bob")
     assert row.count() == 1 and "bob-laptop" not in page.content() and "bob-agent" not in page.content()
@@ -285,7 +288,7 @@ def test_a_stolen_app_cookie_does_nothing_in_a_normal_browser(people, browser):
 def test_local_sentinel_and_refused_pages(people, browser):
     base = people["base"]
     context, page = open_app(browser, base, people["alice"]["person_session"])
-    page.click("nav.rc-nav a:has-text('This computer')")
+    page.click("nav.rc-nav a[aria-label='This computer']")
     assert "Open the RainCLI app" in page.inner_text("main")
     response = page.goto(base + "/app/account")
     assert response.status == 403 and page.locator("a:has-text('Open on the website')").count() == 1
@@ -323,7 +326,7 @@ def test_labels_focus_order_and_token_contrast(people, browser):
         page.keyboard.press("Tab")
         order = []
         for _ in range(5):
-            order.append(page.evaluate("document.activeElement.textContent.trim()"))
+            order.append(page.evaluate("document.activeElement.getAttribute('aria-label')"))  # the rail is icons only
             page.keyboard.press("Tab")
         assert order == ["Inbox", "People", "Archived", "This computer", "Settings"]
         tokens = page.evaluate("""() => { const s = getComputedStyle(document.documentElement);

@@ -1330,7 +1330,7 @@ def part_d(app, server, installers, password, observer, teammate, menu, work):
         check(seen and seen["archived"] and (seen.get("archived_by") or {}).get("person") == EMAIL,
               f"the teammate does not see it archived by the person: {seen}")
         check(conversation not in peer_list("exclude"), "the teammate's main list still has the archived conversation")
-        page.click("nav.rc-nav a:has-text('Archived')")
+        page.click("nav.rc-nav a[aria-label='Archived']")
         page.wait_for_url("**/app/archived", timeout=60000)
         row = page.locator(".rc-archived-row", has_text="Archived by you")
         check(row.count() == 1 and conversation in (row.locator("a").first.get_attribute("href") or ""),
@@ -1339,7 +1339,7 @@ def part_d(app, server, installers, password, observer, teammate, menu, work):
         row.locator("button:has-text('Unarchive')").click()
         page.wait_for_url("**/app/archived?notice=unarchived", timeout=60000)
         check(page.locator(".rc-archived-row").count() == 0, "Unarchive left it under Archived")
-        page.click("nav.rc-nav a:has-text('Inbox')")
+        page.click("nav.rc-nav a[aria-label='Inbox']")
         page.wait_for_url(f"**/app/conversations/{conversation}*", timeout=60000)  # §20.6 M1
         page.wait_for_selector(f".rc-conv[href*='{conversation}']", timeout=60000)
         check(not peer_list("include")[conversation]["archived"], "the teammate still sees it archived")
@@ -1356,7 +1356,7 @@ def part_d(app, server, installers, password, observer, teammate, menu, work):
         wait_for("the window to clamp at its minimum size",
                  lambda: abs(window_rect(hwnd)[2] - min_size[0]) <= 2 and abs(window_rect(hwnd)[3] - min_size[1]) <= 2,
                  timeout=30, interval=0.5)
-        page.click("nav.rc-nav a:has-text('Inbox')")
+        page.click("nav.rc-nav a[aria-label='Inbox']")
         page.wait_for_url(f"**/app/conversations/{conversation}*", timeout=60000)  # §20.6 M1
         page.wait_for_selector(f".rc-conv[href*='{conversation}']", timeout=60000)
         wait_for("the page to see the small window", lambda: page.evaluate("innerWidth") < 760, timeout=30, interval=0.5)
@@ -1376,7 +1376,7 @@ def part_d(app, server, installers, password, observer, teammate, menu, work):
         check(not list_fits(page), "at the default window size the list does not fit")
         for scheme in ("light", "dark"):
             themed_shot(page, scheme, f"after-win-conversation-{scheme}-1180x780")
-        page.click("nav.rc-nav a:has-text('Inbox')")
+        page.click("nav.rc-nav a[aria-label='Inbox']")
         page.wait_for_url(f"**/app/conversations/{conversation}*", timeout=60000)  # §20.6 M1
         page.wait_for_selector(f".rc-conv[href*='{conversation}']", timeout=60000)
         for scheme in ("light", "dark"):
@@ -1621,7 +1621,7 @@ def part_d(app, server, installers, password, observer, teammate, menu, work):
 
         # D6. This computer and Settings (the /app/local sentinel shows the bundled pages). The app cancels the
         # hosted navigation and loads its own page, so the click must not wait for that navigation.
-        page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
+        page.click("nav.rc-nav a[aria-label='This computer']", no_wait_after=True)  # the app cancels it (sentinel)
         page = window.page("this-computer.html", timeout=60)  # re-attached after the swap
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
@@ -1793,7 +1793,7 @@ def part_d(app, server, installers, password, observer, teammate, menu, work):
         say("PASS: D7. with the server stopped the window showed the offline page; Retry returned to the inbox")
 
         # D8. Sign-out from This computer: confirmed, revoked, the profile marked for reset.
-        page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it (sentinel)
+        page.click("nav.rc-nav a[aria-label='This computer']", no_wait_after=True)  # the app cancels it (sentinel)
         page = window.page("this-computer.html", timeout=60)  # re-attached after the swap
         wait_for("This computer to show the machine", lambda: page.inner_text("#machine") == WINDOW_MACHINE,
                  timeout=60, interval=1)
@@ -2159,7 +2159,7 @@ def part_e(app, server, installers, password, observer, teammate, work, codex=No
         with sync_playwright() as pw:
             window = WindowCDP(pw, port)
             page = inbox_after_sign_in(window, page)
-            page.click("nav.rc-nav a:has-text('This computer')", no_wait_after=True)  # the app cancels it
+            page.click("nav.rc-nav a[aria-label='This computer']", no_wait_after=True)  # the app cancels it
             page = window.page("this-computer.html", timeout=60)
             row = "#hooks li[data-agent=codex]"
             try:

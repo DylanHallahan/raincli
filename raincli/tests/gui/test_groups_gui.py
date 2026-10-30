@@ -45,7 +45,7 @@ def test_inbox_opens_the_group_when_its_post_is_newest(live, browser, groups_see
     context, page = open_app(browser, live, s["person_tokens"]["Maya"])
     try:
         assert page.url.endswith(group_url(s) + "#latest"), page.url
-        current = page.locator(".rc-groups .rc-conv[aria-current=page]")
+        current = page.locator(".rc-conv-group[aria-current=page]")
         assert current.count() == 1 and current.inner_text().startswith("checkout")
         assert page.locator(".rc-post").count() == 3 and page.locator("textarea").count() == 0
         assert page.evaluate("history.length") == 1 or page.evaluate("history.length") == 2
@@ -61,7 +61,7 @@ def test_inbox_opens_the_conversation_when_a_1to1_message_is_newest(live, browse
     context, page = open_app(browser, live, s["person_tokens"]["Maya"])
     try:
         assert page.url.endswith(f"/app/conversations/{sent['conversation_id']}#latest"), page.url
-        assert page.locator(".rc-groups .rc-conv[aria-current=page]").count() == 0
+        assert page.locator(".rc-conv-group[aria-current=page]").count() == 0
     finally:
         context.close()
 

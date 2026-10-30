@@ -37,12 +37,14 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-nav { background: var(--rc-surface); border-right: 1px solid var(--rc-border); display: flex; flex-direction: column;
   align-items: center; gap: var(--rc-s-1); padding: var(--rc-s-3) 0; min-height: 0; overflow-y: auto; }
 .rc-nav .rc-logo { width: 28px; height: 28px; margin-bottom: var(--rc-s-3); }
-.rc-nav a { width: 52px; padding: var(--rc-s-2) 0; border-radius: var(--rc-radius); color: var(--rc-muted); text-decoration: none;
-  font-size: var(--rc-fs-xs); text-align: center; display: flex; flex-direction: column; align-items: center; gap: 2px;
+/* Icons only: a 44px target per link (its name is the aria-label, its tooltip the title). The current page has the
+   raised background and the accent icon. */
+.rc-nav a { width: 44px; height: 44px; flex: none; border-radius: var(--rc-radius); color: var(--rc-muted); text-decoration: none;
+  display: grid; place-items: center;
   transition: background var(--rc-dur) var(--rc-ease), color var(--rc-dur) var(--rc-ease); }
 .rc-nav a:hover { background: var(--rc-surface-2); color: var(--rc-text); }
-.rc-nav a[aria-current="page"] { background: var(--rc-surface-2); color: var(--rc-text); font-weight: 600; }
-.rc-nav .rc-nav-icon { width: 20px; height: 20px; }
+.rc-nav a[aria-current="page"] { background: var(--rc-surface-2); color: var(--rc-accent); }
+.rc-nav .rc-nav-icon { width: 22px; height: 22px; }
 .rc-nav .rc-nav-spacer { flex: 1; }
 
 /* Conversation list */
@@ -370,11 +372,9 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-dot.rc-presence-dot-busy { background: var(--rc-warn); }
 .rc-people .rc-team-name { color: var(--rc-muted); }
 
-/* Group chats (§22 G6, D9): the list's Groups section, the read-only thread and the member panel. */
-.rc-list-sub { margin: var(--rc-s-4) var(--rc-s-3) var(--rc-s-1); font-size: var(--rc-fs-xs); font-weight: 600; color: var(--rc-muted);
-  text-transform: uppercase; letter-spacing: .04em; }
-.rc-groups .rc-conv-top { align-items: center; }
-.rc-groups .rc-conv-name { display: inline-flex; align-items: center; gap: var(--rc-s-1); }
+/* Group chats (§22 G6, D9): a group's row in the list, the read-only thread and the member panel. */
+.rc-conv-group .rc-conv-top { align-items: center; }
+.rc-conv-group .rc-conv-name { display: inline-flex; align-items: center; gap: var(--rc-s-1); }
 .rc-group-icon { color: var(--rc-muted); }
 .rc-post-reply { margin: 2px 0 0; font-size: var(--rc-fs-xs); color: var(--rc-muted); }
 .rc-mentions { margin: 4px 0 0; display: flex; flex-wrap: wrap; gap: var(--rc-s-1); }

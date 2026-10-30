@@ -158,3 +158,40 @@ def latest_time(row: groups.GroupRow) -> datetime | None:
 def delivered_text(n: int, m: int) -> str:
     """"Delivered to N of M" (the page and the live update use the same words)."""
     return f"Delivered to {n} of {m}"
+
+
+def merged_list(rows, group_rows) -> list[tuple[str, object]]:
+    """The conversation list with the groups in it (one list, newest activity first): ``("conversation", row)`` and
+    ``("group", row)`` items. The order is D12's (G12 L4): the 1:1 conversation's last message number against the
+    group's latest post number, both numbers in the session's one team (§21.13). Rows without activity go last, 1:1
+    conversations first. Without groups (the website, or none) the 1:1 order is kept as it is."""
+    items = [("conversation", r) for r in rows]
+    if not group_rows:
+        return items
+
+    def recency(item):
+        kind, row = item
+        seq = (row.last.seq if row.last is not None else None) if kind == "conversation" else row.latest_seq
+        return (seq is None, -(seq or 0))
+
+    return sorted(items + [("group", g) for g in group_rows], key=recency)
+
+
+@dataclass(frozen=True)
+class LatestPost:
+    who: str  # "Jon · agent" (presentation, as on the group page)
+    body: str
+
+
+def latest_posts(db: Session, group_rows) -> dict[uuid.UUID, LatestPost]:
+    """Each group's latest post, for its row in the list: one query by the latest post numbers (unique per team)."""
+    by_team: dict[uuid.UUID, list[int]] = {}
+    for g in group_rows:
+        if g.latest_seq is not None:
+            by_team.setdefault(g.group.team_id, []).append(g.latest_seq)
+    out = {}
+    for team_id, seqs in by_team.items():
+        names = _Names(db, team_id)
+        for post in db.scalars(select(GroupPost).where(GroupPost.team_id == team_id, GroupPost.seq.in_(seqs))):
+            out[post.conversation_id] = LatestPost(who=f"{names.of(post.author_user_id)} · agent", body=post.body)
+    return out

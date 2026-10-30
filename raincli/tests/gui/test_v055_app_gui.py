@@ -77,7 +77,7 @@ def test_inbox_opens_the_latest_conversation_selected_with_the_composer_ready(te
     assert page.evaluate("document.activeElement.id") == "body"  # the composer is ready
     assert page.evaluate("history.length") == 2  # replaced, not pushed: Back doesn't return to a bare Inbox
     page.goto(team["base"] + "/app/agents")
-    page.click("nav.rc-nav a:has-text('Inbox')")  # the rail's Inbox does the same
+    page.click("nav.rc-nav a[aria-label='Inbox']")  # the rail's Inbox does the same
     page.wait_for_url(re.compile(re.escape(conv_path(latest))))
     assert not page.errors
     context.close()

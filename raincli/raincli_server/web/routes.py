@@ -160,6 +160,15 @@ templates.env.globals["SECURITY_URL"] = "https://github.com/DylanHallahan/raincl
 templates.env.globals["CONNECTION_LABELS"] = CONNECTION_LABELS
 
 
+def _merge_list(conversations, groups=None):
+    from raincli_server.web import groups_pages
+
+    return groups_pages.merged_list(conversations or [], groups or [])
+
+
+templates.env.globals["merge_list"] = _merge_list  # §22 G6: the conversation list with the groups in it
+
+
 def render(
     request: Request, name: str, *, viewer: auth.Viewer | None = None, status: int = 200,
     csrf: str | None = None, pre_nonce: list[str] | None = None, **ctx,
@@ -673,11 +682,14 @@ def _list_extras(db: Session, viewer: auth.Viewer) -> dict:
     from raincli_server.web import thread
 
     from raincli_server import groups
+    from raincli_server.web import groups_pages
 
     # §20.6 M1: the owner's "not connected" notice also sits at the top of the list on every app-mode page.
-    # §22 G6: the Groups section (the viewer's groups in the session's team, newest activity first); app mode only.
+    # §22 G6: the viewer's groups in the session's team, in the list with the 1:1 conversations (merge_list), each
+    # with its latest post; app mode only.
+    mine = groups.groups_of(db, viewer.user, _team_ids(viewer)) if viewer.app_mode else []
     return {"list_owner_warnings": thread.owner_warnings(db, viewer.user, _team_ids(viewer)),
-            "groups": groups.groups_of(db, viewer.user, _team_ids(viewer)) if viewer.app_mode else []}
+            "groups": mine, "group_latest": groups_pages.latest_posts(db, mine)}
 
 
 @router.get("/app/live")

@@ -78,8 +78,8 @@ def test_archive_in_app_mode(people, browser, artifacts, session):
     assert unread["conversation_id"] == msg["conversation_id"]
     api(people["base"], f"/api/v1/person/conversations/{unread['conversation_id']}/archive", {},
         people["bob"]["person_session"])
-    page.click("nav.rc-nav a:has-text('Archived')")
-    assert page.get_attribute("nav.rc-nav a:has-text('Archived')", "aria-current") == "page"
+    page.click("nav.rc-nav a[aria-label='Archived']")
+    assert page.get_attribute("nav.rc-nav a[aria-label='Archived']", "aria-current") == "page"
     row = page.locator(".rc-archived-row", has_text="Archived by Bob")
     assert row.count() == 1 and row.locator(".rc-count").inner_text() == "1"
     page.screenshot(path=str(artifacts / "app-mode-archived.png"))
@@ -87,7 +87,7 @@ def test_archive_in_app_mode(people, browser, artifacts, session):
     page.wait_for_url("**/app/archived?notice=unarchived")
     assert page.locator(".rc-archived-row").count() == 0
     inbox_again(people, session)
-    page.click("nav.rc-nav a:has-text('Inbox')")
+    page.click("nav.rc-nav a[aria-label='Inbox']")
     page.wait_for_url(f"**/app/conversations/{msg['conversation_id']}*")  # Inbox opens the latest (§20.6 M1)
     assert page.locator(f".rc-conv[href*='{msg['conversation_id']}']").count() == 1
     context.close()
