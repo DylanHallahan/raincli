@@ -45,6 +45,7 @@ def test_inbox_opens_the_group_when_its_post_is_newest(live, browser, groups_see
     context, page = open_app(browser, live, s["person_tokens"]["Maya"])
     try:
         assert page.url.endswith(group_url(s) + "#latest"), page.url
+        assert page.get_attribute("nav.rc-nav a[aria-current=page]", "aria-label") == "Inbox"  # a group page is in Inbox
         current = page.locator(".rc-conv-group[aria-current=page]")
         assert current.count() == 1 and current.inner_text().startswith("checkout")
         assert page.locator(".rc-post").count() == 3 and page.locator("textarea").count() == 0
