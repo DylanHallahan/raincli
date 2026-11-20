@@ -190,3 +190,69 @@ def test_as_resolution_prefers_an_exact_email_then_names():
     assert [c.email for c in accounts.matches(cs, "Billing")] == ["billing@example.test"]
     assert len(accounts.matches(cs, "Help Desk")) == 2  # ambiguous: the caller lists the emails (exit 2)
     assert accounts.matches(cs, "nobody") == []
+
+
+# Review S1: sign-out never parses accounts.json and always rotates the install token ---------------------------
+
+def test_sign_out_with_a_damaged_accounts_file_still_clears_and_rotates(cfg):
+    accounts.accounts_path(cfg).write_text("{not json")
+    os.chmod(accounts.accounts_path(cfg), 0o600)
+    accounts.save_active(cfg, "helpdesk@example.test")
+    feed = accounts.account_notify_dir(cfg, "helpdesk@example.test")
+    feed.mkdir(parents=True)
+    before = person.app_install_token(cfg)
+    person.clear_session(cfg)
+    assert not accounts.accounts_path(cfg).exists() and not accounts.active_path(cfg).exists() and not feed.exists()
+    assert person.app_install_token(cfg) != before  # rotated (§16.14 S3)
+    assert accounts.clear_accounts(cfg) is False  # nothing left
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX permissions, not root")
+def test_clearing_works_without_the_lock(cfg):
+    accounts.save_account(cfg, "helpdesk@example.test", "Help Desk", "northwind", tok(1))
+    lock = accounts.lock_path(cfg)
+    os.chmod(lock, 0o000)  # unreadable
+    try:
+        assert accounts.clear_accounts(cfg) is True
+        assert not accounts.accounts_path(cfg).exists()
+    finally:
+        os.chmod(lock, 0o600)
+
+
+def test_a_failure_while_clearing_never_skips_the_rotation(cfg, monkeypatch):
+    before = person.app_install_token(cfg)
+    monkeypatch.setattr(accounts, "clear_accounts", lambda *_: (_ for _ in ()).throw(OSError("disk")))
+    with pytest.raises(OSError):
+        person.clear_session(cfg)
+    assert person.app_install_token(cfg) != before
+
+
+def test_prune_feeds_removes_only_feeds_of_accounts_no_longer_held(cfg):
+    accounts.save_account(cfg, "helpdesk@example.test", "Help Desk", "northwind", tok(1))
+    kept = accounts.account_notify_dir(cfg, "helpdesk@example.test")
+    stale = accounts.account_notify_dir(cfg, "billing@example.test")  # recreated by a late poller
+    kept.mkdir(parents=True)
+    stale.mkdir(parents=True)
+    assert accounts.prune_feeds(cfg) == [stale.name]
+    assert kept.exists() and not stale.exists()
+    accounts.accounts_path(cfg).write_text("{damaged")
+    assert accounts.prune_feeds(cfg) == [] and kept.exists()  # a damaged file prunes nothing
+
+
+def test_a_plaintext_session_loads_as_person_json_does(cfg, monkeypatch):
+    """Symmetric with person.load_session: a plaintext entry loads even where DPAPI is in use; writes protect."""
+    dpapi.set_backend(FakeDpapi())
+    monkeypatch.setattr(config_mod, "protects_tokens", lambda: True)
+    try:
+        path = accounts.accounts_path(cfg)
+        path.write_text(json.dumps({"accounts": [{"email": "a@x", "display_name": "A", "team": "t",
+                                                  "person_session": tok(1)}]}))
+        os.chmod(path, 0o600)
+        assert accounts.load_accounts(cfg)[0].session.reveal() == tok(1)
+        person.person_path(cfg).write_text(json.dumps({"person_session": tok(2)}))
+        os.chmod(person.person_path(cfg), 0o600)
+        assert person.load_session(cfg).reveal() == tok(2)  # the same rule
+        accounts.save_account(cfg, "b@x", "B", "t", tok(3))
+        assert "rps_" not in path.read_text()  # rewritten protected
+    finally:
+        dpapi.set_backend(None)

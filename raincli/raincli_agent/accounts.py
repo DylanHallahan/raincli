@@ -129,6 +129,8 @@ def load_accounts(agent_config=None) -> list[Account]:
         secret_keys = {"person_session", "person_session_dpapi"} & set(entry)
         if len(secret_keys) != 1 or set(entry) - set(_FIELDS) - secret_keys:
             raise _damaged(path)
+        # As person.load_session (person._read_secret): either form is read on any platform, so a file written
+        # where DPAPI wasn't in use still loads; every write uses DPAPI where it is (review note).
         if "person_session_dpapi" in entry:
             from .dpapi import unprotect_token
             token = unprotect_token(entry["person_session_dpapi"])
@@ -198,15 +200,40 @@ def remove_account(agent_config, email: str) -> Account | None:
 
 def clear_accounts(agent_config=None) -> bool:
     """Every delegated account gone (the own sign-out, A10 and A14 Q10): ``accounts.json``, the active choice and the
-    delegated feeds. The server ends the sessions itself (the cascade from the own session). Returns whether any
-    account was held."""
-    with locked(agent_config):
-        had = bool(load_accounts(agent_config)) if os.path.lexists(accounts_path(agent_config)) else False
+    delegated feeds. The server ends the sessions itself (the cascade from the own session). It never parses
+    anything, so a damaged file can't stop a sign-out, and it clears even when the lock can't be taken (review S1).
+    Returns whether ``accounts.json`` existed."""
+    def clear():
+        had = os.path.lexists(accounts_path(agent_config))
         for path in (accounts_path(agent_config), active_path(agent_config)):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
+        return had
+
+    try:
+        with locked(agent_config):
+            had = clear()
+    except OSError:  # an unreadable or foreign lock file: clear without it
+        had = clear()
     shutil.rmtree(notify_dir(agent_config) / NOTIFY_ACCOUNTS, ignore_errors=True)
     return had
+
+
+def prune_feeds(agent_config=None) -> list[str]:
+    """For the runtime, after it stops a removed account's poller: delete every delegated feed folder whose account
+    is no longer held (a poller still running when ``remove_account`` deleted its feed may have recreated it).
+    Returns the folder names removed. A damaged ``accounts.json`` prunes nothing."""
+    root = notify_dir(agent_config) / NOTIFY_ACCOUNTS
+    try:
+        held = {account_key(a.email) for a in load_accounts(agent_config)}
+    except ConfigError:
+        return []
+    removed = []
+    for folder in (root.iterdir() if root.is_dir() else ()):
+        if folder.is_dir() and folder.name not in held:
+            shutil.rmtree(folder, ignore_errors=True)
+            removed.append(folder.name)
+    return removed
 
 
 # -- accounts-active.json (A14 L6) ----------------------------------------------------------------------------------
