@@ -62,6 +62,7 @@ def handoff_next(value: str) -> str | None:
     return value if _NEXT.fullmatch(value or "") else None
 
 
+SWITCHER_SINCE = (0, 6, 2)  # §23 (A14 L3): the first app window that handles the account switcher's sentinels
 P2_SINCE = (0, 5, 5)  # §20.7: the first app window that tells its page it is hidden while hidden
 
 
@@ -78,3 +79,16 @@ def opens_latest(viewer, user_agent: str | None) -> bool:
         return False
     version = app_version(user_agent)
     return version is not None and version >= P2_SINCE
+
+
+def switcher_ok(viewer, user_agent: str | None) -> bool:
+    """§23 (A14 L3): the account switcher, "Add an account" and the account cues are served only to an app window
+    whose own User-Agent says RainCLIAppVersion 0.6.2 or later (the §20.7 pattern). An older window keeps today's
+    "Signed in as" line; it can't hold a delegated session anyway."""
+    from raincli_server.security import app_version
+
+    session = getattr(viewer, "web_session", None)
+    if session is None or not session.person_session_id:
+        return False
+    version = app_version(user_agent)
+    return version is not None and version >= SWITCHER_SINCE

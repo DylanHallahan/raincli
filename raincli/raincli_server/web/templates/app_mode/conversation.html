@@ -19,12 +19,13 @@
   {% if view.truncated %}<p class="rc-flash">Showing the most recent {{ view.lines|length }} messages.</p>{% endif %}
   <ol class="rc-thread" data-thread>
     {% for line in view.lines %}{% with atts=view.attachments.get(line.message.id, []), conv_id=view.conversation.id,
-       can_send=view.can_send, reply_only=(view.kind == 'self') %}{% include "app_mode/_message.html" %}{% endwith %}{% endfor %}
+       can_send=view.can_send, reply_only=(view.kind == 'self' and self_replies is not false) %}{% include "app_mode/_message.html" %}{% endwith %}{% endfor %}
   </ol>
   <span id="latest" class="rc-thread-end"></span>
   <a class="rc-new-messages" href="#latest" data-new-messages hidden>New messages ↓</a>
 </div>
-{% if view.can_send or (view.kind == 'self' and parent) %}{% include "app_mode/_composer.html" %}
+{% if view.can_send or (view.kind == 'self' and parent and self_replies is not false) %}{% include "app_mode/_composer.html" %}
+{% elif view.kind == 'self' and self_replies is false %}<p class="rc-compose rc-help" data-self-readonly>Replying to {{ viewer.user.display_name }}'s agents needs an individual grant.</p>
 {% elif view.kind == 'self' %}<p class="rc-compose rc-help">Messages from your agents. Use Reply on one of them to answer it.</p>
 {% elif view.kind == 'own_agents' %}<p class="rc-compose rc-help">Your agents' earlier messages to each other, kept for reference.</p>
 {% else %}<p class="rc-compose rc-help">You can't reply here: {{ view.name }} is no longer active.</p>{% endif %}

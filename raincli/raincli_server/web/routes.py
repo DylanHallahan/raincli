@@ -181,9 +181,22 @@ def render(
     return response
 
 
+def _window_accounts(request: Request, viewer: auth.Viewer | None):
+    """§23 (A9, A14 L3): the switcher's accounts, only for an app window of 0.6.2 or later; else None."""
+    from raincli_server import accounts
+    from raincli_server.web import present
+
+    if viewer is None or not viewer.app_mode or not present.switcher_ok(viewer, request.headers.get("user-agent")):
+        return None
+    db = getattr(viewer, "request_db", None)  # set per request by app_viewer, never shared between requests
+    return accounts.window_accounts(db, viewer.person_session) if db is not None else None
+
+
 def _context(request: Request, viewer: auth.Viewer | None, csrf: str | None, ctx: dict) -> dict:
     settings = _settings(request)
     root = settings.root_path
+    if "accounts" not in ctx:
+        ctx = {**ctx, "accounts": _window_accounts(request, viewer)}
     return {
         "url": lambda path: root + path,
         "static": lambda name: f"{root}/static/{name}?v={STATIC_VERSIONS.get(name, '0')}",
@@ -197,6 +210,7 @@ def _context(request: Request, viewer: auth.Viewer | None, csrf: str | None, ctx
         "product_logo": settings.product_logo,
         "layout": "base_app.html" if viewer is not None and viewer.app_mode else "base.html",
         "website_url": settings.public_url + root,
+        "switcher_on": ctx.get("accounts") is not None,  # §23: a 0.6.2+ app window (A14 L3)
         **ctx,
     }
 
@@ -229,6 +243,7 @@ def app_viewer(request: Request, db: Session, csrf_token: str | None = None, *,
     directory and picker, and ``/app/local/*``. Every other route refuses them with a link to the website.
     """
     viewer = require_viewer(request, db)
+    viewer.request_db = db  # §23: this request's own session, for the switcher in the page context (_context)
     if viewer.app_mode and not app_mode_ok:
         settings = _settings(request)
         raise WebError(403, "Open the website",
@@ -237,6 +252,15 @@ def app_viewer(request: Request, db: Session, csrf_token: str | None = None, *,
     if request.method != "GET":
         require_csrf(request, csrf_token or "", viewer)
     return viewer
+
+
+def _own_session_only(db: Session, viewer: auth.Viewer) -> None:
+    """§23 A4 (AS3): what only the account's own sessions may do; a window acting through a grant gets 403."""
+    if viewer.delegated:
+        from raincli_server import presentation
+
+        name = presentation.name_in_team(db, viewer.scope, viewer.user)
+        raise WebError(403, "Not available here", f"Not allowed while acting for {name}.")
 
 
 def _team_ids(viewer: auth.Viewer) -> list[uuid.UUID]:
@@ -399,26 +423,44 @@ def app_handoff(request: Request, code: str = "", db: Session = Depends(get_db))
         raise WebError(400, *_HANDOFF_ERROR)
     if not code.startswith(security.HANDOFF_CODE_PREFIX) or len(code) > 200:
         raise WebError(400, *_HANDOFF_ERROR)
-    found = db.execute(
-        select(HandoffCode, PersonSession).join(PersonSession, PersonSession.id == HandoffCode.person_session_id)
-        .where(HandoffCode.code_hash == security.hash_token(code)).with_for_update(of=HandoffCode)
-    ).first()
+    found = db.scalar(select(HandoffCode.person_session_id).where(HandoffCode.code_hash == security.hash_token(code)))
     if found is None:
         raise WebError(400, *_HANDOFF_ERROR)
-    hc, ps = found
+    existing = auth.app_session(db, request)
+    # §23 A8 (A14 L1): the person sessions decided on are locked FOR SHARE first (in id order), then the code, the
+    # order a revocation takes (sessions, then their codes), so one running at the same time waits for this handoff or
+    # wins outright; never half of each, and never a lock cycle.
+    locked = {row.id: row for row in db.scalars(
+        select(PersonSession).where(PersonSession.id.in_(
+            {found} | ({existing.person_session_id} if existing is not None else set())))
+        .order_by(PersonSession.id).with_for_update(read=True).execution_options(populate_existing=True))}
+    hc = db.scalar(select(HandoffCode).where(HandoffCode.code_hash == security.hash_token(code))
+                   .with_for_update().execution_options(populate_existing=True))
+    if hc is None or hc.person_session_id not in locked:  # revoked (its code deleted) while we waited
+        raise WebError(400, *_HANDOFF_ERROR)
     if not security.same_install(hc.install_hash, headers.get("user-agent")):
         raise WebError(400, *_HANDOFF_ERROR)
+    ps = locked[hc.person_session_id]
     user = db.get(User, ps.user_id)
     machine = db.get(Agent, ps.machine_agent_id)
     valid = (hc.used_at is None and hc.expires_at > identity.now() and ps.revoked_at is None and user is not None
              and user.is_active and machine is not None and machine.revoked_at is None
-             and identity.now() < identity.person_session_expires_at(ps))
+             and identity.now() < identity.session_expires_at(db, ps) and identity.delegated_ok(db, ps))
     if not valid:
         raise WebError(400, *_HANDOFF_ERROR)
-    existing = auth.app_session_user(db, request)
-    if existing is not None and existing != user.id:  # never replace another user's app session
-        raise WebError(400, *_HANDOFF_ERROR)
+    replaced = None
+    if existing is not None and existing.user_id != user.id:
+        # Never replace another user's app session (§16.12 C3), except, for account switching (§23 A8), one of THIS
+        # install whose person session is linked to the handoff's on the same machine (identity.linked: the own
+        # session and its delegated children). Every other case is refused exactly as before.
+        px = locked.get(existing.person_session_id)
+        if (px is None or existing.app_install_hash != hc.install_hash or px.machine_agent_id != ps.machine_agent_id
+                or not identity.linked(db, px, ps)):
+            raise WebError(400, *_HANDOFF_ERROR)
+        replaced = existing
     hc.used_at = identity.now()
+    if replaced is not None:  # the switch: the previous account's window session ends with this transaction
+        replaced.revoked_at = identity.now()
     from raincli_server.web import present
 
     # §20.3: a toast's thread may be named as ``next`` (exactly /app/conversations/<uuid>); anything else is Inbox.
@@ -435,6 +477,8 @@ def app_local(request: Request, page: str, db: Session = Depends(get_db)):
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", page):
         raise not_found()
     viewer = auth.load_viewer(db, request)
+    if viewer is not None:
+        viewer.request_db = db
     return render(request, "app_mode/local.html", viewer=viewer, page=page.replace("-", " "))
 
 
@@ -537,6 +581,8 @@ def _inbox_banner(db: Session, viewer: auth.Viewer) -> list[dict]:
     (``messaging.inbox_candidates``), the suggested one first, and the waiting messages. Empty once picked."""
     from raincli_server import presentation
 
+    if viewer.delegated:  # §23 A5 (A14 M1): the candidates are the account's own machines and agents
+        return []
     candidates = getattr(messaging, "inbox_candidates", None)
     waiting = getattr(messaging, "waiting_count", None)
     out = []
@@ -555,7 +601,7 @@ def _inbox_banner(db: Session, viewer: auth.Viewer) -> list[dict]:
 def inbox(request: Request, db: Session = Depends(get_db)):
     viewer = app_viewer(request, db, app_mode_ok=True)
     team_ids = _team_ids(viewer)
-    rows = queries.list_conversations(db, viewer.user, team_ids)
+    rows = queries.list_conversations(db, viewer.user, team_ids, delegated=viewer.delegated)
     from raincli_server.web import thread
 
     if viewer.app_mode:
@@ -575,7 +621,8 @@ def _app_inbox(request: Request, db: Session, viewer: auth.Viewer, team_ids, row
     first_team = viewer.teams[0][0] if viewer.teams else None
     people = queries.people_directory(db, viewer.user, team_ids)
     # §20.6 M1: Inbox keeps the owner's notice in its main pane as well as at the top of the list; computed once.
-    banners = _inbox_banner(db, viewer)
+    # §23 A5 (A14 M1): through a grant, no inbox banner or candidates: those are the account's own machines.
+    banners = _inbox_banner(db, viewer) if not viewer.delegated else []
     # §21 C7.3: while there is an inbox to pick, Inbox shows the banner; P2 (opening the latest conversation) waits.
     from raincli_server.web import groups_pages
 
@@ -584,7 +631,8 @@ def _app_inbox(request: Request, db: Session, viewer: auth.Viewer, team_ids, row
     return render(request, "app_mode/inbox.html", viewer=viewer, conversations=rows,
                   newest=newest, newest_id=newest[1] if newest else None,
                   owner_warnings=extras["list_owner_warnings"], banners=banners,
-                  my_inbox=present.my_inbox(db, viewer.user, first_team), first_person=people[0] if people else None,
+                  my_inbox=present.my_inbox(db, viewer.user, first_team) if not viewer.delegated else None,
+                  first_person=people[0] if people else None,
                   open_latest=present.opens_latest(viewer, request.headers.get("user-agent"))
                   and not any(b["candidates"] for b in banners), **extras)
 
@@ -592,7 +640,7 @@ def _app_inbox(request: Request, db: Session, viewer: auth.Viewer, team_ids, row
 @router.get("/app/conversations/{conversation_id}", response_class=HTMLResponse)
 def conversation(request: Request, conversation_id: str, reply_to: str = "", db: Session = Depends(get_db)):
     viewer = app_viewer(request, db, app_mode_ok=True)
-    view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id)
+    view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id, delegated=viewer.delegated)
     if view is None:
         raise not_found()
     if str(view.conversation.id) != conversation_id:  # migration 0010: an old id redirects to where it went
@@ -602,7 +650,7 @@ def conversation(request: Request, conversation_id: str, reply_to: str = "", db:
     # message once the window has focus and it has been half on screen (§19.2).
     if not viewer.app_mode and queries.ack_viewed(db, viewer.user, view):
         db.commit()
-        view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id)
+        view = queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id, delegated=viewer.delegated)
     return _conversation_page(request, db, viewer, view, reply_to=reply_to)
 
 
@@ -618,7 +666,8 @@ def group_page(request: Request, group_id: str, db: Session = Depends(get_db)):
     if view is None:
         raise not_found()
     return render(request, "app_mode/group.html", viewer=viewer, view=view, current_id=view.group.id,
-                  conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)),
+                  conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer),
+                                                           delegated=viewer.delegated),
                   group_operator=groups_pages.GROUP_OPERATOR,
                   live_now=identity.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"), **_list_extras(db, viewer))
 
@@ -654,20 +703,23 @@ def _live_list(request: Request, db: Session, viewer: auth.Viewer, current_id, c
     revision differs. The revision is a digest of the list's inputs (§21 C5.7, narrowed): only the viewer's own
     conversations (id, last seq, unread count, archive state, name) and the owner's warnings about their own machines.
     No teammate's presence goes into it, so its change says nothing about a teammate."""
-    rows = queries.list_conversations(db, viewer.user, _team_ids(viewer))
+    rows = queries.list_conversations(db, viewer.user, _team_ids(viewer), delegated=viewer.delegated)
     extras = _list_extras(db, viewer)
     warnings = extras["list_owner_warnings"]  # computed once (review L4): the list shows the same notice
+    window_accounts = _window_accounts(request, viewer)  # §23: the switcher's counts move with the list (C7)
     digest = json.dumps([
         [[str(r.conversation.id), r.last.seq if r.last else 0, r.unacked, r.archived, r.name] for r in rows],
         [[w.handle, w.kind, w.since.isoformat() if w.since else None] for w in warnings],
         str(current_id or ""),
         # §22 G6: the viewer's own groups only (id, latest post number, name, member count); nothing per copy.
         [[str(g.group.id), g.latest_seq or 0, g.group.name, g.members_n] for g in extras["groups"]],
+        window_accounts.json() if window_accounts is not None else None,
     ], separators=(",", ":"))
     rev = hashlib.sha256(digest.encode()).hexdigest()[:16]
     if rev == client_rev:
         return None, rev
-    html = fragment(request, "app_mode/_conv_list.html", viewer, conversations=rows, current_id=current_id, **extras)
+    html = fragment(request, "app_mode/_conv_list.html", viewer, conversations=rows, current_id=current_id,
+                    accounts=window_accounts, **extras)
     return html, rev
 
 
@@ -688,7 +740,9 @@ def _list_extras(db: Session, viewer: auth.Viewer) -> dict:
     # §22 G6: the viewer's groups in the session's team, in the list with the 1:1 conversations (merge_list), each
     # with its latest post; app mode only.
     mine = groups.groups_of(db, viewer.user, _team_ids(viewer)) if viewer.app_mode else []
-    return {"list_owner_warnings": thread.owner_warnings(db, viewer.user, _team_ids(viewer)),
+    # §23 A5 (A14 M1): the owner warnings name the owner's machines; never through a grant.
+    warnings = thread.owner_warnings(db, viewer.user, _team_ids(viewer)) if not viewer.delegated else []
+    return {"list_owner_warnings": warnings,
             "groups": mine, "group_latest": groups_pages.latest_posts(db, mine)}
 
 
@@ -699,6 +753,7 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
     templates and Markdown renderer), the viewer's own messages whose delivery state changed, the header's
     presence, the sender warning, and the conversation list when it changed. Indexed queries only: messages by
     (conversation_id, seq), events by message, presence by machine; nothing per message. Never acks (§19.2)."""
+    from raincli_server import accounts
     from raincli_server.web import thread
 
     viewer = app_viewer(request, db, app_mode_ok=True)
@@ -709,7 +764,7 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
                  "now": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), "retry_after": LIVE_INTERVAL}
     current_id = None
     if conversation:
-        head = queries.conversation_head(db, viewer.user, _team_ids(viewer), conversation)
+        head = queries.conversation_head(db, viewer.user, _team_ids(viewer), conversation, delegated=viewer.delegated)
         if head is None:
             raise not_found()
         conv, team, me, peer, owned = head
@@ -753,7 +808,8 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
         atts = queries.attachment_meta(db, [m.id for m in fresh]) if fresh else {}
         who = presentation.conversation_peer(db, viewer.user, conv)
         view_ctx = dict(conv_id=conv.id, can_send=queries.ConversationView(
-            conv, team, me, peer, peer_user=who.user, kind=who.kind).can_send, reply_only=who.kind == "self")
+            conv, team, me, peer, peer_user=who.user, kind=who.kind).can_send,
+            reply_only=who.kind == "self" and accounts.self_replies_ok(db, viewer))  # A18.5
         for line in lines[:len(fresh)]:
             out["messages"].append({"id": str(line.message.id), "seq": line.message.seq,
                                     "html": fragment(request, "app_mode/_message.html", viewer, line=line,
@@ -810,6 +866,20 @@ def _live_group(request: Request, db: Session, viewer: auth.Viewer, group_id: st
     return view_group.id
 
 
+@router.get("/app/accounts")
+def window_accounts_json(request: Request, db: Session = Depends(get_db)):
+    """§23 (A9): the accounts this app window holds (the own session and its live delegated sessions on this
+    machine), each with its unread count and whether the window shows it, plus the granted accounts not yet added
+    (own session only). App mode only; people, never machines."""
+    from raincli_server import accounts
+
+    viewer = app_viewer(request, db, app_mode_ok=True)
+    if not viewer.app_mode:
+        raise not_found()
+    return JSONResponse(accounts.window_accounts(db, viewer.person_session).json(),
+                        headers={"Cache-Control": "no-store"})
+
+
 @router.post("/app/ack")
 async def live_ack(request: Request, db: Session = Depends(get_db)):
     """§19.2: live.js acks messages to the person that have been half on screen while the window had focus.
@@ -837,7 +907,7 @@ async def live_ack(request: Request, db: Session = Depends(get_db)):
         if msg.route == "group":  # §22 C18: nothing in a group is ever acked from the app
             continue
         try:
-            _, done = messaging.person_ack(db, viewer.user, mid, viewer.scope)
+            _, done = messaging.person_ack(db, viewer.user, mid, viewer.scope, delegated=viewer.delegated)
         except messaging.MessagingError:
             continue
         if done:
@@ -1004,7 +1074,7 @@ def person_warning(request: Request, to: str = "", team: str = "", db: Session =
 def archived_conversations(request: Request, db: Session = Depends(get_db)):
     """§17.2: the archived conversations, each with Unarchive; the unread counts stay (§17.3 A3)."""
     viewer = app_viewer(request, db, app_mode_ok=True)
-    rows = queries.list_conversations(db, viewer.user, _team_ids(viewer), archived="only")
+    rows = queries.list_conversations(db, viewer.user, _team_ids(viewer), archived="only", delegated=viewer.delegated)
     template = "app_mode/archived.html" if viewer.app_mode else "app/archived.html"
     return render(request, template, viewer=viewer, conversations=rows)
 
@@ -1014,11 +1084,13 @@ def _set_archived(request: Request, db: Session, conversation_id: str, csrf_toke
     """Archive or unarchive as the person (§17.2): either endpoint, or the owner of a machine endpoint, the
     same rule as seeing the conversation here. In the app-mode allowlist (§17.3 A5), with CSRF."""
     viewer = app_viewer(request, db, csrf_token, app_mode_ok=True)
-    if queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id) is None:
+    if queries.get_conversation(db, viewer.user, _team_ids(viewer), conversation_id,
+                                delegated=viewer.delegated) is None:
         raise not_found()
     seq = int(through) if through.isdigit() and len(through) < 19 else None
     try:
-        conv = messaging.archive_as_person(db, viewer.user, conversation_id, archived, seq, viewer.scope)
+        conv = messaging.archive_as_person(db, viewer.user, conversation_id, archived, seq, viewer.scope,
+                                           delegated=viewer.delegated)
     except messaging.MessagingError:
         raise not_found() from None
     state = messaging.archive_json(db, conv)["archived"]
@@ -1104,6 +1176,10 @@ def _conversation_page(
     request: Request, db: Session, viewer: auth.Viewer, view: queries.ConversationView, *, reply_to: str = "",
     status: int = 200, **ctx,
 ) -> HTMLResponse:
+    from raincli_server import accounts
+
+    # A18.5: under a team-wide grant, the account's escalations and "From your agents" are read-only.
+    ctx.setdefault("self_replies", accounts.self_replies_ok(db, viewer))
     parent = None
     rid = queries.parse_uuid(reply_to)
     if rid is not None:
@@ -1121,7 +1197,8 @@ def _conversation_page(
                   live_now=identity.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"), **ctx)
     if viewer.app_mode:
         return render(request, "app_mode/conversation.html",
-                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)),
+                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer),
+                                                               delegated=viewer.delegated),
                       **_list_extras(db, viewer), **common)
     return render(request, "app/conversation.html", **common)
 
@@ -1154,7 +1231,8 @@ def _compose_page(request, db, viewer, *, form, status: int = 200, error: str | 
                thread.warning_for_text(db, chosen, to, viewer.user))
     if viewer.app_mode:
         return render(request, "app_mode/compose.html",
-                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer)),
+                      conversations=queries.list_conversations(db, viewer.user, _team_ids(viewer),
+                                                               delegated=viewer.delegated),
                       **_list_extras(db, viewer), **ctx)
     return render(request, "app/compose.html", **ctx)
 
@@ -1170,7 +1248,7 @@ def send_message(
     team_ids = _team_ids(viewer)
     view = None
     if conversation_id != "new":
-        view = queries.get_conversation(db, viewer.user, team_ids, conversation_id)
+        view = queries.get_conversation(db, viewer.user, team_ids, conversation_id, delegated=viewer.delegated)
         if view is None:
             raise not_found()
     mid = queries.parse_uuid(message_id) or uuid.uuid4()
@@ -1196,7 +1274,7 @@ def send_message(
     def fail(status: int, message: str):
         db.rollback()
         if view is not None:
-            fresh = queries.get_conversation(db, viewer.user, team_ids, conversation_id)
+            fresh = queries.get_conversation(db, viewer.user, team_ids, conversation_id, delegated=viewer.delegated)
             return _conversation_page(request, db, viewer, fresh, reply_to=in_reply_to, status=status,
                                       error=message, draft=body)
         return _compose_page(request, db, viewer, status=status, error=message,
@@ -1215,10 +1293,11 @@ def send_message(
             db, viewer.user, team_obj, id=mid, to=to, body=body,
             conversation_id=conv_for_send, in_reply_to=parent_id,
             max_pending=_settings(request).max_pending, attachments=attachments,
-            quotas=quotas.Quotas.from_settings(_settings(request)),
+            quotas=quotas.Quotas.from_settings(_settings(request)), acting_user=viewer.acting_user,
+            delegation=viewer.person_session if viewer.delegated else None,
         )
     except queries.SendError as exc:
-        status = {"inbox_full": 429, "id_conflict": 409, "quota_exceeded": 413}.get(exc.code, 400)
+        status = SEND_STATUS.get(exc.code, 400)
         return fail(status, exc.message)
     db.commit()
     if viewer.app_mode:  # §20.2: app mode never shows the "Message stored on the server." banner
@@ -1227,7 +1306,7 @@ def send_message(
     return redirect(request, f"/app/conversations/{msg.conversation_id}?notice={notice}#m-{msg.id}")
 
 
-SEND_STATUS = {"inbox_full": 429, "id_conflict": 409, "quota_exceeded": 413}
+SEND_STATUS = {"inbox_full": 429, "id_conflict": 409, "quota_exceeded": 413, "delegated_scope": 403}
 
 
 def _send_error(status: int, code: str, message: str, retry_after: int | None = None) -> JSONResponse:
@@ -1242,15 +1321,18 @@ def _message_ctx(db: Session, viewer: auth.Viewer, conv, team, me, peer) -> dict
     """What _message.html needs besides the line: may the viewer write here, and replies-only for their own
     agents' conversation (§21 C13 H2)."""
     who = presentation.conversation_peer(db, viewer.user, conv)
+    from raincli_server import accounts
+
     return {"can_send": queries.ConversationView(conv, team, me, peer, peer_user=who.user, kind=who.kind).can_send,
-            "reply_only": who.kind == "self"}
+            "reply_only": who.kind == "self" and accounts.self_replies_ok(db, viewer)}  # A18.5
 
 
 def _sent_message(request: Request, db: Session, viewer: auth.Viewer, msg: Message, **extra) -> JSONResponse:
     """The message as the thread shows it (§19.1, the same template as /app/live), for the client's merge by id."""
     from raincli_server.web import thread
 
-    conv, team, me, peer, owned = queries.conversation_head(db, viewer.user, _team_ids(viewer), str(msg.conversation_id))
+    conv, team, me, peer, owned = queries.conversation_head(db, viewer.user, _team_ids(viewer), str(msg.conversation_id),
+                                                            delegated=viewer.delegated)
     lines, _ = queries.message_lines(db, viewer.user, owned, [msg], thread.Names(db))
     html = fragment(request, "app_mode/_message.html", viewer, line=lines[0],
                     atts=queries.attachment_meta(db, [msg.id]).get(msg.id, []), conv_id=conv.id,
@@ -1275,7 +1357,7 @@ def send_in_place(
     if not viewer.app_mode:
         return _send_error(404, "not_found", "That page does not exist, or you do not have access to it.")
     team_ids = _team_ids(viewer)
-    view = queries.get_conversation(db, viewer.user, team_ids, conversation_id)
+    view = queries.get_conversation(db, viewer.user, team_ids, conversation_id, delegated=viewer.delegated)
     if view is None:
         return _send_error(404, "not_found", "That conversation does not exist, or you do not have access to it.")
     mid = queries.parse_uuid(message_id)
@@ -1300,6 +1382,8 @@ def send_in_place(
             db, viewer.user, view.team, id=mid, to=to, body=body.replace("\r\n", "\n"),
             conversation_id=conv_for_send, in_reply_to=parent_id, max_pending=_settings(request).max_pending,
             attachments=_read_uploads(files), quotas=quotas.Quotas.from_settings(_settings(request)),
+            acting_user=viewer.acting_user,
+            delegation=viewer.person_session if viewer.delegated else None,
         )
     except queries.SendError as exc:
         db.rollback()
@@ -1307,7 +1391,8 @@ def send_in_place(
         if exc.code == "id_conflict":
             mine = db.get(Message, mid)
             if mine is not None and mine.sender_user_id == viewer.user.id and \
-                    queries.get_conversation(db, viewer.user, team_ids, str(mine.conversation_id)) is not None:
+                    queries.get_conversation(db, viewer.user, team_ids, str(mine.conversation_id),
+                                             delegated=viewer.delegated) is not None:
                 response = _sent_message(request, db, viewer, mine)
                 payload = json.loads(response.body)
                 return JSONResponse({"error": {"code": exc.code, "message": "Your earlier version was already sent."},
@@ -1336,7 +1421,8 @@ def _read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
 @router.get("/app/messages/{message_id}/attachments/{attachment_id}")
 def download_attachment(request: Request, message_id: str, attachment_id: str, db: Session = Depends(get_db)):
     viewer = app_viewer(request, db, app_mode_ok=True)
-    att = queries.attachment_for_user(db, viewer.user, _team_ids(viewer), message_id, attachment_id)
+    att = queries.attachment_for_user(db, viewer.user, _team_ids(viewer), message_id, attachment_id,
+                                      delegated=viewer.delegated)
     if att is None:
         raise not_found()
     return Response(att.content, media_type="text/markdown; charset=utf-8", headers={
@@ -1428,6 +1514,7 @@ def set_inbox(request: Request, csrf_token: str = Form(""), team: str = Form("")
     if choice and "|" in choice:
         machine, agent = choice.split("|", 1)
     viewer = app_viewer(request, db, csrf_token, app_mode_ok=True)
+    _own_session_only(db, viewer)  # §23 A4: never the account's inbox setting through a grant
     teams = [t for t, _ in viewer.teams if t.slug == team] if team else [t for t, _ in viewer.teams][:1]
     target = "/app/inbox" if back != "people" else "/app/people"
     if not teams:
