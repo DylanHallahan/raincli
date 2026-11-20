@@ -359,7 +359,7 @@ def test_concurrent_revocations_of_both_covering_grants_end_the_session(client, 
         def other():
             done["ended"] = grants.remove_team_grant(second, second.get(type(nw), nw.id), RELEASE)
             second.commit()
-        worker = threading.Thread(target=other)
+        worker = threading.Thread(target=other, daemon=True)  # never keeps a stuck run alive
         worker.start()
         worker.join(1.5)
         assert worker.is_alive()  # waiting on the grant locks

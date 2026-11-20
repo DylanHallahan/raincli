@@ -152,7 +152,7 @@ def test_a_handoff_racing_a_revocation_waits_and_refuses(app, client, session, e
             identity.revoke_person_sessions(revoker, session_id=s["sessions"]["maya_own"].id)  # uncommitted
             result = {}
             worker = threading.Thread(target=lambda: result.update(
-                r=webview.get(f"/app/handoff?code={code}", headers=NAV, follow_redirects=False)))
+                r=webview.get(f"/app/handoff?code={code}", headers=NAV, follow_redirects=False)), daemon=True)
             worker.start()
             worker.join(1.5)
             assert worker.is_alive()  # waiting on the lock, not deciding on stale rows
