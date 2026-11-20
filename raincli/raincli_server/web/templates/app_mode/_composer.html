@@ -28,6 +28,8 @@
     {# One row (§19.7): "To: name", a textarea that grows from 1 to 8 lines, the clip and Send. Ctrl+Enter sends
        (app.js); without JavaScript it is a plain form with a Send button. #}
     <div class="rc-box rc-box-row1">
+      {# §23 (AS7): acting for an account through a grant, the composer says as whom it sends. #}
+      {% if viewer and viewer.delegated and switcher_on %}<span class="rc-as">As: <strong>{{ viewer.user.display_name }}</strong></span>{% endif %}
       {% if to_label %}<span class="rc-to">To: <strong>{{ to_name or to_label }}</strong></span>{% endif %}
       <label class="sr-only" for="body">Message</label>
       <textarea id="body" name="body" rows="1" maxlength="16000" required data-grow

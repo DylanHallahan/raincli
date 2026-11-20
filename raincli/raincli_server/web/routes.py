@@ -181,9 +181,22 @@ def render(
     return response
 
 
+def _window_accounts(request: Request, viewer: auth.Viewer | None):
+    """§23 (A9, A14 L3): the switcher's accounts, only for an app window of 0.6.2 or later; else None."""
+    from raincli_server import accounts
+    from raincli_server.web import present
+
+    if viewer is None or not viewer.app_mode or not present.switcher_ok(viewer, request.headers.get("user-agent")):
+        return None
+    db = getattr(viewer, "request_db", None)  # set per request by app_viewer, never shared between requests
+    return accounts.window_accounts(db, viewer.person_session) if db is not None else None
+
+
 def _context(request: Request, viewer: auth.Viewer | None, csrf: str | None, ctx: dict) -> dict:
     settings = _settings(request)
     root = settings.root_path
+    if "accounts" not in ctx:
+        ctx = {**ctx, "accounts": _window_accounts(request, viewer)}
     return {
         "url": lambda path: root + path,
         "static": lambda name: f"{root}/static/{name}?v={STATIC_VERSIONS.get(name, '0')}",
@@ -197,6 +210,7 @@ def _context(request: Request, viewer: auth.Viewer | None, csrf: str | None, ctx
         "product_logo": settings.product_logo,
         "layout": "base_app.html" if viewer is not None and viewer.app_mode else "base.html",
         "website_url": settings.public_url + root,
+        "switcher_on": ctx.get("accounts") is not None,  # §23: a 0.6.2+ app window (A14 L3)
         **ctx,
     }
 
@@ -229,6 +243,7 @@ def app_viewer(request: Request, db: Session, csrf_token: str | None = None, *,
     directory and picker, and ``/app/local/*``. Every other route refuses them with a link to the website.
     """
     viewer = require_viewer(request, db)
+    viewer.request_db = db  # §23: this request's own session, for the switcher in the page context (_context)
     if viewer.app_mode and not app_mode_ok:
         settings = _settings(request)
         raise WebError(403, "Open the website",
@@ -462,6 +477,8 @@ def app_local(request: Request, page: str, db: Session = Depends(get_db)):
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", page):
         raise not_found()
     viewer = auth.load_viewer(db, request)
+    if viewer is not None:
+        viewer.request_db = db
     return render(request, "app_mode/local.html", viewer=viewer, page=page.replace("-", " "))
 
 
@@ -564,6 +581,8 @@ def _inbox_banner(db: Session, viewer: auth.Viewer) -> list[dict]:
     (``messaging.inbox_candidates``), the suggested one first, and the waiting messages. Empty once picked."""
     from raincli_server import presentation
 
+    if viewer.delegated:  # §23 A5 (A14 M1): the candidates are the account's own machines and agents
+        return []
     candidates = getattr(messaging, "inbox_candidates", None)
     waiting = getattr(messaging, "waiting_count", None)
     out = []
@@ -687,17 +706,20 @@ def _live_list(request: Request, db: Session, viewer: auth.Viewer, current_id, c
     rows = queries.list_conversations(db, viewer.user, _team_ids(viewer), delegated=viewer.delegated)
     extras = _list_extras(db, viewer)
     warnings = extras["list_owner_warnings"]  # computed once (review L4): the list shows the same notice
+    window_accounts = _window_accounts(request, viewer)  # §23: the switcher's counts move with the list (C7)
     digest = json.dumps([
         [[str(r.conversation.id), r.last.seq if r.last else 0, r.unacked, r.archived, r.name] for r in rows],
         [[w.handle, w.kind, w.since.isoformat() if w.since else None] for w in warnings],
         str(current_id or ""),
         # §22 G6: the viewer's own groups only (id, latest post number, name, member count); nothing per copy.
         [[str(g.group.id), g.latest_seq or 0, g.group.name, g.members_n] for g in extras["groups"]],
+        window_accounts.json() if window_accounts is not None else None,
     ], separators=(",", ":"))
     rev = hashlib.sha256(digest.encode()).hexdigest()[:16]
     if rev == client_rev:
         return None, rev
-    html = fragment(request, "app_mode/_conv_list.html", viewer, conversations=rows, current_id=current_id, **extras)
+    html = fragment(request, "app_mode/_conv_list.html", viewer, conversations=rows, current_id=current_id,
+                    accounts=window_accounts, **extras)
     return html, rev
 
 
@@ -731,6 +753,7 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
     templates and Markdown renderer), the viewer's own messages whose delivery state changed, the header's
     presence, the sender warning, and the conversation list when it changed. Indexed queries only: messages by
     (conversation_id, seq), events by message, presence by machine; nothing per message. Never acks (§19.2)."""
+    from raincli_server import accounts
     from raincli_server.web import thread
 
     viewer = app_viewer(request, db, app_mode_ok=True)
@@ -785,7 +808,8 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
         atts = queries.attachment_meta(db, [m.id for m in fresh]) if fresh else {}
         who = presentation.conversation_peer(db, viewer.user, conv)
         view_ctx = dict(conv_id=conv.id, can_send=queries.ConversationView(
-            conv, team, me, peer, peer_user=who.user, kind=who.kind).can_send, reply_only=who.kind == "self")
+            conv, team, me, peer, peer_user=who.user, kind=who.kind).can_send,
+            reply_only=who.kind == "self" and accounts.self_replies_ok(db, viewer))  # A18.5
         for line in lines[:len(fresh)]:
             out["messages"].append({"id": str(line.message.id), "seq": line.message.seq,
                                     "html": fragment(request, "app_mode/_message.html", viewer, line=line,
@@ -840,6 +864,20 @@ def _live_group(request: Request, db: Session, viewer: auth.Viewer, group_id: st
     out["delivered"] = [{"id": str(pid), "text": groups_pages.delivered_text(n, m)}
                         for pid, n, m in groups_pages.own_delivered(db, viewer.user, view_group)]
     return view_group.id
+
+
+@router.get("/app/accounts")
+def window_accounts_json(request: Request, db: Session = Depends(get_db)):
+    """§23 (A9): the accounts this app window holds (the own session and its live delegated sessions on this
+    machine), each with its unread count and whether the window shows it, plus the granted accounts not yet added
+    (own session only). App mode only; people, never machines."""
+    from raincli_server import accounts
+
+    viewer = app_viewer(request, db, app_mode_ok=True)
+    if not viewer.app_mode:
+        raise not_found()
+    return JSONResponse(accounts.window_accounts(db, viewer.person_session).json(),
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.post("/app/ack")
@@ -1138,6 +1176,10 @@ def _conversation_page(
     request: Request, db: Session, viewer: auth.Viewer, view: queries.ConversationView, *, reply_to: str = "",
     status: int = 200, **ctx,
 ) -> HTMLResponse:
+    from raincli_server import accounts
+
+    # A18.5: under a team-wide grant, the account's escalations and "From your agents" are read-only.
+    ctx.setdefault("self_replies", accounts.self_replies_ok(db, viewer))
     parent = None
     rid = queries.parse_uuid(reply_to)
     if rid is not None:
@@ -1279,8 +1321,10 @@ def _message_ctx(db: Session, viewer: auth.Viewer, conv, team, me, peer) -> dict
     """What _message.html needs besides the line: may the viewer write here, and replies-only for their own
     agents' conversation (§21 C13 H2)."""
     who = presentation.conversation_peer(db, viewer.user, conv)
+    from raincli_server import accounts
+
     return {"can_send": queries.ConversationView(conv, team, me, peer, peer_user=who.user, kind=who.kind).can_send,
-            "reply_only": who.kind == "self"}
+            "reply_only": who.kind == "self" and accounts.self_replies_ok(db, viewer)}  # A18.5
 
 
 def _sent_message(request: Request, db: Session, viewer: auth.Viewer, msg: Message, **extra) -> JSONResponse:

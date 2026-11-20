@@ -30,7 +30,7 @@ COVERED = {f"GET {p}" for p in (
     "/app", "/app/inbox", "/app/people", "/app/compose", "/app/conversations/{conversation_id}", "/app/archived",
     "/app/live", "/app/recipients", "/app/person-warning", "/app/agents", "/app/teams/{slug}", "/app/team",
     "/app/account", "/app/local/{page}",
-    "/app/groups/{group_id}")} | {  # §22 G6: scanned on the group seed (test_group_pages_*)
+    "/app/groups/{group_id}", "/app/accounts")} | {  # §22 G6: scanned on the group seed (test_group_pages_*)
     "POST /app/send",  # driven: the member's in-place sends, their JSON (message_html) scanned
     "POST /app/inbox",  # driven: picking her inbox from the banner, and a teammate's machine (refused)
     "POST /app/conversations/{conversation_id}/send",  # driven: refused sends by handle; a website send
@@ -150,7 +150,7 @@ def _app_pages(scan, page, base, seed):  # noqa: F811
         page.wait_for_timeout(300)
         scan.snapshot(page, f"app conversation {key}, trails open, after a poll")
     for path in [f"/app/live?conversation={cid}&after=0" for cid in convs.values()] + [
-            "/app/recipients", "/app/live"] + [f"/app/person-warning?to={q}" for q in (
+            "/app/recipients", "/app/live", "/app/accounts"] + [f"/app/person-warning?to={q}" for q in (
             "jon@example.test", "Sam", "Ryan", "zq-handle-jon", "zq-handle-jon/zq-agent-jon-api", "zq-handle-lee",
             "nobody@example.test")]:
         r = page.request.get(base + path)
