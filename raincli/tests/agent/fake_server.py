@@ -694,6 +694,7 @@ class FakeState(_GroupsMixin):
                 else m["created_at"],
                 "attachments": [{k: a[k] for k in ("id", "filename", "media_type", "size", "sha256")}
                                 for a in m["attachments"]],
+                "sent_by": None,  # §23 A6: only the account itself sees who wrote a delegated send
                 **(self.copy_fields(m, viewer) if m.get("route") == "group" else {})}
 
     def same_owner(self, m):
