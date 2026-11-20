@@ -162,22 +162,29 @@ class PersonSession(Base):
 
 
 class Grant(Base):
-    """§23: the operator lets ``grantee`` act as ``account`` in ``team`` (``raincli-admin grant-add``). Revoked, never
-    deleted. Keys go to users and teams, not memberships, so removing a member still works; membership is checked
-    where a grant is added and used."""
+    """§23: the operator lets ``grantee`` act as ``account`` in ``team`` (``raincli-admin grant-add``), or, with
+    ``all_members`` and no grantee (A17), every active member of the team but the account. Revoked, never deleted.
+    Keys go to users and teams, not memberships, so removing a member still works; membership is checked where a grant
+    is added and used."""
 
     __tablename__ = "grants"
     id: Mapped[uuid.UUID] = _uuid()
     team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id"), nullable=False)
-    grantee_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    grantee_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     account_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_by: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = _created()
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    all_members: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # A18: the app's toasts for an account used through this grant (per-user grants on, team-wide off by default).
+    toasts: Mapped[bool] = mapped_column(Boolean, nullable=False)  # no default: grant-add always sets it
     __table_args__ = (
         CheckConstraint("grantee_user_id <> account_user_id", name="ck_grants_not_self"),
+        CheckConstraint("all_members = (grantee_user_id IS NULL)", name="ck_grants_all_members"),
         Index("uq_grants_live", "team_id", "grantee_user_id", "account_user_id", unique=True,
               postgresql_where=text("revoked_at IS NULL")),
+        Index("uq_grants_live_all_members", "team_id", "account_user_id", unique=True,
+              postgresql_where=text("all_members AND revoked_at IS NULL")),
         Index("ix_grants_account", "account_user_id", "team_id"),
     )
 
@@ -422,6 +429,8 @@ class Message(Base):
     # §23 (migration 0013): the grantee who wrote a person send through a delegated session; shown only in the
     # account's own views and the operator's listing, never to recipients.
     acting_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", name="fk_messages_acting_user"))
+    # A19 D4/E3: the grant in effect when it was sent (audit), set with ``acting_user_id``.
+    grant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("grants.id", name="fk_messages_grant"))
     in_reply_to: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("messages.id"))
     # Endpoints (§16.1): a machine (agent id), an agent on a machine (agent id plus name) or a person.
     sender_agent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id"))
@@ -470,6 +479,7 @@ class Message(Base):
         CheckConstraint("withdrawn_at IS NULL OR route IS NOT DISTINCT FROM 'group'",
                         name="ck_messages_withdrawn_group"),
         CheckConstraint("acting_user_id IS NULL OR sender_user_id IS NOT NULL", name="ck_messages_acting_person"),
+        CheckConstraint("(acting_user_id IS NULL) = (grant_id IS NULL)", name="ck_messages_acting_grant"),
         Index("ix_messages_acting", "acting_user_id", "created_at", postgresql_where=text("acting_user_id IS NOT NULL")),
         Index("ix_messages_redeliver_agent", "recipient_agent_id", "seq",
               postgresql_where=text("redeliver AND acked_at IS NULL")),

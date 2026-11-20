@@ -51,11 +51,12 @@ def _app_session(conn, user, ps):
                  {"h": uuid.uuid4().hex * 2, "p": ps, "i": "a" * 64})
 
 
-def _grant(conn, team, grantee, account, revoked=False):
+def _grant(conn, team, grantee, account, revoked=False, all_members=False, toasts=True):
     gid = uuid.uuid4()
-    conn.execute(text("INSERT INTO grants (id, team_id, grantee_user_id, account_user_id, created_by, revoked_at) "
-                      f"VALUES (:i, :t, :g, :a, 'operator', {'now()' if revoked else 'NULL'})"),
-                 {"i": gid, "t": team, "g": grantee, "a": account})
+    conn.execute(text("INSERT INTO grants (id, team_id, grantee_user_id, account_user_id, created_by, revoked_at, "
+                      f"all_members, toasts) VALUES (:i, :t, :g, :a, 'operator', {'now()' if revoked else 'NULL'}, "
+                      ":all, :toasts)"),
+                 {"i": gid, "t": team, "g": grantee, "a": account, "all": all_members, "toasts": toasts})
     return gid
 
 
@@ -81,11 +82,13 @@ def test_accounts_round_trip_and_the_downgrade_is_exact(scratch_db):  # noqa: F8
     with db.begin() as conn:
         live = _grant(conn, nw, maya, jon)
         _grant(conn, nw, maya, priya, revoked=True)
+        _grant(conn, nw, None, priya, all_members=True, toasts=False)  # A17: team-wide
         child = _person_session(conn, jon, seed["machines"]["laptop"], acting_user_id=maya, grant_id=live,
                                 parent_session_id=seed["maya_own"])
         _app_session(conn, jon, child)
         sent = _msg(conn, nw, seed["jon"][0], P(jon), P(priya), "sent by Maya as Jon")
-        conn.execute(text("UPDATE messages SET acting_user_id = :m WHERE id = :i"), {"m": maya, "i": sent.id})
+        conn.execute(text("UPDATE messages SET acting_user_id = :m, grant_id = :g WHERE id = :i"),
+                     {"m": maya, "g": live, "i": sent.id})
 
     command.downgrade(alembic_config(url), "0012")
     with db.connect() as conn:
@@ -96,7 +99,7 @@ def test_accounts_round_trip_and_the_downgrade_is_exact(scratch_db):  # noqa: F8
             assert after[table] == rows[table], table  # the delegated session, its web session and code are gone
     before_ids = {r[0] for r in rows["messages"]}
     assert [r for r in after["messages"] if r[0] in before_ids] == rows["messages"]  # every earlier row exactly
-    assert len(after["messages"]) == len(rows["messages"]) + 1  # the send stays, without its acting person
+    assert len(after["messages"]) == len(rows["messages"]) + 1  # the send stays, without its acting person and grant
     upgrade(url, "0013")  # and back up again
     with db.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM grants")).scalar() == 0
@@ -117,12 +120,25 @@ def test_the_checks_keep_grants_and_delegated_sessions_in_shape(scratch_db):  # 
     with db.begin() as conn:
         live = _grant(conn, nw, maya, jon)
     # One live grant per pair; a revoked one may sit beside it; never yourself.
-    _refused(db, "INSERT INTO grants (id, team_id, grantee_user_id, account_user_id, created_by) "
-                 "VALUES (gen_random_uuid(), :t, :g, :a, 'operator')", {"t": nw, "g": maya, "a": jon}, "uq_grants_live")
+    _refused(db, "INSERT INTO grants (id, team_id, grantee_user_id, account_user_id, created_by, toasts) "
+                 "VALUES (gen_random_uuid(), :t, :g, :a, 'operator', true)", {"t": nw, "g": maya, "a": jon},
+             "uq_grants_live")
     with db.begin() as conn:
         _grant(conn, nw, maya, jon, revoked=True)
+    _refused(db, "INSERT INTO grants (id, team_id, grantee_user_id, account_user_id, created_by, toasts) "
+                 "VALUES (gen_random_uuid(), :t, :g, :g, 'operator', true)", {"t": nw, "g": maya}, "ck_grants_not_self")
+    # A17: a team-wide grant has no grantee (and only it), one live per (team, account); toasts is always set (A19).
+    for grantee, all_members in ((None, False), (maya, True)):
+        _refused(db, "INSERT INTO grants (id, team_id, grantee_user_id, account_user_id, created_by, all_members, "
+                     "toasts) VALUES (gen_random_uuid(), :t, :g, :a, 'operator', :all, true)",
+                 {"t": nw, "g": grantee, "a": priya, "all": all_members}, "ck_grants_all_members")
+    with db.begin() as conn:
+        _grant(conn, nw, None, priya, all_members=True)
+        _grant(conn, nw, None, priya, all_members=True, revoked=True)
+    with pytest.raises((IntegrityError, DBAPIError), match="uq_grants_live_all_members"), db.begin() as conn:
+        _grant(conn, nw, None, priya, all_members=True)
     _refused(db, "INSERT INTO grants (id, team_id, grantee_user_id, account_user_id, created_by) "
-                 "VALUES (gen_random_uuid(), :t, :g, :g, 'operator')", {"t": nw, "g": maya}, "ck_grants_not_self")
+                 "VALUES (gen_random_uuid(), :t, :g, :a, 'operator')", {"t": nw, "g": maya, "a": priya}, "toasts")
     # A delegated session has all three of acting person, grant and parent, or none; never acting as itself.
     for cols in ({"acting_user_id": maya}, {"acting_user_id": maya, "grant_id": live},
                  {"grant_id": live, "parent_session_id": seed["maya_own"]}):
@@ -130,9 +146,11 @@ def test_the_checks_keep_grants_and_delegated_sessions_in_shape(scratch_db):  # 
             _person_session(conn, jon, laptop, **cols)
     with pytest.raises((IntegrityError, DBAPIError), match="ck_person_sessions_delegated"), db.begin() as conn:
         _person_session(conn, maya, laptop, acting_user_id=maya, grant_id=live, parent_session_id=seed["maya_own"])
-    # The acting person is recorded on person sends only.
-    _refused(db, "UPDATE messages SET acting_user_id = :m WHERE sender_user_id IS NULL", {"m": maya},
-             "ck_messages_acting_person")
+    # The acting person is recorded on person sends only, always with the grant in effect (A19 D4).
+    _refused(db, "UPDATE messages SET acting_user_id = :m, grant_id = :g WHERE sender_user_id IS NULL",
+             {"m": maya, "g": live}, "ck_messages_acting_person")
+    _refused(db, "UPDATE messages SET acting_user_id = :m WHERE sender_user_id IS NOT NULL", {"m": maya},
+             "ck_messages_acting_grant")
     # M2: grants never key on memberships, so a member with a (revoked) grant can still be removed and re-added.
     with db.begin() as conn:
         conn.execute(text("UPDATE grants SET revoked_at = now() WHERE id = :i"), {"i": live})

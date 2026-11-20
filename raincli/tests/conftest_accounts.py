@@ -28,13 +28,16 @@ from conftest_v06 import PASSWORD, _inbox, _machine, _message, _pair, v06_seed  
 
 # Help Desk's own machine and agents: never in any response to a delegated session (A5, A14 M1, C20a).
 HELPDESK_STRINGS = ("zq-handle-helpdesk", "zq-agent-helpdesk-inbox", "zq-agent-helpdesk-ops")
+# The API routes tests/server/test_accounts_privacy_api.py scans with account data (the v0.6 route walk counts them).
+ACCOUNT_GETS = {"/api/v1/person/delegations"}
+ACCOUNT_DRIVEN = {("POST", "/api/v1/person/delegations")}
 
 
-def make_grant(session, team, grantee, account, created_by="operator"):
+def make_grant(session, team, grantee, account, created_by="operator", toasts=True):
     from raincli_server.models import Grant
 
     grant = Grant(id=uuid.uuid4(), team_id=team.id, grantee_user_id=grantee.id, account_user_id=account.id,
-                  created_by=created_by)
+                  created_by=created_by, toasts=toasts)
     session.add(grant)
     session.flush()
     return grant
@@ -103,7 +106,7 @@ def accounts_seed(session, v06_seed):  # noqa: F811
                                              body="Sync the ticket queue.")
     delegated_send = _message(session, nw, with_jon, body="On it, Jon.", route="inbox", sender_user=helpdesk,
                               recipient_machine=machines["jon"], recipient_name="zq-agent-jon-api")
-    delegated_send.acting_user_id = maya.id
+    delegated_send.acting_user_id, delegated_send.grant_id = maya.id, grants["helpdesk"].id
 
     maya_own = own_session(session, s["person_tokens"]["Maya"])
     helpdesk_token, helpdesk_session, _ = identity.issue_delegated_session(session, maya_own, "helpdesk@example.test")
