@@ -345,6 +345,11 @@ class Services:
         from .. import accounts
         return _person().notify_all(self.agent_config, folder=accounts.account_notify_dir(self.agent_config, email))
 
+    def take_dropped(self):
+        """The accounts the runtime dropped on a 401 since the window last asked (``{email, display_name}``)."""
+        from .. import accounts
+        return accounts.take_dropped(self.agent_config)
+
     def drop_account(self, email):
         """A delegated session the server refused (401): forget it here, without a server call."""
         from .. import accounts

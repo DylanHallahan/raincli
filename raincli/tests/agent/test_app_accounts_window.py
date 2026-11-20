@@ -169,3 +169,29 @@ def test_the_local_pages_ask_for_the_line_through_the_nonce_gate(tmp_path):
         assert '<p class="belongs" id="belongs" hidden></p>' in (local / page).read_text()
     assert 'rc.read("account_note")' in (local / "local.js").read_text()
     assert hasattr(window_mod.Api, "account_note")
+
+
+def test_a_dropped_account_shows_one_line_and_leaves_the_window(tmp_path):
+    svc = AccountServices(held=[HD, BILL], active=HD["email"])
+    drops = [[{"email": HD["email"], "display_name": "Help Desk"}]]
+    svc.take_dropped = lambda: drops.pop() if drops else []
+    app, win, _ = make(tmp_path, svc)
+    titled(win)
+    app.home()  # started on Help Desk, which the runtime dropped meanwhile
+    assert app.active_account is None and svc.handoff_for[-1] is None and len(svc.handoff_for) == 1
+    on_hosted(app, win)
+    notice = [sc for sc in win.scripts if "rc-flash" in sc]
+    assert len(notice) == 1 and "Help Desk was removed from this app: the access ended." in notice[0]
+    assert "textContent" in notice[0] and "innerHTML" not in notice[0]
+    on_hosted(app, win)
+    assert len([sc for sc in win.scripts if "rc-flash" in sc]) == 1  # shown once
+
+
+def test_a_dropped_inactive_account_shows_the_line_on_the_current_page(tmp_path):
+    svc = AccountServices(held=[HD, BILL])
+    svc.take_dropped = lambda: [{"email": BILL["email"], "display_name": "Billing"}]
+    app, win, _ = make(tmp_path, svc)
+    titled(win)
+    on_hosted(app, win)
+    assert app.check_dropped() is False and app.active_account is None
+    assert "Billing was removed from this app" in win.scripts[-1]

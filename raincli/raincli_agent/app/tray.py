@@ -203,6 +203,8 @@ class Tray:
                     return self.quit(code)
             self.refresh_icon()
             self.toasts()
+            if hasattr(self.window, "check_dropped"):  # §23: an account dropped by the runtime: the window says so
+                self.post(self.window.check_dropped)
 
     def signed_in(self):
         return os.path.exists(self.agent_config) and os.path.exists(self.runtime_config)

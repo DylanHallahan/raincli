@@ -300,6 +300,7 @@ class AppWindow:
         # page gets for the switcher's sentinels. A sentinel without the current page's nonce does nothing.
         self.active_account = None
         self._hosted_nonce = None
+        self._pending_notice = None  # §23: the one-line notice for a dropped account, shown on the next hosted page
         self._recent_external = collections.deque(maxlen=16)  # links already handed to the policy
 
     # -- set-up ---------------------------------------------------------------------------------------
@@ -533,6 +534,8 @@ class AppWindow:
             # for the local pages' js_api, whose gate has its own).
             self._hosted_nonce = secrets.token_urlsafe(24)
             self.window.evaluate_js(f"window.__rcNonce = {json.dumps(self._hosted_nonce)};")
+            if self._pending_notice:
+                self._show_notice()
 
     def on_navigation_completed(self, success, http_status=0, *, cancelled=False, status="", url=None):
         """A network failure shows the offline page. An HTTP error page is the service's own answer
@@ -603,6 +606,8 @@ class AppWindow:
         except Exception:  # noqa: BLE001
             self.active_account = None
         self._set_title()
+        if self.check_dropped():  # the account shown was dropped while the app was closed: switched to the own one
+            return
         self.open_hosted("/app/inbox")
 
     def service_base(self):
@@ -672,6 +677,36 @@ class AppWindow:
         self._set_title()
         self.handed_off = False  # the next page needs that account's app session
         return self.open_hosted(path)
+
+    def check_dropped(self):
+        """§23 (A10): accounts the runtime dropped (their session answered 401: the grant revoked, removed from the
+        app elsewhere, or no longer a member). One line on the page says so; if the window showed one of them, it
+        switches back to the own account first."""
+        try:
+            dropped = self.services.take_dropped()
+        except Exception:  # noqa: BLE001
+            return False
+        if not dropped:
+            return False
+        names = [d["display_name"] for d in dropped]
+        listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        self._pending_notice = (f"{listed} {'was' if len(names) == 1 else 'were'} removed from this app: "
+                                "the access ended.")
+        gone = {d["email"].lower() for d in dropped}
+        if self.active_account and self.active_account.lower() in gone:
+            self.switch_to(None)  # the notice shows on the own account's page
+            return True
+        url = self.current_url() or ""
+        if url and self.navigation is not None and not self.navigation.is_local(url):
+            self._show_notice()
+        return False
+
+    def _show_notice(self):
+        text, self._pending_notice = self._pending_notice, None
+        self.window.evaluate_js(
+            "(function (t) { var m = document.querySelector('main'); if (!m) return;"
+            " var p = document.createElement('p'); p.className = 'rc-flash'; p.setAttribute('role', 'status');"
+            f" p.textContent = t; m.insertBefore(p, m.firstChild); }})({json.dumps(text)});")
 
     def account_note(self):
         active = None
