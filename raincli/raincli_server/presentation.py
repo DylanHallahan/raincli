@@ -97,6 +97,17 @@ def name_in_team(db: Session, team_id: uuid.UUID | None, user: User) -> str:
     return owners.displays(db, team_id, [user]).get(user.id) or display_name(user)
 
 
+def sent_by(db: Session, msg, viewer_id: uuid.UUID | None) -> dict | None:
+    """§23 A6: ``{display_name, email}`` of the grantee who wrote ``msg`` through a delegated session, for the account
+    itself only (``viewer_id`` is the sender person, with any session); None for everyone else and every other
+    message. Never shown to recipients, their machines, the frame or the website's other readers."""
+    acting = getattr(msg, "acting_user_id", None)
+    if acting is None or viewer_id is None or viewer_id != msg.sender_user_id:
+        return None
+    grantee = db.get(User, acting)
+    return {"display_name": name_in_team(db, msg.team_id, grantee), "email": grantee.email} if grantee else None
+
+
 def person_of(db: Session, endpoint: Endpoint) -> User | None:
     """The person an endpoint belongs to: the person, or the machine's owner."""
     if endpoint.kind == "person":

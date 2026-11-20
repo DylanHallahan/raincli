@@ -37,7 +37,7 @@ from sqlalchemy import and_, case, func, or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, object_session
 
-from raincli_server import groups, presentation, routing, security
+from raincli_server import groups, identity, presentation, routing, security
 from raincli_server.models import (EVENT_STATES, MESSAGE_KINDS, Agent, AgentPresence, Attachment, Conversation,
                                    DeliveryEvent, MachineAgent, Membership, Message, PersonInbox, Team, User)
 from raincli_server.routing import Endpoint
@@ -154,7 +154,7 @@ def view_state(session: Session, viewer: User | None, msg: Message) -> tuple[str
 
 def message_json(session: Session, msg: Message, attachments: list[dict] | None = None,
                  owners: dict | None = None, *, reader_agent: Agent | None = None,
-                 reader_user: User | None = None) -> dict:
+                 reader_user: User | None = None, delegated: bool = False) -> dict:
     """Protocol message JSON (M) for one reader, with attachment metadata (§21 C5.2, C13 M3).
 
     Teammates are people: ``from_endpoint``/``to_endpoint`` are ``{person, display_name}`` and ``from``/``to``
@@ -162,6 +162,10 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
     a connector still sees its own target. ``from_agent`` is shown only to the sending machine's owner;
     ``from_owner`` is null; ``from_kind`` is ``app`` or ``agent``. ``hold_reason`` is the raw code for the
     recipient machine's owner and a coarse code for anyone else.
+
+    §23 (A14 M1): "owner" means ``identity.owner_view``: a ``delegated`` person reader (acting as the account through
+    a grant) sees the account's machines as a teammate would: no ``from_agent``, the coarse hold code. ``sent_by``
+    (A6) is the grantee who wrote a delegated send, shown only to the account itself (any session), else null.
     """
     if attachments is None:
         attachments = _attachment_meta(session, [msg.id])[msg.id]
@@ -180,7 +184,8 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
     from_text, from_json = shown(sender)
     to_text, to_json = shown(recipient)
     state, hold, route = view_state(session, viewer, msg)
-    owns_recipient = recipient.agent is not None and recipient.agent.owner_user_id == viewer_id
+    owns_recipient = recipient.agent is not None and identity.owner_view(viewer_id, recipient.agent.owner_user_id,
+                                                                         delegated)
     return {
         "id": str(msg.id),
         "conversation_id": str(msg.conversation_id),
@@ -189,8 +194,8 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
         "to": to_text,
         "from_endpoint": from_json,
         "to_endpoint": to_json,
-        "from_agent": msg.sender_agent_name if sender.agent is not None and sender.agent.owner_user_id == viewer_id
-        else None,
+        "from_agent": msg.sender_agent_name
+        if sender.agent is not None and identity.owner_view(viewer_id, sender.agent.owner_user_id, delegated) else None,
         "from_owner": None,
         "from_kind": "app" if sender.kind == "person" else "agent",
         "kind": msg.kind,
@@ -208,6 +213,8 @@ def message_json(session: Session, msg: Message, attachments: list[dict] | None 
         "delivery_updated_at": iso(msg.delivery_updated_at) if msg.recipient_user_id is None
         or viewer_id == msg.recipient_user_id or msg.delivery_state == "replied" else iso(msg.created_at),
         "attachments": attachments,
+        # A6: for the account as a person reader only; never a machine (its frame names the account alone).
+        "sent_by": presentation.sent_by(session, msg, viewer_id if reader_user is not None else None),
         **(groups.copy_fields(session, msg, viewer_id) if msg.route == "group" else {}),
     }
 
@@ -224,11 +231,11 @@ def same_owner(sender: Endpoint, recipient: Endpoint) -> bool:
 
 
 def messages_json(session: Session, messages: list[Message], *, reader_agent: Agent | None = None,
-                  reader_user: User | None = None) -> list[dict]:
+                  reader_user: User | None = None, delegated: bool = False) -> list[dict]:
     """``message_json`` for a page of messages, for one reader, with one attachment query."""
     meta = _attachment_meta(session, [m.id for m in messages])
-    return [message_json(session, m, meta[m.id], reader_agent=reader_agent, reader_user=reader_user)
-            for m in messages]
+    return [message_json(session, m, meta[m.id], reader_agent=reader_agent, reader_user=reader_user,
+                         delegated=delegated) for m in messages]
 
 
 # Lookups and visibility (§16.6) --------------------------------------------------
@@ -257,10 +264,21 @@ def in_scope(session: Session, team_id: uuid.UUID, user: User, scope: uuid.UUID 
     return (scope is None or team_id == scope) and session.get(Membership, (team_id, user.id)) is not None
 
 
-def person_can_see(session: Session, msg: Message, user: User, scope: uuid.UUID | None = None) -> bool:
+def hidden_under_grant(session: Session, conversation_id: uuid.UUID | None) -> bool:
+    """§23 A16: the account's "Your agents" history (``own_agents``) stays hidden from a delegate (AS13): absent from
+    every list and the unknown-id answer by id."""
+    conv = session.get(Conversation, conversation_id) if conversation_id is not None else None
+    return conv is not None and conv.kind == "own_agents"
+
+
+def person_can_see(session: Session, msg: Message, user: User, scope: uuid.UUID | None = None, *,
+                   delegated: bool = False) -> bool:
     """A person sees messages where they are an endpoint, plus those to or from machines they own,
-    while they are still a member of the message's team (§16.6), in the team their session covers (§21.13)."""
+    while they are still a member of the message's team (§16.6), in the team their session covers (§21.13).
+    ``delegated``: acting as ``user`` through a grant (§23), which never sees the ``own_agents`` history (A16)."""
     if not in_scope(session, msg.team_id, user, scope):
+        return False
+    if delegated and hidden_under_grant(session, msg.conversation_id):
         return False
     if msg.route == "group":
         return _group_copy_visible(session, msg, user.id)
@@ -320,10 +338,10 @@ def get_visible_message(session: Session, agent: Agent, message_id: uuid.UUID | 
 
 
 def get_message_for_person(session: Session, user: User, message_id: uuid.UUID | str,
-                           scope: uuid.UUID | None = None) -> Message:
+                           scope: uuid.UUID | None = None, *, delegated: bool = False) -> Message:
     mid = parse_uuid(message_id, "message id", not_found=True)
     msg = _load_message(session, mid)
-    if msg is None or not person_can_see(session, msg, user, scope):
+    if msg is None or not person_can_see(session, msg, user, scope, delegated=delegated):
         raise _not_found()
     return msg
 
@@ -433,8 +451,9 @@ def get_attachment_for_agent(session: Session, agent: Agent, message_id: uuid.UU
 
 
 def get_attachment_for_person(session: Session, user: User, message_id: uuid.UUID | str,
-                              attachment_id: uuid.UUID | str, scope: uuid.UUID | None = None) -> Attachment:
-    msg = get_message_for_person(session, user, message_id, scope)
+                              attachment_id: uuid.UUID | str, scope: uuid.UUID | None = None, *,
+                              delegated: bool = False) -> Attachment:
+    msg = get_message_for_person(session, user, message_id, scope, delegated=delegated)
     aid = parse_uuid(attachment_id, "attachment id", not_found=True)
     att = session.scalar(select(Attachment).where(Attachment.id == aid, Attachment.message_id == msg.id))
     if att is None:
@@ -483,15 +502,32 @@ def send_message(
 def send_as_person(session: Session, user: User, team_id: uuid.UUID, *, id, to: object, body: str,  # noqa: A002
                    conversation_id=None, in_reply_to=None, max_pending: int,
                    attachments: list[tuple[str, bytes]] | None = None, kind: str = "message",
-                   quotas=None) -> tuple[Message, bool]:
-    """Store a message from a person (§16.3, §16.4). Only ``kind: message`` (§16.12 C11)."""
+                   quotas=None, acting_user: User | None = None, delegation=None) -> tuple[Message, bool]:
+    """Store a message from a person (§16.3, §16.4). Only ``kind: message`` (§16.12 C11). ``acting_user``: the grantee
+    writing through a delegated session (§23 A6), recorded on the message; ``delegation``: that session (A18.5)."""
     if not user.is_active or session.get(Membership, (team_id, user.id)) is None:
         raise MessagingError(403, "forbidden", "you are not a member of that team")
     if kind != "message":
         raise _invalid("a person sends kind message only")
     return send(session, Endpoint("person", user=user), team_id, id=id, to=to, body=body,
                 conversation_id=conversation_id, in_reply_to=in_reply_to, max_pending=max_pending,
-                attachments=attachments, kind=kind, quotas=quotas)
+                attachments=attachments, kind=kind, quotas=quotas, acting_user=acting_user, delegation=delegation)
+
+
+def delegated_reply_refusal(session: Session, delegation, parent: Message, account: User) -> str | None:
+    """A18.5: through a TEAM-WIDE effective grant, a delegate reads the account's escalations and own traffic (route
+    ``self``, or its self and own_agents conversations) but doesn't reply to them; a per-user grant may (A15)."""
+    if delegation is None or not delegation.delegated:
+        return None
+    grant = identity.effective_grant(session, delegation)
+    if grant is None or not grant.all_members:
+        return None
+    conv = session.get(Conversation, parent.conversation_id)
+    if parent.route == "self" or parent.kind == "escalation" or (conv is not None
+                                                                 and conv.kind in ("self", "own_agents")):
+        return (f"Replying to {presentation.name_in_team(session, parent.team_id, account)}'s agents needs an "
+                "individual grant.")
+    return None
 
 
 def _sends_as(sender: Endpoint, msg: Message, side: str) -> bool:
@@ -505,7 +541,8 @@ def _sends_as(sender: Endpoint, msg: Message, side: str) -> bool:
 def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: object, body: str,  # noqa: A002
          conversation_id=None, in_reply_to=None, max_pending: int,
          attachments: list[tuple[str, bytes]] | None = None, kind: str = "message",
-         quotas=None, private: bool = False) -> tuple[Message, bool]:
+         quotas=None, private: bool = False, acting_user: User | None = None,
+         delegation=None) -> tuple[Message, bool]:
     """The one send path for every sender (§21): teammates address people, never machines or agents.
 
     - A new message names a person (C2); it goes to that person's inbox in the team, or waits for them in their
@@ -552,9 +589,13 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
     parent: Message | None = None
     if reply_to is not None:
         parent = _load_message(session, reply_to)
-        visible = parent is not None and parent.team_id == team_id and person_can_see(session, parent, me)
+        visible = parent is not None and parent.team_id == team_id and \
+            person_can_see(session, parent, me, delegated=acting_user is not None)
         if not visible:
             raise MessagingError(404, "not_found", "in_reply_to message not found")
+        refusal = delegated_reply_refusal(session, delegation, parent, me)
+        if refusal is not None:
+            raise MessagingError(403, "delegated_scope", refusal)
         target, route, other = _reply_target(session, sender, me, parent)
         if to is not None and _person_named(session, team_id, to, me) != other.id:
             raise _invalid("a reply goes to the other person of the message it answers")
@@ -581,6 +622,8 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
             raise _invalid("conversation_id is not your conversation with that person")
     if kind == "escalation" and not (sender.kind != "person" and route == "self"):
         raise _invalid("an escalation goes only from a machine to its own owner (§16.8)")
+    acting_grant = identity.effective_grant(session, delegation) \
+        if delegation is not None and acting_user is not None and sender.kind == "person" else None
     _lock_recipient(session, target)  # serializes sends to one recipient (capacity and cursor order)
 
     if _pending_count(session, target) >= max_pending:
@@ -602,6 +645,8 @@ def send(session: Session, sender: Endpoint, team_id: uuid.UUID, *, id, to: obje
         recipient_agent_id=target.machine_id,
         recipient_agent_name=target.name if target.kind == "agent" else None,
         recipient_user_id=target.user.id if target.kind == "person" else None,
+        acting_user_id=acting_user.id if acting_grant is not None else None,
+        grant_id=acting_grant.id if acting_grant is not None else None,  # A19 D4: the grant in effect, for the audit
     )
     inserted = session.scalar(
         pg_insert(Message).values(**values).on_conflict_do_nothing(index_elements=["id"]).returning(Message.id))
@@ -1015,12 +1060,12 @@ def person_inbox(session: Session, user: User, *, after: int = 0, limit: int = 1
 
 
 def person_ack(session: Session, user: User, message_id: uuid.UUID | str,
-               scope: uuid.UUID | None = None) -> tuple[Message, bool]:
+               scope: uuid.UUID | None = None, *, delegated: bool = False) -> tuple[Message, bool]:
     """The person has seen a message to them (§16.4, §21 H2): only their own read state, ``person_seen_at``, used
     in their own views and unread counts. Nothing a sender can fetch changes (no event, no state, no ``acked_at``:
     that stays the machine's pickup, so a message read in the app is still delivered to an inbox picked later).
     Idempotent. A message routed to one of the person's machines may be marked seen too."""
-    msg = get_message_for_person(session, user, message_id, scope)
+    msg = get_message_for_person(session, user, message_id, scope, delegated=delegated)
     if msg.route == "group":  # §22 C18: groups have no reads
         raise MessagingError(403, "forbidden", "only the recipient can do this")
     if person_of_endpoint(session, recipient_endpoint(session, msg)) != user.id or \
@@ -1042,6 +1087,13 @@ def is_unread_for(session: Session, user_id: uuid.UUID, msg: Message, owned: set
     owned = owned if owned is not None else set(session.scalars(select(Agent.id).where(Agent.owner_user_id == user_id)))
     from_user = msg.sender_user_id == user_id or msg.sender_agent_id in owned
     return bool(msg.recipient_agent_id in owned and not from_user)
+
+
+def unread_count(session: Session, user_id: uuid.UUID, team_id: uuid.UUID) -> int:
+    """How many messages ``user_id`` hasn't seen yet in one team (``unread_for``): the switcher's count and
+    ``/person/me``'s ``unread`` (§23 A9, A14 Q7). The account's own read state (AS12); senders never see it (PR5)."""
+    return session.scalar(select(func.count()).select_from(Message)
+                          .where(Message.team_id == team_id, unread_for(user_id))) or 0
 
 
 def unread_for(user_id: uuid.UUID):
@@ -1124,15 +1176,19 @@ def list_conversations(session: Session, agent: Agent, *, limit: int = 50, archi
 
 
 def list_person_conversations(session: Session, user: User, *, limit: int = 50,
-                              archived: str = "exclude", scope: uuid.UUID | None = None) -> list[dict]:
+                              archived: str = "exclude", scope: uuid.UUID | None = None,
+                              delegated: bool = False) -> list[dict]:
     """The person's conversations: those with the person as an endpoint, in teams they belong to (§16.4) and
-    their session covers (§21.13)."""
+    their session covers (§21.13). ``delegated`` (§23 A16): never the ``own_agents`` history."""
     teams = select(Membership.team_id).where(Membership.user_id == user.id)
     if scope is not None:
         teams = teams.where(Membership.team_id == scope)
+    where = and_(or_(Conversation.a_user_id == user.id, Conversation.b_user_id == user.id),
+                 Conversation.team_id.in_(teams), Conversation.merged_into.is_(None))
+    if delegated:
+        where = and_(where, Conversation.kind != "own_agents")
     return _conversation_rows(
-        session, and_(or_(Conversation.a_user_id == user.id, Conversation.b_user_id == user.id),
-                      Conversation.team_id.in_(teams), Conversation.merged_into.is_(None)),
+        session, where,
         lambda conv: "a" if conv.a_user_id == user.id else "b",
         unread_for(user.id), limit, archived, viewer_id=user.id)
 
@@ -1269,10 +1325,11 @@ def archive_as_machine(session: Session, agent: Agent, conversation_id: uuid.UUI
     return _set_archived(session, _lock(session, conv), getattr(conv, f"{side}_key"), archived, through_seq)
 
 
-def can_archive_as_person(session: Session, user: User, conv: Conversation, scope: uuid.UUID | None = None) -> bool:
+def can_archive_as_person(session: Session, user: User, conv: Conversation, scope: uuid.UUID | None = None, *,
+                          delegated: bool = False) -> bool:
     """A member of the conversation's team (in the team their session covers) who is an endpoint, or who owns a
-    machine endpoint."""
-    if not in_scope(session, conv.team_id, user, scope):
+    machine endpoint. Never the ``own_agents`` history through a grant (§23 A16)."""
+    if not in_scope(session, conv.team_id, user, scope) or (delegated and conv.kind == "own_agents"):
         return False
     if user.id in (conv.a_user_id, conv.b_user_id):
         return True
@@ -1281,9 +1338,10 @@ def can_archive_as_person(session: Session, user: User, conv: Conversation, scop
 
 
 def archive_as_person(session: Session, user: User, conversation_id: uuid.UUID | str,
-                      archived: bool, through_seq: int | None = None, scope: uuid.UUID | None = None) -> Conversation:
+                      archived: bool, through_seq: int | None = None, scope: uuid.UUID | None = None, *,
+                      delegated: bool = False) -> Conversation:
     conv = _conversation_for_archive(session, conversation_id)
-    if conv is None or not can_archive_as_person(session, user, conv, scope):
+    if conv is None or not can_archive_as_person(session, user, conv, scope, delegated=delegated):
         raise MessagingError(404, "not_found", "conversation not found")
     return _set_archived(session, _lock(session, conv), f"p:{user.id}", archived, through_seq)
 
@@ -1305,11 +1363,11 @@ def get_conversation(session: Session, agent: Agent, conversation_id: uuid.UUID 
 
 
 def get_person_conversation(session: Session, user: User, conversation_id: uuid.UUID | str,
-                            scope: uuid.UUID | None = None) -> Conversation:
+                            scope: uuid.UUID | None = None, *, delegated: bool = False) -> Conversation:
     cid = final_conversation_id(session, parse_uuid(conversation_id, "conversation id", not_found=True))
     conv = session.get(Conversation, cid)
     if conv is None or user.id not in (conv.a_user_id, conv.b_user_id) or \
-            not in_scope(session, conv.team_id, user, scope):
+            not in_scope(session, conv.team_id, user, scope) or (delegated and conv.kind == "own_agents"):
         raise MessagingError(404, "not_found", "conversation not found")
     return conv
 
@@ -1331,9 +1389,10 @@ def conversation_messages(session: Session, agent: Agent, conversation_id: uuid.
 
 
 def person_conversation_messages(session: Session, user: User, conversation_id: uuid.UUID | str, *,
-                                 after: int = 0, limit: int = 100,
-                                 scope: uuid.UUID | None = None) -> tuple[list[Message], int]:
-    return _messages_of(session, get_person_conversation(session, user, conversation_id, scope), after, limit)
+                                 after: int = 0, limit: int = 100, scope: uuid.UUID | None = None,
+                                 delegated: bool = False) -> tuple[list[Message], int]:
+    conv = get_person_conversation(session, user, conversation_id, scope, delegated=delegated)
+    return _messages_of(session, conv, after, limit)
 
 
 def delivery_events(session: Session, agent: Agent, message_id: uuid.UUID | str) -> list[DeliveryEvent]:

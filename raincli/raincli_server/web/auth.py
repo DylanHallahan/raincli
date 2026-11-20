@@ -169,11 +169,18 @@ def app_cookie_path(settings: Settings) -> str:
     return (settings.root_path or "") + "/app/"
 
 
-def app_session_user(db: Session, request: Request) -> uuid.UUID | None:
-    """The user of a still-valid ``raincli_app`` session in this browser, if any."""
+def app_session(db: Session, request: Request) -> WebSession | None:
+    """This browser's still-valid ``raincli_app`` session, if any. Only one bound to the install in this request's
+    User-Agent counts: a cookie of another install reads as none (§16.14 S3)."""
     found = _session_from(db, request.cookies.get(APP_COOKIE), app_mode=True,
                           user_agent=request.headers.get("user-agent"))
-    return found[1].id if found else None
+    return found[0] if found else None
+
+
+def app_session_user(db: Session, request: Request) -> uuid.UUID | None:
+    """The user of a still-valid ``raincli_app`` session in this browser, if any."""
+    ws = app_session(db, request)
+    return ws.user_id if ws else None
 
 
 def end_session(db: Session, viewer: Viewer | None, response: Response, settings: Settings) -> None:

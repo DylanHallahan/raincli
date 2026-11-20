@@ -399,15 +399,16 @@ def _archived_by(db: Session, conv: Conversation, user: User, owned: dict) -> st
 
 
 def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
-                       archived: str = "exclude") -> list[ConversationRow]:
+                       archived: str = "exclude", *, delegated: bool = False) -> list[ConversationRow]:
     """The person's conversations and those of machines they own, newest first (§16.6). ``archived``:
-    ``exclude`` (the main list), ``only`` (the Archived view) or ``include`` (§17.2)."""
+    ``exclude`` (the main list), ``only`` (the Archived view) or ``include`` (§17.2). ``delegated`` (§23 A16): a
+    window acting through a grant never lists the account's ``own_agents`` history."""
     if not team_ids:
         return []
     owned = _owned_ids(db, user, team_ids)
     convs = db.execute(
         select(Conversation, Team).join(Team, Team.id == Conversation.team_id)
-        .where(Conversation.team_id.in_(team_ids), _visible(user, owned))
+        .where(Conversation.team_id.in_(team_ids), _visible(user, owned), *_not_hidden(delegated))
     ).all()
     if not convs:
         return []
@@ -447,8 +448,15 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
     return rows
 
 
-def conversation_head(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object):
-    """``(conversation, team, me, peer, owned)`` when the viewer may see it, else None. No messages are read."""
+def _not_hidden(delegated: bool) -> tuple:
+    """§23 A16: the conditions that hide the account's "Your agents" history from a delegate (AS13)."""
+    return (Conversation.kind != "own_agents",) if delegated else ()
+
+
+def conversation_head(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object, *,
+                      delegated: bool = False):
+    """``(conversation, team, me, peer, owned)`` when the viewer may see it, else None (``own_agents`` too, through a
+    grant, §23 A16). No messages are read."""
     cid = parse_uuid(conversation_id)
     if cid is None or not team_ids:
         return None
@@ -456,7 +464,8 @@ def conversation_head(db: Session, user: User, team_ids: list[uuid.UUID], conver
     owned = _owned_ids(db, user, team_ids)
     row = db.execute(
         select(Conversation, Team).join(Team, Team.id == Conversation.team_id)
-        .where(Conversation.id == cid, Conversation.team_id.in_(team_ids), _visible(user, owned))
+        .where(Conversation.id == cid, Conversation.team_id.in_(team_ids), _visible(user, owned),
+               *_not_hidden(delegated))
     ).first()
     if row is None:
         return None
@@ -572,11 +581,11 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
     return lines, events
 
 
-def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object
-                     ) -> ConversationView | None:
+def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object, *,
+                     delegated: bool = False) -> ConversationView | None:
     from raincli_server.web import thread
 
-    head = conversation_head(db, user, team_ids, conversation_id)
+    head = conversation_head(db, user, team_ids, conversation_id, delegated=delegated)
     if head is None:
         return None
     conv, team, me, peer, owned = head
@@ -635,14 +644,14 @@ def attachment_meta(db: Session, message_ids: list[uuid.UUID]) -> dict[uuid.UUID
 
 
 def attachment_for_user(db: Session, user: User, team_ids: list[uuid.UUID], message_id: object,
-                        attachment_id: object) -> Attachment | None:
+                        attachment_id: object, *, delegated: bool = False) -> Attachment | None:
     """The attachment if the person may see its message (§16.6), in one of ``team_ids`` (the teams the session
     covers, §21.13)."""
     mid = parse_uuid(message_id)
     if mid is None or not team_ids:
         return None
     try:
-        att = messaging.get_attachment_for_person(db, user, mid, attachment_id)
+        att = messaging.get_attachment_for_person(db, user, mid, attachment_id, delegated=delegated)
     except messaging.MessagingError:
         return None
     return att if db.scalar(select(Message.team_id).where(Message.id == mid)) in team_ids else None
@@ -748,16 +757,19 @@ _FRIENDLY = {
 def send_as_person(
     db: Session, user: User, team: Team, *, id: uuid.UUID, to: object, body: str,  # noqa: A002
     conversation_id: uuid.UUID | None, in_reply_to: uuid.UUID | None, max_pending: int,
-    attachments: list[tuple[str, bytes]] | None = None, quotas=None,
+    attachments: list[tuple[str, bytes]] | None = None, quotas=None, acting_user: User | None = None,
+    delegation=None,
 ) -> tuple[Message, bool]:
-    """Send as the person (§16.9) through ``messaging.send_as_person``. Raises SendError."""
+    """Send as the person (§16.9) through ``messaging.send_as_person``; ``acting_user``: the grantee of a delegated
+    window (§23 A6). Raises SendError."""
     try:
         return messaging.send_as_person(
             db, user, team.id, id=id, to=to, body=body, conversation_id=conversation_id,
             in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments or None, quotas=quotas,
+            acting_user=acting_user, delegation=delegation,
         )
     except messaging.MessagingError as exc:
-        if exc.code in ("address_people", "ambiguous_person"):
+        if exc.code in ("address_people", "ambiguous_person", "delegated_scope"):
             raise SendError(exc.code, exc.message) from exc  # presentation's own words (§21 C2)
         # "invalid" messages from the service name the problem (and attachment) without leaking data.
         text = _FRIENDLY.get(exc.code) or (exc.message[:1].upper() + exc.message[1:300] + ".")
