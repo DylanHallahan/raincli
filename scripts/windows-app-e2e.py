@@ -93,6 +93,14 @@ G. Group chats (protocol §22; brief "RainCLI group chats", screenshots 1-4 of t
    group mixed in and the icon-only rail (names, tooltips, 44px targets, a keyboard focus ring). Screenshots go to
    build/e2e-artifacts (groups-win-*, listnav-*). ``--only groups-shots`` runs just the server and this part. Skipped with --real.
 
+H. Account switching (protocol §23; brief "RainCLI account switching", Windows-window screenshots), on a fresh
+   install of this ref (it needs the server half, A2, A3, A8 and A9, in the ref): Maya on the window's machine,
+   Help Desk with its own machine and inbox, Jon; the operator's grant-add gives Maya Help Desk. The window adds
+   Help Desk from the switcher and switches both ways, captured light and dark at 1180x780 and 760x520: the
+   switcher open with Help Desk's count, the window as Help Desk (the native title, the rail avatar, "As:"), a
+   message written as Help Desk showing "sent by Maya", This computer's "belongs to Maya" line, and a screen
+   capture for the inactive account's toast. ``--only accounts-shots`` runs just the server and this part.
+
 Release traffic goes to the REAL hostnames (api.github.com, github.com,
 objects.githubusercontent.com, release-assets.githubusercontent.com): a hosts-file entry points
 them at 127.0.0.1:443, where a fake release endpoint serves a certificate from a test root CA
@@ -2061,6 +2069,159 @@ def part_g(app, server, installers, work):
     app.uninstall(signout=True, label="g")
 
 
+# -- account switching: the brief's Windows-window screenshots (part H) -------------------------------------------
+
+H_TEAM = "northwind"
+H_PEOPLE = {"dylan": ("Dylan", "h-dylan@example.invalid"), "maya": ("Maya", "h-maya@example.invalid"),
+            "helpdesk": ("Help Desk", "h-helpdesk@example.invalid"), "jon": ("Jon", "h-jon@example.invalid")}
+H_MACHINES = {"maya": "h-maya-laptop", "helpdesk": "h-helpdesk-desk", "jon": "h-jon-laptop"}
+H_AGENTS = {"helpdesk": "h-helpdesk-inbox", "jon": "h-jon-api"}
+H_SIZES = ((1180, 780), (760, 520))
+
+
+def window_title(hwnd):
+    import ctypes
+    buf = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+    return buf.value
+
+
+def screen_region(path, left, top, width, height):
+    """A rectangle of the whole screen (a toast sits outside the app window), saved as a 32-bit BMP."""
+    import ctypes
+    import struct
+    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+    screen = user32.GetDC(0)
+    mem = gdi32.CreateCompatibleDC(screen)
+    bmp = gdi32.CreateCompatibleBitmap(screen, width, height)
+    gdi32.SelectObject(mem, bmp)
+    gdi32.BitBlt(mem, 0, 0, width, height, screen, left, top, 0x00CC0020)
+    header = struct.pack("<IiiHHIIiiII", 40, width, -height, 1, 32, 0, 0, 0, 0, 0, 0)
+    buf = (ctypes.c_ubyte * (width * height * 4))()
+    info = ctypes.create_string_buffer(header, 44)  # BITMAPINFOHEADER (40) and one spare colour entry
+    gdi32.GetDIBits(mem, bmp, 0, height, buf, info, 0)
+    gdi32.DeleteObject(bmp)
+    gdi32.DeleteDC(mem)
+    user32.ReleaseDC(0, screen)
+    data = bytes(buf)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"BM" + struct.pack("<IHHI", 54 + len(data), 0, 0, 54) + header + data)
+
+
+def h_switch(page, email):
+    """The switcher: open it, click the account, wait for the window to show it (the rail avatar's name)."""
+    page.click("[data-switcher-toggle]")
+    page.click(f"[data-account-switch='{email}'], [data-account-add='{email}']")
+    name = next(n for n, e in H_PEOPLE.values() if e == email)
+    wait_for(f"the window to show {name}", lambda: (page.get_attribute(".rc-rail-avatar", "title") or "") == name,
+             timeout=90, interval=1)
+
+
+def part_h(app, server, installers, work):
+    """Account switching (§23): the brief's Windows-window screenshots; see H in the module docstring."""
+    from playwright.sync_api import sync_playwright
+
+    passwords = {key: SECRETS.add(secrets.token_urlsafe(18)) for key in H_PEOPLE}
+    for key, (name, email) in H_PEOPLE.items():
+        server.admin("create-user", "--email", email, "--name", name, input=passwords[key] + "\n")
+    server.admin("create-team", "--slug", H_TEAM, "--name", "Northwind", "--owner", H_PEOPLE["dylan"][1])
+    for key in ("maya", "helpdesk", "jon"):
+        server.admin("add-member", "--team", H_TEAM, "--email", H_PEOPLE[key][1])
+    tokens = {}
+    for key in ("helpdesk", "jon"):
+        staged = server.work / f"{H_MACHINES[key]}.json"
+        server.admin("register-agent", "--team", H_TEAM, "--owner", H_PEOPLE[key][1], "--handle", H_MACHINES[key],
+                     "--out", str(staged))
+        tokens[key] = SECRETS.add(json.loads(staged.read_text())["token"])
+        staged.unlink()
+        g_presence(server, tokens[key], H_AGENTS[key], "0.6.2")
+        server.admin("set-inbox", "--team", H_TEAM, "--email", H_PEOPLE[key][1], "--handle", H_MACHINES[key],
+                     "--agent", H_AGENTS[key], "--no-deliver-waiting")
+    granted = server.admin("grant-add", H_TEAM, H_PEOPLE["maya"][1], H_PEOPLE["helpdesk"][1]).stdout
+    # H1. Maya's machine is the window's: a fresh install of this ref, signed in from the CLI, its runtime running.
+    app.install(NEW, installers, "accounts")
+    app.quit()
+    login_through_conpty(app, server, passwords["maya"], H_MACHINES["maya"], email=H_PEOPLE["maya"][1])
+    app.launch_run_value()
+    emails = {key: e for key, (_, e) in H_PEOPLE.items()}
+    send(server, tokens["jon"], {"person": emails["maya"]}, "Is the orders migration done on your side?")
+    for body in ("Ryan's laptop won't boot.", "VPN request for the new contractor.", "Printer on 3 is jammed."):
+        send(server, tokens["jon"], {"person": emails["helpdesk"]}, body)
+    app.quit()
+    say("PASS: H1. the seed: northwind with Maya (the window's machine), Help Desk (its own machine and inbox) and "
+        "Jon; grant-add gives Maya Help Desk (" + SECRETS.scrub(granted.strip())[:120] + "); Jon wrote to both")
+
+    # H2. The window: add Help Desk from the switcher, switch both ways, and the views, light and dark, both sizes.
+    hidden = [H_MACHINES["helpdesk"], H_AGENTS["helpdesk"], H_MACHINES["jon"], H_AGENTS["jon"]]
+    display = display_state()
+    set_display(1920, 1080, 100)
+    port = open_window_cdp(app)
+    with sync_playwright() as pw:
+        window = WindowCDP(pw, port)
+        page = window.page(("app/inbox", "app/conversations/", "app/groups/"), timeout=180)
+        page.wait_for_selector("[data-switcher-toggle]", timeout=60000)
+        hwnd = wait_for("the app window", lambda: app_window(app_pids(app.root)), timeout=60, interval=1)
+        scale = window_scale(hwnd)
+        try:
+            h_switch(page, emails["helpdesk"])  # added with one click (A18.3), then shown
+            check(window_title(hwnd) == "RainCLI · Help Desk", f"the window title is {window_title(hwnd)!r}")
+            for width, height in H_SIZES:
+                resize_window(hwnd, round(width * scale), round(height * scale))
+                wait_for(f"the page at about {width} px", lambda: abs(page.evaluate("innerWidth") - width) < 40,
+                         timeout=30, interval=0.5)
+                size = f"{width}x{height}"
+                for scheme in ("light", "dark"):
+                    # 1. The switcher open on Maya, Help Desk with its unread count.
+                    h_switch(page, emails["maya"])
+                    page.click("[data-switcher-toggle]")
+                    count = page.inner_text(f"[data-account-switch='{emails['helpdesk']}'] .rc-count").split()[0]
+                    check(count == "3", f"Help Desk's count in the switcher is {count!r}")
+                    themed_shot(page, scheme, f"acc-win-1-switcher-open-{size}-{scheme}")
+                    page.keyboard.press("Escape")
+                    # 2. Switched to Help Desk: the title, the rail avatar, its list, and "As:" in the composer.
+                    h_switch(page, emails["helpdesk"])
+                    page.click(".rc-conv:has-text('Jon')")
+                    page.wait_for_selector(".rc-as")
+                    check(page.inner_text(".rc-as") == "As: Help Desk" and page.title().endswith(" · Help Desk"),
+                          f"the cues: {page.inner_text('.rc-as')!r}, {page.title()!r}")
+                    themed_shot(page, scheme, f"acc-win-2-as-help-desk-{size}-{scheme}")
+                    # 4. A message written as Help Desk shows "sent by Maya" in Help Desk's own view.
+                    if (width, scheme) == (H_SIZES[0][0], "light"):
+                        page.fill("textarea#body", "On it, Jon. Ticket 42.")
+                        page.keyboard.press("Control+Enter")
+                    page.wait_for_selector(".rc-sent-by")
+                    check(page.inner_text(".rc-sent-by") == "sent by Maya", "no 'sent by Maya' on the delegated send")
+                    themed_shot(page, scheme, f"acc-win-4-sent-by-{size}-{scheme}")
+                    found = [h for h in hidden if h in page.content()]
+                    check(not found, f"machine or agent names in Help Desk's window: {found}")
+                    # 5. This computer while Help Desk shows: it belongs to Maya.
+                    page.click("nav.rc-nav a[aria-label='This computer']", no_wait_after=True)
+                    local = window.page("this-computer.html", timeout=60)
+                    wait_for("the belongs-to line", lambda: local.is_visible("#belongs"), timeout=30, interval=0.5)
+                    check(local.inner_text("#belongs").startswith("This computer belongs to Maya."),
+                          f"the line: {local.inner_text('#belongs')!r}")
+                    themed_shot(local, scheme, f"acc-win-5-this-computer-{size}-{scheme}")
+                    local.click("nav.rc-nav button[data-open=inbox]", no_wait_after=True)
+                    page = window.page(("app/inbox", "app/conversations/"), timeout=60)
+            # 3. A labelled toast for the inactive account (best effort: a native notification, captured from the
+            # screen), and the window after the switch it asks for.
+            h_switch(page, emails["maya"])
+            send(server, tokens["jon"], {"person": emails["helpdesk"]}, "One more: the badge reader.")
+            time.sleep(12)  # the runtime's Help Desk poller, then the tray
+            sw, sh = 1920, 1080
+            screen_region(ARTIFACTS / "acc-win-3-toast-screen.bmp", sw - 520, sh - 320, 520, 320)
+        finally:
+            set_display(display[0], display[1], display[2])
+        page.emulate_media(color_scheme="null")
+        window.close()
+    say("PASS: H2. the window added Help Desk from the switcher and switched both ways (title, rail avatar, As:, "
+        "sent by Maya, This computer belongs to Maya), light and dark at 1180x780 and 760x520, and a screen capture "
+        "for the toast, in build/e2e-artifacts (acc-win-*)")
+    app.quit()
+    app.uninstall(signout=True, label="h")
+
+
 # -- stale or foreign setups (part E) --------------------------------------------------------------------
 
 OTHER_EMAIL, OTHER_TEAM = "e2e-other@example.invalid", "e2e-other-team"
@@ -2803,6 +2964,9 @@ def run_e2e(args, work, stack):
     if args.only == "groups-shots":
         part_g(app, server, installers, work)
         return
+    if args.only == "accounts-shots":
+        part_h(app, server, installers, work)
+        return
 
     # == A. a fresh install, signed in from the CLI ==========================================
     # A1. silent per-user install
@@ -2924,6 +3088,13 @@ def run_e2e(args, work, stack):
     else:
         fresh_slate(app)
         part_g(app, server, installers, work)
+
+    # == H. account switching: the brief's Windows-window screenshots =====================================
+    if args.real:
+        say("SKIP: H. the published installers have no account switching")
+    else:
+        fresh_slate(app)
+        part_h(app, server, installers, work)
 
     # == B. an old pip client's foreground connector ============================================
     fresh_slate(app)
@@ -3120,8 +3291,9 @@ def main(argv=None):
     source.add_argument("--real", nargs=2, metavar=("FROM", "TO"),
                         help="published releases vX.Y.Z (v0.4.0 or later) whose installer assets to use")
     parser.add_argument("--server-python", help="an existing Python with raincli/requirements.lock installed")
-    parser.add_argument("--only", choices=("groups-shots",),
-                        help="run only the server and part G (the group chats screenshots)")
+    parser.add_argument("--only", choices=("groups-shots", "accounts-shots"),
+                        help="run only the server and part G (the group chats screenshots) or part H (account "
+                             "switching)")
     args = parser.parse_args(argv)
     if args.only and args.real:
         parser.error("--only needs this ref's installers (--installers)")
