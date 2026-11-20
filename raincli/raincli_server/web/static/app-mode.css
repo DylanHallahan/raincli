@@ -394,3 +394,44 @@ body.app-mode.no-list { grid-template-columns: var(--rc-nav-width) minmax(0, 1fr
 .rc-member-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rc-member-note { font-size: var(--rc-fs-xs); color: var(--rc-muted); white-space: nowrap; }
 .app-mode .rc-group-head > .rc-members { align-self: start; margin-top: 6px; }
+
+/* Account switching (§23, AS7): the switcher on "Signed in as", the rail's avatar and the "As:" cue. */
+.rc-switcher { position: relative; padding: 0; }
+.rc-switcher-btn { width: 100%; display: flex; align-items: center; gap: var(--rc-s-2); padding: var(--rc-s-2); border: 0;
+  border-radius: var(--rc-radius); background: transparent; color: var(--rc-text); font: inherit; text-align: left; cursor: pointer; }
+.rc-switcher-btn:hover { background: var(--rc-surface-2); }
+.rc-switcher-btn .rc-avatar { width: 28px; height: 28px; flex: none; }
+.rc-switcher-who { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: var(--rc-fs-sm); }
+.rc-switcher-who strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-switcher-sub { color: var(--rc-muted); font-size: var(--rc-fs-xs); }
+.rc-switcher-btn .rc-chevron { color: var(--rc-muted); }
+.rc-accounts { position: absolute; left: 0; right: 0; bottom: calc(100% + var(--rc-s-1)); z-index: 6; background: var(--rc-bg);
+  border: 1px solid var(--rc-border); border-radius: var(--rc-radius); box-shadow: var(--rc-shadow); padding: var(--rc-s-2);
+  max-height: min(420px, 70vh); overflow: auto; }
+.rc-accounts-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.rc-account-row { display: flex; align-items: center; gap: var(--rc-s-1); }
+.rc-account { flex: 1; min-width: 0; min-height: 44px; display: flex; align-items: center; gap: var(--rc-s-2); padding: var(--rc-s-1) var(--rc-s-2);
+  border: 0; border-radius: var(--rc-radius-sm); background: transparent; color: var(--rc-text); font: inherit; text-align: left; cursor: pointer; }
+.rc-account:hover { background: var(--rc-surface-2); }
+.rc-account[aria-current="true"] { background: var(--rc-surface-2); }
+.rc-account .rc-avatar { width: 28px; height: 28px; flex: none; }
+.rc-account-text { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: var(--rc-fs-sm); }
+.rc-account-text strong, .rc-account-text span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-account-text span { color: var(--rc-muted); font-size: var(--rc-fs-xs); }
+.rc-account-check { color: var(--rc-accent); }
+.rc-account-remove { width: 44px; height: 44px; flex: none; display: grid; place-items: center; border: 0; border-radius: var(--rc-radius-sm);
+  background: transparent; color: var(--rc-muted); cursor: pointer; }
+.rc-account-remove:hover { background: var(--rc-surface-2); color: var(--rc-text); }
+.rc-avatar-add { font-size: var(--rc-fs-md); }
+.rc-accounts-h { margin: var(--rc-s-2) var(--rc-s-2) 2px; font-size: var(--rc-fs-xs); font-weight: 600; color: var(--rc-muted); }
+.rc-accounts-confirm { margin-top: var(--rc-s-2); padding: var(--rc-s-2); border-top: 1px solid var(--rc-border); font-size: var(--rc-fs-sm); }
+.rc-accounts-confirm p { margin: 0 0 var(--rc-s-2); }
+.rc-accounts-key { margin: var(--rc-s-2) var(--rc-s-2) 0; }
+.rc-rail-avatar { width: 44px; height: 44px; flex: none; margin-bottom: var(--rc-s-1); padding: 0; border-radius: var(--rc-radius-pill);
+  border: 1px solid var(--rc-border); background: var(--rc-bg); color: var(--rc-text); display: grid; place-items: center;
+  font-family: inherit; font-size: var(--rc-fs-xs); font-weight: 600; line-height: 1; }
+button.rc-rail-avatar { cursor: pointer; }
+button.rc-rail-avatar:hover { background: var(--rc-surface-2); }
+.rc-rail-avatar-for { border-color: var(--rc-accent); color: var(--rc-accent); background: var(--rc-accent-soft); }
+.rc-as { font-size: var(--rc-fs-xs); color: var(--rc-accent); white-space: nowrap; }
+.rc-sent-by { color: var(--rc-muted); font-weight: 400; }
