@@ -146,3 +146,26 @@ def test_a_refused_account_is_dropped_and_the_own_account_shown(tmp_path):
     app.home()
     assert svc.dropped == [HD["email"]] and app.active_account is None and svc.handoff_for[-1] is None
     assert win.loads[-1].startswith(SERVICE + "/app/handoff")
+
+
+def test_the_local_pages_say_whose_computer_it_is(tmp_path):
+    svc = AccountServices(held=[HD])
+    svc.own_account = lambda: {"email": "maya@example.test", "display_name": "Maya"}
+    app, win, _ = make(tmp_path, svc)
+    titled(win)
+    assert app.account_note() == {"owner": None, "active": None}  # the own account: no line
+    app.before_navigate(sentinel("switch", on_hosted(app, win), account=HD["email"]))
+    assert app.account_note() == {"owner": "Maya", "active": "Help Desk"}
+    assert "rps_" not in str(app.account_note())
+
+
+def test_the_local_pages_ask_for_the_line_through_the_nonce_gate(tmp_path):
+    from pathlib import Path
+
+    from raincli_agent.app import window as window_mod
+
+    local = Path(window_mod.__file__).parent / "local"
+    for page in ("this-computer.html", "settings.html"):
+        assert '<p class="belongs" id="belongs" hidden></p>' in (local / page).read_text()
+    assert 'rc.read("account_note")' in (local / "local.js").read_text()
+    assert hasattr(window_mod.Api, "account_note")

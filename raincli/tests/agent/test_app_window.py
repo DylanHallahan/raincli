@@ -273,7 +273,8 @@ def test_js_api_never_returns_a_credential(tmp_path):
     assert set(names) == {"sign_in_defaults", "sign_in", "status", "settings", "save_settings", "toggle_pause",
                           "forget_device",
                           "open_log", "sign_out", "open", "retry", "hooks", "connect_hooks",
-                          "inbox", "set_inbox", "clear_inbox", "dismiss_inbox_notice"}
+                          "inbox", "set_inbox", "clear_inbox", "dismiss_inbox_notice",
+                          "account_note"}  # §23: names only (the owner, the account the window shows)
     source = (APP_DIR / "services.py").read_text()
     tree = ast.parse(source)
     status = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "status")

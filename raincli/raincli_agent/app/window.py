@@ -167,6 +167,12 @@ class Api:
         self._guard(nonce)
         return self._app.services.settings()
 
+    def account_note(self, nonce):
+        """§23 (A10, C6): for This computer and Settings: the machine's owner, and the account the window shows
+        when it isn't the owner's (``active`` None otherwise). Names only, never a credential."""
+        self._guard(nonce)
+        return self._app.account_note()
+
     def save_settings(self, nonce, change):
         self._guard(nonce)
         try:
@@ -666,6 +672,19 @@ class AppWindow:
         self._set_title()
         self.handed_off = False  # the next page needs that account's app session
         return self.open_hosted(path)
+
+    def account_note(self):
+        active = None
+        if self.active_account:
+            active = next((n for e, n in self._accounts_order() if e and e.lower() == self.active_account.lower()),
+                          None)
+        if active is None:
+            return {"owner": None, "active": None}
+        try:
+            owner = self.services.own_account().get("display_name")
+        except Exception:  # noqa: BLE001 - offline: the line names no one
+            owner = None
+        return {"owner": owner, "active": active}
 
     def _set_title(self):
         name = None
