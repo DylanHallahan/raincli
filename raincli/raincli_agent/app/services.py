@@ -331,6 +331,20 @@ class Services:
             pass
         return held.public()
 
+    def account_notifications(self, email):
+        """New entries from a delegated account's feed (``notifications/accounts/<key>/``), oldest first."""
+        from .. import accounts
+        return _person().take_notifications(self.agent_config, folder=accounts.account_notify_dir(self.agent_config, email))
+
+    def account_toasts(self, email):
+        """The account's effective grant allows toasts (A18.4; the runtime re-reads it every cycle, A19 E4)."""
+        from .. import accounts
+        return accounts.account_toasts(self.agent_config, email)
+
+    def account_notify_all(self, email):
+        from .. import accounts
+        return _person().notify_all(self.agent_config, folder=accounts.account_notify_dir(self.agent_config, email))
+
     def drop_account(self, email):
         """A delegated session the server refused (401): forget it here, without a server call."""
         from .. import accounts
@@ -340,10 +354,11 @@ class Services:
     def service_url(self):
         return self._config().api_url
 
-    def message_summary(self, message_id):
-        """``{kind, sender, conversation_id}`` for a toast, from the person API. Never the body (§16.12 C14)."""
+    def message_summary(self, message_id, account=None):
+        """``{kind, sender, conversation_id}`` for a toast, from the person API (``account``: with that delegated
+        session, §23). Never the body (§16.12 C14)."""
         from .policy import toast_sender
-        message = _person().PersonClient.for_config(self.agent_config, timeout=10, max_attempts=1).message(message_id)
+        message = self._person_client(account, timeout=10, max_attempts=1).message(message_id)
         return {"kind": message.get("kind") or "message", "sender": toast_sender(message),
                 "conversation_id": message.get("conversation_id")}
 

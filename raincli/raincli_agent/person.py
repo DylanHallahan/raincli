@@ -425,8 +425,9 @@ def _read_json(path, default):
     return data if isinstance(data, dict) else default
 
 
-def _queue(agent_config):
-    data = _read_json(notify_dir(agent_config) / "queue.json", {})
+def _queue(agent_config, folder=None):
+    folder = Path(folder) if folder is not None else notify_dir(agent_config)
+    data = _read_json(folder / "queue.json", {})
     entries = [e for e in data.get("entries", []) if isinstance(e, dict) and isinstance(e.get("seq"), int)]
     offline = data.get("inbox_offline") if isinstance(data.get("inbox_offline"), dict) else {}
     since = offline.get("since")
@@ -437,9 +438,10 @@ def _queue(agent_config):
                               else None, "notified": offline.get("notified") is True}}
 
 
-def _write_queue(agent_config, queue):
-    ensure_private_dir(str(notify_dir(agent_config)))
-    atomic_write_json(str(notify_dir(agent_config) / "queue.json"), queue)
+def _write_queue(agent_config, queue, folder=None):
+    folder = Path(folder) if folder is not None else notify_dir(agent_config)
+    ensure_private_dir(str(folder))
+    atomic_write_json(str(folder / "queue.json"), queue)
 
 
 def _prune(entries, now):
@@ -520,29 +522,33 @@ def record_inbox_presence(agent_config, presence, now=None):
     return added
 
 
-def take_notifications(agent_config=None, now=None):
+def take_notifications(agent_config=None, now=None, folder=None):
     """The app's side: new entries ``{id, kind, at, from_kind, hold, waiting}``, oldest first, each
     returned once. ``kind`` is ``message``, ``escalation`` or ``inbox_offline``; an entry written before
-    v0.6 has ``from_kind`` None."""
+    v0.6 has ``from_kind`` None. ``folder``: a delegated account's feed (§23, ``accounts.account_notify_dir``)
+    instead of the own one."""
     now = time.time() if now is None else now
-    queue = _queue(agent_config)
-    taken = _read_json(notify_dir(agent_config) / "taken.json", {}).get("seq", 0)
+    folder = Path(folder) if folder is not None else notify_dir(agent_config)
+    queue = _queue(agent_config, folder)
+    taken = _read_json(folder / "taken.json", {}).get("seq", 0)
     taken = taken if isinstance(taken, int) else 0
     if taken > queue["seq"]:  # the queue was cleared and started again
         taken = 0
     fresh = [e for e in _prune(queue["entries"], now) if e["seq"] > taken]
     if fresh:
-        ensure_private_dir(str(notify_dir(agent_config)))
-        atomic_write_json(str(notify_dir(agent_config) / "taken.json"), {"seq": fresh[-1]["seq"]})
+        ensure_private_dir(str(folder))
+        atomic_write_json(str(folder / "taken.json"), {"seq": fresh[-1]["seq"]})
     return [{"id": e["id"], "kind": e["kind"], "at": e["at"],
              "from_kind": e.get("from_kind") if e.get("from_kind") in FROM_KINDS else None,
              "hold": "approval" if e.get("hold") == "approval" else None, "waiting": e.get("waiting") is True}
             for e in fresh]
 
 
-def notify_all(agent_config=None):
-    """The app's "Notify me about every message" setting (§21 PR6): off unless chosen."""
-    return _read_json(notify_dir(agent_config) / NOTIFY_SETTINGS, {}).get("notify_all") is True
+def notify_all(agent_config=None, folder=None):
+    """The app's "Notify me about every message" setting (§21 PR6): off unless chosen. ``folder``: a delegated
+    account's feed (§23)."""
+    folder = Path(folder) if folder is not None else notify_dir(agent_config)
+    return _read_json(folder / NOTIFY_SETTINGS, {}).get("notify_all") is True
 
 
 def set_notify_all(agent_config, value):

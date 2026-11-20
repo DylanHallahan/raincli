@@ -207,6 +207,16 @@ def toast_text(kind, sender, hold=None):
     return f"New message from {name}"
 
 
+def account_toast_text(account, kind, sender):
+    """§23 (AS5, A16): a toast for an account the window isn't showing, named first: "Help Desk: new message from
+    Ryan", "Help Desk: escalation from its agent". Never body text (C14), never an agent's name."""
+    label = " ".join(str(account or "").split())[:64] or "Another account"
+    if kind == "escalation":
+        return f"{label}: escalation from its agent"
+    name = " ".join(str(sender or "a teammate").split())[:64] or "a teammate"
+    return f"{label}: new message from {name}"
+
+
 def toast_sender(message):
     """The person label for a toast (C5.1, INV §1.7): the sender's display name, else their email. Never a
     machine handle or an agent name: a machine-form endpoint (a server before v0.6) gives its owner's name

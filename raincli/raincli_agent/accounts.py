@@ -240,3 +240,25 @@ def matches(candidates, query: str) -> list:
     if by_email:
         return by_email[:1]
     return [c for c in candidates if c.display_name == query.strip()]
+
+
+# -- the effective grant's facts, per account (A18.4, A19 E4) ------------------------------------------------------
+
+GRANT_FILE = "grant.json"
+
+
+def save_grant_facts(agent_config, email: str, *, toasts: bool, kind: str | None = None) -> None:
+    """The runtime's poller, on every cycle and after a 401 (A19 E4): the account's effective grant as
+    ``/person/me`` gives it: ``toasts`` (show toasts for this account) and its ``kind`` (``individual`` or
+    ``all_members``). Written beside that account's queue."""
+    folder = account_notify_dir(agent_config, email)
+    ensure_private_dir(str(folder))
+    atomic_write_json(str(folder / GRANT_FILE), {"toasts": toasts is True, "kind": kind}, mode=0o600)
+
+
+def account_toasts(agent_config, email: str) -> bool:
+    """Whether the tray shows this account's toasts (A18.4). Off only when the poller recorded the flag off;
+    its unread count still shows in the switcher."""
+    from .person import _read_json
+
+    return _read_json(account_notify_dir(agent_config, email) / GRANT_FILE, {}).get("toasts") is not False
