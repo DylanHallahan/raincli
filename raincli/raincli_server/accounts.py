@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from raincli_server import identity, messaging, presentation
-from raincli_server.models import Agent, Message, PersonSession, User
+from raincli_server.models import Agent, Grant, Message, PersonSession, User
 
 
 def unread_total(session: Session, user_id: uuid.UUID, team_id: uuid.UUID) -> int:
@@ -47,13 +47,14 @@ class WindowAccount:
 class Addable:
     user: User
     name: str
+    kind: str = "individual"  # or "all_members" (A18: a team-wide grant)
 
     @property
     def email(self) -> str:
         return self.user.email
 
     def json(self) -> dict:
-        return {"email": self.user.email, "display_name": self.name}
+        return {"email": self.user.email, "display_name": self.name, "kind": self.kind}
 
 
 @dataclass
@@ -86,9 +87,62 @@ def window_accounts(session: Session, ps: PersonSession | None) -> WindowAccount
         name = presentation.name_in_team(session, team_id, user)
         out.accounts.append(WindowAccount(user=user, name=name, initials=initials(name), active=member.id == ps.id,
                                           own=not member.delegated, unread=unread_total(session, user.id, team_id)))
-    if not ps.delegated:
+    if not ps.delegated:  # A18: what this person may add, individual and team-wide; never added automatically
         added = {a.user.id for a in out.accounts}
-        for _grant, user in identity.grants_of(session, ps.user_id, team_id):
+        for _grant, user, kind in available_grants(session, ps.user_id, team_id):
             if user.id not in added:
-                out.addable.append(Addable(user=user, name=presentation.name_in_team(session, team_id, user)))
+                out.addable.append(Addable(user=user, name=presentation.name_in_team(session, team_id, user),
+                                           kind=kind))
     return out
+
+
+def _excluded(session: Session, person_id: uuid.UUID, team_id: uuid.UUID) -> bool:
+    """A18.1: a team-wide grant never covers someone who is themselves the ACCOUNT of a live grant in that team."""
+    return session.scalar(select(Grant.id).where(Grant.team_id == team_id, Grant.account_user_id == person_id,
+                                                 Grant.revoked_at.is_(None)).limit(1)) is not None
+
+
+def available_grants(session: Session, grantee_id: uuid.UUID, team_id: uuid.UUID) -> list[tuple[Grant, User, str]]:
+    """``(grant, account, kind)`` for every account ``grantee_id`` may act as in the team, by email: their live
+    individual grants (``identity.grants_of``) and the team-wide (all-members) grants that cover them (A18.1), one
+    per account, the individual grant first (A19 E1). Accounts and the grantee are active members."""
+    out: dict[uuid.UUID, tuple[Grant, User, str]] = {}
+    for grant, user in identity.grants_of(session, grantee_id, team_id):  # D1: both kinds, when it returns both
+        out.setdefault(user.id, (grant, user, "all_members" if getattr(grant, "all_members", False) else "individual"))
+    if not _excluded(session, grantee_id, team_id) and identity._active_member(session, team_id, grantee_id):
+        rows = session.execute(
+            select(Grant, User).join(User, User.id == Grant.account_user_id)
+            .where(Grant.team_id == team_id, Grant.all_members.is_(True), Grant.revoked_at.is_(None),
+                   Grant.account_user_id != grantee_id)).all()
+        for grant, user in rows:
+            if user.id not in out and identity._active_member(session, team_id, user.id):
+                out[user.id] = (grant, user, "all_members")
+    return sorted(out.values(), key=lambda t: t[1].email)
+
+
+def effective_kind(session: Session, ps: PersonSession | None) -> str | None:
+    """The kind of a delegated session's effective grant (A19 E1): ``individual`` or ``all_members``, else None
+    (an own session, or no covering grant). Uses ``identity.effective_grant`` when the server has it; otherwise the
+    same order: the live individual grant, then a covering team-wide one."""
+    if ps is None or not ps.delegated:
+        return None
+    resolver = getattr(identity, "effective_grant", None)
+    if resolver is not None:
+        grant = resolver(session, ps)
+        return None if grant is None else ("all_members" if grant.all_members else "individual")
+    team_id = session.get(Agent, ps.machine_agent_id).team_id
+    if identity.live_grant(session, team_id, ps.acting_user_id, ps.user_id) is not None:
+        return "individual"
+    if _excluded(session, ps.acting_user_id, team_id):
+        return None
+    covering = session.scalar(select(Grant.id).where(
+        Grant.team_id == team_id, Grant.account_user_id == ps.user_id, Grant.all_members.is_(True),
+        Grant.revoked_at.is_(None)))
+    return "all_members" if covering is not None else None
+
+
+def self_replies_ok(session: Session, viewer) -> bool:
+    """A18.5: under a team-wide effective grant, the account's escalations and "From your agents" are read-only."""
+    if not getattr(viewer, "delegated", False):
+        return True
+    return effective_kind(session, getattr(viewer, "person_session", None)) != "all_members"

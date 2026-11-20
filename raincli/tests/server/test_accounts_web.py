@@ -87,7 +87,7 @@ def test_get_app_accounts(windows, client, accounts_seed):  # noqa: F811
     assert [(a["email"], a["kind"], a["active"], a["unread"]) for a in own["accounts"]] == [
         ("maya@example.test", "own", True, own["accounts"][0]["unread"]), ("helpdesk@example.test", "granted", False, 3)]
     assert own["accounts"][0]["initials"] == "MA" and own["accounts"][1]["display_name"] == "Help Desk"
-    assert own["addable"] == [{"email": "billing@example.test", "display_name": "Billing"}]
+    assert own["addable"] == [{"email": "billing@example.test", "display_name": "Billing", "kind": "individual"}]
     hd = windows["helpdesk"].get("/app/accounts").json()
     assert [(a["email"], a["active"]) for a in hd["accounts"]] == [("maya@example.test", False),
                                                                     ("helpdesk@example.test", True)]
@@ -189,3 +189,70 @@ def test_a_sentinel_in_a_browser_explains_and_reflects_nothing(windows, name):  
     assert "href" not in rendered and "<a" not in rendered  # left as text, never a link
     from raincli_server.web import present
     assert present.handoff_next(f"/app/local/{name}") is None
+
+
+# A18: team-wide grants in "Add an account"; read-only escalations under a team-wide grant ------------------------
+
+def _all_members_grant(session, team, account, toasts=False):
+    from raincli_server.models import Grant
+
+    g = Grant(id=uuid.uuid4(), team_id=team.id, grantee_user_id=None, account_user_id=account.id, all_members=True,
+              created_by="operator", toasts=toasts)
+    session.add(g)
+    session.flush()
+    return g
+
+
+def test_add_an_account_lists_individual_and_team_wide_grants_and_adds_nothing(windows, accounts_seed, session):  # noqa: F811
+    from raincli_server import identity
+
+    s = accounts_seed
+    nw = s["teams"]["northwind"]
+    release = identity.create_user(session, "release@example.test", "Release", PASSWORD)
+    identity.add_member(session, nw, release)
+    _all_members_grant(session, nw, release)
+    session.commit()
+    data = windows["own"].get("/app/accounts").json()
+    assert data["addable"] == [{"email": "billing@example.test", "display_name": "Billing", "kind": "individual"},
+                               {"email": "release@example.test", "display_name": "Release", "kind": "all_members"}]
+    assert [a["email"] for a in data["accounts"]] == ["maya@example.test", "helpdesk@example.test"]  # never auto-added
+    panel = switcher(windows["own"].get("/app/inbox").text)
+    assert 'data-account-add="billing@example.test"' in panel and 'data-account-add="release@example.test"' in panel
+    # A18.1: a team-wide grant never covers someone who is the account of a live grant (Help Desk).
+    assert [u.email for _, u, _ in accounts.available_grants(session, s["people"]["Help Desk"].id, nw.id)] == []
+    # Jon (no individual grant) is covered by the team-wide one only.
+    assert [(u.email, k) for _, u, k in accounts.available_grants(session, s["people"]["Jon"].id, nw.id)] == [
+        ("release@example.test", "all_members")]
+
+
+def test_the_effective_kind_prefers_the_individual_grant(accounts_seed, session):  # noqa: F811
+    from raincli_server import identity
+
+    s = accounts_seed
+    ps = s["sessions"]["helpdesk"]
+    assert accounts.effective_kind(session, ps) == "individual"
+    assert accounts.effective_kind(session, s["sessions"]["maya_own"]) is None  # an own session
+    _all_members_grant(session, s["teams"]["northwind"], s["people"]["Help Desk"])
+    s["grants"]["helpdesk"].revoked_at = identity.now()
+    session.commit()
+    assert accounts.effective_kind(session, ps) == "all_members"
+
+
+@pytest.mark.parametrize("kind", ["individual", "all_members"])
+def test_escalations_are_read_only_under_a_team_wide_grant(windows, accounts_seed, monkeypatch, kind):  # noqa: F811
+    s = accounts_seed
+    monkeypatch.setattr(accounts, "effective_kind", lambda session, ps: kind if ps is not None and ps.delegated else None)
+    own = str(s["conversations"]["helpdesk_self"].id)
+    esc = str(s["messages"]["helpdesk_escalation"].id)
+    hd = windows["helpdesk"]
+    page = hd.get(f"/app/conversations/{own}").text
+    with_parent = hd.get(f"/app/conversations/{own}?reply_to={esc}").text
+    live = hd.get(f"/app/live?conversation={own}&after=0").json()
+    live_html = "".join(m["html"] for m in live["messages"])
+    if kind == "all_members":
+        assert "rc-reply" not in page and "rc-reply" not in live_html
+        assert "Replying to Help Desk's agents needs an individual grant." in text(page)
+        assert 'name="body"' not in with_parent  # no composer, even from a reply link
+    else:
+        assert "rc-reply" in page and "rc-reply" in live_html and "needs an individual grant" not in page
+        assert 'name="body"' in with_parent

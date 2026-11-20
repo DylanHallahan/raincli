@@ -719,6 +719,7 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
     templates and Markdown renderer), the viewer's own messages whose delivery state changed, the header's
     presence, the sender warning, and the conversation list when it changed. Indexed queries only: messages by
     (conversation_id, seq), events by message, presence by machine; nothing per message. Never acks (§19.2)."""
+    from raincli_server import accounts
     from raincli_server.web import thread
 
     viewer = app_viewer(request, db, app_mode_ok=True)
@@ -773,7 +774,8 @@ def live(request: Request, conversation: str = "", after: int = 0, states_since:
         atts = queries.attachment_meta(db, [m.id for m in fresh]) if fresh else {}
         who = presentation.conversation_peer(db, viewer.user, conv)
         view_ctx = dict(conv_id=conv.id, can_send=queries.ConversationView(
-            conv, team, me, peer, peer_user=who.user, kind=who.kind).can_send, reply_only=who.kind == "self")
+            conv, team, me, peer, peer_user=who.user, kind=who.kind).can_send,
+            reply_only=who.kind == "self" and accounts.self_replies_ok(db, viewer))  # A18.5
         for line in lines[:len(fresh)]:
             out["messages"].append({"id": str(line.message.id), "seq": line.message.seq,
                                     "html": fragment(request, "app_mode/_message.html", viewer, line=line,
@@ -1138,6 +1140,10 @@ def _conversation_page(
     request: Request, db: Session, viewer: auth.Viewer, view: queries.ConversationView, *, reply_to: str = "",
     status: int = 200, **ctx,
 ) -> HTMLResponse:
+    from raincli_server import accounts
+
+    # A18.5: under a team-wide grant, the account's escalations and "From your agents" are read-only.
+    ctx.setdefault("self_replies", accounts.self_replies_ok(db, viewer))
     parent = None
     rid = queries.parse_uuid(reply_to)
     if rid is not None:
@@ -1276,8 +1282,10 @@ def _message_ctx(db: Session, viewer: auth.Viewer, conv, team, me, peer) -> dict
     """What _message.html needs besides the line: may the viewer write here, and replies-only for their own
     agents' conversation (§21 C13 H2)."""
     who = presentation.conversation_peer(db, viewer.user, conv)
+    from raincli_server import accounts
+
     return {"can_send": queries.ConversationView(conv, team, me, peer, peer_user=who.user, kind=who.kind).can_send,
-            "reply_only": who.kind == "self"}
+            "reply_only": who.kind == "self" and accounts.self_replies_ok(db, viewer)}  # A18.5
 
 
 def _sent_message(request: Request, db: Session, viewer: auth.Viewer, msg: Message, **extra) -> JSONResponse:
