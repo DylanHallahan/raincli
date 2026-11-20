@@ -261,10 +261,11 @@ def test_the_nonce_is_injected_only_into_local_pages(tmp_path):
     app, win, _ = make(tmp_path)
     app.load(SERVICE + "/app/inbox")
     app.on_loaded()
-    assert win.scripts == []
+    # §23 (A14 L2): a hosted page gets only its own switcher nonce, which the local pages' gate refuses.
+    assert len(win.scripts) == 1 and not app.gate.check(nonce_of(win), LOCAL + "settings.html")
     app.load(LOCAL + "settings.html")
     app.on_loaded()
-    assert len(win.scripts) == 1 and "__rcNonce" in win.scripts[0]
+    assert len(win.scripts) == 2 and "__rcNonce" in win.scripts[1] and app.gate.check(nonce_of(win), LOCAL + "settings.html")
 
 
 def test_js_api_never_returns_a_credential(tmp_path):

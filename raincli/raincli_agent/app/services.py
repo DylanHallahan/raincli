@@ -256,15 +256,86 @@ class Services:
         except Exception:  # noqa: BLE001 - not signed in yet
             return None
 
-    def handoff_url(self, path=None):
+    def handoff_url(self, path=None, account=None):
         """A single-use handoff URL for this person session (§16.10), bound to this app install by
-        ``sha256(app_install_token)`` (§16.14 S3)."""
+        ``sha256(app_install_token)`` (§16.14 S3). ``account``: a delegated account's email (§23 A10): its own
+        session mints the handoff, so the window switches to it (the server allows replacing the app session only
+        between linked sessions on this machine, A8)."""
         person = _person()
         if person.load_session(self.agent_config) is None:
             raise ServiceError("this computer has no person session; sign in again")
         _token, install_hash = person.app_install(self.agent_config)
-        client = person.PersonClient.for_config(self.agent_config, timeout=15, max_attempts=1)
+        client = self._person_client(account, timeout=15, max_attempts=1)
         return client.api.request("POST", "/app/handoff", body={"app_install_hash": install_hash})[1]["url"]
+
+    # -- accounts (§23 A10) ------------------------------------------------------------------------------------
+
+    def _person_client(self, account=None, **kwargs):
+        """The person API with the own session, or with ``account``'s delegated session from accounts.json."""
+        person = _person()
+        if account is None:
+            return person.PersonClient.for_config(self.agent_config, **kwargs)
+        from .. import accounts
+        from ..api import ApiClient
+        from ..config import load_config
+
+        held = accounts.find_account(self.agent_config, account)
+        if held is None:
+            raise ServiceError("that account isn't in this app")
+        return person.PersonClient(ApiClient(load_config(str(self.agent_config)).api_url, held.session, **kwargs))
+
+    def own_account(self):
+        """``{email, display_name}`` of this machine's own person (``/person/me`` with the own session)."""
+        me = self._person_client(timeout=10, max_attempts=1).me()
+        user = me.get("user") or me
+        return {"email": user.get("email"), "display_name": user.get("display_name") or user.get("email")}
+
+    def held_accounts(self):
+        """The delegated accounts this app holds, without their sessions."""
+        from .. import accounts
+        return [a.public() for a in accounts.load_accounts(self.agent_config)]
+
+    def active_account(self):
+        """The account the window shows: a held delegated account's email, or None for the own account."""
+        from .. import accounts
+        active = accounts.load_active(self.agent_config)
+        return active if active and accounts.find_account(self.agent_config, active) is not None else None
+
+    def set_active_account(self, email):
+        from .. import accounts
+        accounts.save_active(self.agent_config, email)
+
+    def add_account(self, email):
+        """A delegated session for ``email`` from the own session (``POST /person/delegations``), stored in
+        accounts.json. Returns the account (email, display_name, team)."""
+        from .. import accounts
+        reply = self._person_client(timeout=15, max_attempts=1).api.request(
+            "POST", "/person/delegations", body={"account": email})[1]
+        acc = reply.get("account") or {}
+        held = accounts.save_account(self.agent_config, acc.get("email") or email, acc.get("display_name") or email,
+                                     acc.get("team") or "", reply["person_session"])
+        return held.public()
+
+    def remove_account(self, email):
+        """"Remove <account> from this app": that session only ends on the server; the grant stays (C13)."""
+        from .. import accounts
+        held = accounts.remove_account(self.agent_config, email)
+        if held is None:
+            return None
+        try:
+            from ..api import ApiClient
+            from ..config import load_config
+            ApiClient(load_config(str(self.agent_config)).api_url, held.session, timeout=10, max_attempts=1).request(
+                "POST", "/person/sign-out", body={})
+        except Exception:  # noqa: BLE001 - gone here either way; the server ends it with the own session later
+            pass
+        return held.public()
+
+    def drop_account(self, email):
+        """A delegated session the server refused (401): forget it here, without a server call."""
+        from .. import accounts
+        held = accounts.remove_account(self.agent_config, email)
+        return held.public() if held is not None else None
 
     def service_url(self):
         return self._config().api_url
