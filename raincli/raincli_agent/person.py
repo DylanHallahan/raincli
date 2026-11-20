@@ -134,12 +134,16 @@ def load_session(agent_config=None):
 
 
 def clear_session(agent_config=None):
-    """Delete ``person.json`` and the notification feed, and rotate the install token
+    """Delete ``person.json``, the notification feed and the delegated accounts (§23: ``accounts.json``, the
+    active choice and their feeds; the server ends their sessions with the own one), and rotate the install token
     (§16.14 S3: every sign-out). Returns whether a session was stored."""
     had = _remove(person_path(agent_config))
     folder = notify_dir(agent_config)
     for name in ("queue.json", "taken.json"):
         _remove(folder / name)
+    from .accounts import clear_accounts  # §23: the own sign-out ends every delegated account here too
+
+    clear_accounts(agent_config)
     rotate_app_install_token(agent_config)
     return had
 
