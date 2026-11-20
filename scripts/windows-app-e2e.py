@@ -2172,10 +2172,18 @@ def part_h(app, server, installers, work):
                          timeout=30, interval=0.5)
                 size = f"{width}x{height}"
                 for scheme in ("light", "dark"):
-                    # 1. The switcher open on Maya, Help Desk with its unread count.
+                    # 1. The switcher open on Maya, Help Desk with its unread count. Showing Help Desk reads its newest
+                    # thread (its own read state, AS12), so Jon writes three more before each shot.
                     h_switch(page, emails["maya"])
+                    for body in ("Ryan's laptop won't boot.", "VPN request for the new contractor.",
+                                 "Printer on 3 is jammed."):
+                        send(server, tokens["jon"], {"person": emails["helpdesk"]}, body)
+                    page.reload()
+                    page.wait_for_selector("[data-switcher-toggle]")
                     page.click("[data-switcher-toggle]")
-                    count = page.inner_text(f"[data-account-switch='{emails['helpdesk']}'] .rc-count").split()[0]
+                    badge = f"[data-account-switch='{emails['helpdesk']}'] .rc-count"
+                    wait_for("Help Desk's unread count", lambda: page.locator(badge).count() == 1, timeout=30, interval=1)
+                    count = page.inner_text(badge).split()[0]
                     check(count == "3", f"Help Desk's count in the switcher is {count!r}")
                     themed_shot(page, scheme, f"acc-win-1-switcher-open-{size}-{scheme}")
                     page.keyboard.press("Escape")
