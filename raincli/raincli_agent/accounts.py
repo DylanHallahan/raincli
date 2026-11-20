@@ -289,3 +289,38 @@ def account_toasts(agent_config, email: str) -> bool:
     from .person import _read_json
 
     return _read_json(account_notify_dir(agent_config, email) / GRANT_FILE, {}).get("toasts") is not False
+
+
+# -- accounts dropped by the runtime (A10: "the window shows a one-line notice") -------------------------------------
+
+DROPPED_FILE = "accounts-dropped.json"
+
+
+def record_dropped(agent_config, email: str, display_name: str) -> None:
+    """The runtime, when a delegated session answers 401 (revoked, the grant gone, or the account or grantee no longer
+    a member): remember the account for the window's one-line notice. People only, never a token."""
+    path = _dir(agent_config) / DROPPED_FILE
+    with locked(agent_config):
+        try:
+            data = json.loads(read_private_file(str(path), "dropped accounts file")) if os.path.lexists(path) else {}
+        except (ConfigError, ValueError, UnicodeDecodeError):
+            data = {}
+        rows = [r for r in (data.get("dropped") or []) if isinstance(r, dict) and not _same(str(r.get("email")), email)]
+        rows.append({"email": email, "display_name": display_name})
+        atomic_write_json(str(path), {"dropped": rows[-MAX_DELEGATED:]}, mode=0o600)
+
+
+def take_dropped(agent_config) -> list[dict]:
+    """The window's side: the accounts dropped since it last asked (``{email, display_name}``), each once."""
+    path = _dir(agent_config) / DROPPED_FILE
+    with locked(agent_config):
+        if not os.path.lexists(path):
+            return []
+        try:
+            data = json.loads(read_private_file(str(path), "dropped accounts file"))
+        except (ConfigError, ValueError, UnicodeDecodeError):
+            data = {}
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+    return [{"email": r["email"], "display_name": str(r.get("display_name") or r["email"])}
+            for r in (data.get("dropped") or []) if isinstance(r, dict) and isinstance(r.get("email"), str)]

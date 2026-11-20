@@ -473,11 +473,12 @@ def message_facts(message, to_person=None):
     return {"from_kind": from_kind, "hold": "approval" if hold in APPROVAL_HOLDS else None, "waiting": bool(waiting)}
 
 
-def append_notifications(agent_config, messages, cursor, session_id, now=None, to_person=None):
+def append_notifications(agent_config, messages, cursor, session_id, now=None, to_person=None, folder=None):
     """The runtime's side: append ``{id, kind, at}`` and the toast facts (``message_facts``) for each
-    new message, and keep the cursor. Only the runtime writes ``queue.json``. Returns the number added."""
+    new message, and keep the cursor. Only the runtime writes ``queue.json``. Returns the number added.
+    ``folder``: a delegated account's feed (§23) instead of the own one."""
     now = time.time() if now is None else now
-    queue = _queue(agent_config)
+    queue = _queue(agent_config, folder)
     known = {e.get("id") for e in queue["entries"]}
     added = 0
     for message in messages:
@@ -495,7 +496,7 @@ def append_notifications(agent_config, messages, cursor, session_id, now=None, t
         known.add(mid)
         added += 1
     queue.update(cursor=int(cursor), session=session_id, entries=_prune(queue["entries"], now))
-    _write_queue(agent_config, queue)
+    _write_queue(agent_config, queue, folder)
     return added
 
 

@@ -78,8 +78,13 @@ def out(text=""):
     print(text, file=sys.stdout, flush=True)
 
 
+JSON_STAMP = [None]  # §23 A11: {"schema": 1, "account": <email>} while a `raincli me` command runs
+
+
 def out_json(obj):
     # ensure_ascii escapes every control and non-ASCII character.
+    if JSON_STAMP[0] and isinstance(obj, dict):
+        obj = {**obj, **JSON_STAMP[0]}  # additive: every `me … --json` object carries schema and account
     out(json.dumps(obj, ensure_ascii=True, sort_keys=True))
 
 

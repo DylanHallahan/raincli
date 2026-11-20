@@ -554,9 +554,11 @@ def notification_feed(configs):
     cfg = configs[0][1] if configs else None
     if cfg is None or not getattr(cfg, "machine", False) or not cfg.agent_config:
         return None
-    from .. import person
-    feed = person.NotificationFeed(cfg.agent_config, log=lambda text: print(text, file=sys.stderr, flush=True))
+    from .. import account_feeds, person
+    log = lambda text: print(text, file=sys.stderr, flush=True)  # noqa: E731 - the runtime log
+    feed = person.NotificationFeed(cfg.agent_config, log=log)
     feed.start()
+    account_feeds.AccountFeeds(cfg.agent_config, log=log).start()  # §23 A10: one poller per delegated account
     return feed
 
 

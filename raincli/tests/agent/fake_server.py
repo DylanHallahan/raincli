@@ -327,7 +327,13 @@ class FakeState(_GroupsMixin):
         self.login_bodies = []  # every /app/login body received (tests check what was sent)
         self.devices_issued = 0
         self.inbox_queries = []  # (handle, routing=1?) for every inbox poll
-        self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id} (§16.3)
+        self.person_sessions = {}  # "rps_" token -> {"email", "machine": agent id, "acting"?: grantee} (§16.3, §23)
+        # §23: grants, each {"grantee": email | None (all members), "account": email, "team", "toasts"}; the unread
+        # count /person/me reports per email; message ids whose route is "self" (A18.5).
+        self.grants = []
+        self.unread = {}
+        self.self_traffic = set()
+        self.sent_as = []  # every /person/send body, with the account and acting person
         self.known_devices = {}  # known-device token -> email (§18.1 item 2)
         self.over_cap_retry_after = None  # set: every inbox poll is answered at once, empty, with Retry-After
         self.over_cap_polls = 0
@@ -340,6 +346,28 @@ class FakeState(_GroupsMixin):
         self.groups = {}
         self.group_posts = {}
         self.groups_capable = set()  # agent ids that polled with groups=1 on a groups client
+
+    # -- account switching (§23) -------------------------------------------
+
+    def grant_for(self, grantee, account):
+        """The effective grant: grantee's individual grant first, then an all-members grant (A19 E1)."""
+        if grantee is None or grantee == account:
+            return None
+        live = [g for g in self.grants if g["account"] == account]
+        return next((g for g in live if g["grantee"] == grantee), None) or \
+            next((g for g in live if g["grantee"] is None), None)
+
+    def grants_of(self, grantee):
+        accounts = sorted({g["account"] for g in self.grants if g["grantee"] in (grantee, None)} - {grantee})
+        return [self.grant_for(grantee, a) for a in accounts]
+
+    @staticmethod
+    def grant_kind(grant):
+        return None if grant is None else ("all_members" if grant["grantee"] is None else "individual")
+
+    def delegation_json(self, grant):
+        return {"email": grant["account"], "display_name": self.name_of(grant["account"]), "team": grant["team"],
+                "toasts": grant["toasts"], "kind": self.grant_kind(grant)}
 
     # -- setup -----------------------------------------------------------
 
@@ -1392,11 +1420,50 @@ class _Handler(BaseHTTPRequestHandler):
         if session is None:
             raise ApiFail(401, "unauthorized")
         email = session["email"]
+        acting = session.get("acting")
+        if acting is not None and st.grant_for(acting, email) is None:
+            raise ApiFail(401, "unauthorized")  # §23 belt: the effective grant is gone
         if method == "GET" and route == "/person/me":
-            user = st.users[email]
+            user = st.users.get(email) or {"teams": [next(iter(st.teams), "alpha")]}
+            grant = st.grant_for(acting, email) if acting else None
             return 200, {"user": {"display_name": st.name_of(email), "email": email},
                          "teams": [{"slug": t, "name": st.teams[t]} for t in user["teams"]],
-                         "session": {"created_at": "t", "expires_at": "t"}}
+                         "session": {"created_at": "t", "expires_at": "t"},
+                         "unread": st.unread.get(email, 0), "delegated": acting is not None,
+                         "acting_user": {"display_name": st.name_of(acting), "email": acting} if acting else None,
+                         "toasts": grant["toasts"] if grant else None, "grant_kind": st.grant_kind(grant)}
+        if route == "/person/delegations":
+            if acting is not None:
+                raise ApiFail(403, "delegated_scope")
+            if method == "GET":
+                return 200, {"accounts": [st.delegation_json(g) for g in st.grants_of(email)]}
+            body = json.loads(raw) if raw else {}
+            account = str(body.get("account", "")).lower() if isinstance(body, dict) else ""
+            grant = st.grant_for(email, account)
+            if grant is None:
+                raise ApiFail(404, "not_found")
+            for t in [t for t, s in st.person_sessions.items() if s.get("parent") == token
+                      and s["email"] == grant["account"]]:
+                del st.person_sessions[t]  # §23 D2: one child per account
+            if len({s["email"] for s in st.person_sessions.values() if s.get("parent") == token}) >= 4:
+                raise ApiFail(409, "too_many_accounts")
+            child = "rps_" + secrets.token_urlsafe(32)
+            st.person_sessions[child] = {"email": grant["account"], "machine": session["machine"], "acting": email,
+                                         "parent": token}
+            return 200, {"person_session": child, "account": st.delegation_json(grant)}
+        if method == "GET" and route.startswith("/person/messages/"):
+            m = st.messages.get(route.rsplit("/", 1)[1])
+            if m is None:
+                raise ApiFail(404, "not_found")
+            return 200, {"message": st.render(m, reader_email=email)}
+        if method == "POST" and route == "/person/send":
+            body = json.loads(raw) if raw else {}
+            grant = st.grant_for(acting, email) if acting else None
+            if grant is not None and grant["grantee"] is None and body.get("in_reply_to") in st.self_traffic:
+                raise ApiFail(403, "delegated_scope")  # A18.5
+            st.sent_as.append({"account": email, "acting": acting, **body})
+            return 201, {"message": {"id": body.get("id"), "from": "@" + email, "body": body.get("body"),
+                                     "sent_by": {"email": acting} if acting else None}, "created": True}
         if method == "GET" and route == "/person/inbox":
             return st.person_inbox_page(email, query)
         if method == "POST" and route == "/person/sign-out":
