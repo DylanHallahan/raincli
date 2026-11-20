@@ -16,8 +16,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from raincli_server import security
-from raincli_server.models import (PERSON_SCOPES, SCOPES, Agent, AgentCredential, Invitation, Membership, Message,
-                                   PersonSession, Team, User, WebSession)
+from raincli_server.models import (PERSON_SCOPES, SCOPES, Agent, AgentCredential, Grant, Invitation, Membership,
+                                   Message, PersonSession, Team, User, WebSession)
 
 INVITE_TTL = timedelta(days=7)
 
@@ -405,6 +405,11 @@ class PersonAuth:
     person_session: PersonSession
     user: User
     team_id: uuid.UUID
+    acting_user: User | None = None  # §23: the grantee, when the session is delegated (``user`` is the account)
+
+    @property
+    def delegated(self) -> bool:
+        return self.acting_user is not None
 
     def has_scope(self, scope: str) -> bool:
         return scope in self.person_session.scopes
@@ -449,17 +454,159 @@ def authenticate_person(session: Session, token: str | None, touch: bool = True)
     if ps.revoked_at is not None or not user.is_active or machine is None or machine.revoked_at is not None:
         return None
     ts = now()
-    if ts >= person_session_expires_at(ps):
+    if ts >= person_session_expires_at(ps) or not delegated_ok(session, ps, ts):
         return None
-    if touch and ts - ps.last_used_at > timedelta(seconds=30):
-        ps.last_used_at = ts
-    return PersonAuth(person_session=ps, user=user, team_id=machine.team_id)
+    acting = session.get(User, ps.acting_user_id) if ps.delegated else None
+    if touch:
+        # §23 (A14 Q5): using a delegated session also keeps its parent (the grantee's own session) alive.
+        parent = session.get(PersonSession, ps.parent_session_id) if ps.delegated else None
+        for row_ in (ps, parent):
+            if row_ is not None and ts - row_.last_used_at > timedelta(seconds=30):
+                row_.last_used_at = ts
+    return PersonAuth(person_session=ps, user=user, team_id=machine.team_id, acting_user=acting)
+
+
+# Delegated sessions (protocol §23) -------------------------------------------------------
+
+MAX_DELEGATED = 4  # §23 (AS2): at most 5 accounts in one app, its own included
+
+
+class DelegationNotFound(IdentityError):
+    """No live grant for that account in this session's team (or no such person): one answer for all (no oracle)."""
+
+
+class TooManyAccounts(IdentityError):
+    pass
+
+
+def owner_view(viewer_id: uuid.UUID | None, owner_id: uuid.UUID | None, delegated: bool) -> bool:
+    """§23 (A14 M1): the viewer sees a machine as its owner: they own it AND aren't acting through a grant. Under a
+    grant the delegate sees the account's machines as a teammate would (no handles, agent names or raw codes)."""
+    return viewer_id is not None and owner_id == viewer_id and not delegated
+
+
+def session_expires_at(session: Session, ps: PersonSession) -> datetime:
+    """When ``ps`` ends: its own expiry and, for a delegated session, never later than its parent's (A3, A14 Q5)."""
+    ends = person_session_expires_at(ps)
+    if ps.delegated:
+        parent = session.get(PersonSession, ps.parent_session_id)
+        if parent is not None:
+            ends = min(ends, person_session_expires_at(parent))
+    return ends
+
+
+def delegated_ok(session: Session, ps: PersonSession, at: datetime | None = None) -> bool:
+    """The belt for a delegated session (A4, A14 L1), true for an own session: its parent is a live, unexpired own
+    session of the grantee on the same machine; its grant is live and names these two people in the machine's team;
+    and both are active members of that team."""
+    if not ps.delegated:
+        return True
+    ts = at or now()
+    parent = session.get(PersonSession, ps.parent_session_id)
+    grant = session.get(Grant, ps.grant_id)
+    machine = session.get(Agent, ps.machine_agent_id)
+    if (parent is None or parent.delegated or parent.revoked_at is not None or ts >= person_session_expires_at(parent)
+            or parent.machine_agent_id != ps.machine_agent_id or parent.user_id != ps.acting_user_id):
+        return False
+    if (grant is None or grant.revoked_at is not None or grant.grantee_user_id != ps.acting_user_id
+            or grant.account_user_id != ps.user_id or machine is None or machine.revoked_at is not None
+            or machine.team_id != grant.team_id):
+        return False
+    return all(_active_member(session, grant.team_id, uid) for uid in (ps.user_id, ps.acting_user_id))
+
+
+def _active_member(session: Session, team_id: uuid.UUID, user_id: uuid.UUID) -> bool:
+    user = session.get(User, user_id)
+    return user is not None and user.is_active and membership(session, team_id, user_id) is not None
+
+
+def _session_live(session: Session, ps: PersonSession, at: datetime) -> bool:
+    machine = session.get(Agent, ps.machine_agent_id)
+    user = session.get(User, ps.user_id)
+    return (ps.revoked_at is None and machine is not None and machine.revoked_at is None and user is not None
+            and user.is_active and at < session_expires_at(session, ps) and delegated_ok(session, ps, at))
+
+
+def linked_sessions(session: Session, ps: PersonSession) -> list[PersonSession]:
+    """THE definition of linked person sessions (§23, A8, A9): the own session at the root of ``ps``'s family (``ps``
+    itself, or its parent) and its live delegated children, all on one machine; the root first, then the children
+    oldest first. Empty when the root isn't live. Two sessions are linked iff both are in one such list."""
+    ts = now()
+    root = session.get(PersonSession, ps.parent_session_id) if ps.delegated else ps
+    if root is None or root.delegated or not _session_live(session, root, ts):
+        return []
+    children = session.scalars(
+        select(PersonSession).where(PersonSession.parent_session_id == root.id, PersonSession.revoked_at.is_(None))
+        .order_by(PersonSession.created_at, PersonSession.id)).all()
+    return [root] + [c for c in children
+                     if c.machine_agent_id == root.machine_agent_id and _session_live(session, c, ts)]
+
+
+def linked(session: Session, x: PersonSession, y: PersonSession) -> bool:
+    """Both live and in one family (``linked_sessions``)."""
+    ids = {s.id for s in linked_sessions(session, x)}
+    return x.id in ids and y.id in ids
+
+
+def live_grant(session: Session, team_id: uuid.UUID, grantee_id: uuid.UUID, account_id: uuid.UUID) -> Grant | None:
+    return session.scalar(select(Grant).where(
+        Grant.team_id == team_id, Grant.grantee_user_id == grantee_id, Grant.account_user_id == account_id,
+        Grant.revoked_at.is_(None)))
+
+
+def grants_of(session: Session, grantee_id: uuid.UUID, team_id: uuid.UUID) -> list[tuple[Grant, User]]:
+    """The grantee's live grants in the team whose account is an active member, by the account's email."""
+    rows = session.execute(
+        select(Grant, User).join(User, User.id == Grant.account_user_id)
+        .where(Grant.team_id == team_id, Grant.grantee_user_id == grantee_id, Grant.revoked_at.is_(None))
+        .order_by(User.email)).all()
+    return [(g, u) for g, u in rows if _active_member(session, team_id, u.id)]
+
+
+def issue_delegated_session(session: Session, parent: PersonSession, account_email: object
+                            ) -> tuple[str, PersonSession, User]:
+    """§23 A3: a delegated session acting as ``account_email`` for the grantee of the own session ``parent``.
+
+    The ONLY place §16.3's owner rule is relaxed. Needs a live own ``parent`` on an active machine, a live grant
+    (grantee = the parent's person, the account, the machine's team) and both people active members. One live child
+    per (parent, grant) (A14 M5): an existing one is revoked, with its web sessions, and a fresh one issued. At most
+    ``MAX_DELEGATED`` accounts per parent. The raw token is returned once."""
+    parent = session.scalar(select(PersonSession).where(PersonSession.id == parent.id).with_for_update()
+                            .execution_options(populate_existing=True))  # serializes adds under one parent
+    ts = now()
+    if parent is None or parent.delegated or not _session_live(session, parent, ts):
+        raise PermissionDenied("a delegated session is issued only from a live own session")
+    machine = session.get(Agent, parent.machine_agent_id)
+    account = find_user_by_email(session, account_email) if isinstance(account_email, str) else None
+    grant = live_grant(session, machine.team_id, parent.user_id, account.id) if account is not None else None
+    if (grant is None or not _active_member(session, machine.team_id, account.id)
+            or not _active_member(session, machine.team_id, parent.user_id)):
+        raise DelegationNotFound("no such account to act as")
+    revoke_person_sessions(session, parent_id=parent.id, grant_id=grant.id)  # M5: re-adding replaces
+    live = [c for c in session.scalars(select(PersonSession).where(
+        PersonSession.parent_session_id == parent.id, PersonSession.revoked_at.is_(None)))
+        if _session_live(session, c, ts)]
+    if len(live) >= MAX_DELEGATED:
+        raise TooManyAccounts("at most 5 accounts in one app")
+    token = security.new_token(security.PERSON_TOKEN_PREFIX)
+    child = PersonSession(user_id=account.id, machine_agent_id=parent.machine_agent_id,
+                          token_hash=security.hash_token(token), prefix=security.token_prefix(token),
+                          scopes=list(parent.scopes), acting_user_id=parent.user_id, grant_id=grant.id,
+                          parent_session_id=parent.id)
+    session.add(child)
+    session.flush()
+    return token, child, account
 
 
 def revoke_person_sessions(session: Session, *, session_id: uuid.UUID | None = None,
-                           machine_id: uuid.UUID | None = None, user_id: uuid.UUID | None = None) -> int:
-    """Revoke matching person sessions and every app-mode web session made from them (§16.12 C2, C6)."""
-    if session_id is None and machine_id is None and user_id is None:
+                           machine_id: uuid.UUID | None = None, user_id: uuid.UUID | None = None,
+                           parent_id: uuid.UUID | None = None, grant_id: uuid.UUID | None = None,
+                           include_delegated: bool = True) -> int:
+    """Revoke matching person sessions and every app-mode web session and handoff code made from them (§16.12 C2,
+    C6), in the caller's transaction. §23 A7: the delegated sessions under a revoked session go with it.
+    ``include_delegated=False`` leaves delegated sessions matched directly alone (the account's own password change,
+    A14 M4); their parents' revocation still ends them."""
+    if all(v is None for v in (session_id, machine_id, user_id, parent_id, grant_id)):
         raise ValueError("revoke_person_sessions needs a filter")
     stmt = update(PersonSession).where(PersonSession.revoked_at.is_(None))
     if session_id is not None:
@@ -468,10 +615,23 @@ def revoke_person_sessions(session: Session, *, session_id: uuid.UUID | None = N
         stmt = stmt.where(PersonSession.machine_agent_id == machine_id)
     if user_id is not None:
         stmt = stmt.where(PersonSession.user_id == user_id)
-    ids = list(session.scalars(stmt.values(revoked_at=now()).returning(PersonSession.id)))
+    if parent_id is not None:
+        stmt = stmt.where(PersonSession.parent_session_id == parent_id)
+    if grant_id is not None:
+        stmt = stmt.where(PersonSession.grant_id == grant_id)
+    if not include_delegated:
+        stmt = stmt.where(PersonSession.acting_user_id.is_(None))
+    ts = now()
+    ids = list(session.scalars(stmt.values(revoked_at=ts).returning(PersonSession.id)))
     if ids:
+        ids += list(session.scalars(
+            update(PersonSession).where(PersonSession.parent_session_id.in_(ids), PersonSession.revoked_at.is_(None))
+            .values(revoked_at=ts).returning(PersonSession.id)))
         session.execute(update(WebSession).where(WebSession.person_session_id.in_(ids),
-                                                 WebSession.revoked_at.is_(None)).values(revoked_at=now()))
+                                                 WebSession.revoked_at.is_(None)).values(revoked_at=ts))
+        from raincli_server.models import HandoffCode
+
+        session.execute(delete(HandoffCode).where(HandoffCode.person_session_id.in_(ids)))
     session.flush()
     return len(ids)
 

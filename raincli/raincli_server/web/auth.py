@@ -45,6 +45,13 @@ class Viewer:
     web_session: WebSession
     teams: list[tuple[Team, str]] = field(default_factory=list)
     scope: uuid.UUID | None = None
+    # §23: an app-mode session's person session, and the grantee when it's delegated (``user`` is then the account).
+    person_session: PersonSession | None = None
+    acting_user: User | None = None
+
+    @property
+    def delegated(self) -> bool:
+        return self.acting_user is not None
 
     @property
     def app_mode(self) -> bool:
@@ -120,7 +127,7 @@ def _session_from(db: Session, token: str | None, *, app_mode: bool,
         ps = db.get(PersonSession, ws.person_session_id)
         machine = db.get(Agent, ps.machine_agent_id) if ps else None
         if (ps is None or ps.revoked_at is not None or machine is None or machine.revoked_at is not None
-                or identity.now() >= identity.person_session_expires_at(ps)):
+                or identity.now() >= identity.session_expires_at(db, ps) or not identity.delegated_ok(db, ps)):
             return None
     return ws, user
 
@@ -133,12 +140,13 @@ def load_viewer(db: Session, request: Request) -> Viewer | None:
     if found is None:
         return None
     ws, user = found
-    teams, scope = identity.teams_for_user(db, user), None
+    teams, scope, ps, acting = identity.teams_for_user(db, user), None, None, None
     if ws.app_mode:  # §21.13: an app sign-in covers the team of the machine it's signed in on
         ps = db.get(PersonSession, ws.person_session_id)
         scope = db.get(Agent, ps.machine_agent_id).team_id
         teams = [(team, role) for team, role in teams if team.id == scope]
-    return Viewer(user=user, web_session=ws, teams=teams, scope=scope)
+        acting = db.get(User, ps.acting_user_id) if ps.delegated else None
+    return Viewer(user=user, web_session=ws, teams=teams, scope=scope, person_session=ps, acting_user=acting)
 
 
 def start_app_session(db: Session, ps: PersonSession, user: User, response: Response, settings: Settings,
@@ -147,7 +155,7 @@ def start_app_session(db: Session, ps: PersonSession, user: User, response: Resp
     install the code was bound to (§16.14 S3)."""
     token = security.new_token()
     ws = WebSession(user_id=user.id, token_hash=security.hash_token(token), csrf_token=secrets.token_urlsafe(32),
-                    expires_at=identity.person_session_expires_at(ps), app_mode=True, person_session_id=ps.id,
+                    expires_at=identity.session_expires_at(db, ps), app_mode=True, person_session_id=ps.id,
                     app_install_hash=install_hash)
     db.add(ws)
     db.flush()
