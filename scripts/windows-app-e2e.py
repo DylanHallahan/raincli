@@ -2071,7 +2071,7 @@ def part_g(app, server, installers, work):
 
 # -- account switching: the brief's Windows-window screenshots (part H) -------------------------------------------
 
-H_TEAM = "northwind"
+H_TEAM = "northwind-accounts"  # part G already has "northwind" in a full run (shown as "Northwind")
 H_PEOPLE = {"dylan": ("Dylan", "h-dylan@example.invalid"), "maya": ("Maya", "h-maya@example.invalid"),
             "helpdesk": ("Help Desk", "h-helpdesk@example.invalid"), "jon": ("Jon", "h-jon@example.invalid")}
 H_MACHINES = {"maya": "h-maya-laptop", "helpdesk": "h-helpdesk-desk", "jon": "h-jon-laptop"}
