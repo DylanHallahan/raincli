@@ -7,7 +7,7 @@
   <span class="rc-avatar" aria-hidden="true">{{ line.initials or '?' }}</span>
   <div class="rc-msg-body">
     <div class="rc-who">
-      <span><strong>{{ line.sender_name }}</strong> · {{ time(m.created_at) }}</span>
+      <span><strong>{{ line.sender_name }}</strong> · {{ time(m.created_at) }}{% if line.sent_by %} · <span class="rc-sent-by">sent by {{ line.sent_by }}</span>{% endif %}</span>
       {% if can_send or (reply_only and not line.outgoing) %}<a class="rc-reply" href="{{ url('/app/conversations/' ~ conv_id) }}?reply_to={{ m.id }}#body">Reply<span class="sr-only"> to this message</span></a>{% endif %}
     </div>
     {% if m.kind == 'escalation' %}<p class="rc-needs"><strong>Escalation</strong> · this needs you.</p>{% endif %}

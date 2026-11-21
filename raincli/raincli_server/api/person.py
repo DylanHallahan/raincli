@@ -87,14 +87,25 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
         """The team of the parent message's conversation, when the person may see it and is still
         a member; otherwise the same 404 a reply to an unseen message gets."""
         parent = messaging.get_message_for_person(session, auth.user,
-                                                  messaging.parse_uuid(in_reply_to, "in_reply_to"), auth.team_id)
+                                                  messaging.parse_uuid(in_reply_to, "in_reply_to"), auth.team_id,
+                                                  delegated=auth.delegated)
         team = next((t for t in teams_of(session, auth) if t.id == parent.team_id), None)
         if team is None:
             raise ApiError(404, "not_found", "in_reply_to message not found")
         return team
 
+    def own_session_only(session: Session, auth: PersonAuth) -> None:
+        """§23 A4 (AS3): what only the account's own sessions may do; a delegated session gets 403 delegated_scope."""
+        if auth.delegated:
+            name = presentation.name_in_team(session, auth.team_id, auth.user)
+            raise ApiError(403, "delegated_scope", f"Not allowed while acting for {name}.")
+
+    def account_json(session: Session, user, team: Team) -> dict:
+        return {"email": user.email, "display_name": presentation.name_in_team(session, team.id, user),
+                "team": team.slug}
+
     def m(session: Session, msg, auth: PersonAuth) -> dict:
-        return messaging.message_json(session, msg, reader_user=auth.user)
+        return messaging.message_json(session, msg, reader_user=auth.user, delegated=auth.delegated)
 
     # Routes ------------------------------------------------------------------------
 
@@ -102,10 +113,19 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
     async def person_me(request: Request):
         def work(session, auth: PersonAuth):
             ps = auth.person_session
+            acting = auth.acting_user
+            # §23 (A14 Q7): additive ``unread`` (the account's own count), ``delegated`` and ``acting_user``.
             return {"user": {"display_name": auth.user.display_name, "email": auth.user.email},
                     "teams": [{"slug": t.slug, "name": t.name} for t in teams_of(session, auth)],
                     "session": {"created_at": messaging.iso(ps.created_at),
-                                "expires_at": messaging.iso(identity.person_session_expires_at(ps))}}
+                                "expires_at": messaging.iso(identity.session_expires_at(session, ps))},
+                    "unread": messaging.unread_count(session, auth.user.id, auth.team_id),
+                    "delegated": auth.delegated,
+                    # A18.4: the effective grant's toasts flag for a delegated session; null for an own session.
+                    "toasts": grant.toasts if (grant := identity.effective_grant(session, ps)) is not None else None,
+                    "grant_kind": identity.grant_kind(grant),  # A19 D1/E4: individual, all_members or null
+                    "acting_user": {"display_name": presentation.name_in_team(session, auth.team_id, acting),
+                                    "email": acting.email} if acting is not None else None}
         return await run(request, "person:read", work)
 
     @api.get("/person/inbox")
@@ -122,21 +142,23 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
                                                       include_acked=include_acked, routed=bool(routed),
                                                       scope=auth.team_id)
                 keys = (("person", auth.person_session.id), ("user", auth.user.id))
-                return {"messages": messaging.messages_json(session, msgs, reader_user=auth.user), "cursor": cursor}, keys
+                return {"messages": messaging.messages_json(session, msgs, reader_user=auth.user,
+                                                            delegated=auth.delegated), "cursor": cursor}, keys
         return await polls.long_poll(request, api.state.poll_slots, wait, POLL_INTERVAL, poll)
 
     @api.post("/person/messages/{message_id}/ack")
     async def person_ack(request: Request, message_id: str):
         def work(session, auth: PersonAuth):
-            msg, acked = messaging.person_ack(session, auth.user, message_id, auth.team_id)
+            msg, acked = messaging.person_ack(session, auth.user, message_id, auth.team_id, delegated=auth.delegated)
             return {"message": m(session, msg, auth), "acked": acked}
         return await run(request, "person:read", work)
 
     @api.get("/person/messages/{message_id}")
     async def person_message(request: Request, message_id: str):
         def work(session, auth: PersonAuth):
-            return {"message": m(session, messaging.get_message_for_person(session, auth.user, message_id, auth.team_id),
-                                 auth)}
+            msg = messaging.get_message_for_person(session, auth.user, message_id, auth.team_id,
+                                                   delegated=auth.delegated)
+            return {"message": m(session, msg, auth)}
         return await run(request, "person:read", work)
 
     @api.get("/person/conversations")
@@ -145,7 +167,8 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
         def work(session, auth: PersonAuth):
             return {"conversations": messaging.list_person_conversations(session, auth.user, limit=limit,
                                                                          archived=archived or "exclude",
-                                                                         scope=auth.team_id)}
+                                                                         scope=auth.team_id,
+                                                                         delegated=auth.delegated)}
         return await run(request, "person:read", work)
 
     def _side(conv, user):
@@ -170,14 +193,16 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
         through = await archive_body(request)
 
         def work(session, auth: PersonAuth):
-            conv = messaging.archive_as_person(session, auth.user, conversation_id, True, through, auth.team_id)
+            conv = messaging.archive_as_person(session, auth.user, conversation_id, True, through, auth.team_id,
+                                               delegated=auth.delegated)
             return {"conversation": messaging.conversation_json(session, conv, auth.user)}
         return await run(request, "person:send", work, counted=False)
 
     @api.post("/person/conversations/{conversation_id}/unarchive")
     async def person_unarchive(request: Request, conversation_id: str):
         def work(session, auth: PersonAuth):
-            conv = messaging.archive_as_person(session, auth.user, conversation_id, False, scope=auth.team_id)
+            conv = messaging.archive_as_person(session, auth.user, conversation_id, False, scope=auth.team_id,
+                                               delegated=auth.delegated)
             return {"conversation": messaging.conversation_json(session, conv, auth.user)}
         return await run(request, "person:send", work)
 
@@ -186,12 +211,14 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
                                   after: int = Query(0, ge=0, le=2**63 - 1),
                                   limit: int = Query(100, ge=1, le=2**63 - 1)):
         def work(session, auth: PersonAuth):
-            conv = messaging.get_person_conversation(session, auth.user, conversation_id, auth.team_id)
+            conv = messaging.get_person_conversation(session, auth.user, conversation_id, auth.team_id,
+                                                     delegated=auth.delegated)
             msgs, cursor = messaging.person_conversation_messages(session, auth.user, conv.id, after=after, limit=limit,
-                                                                  scope=auth.team_id)
+                                                                  scope=auth.team_id, delegated=auth.delegated)
             return {"conversation": {"id": str(conv.id), **messaging.peer_json(session, conv, auth.user),
                                      **messaging.archive_json(session, conv)},
-                    "messages": messaging.messages_json(session, msgs, reader_user=auth.user), "cursor": cursor}
+                    "messages": messaging.messages_json(session, msgs, reader_user=auth.user,
+                                                        delegated=auth.delegated), "cursor": cursor}
         return await run(request, "person:read", work)
 
     # §21 C8.2: the inbox setting. (``/person/inbox`` is the person's message pickup, so it lives under
@@ -199,6 +226,7 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
     @api.get("/person/me/inbox")
     async def person_my_inbox(request: Request, team: str | None = Query(None, max_length=40)):
         def work(session, auth: PersonAuth):
+            own_session_only(session, auth)  # §23 A4/A5: never the account's inbox setting through a grant
             chosen = choose_team(session, auth, team)
             return {"team": chosen.slug,
                     "inbox": messaging.inbox_json(session, presentation.inbox_of(session, chosen.id, auth.user.id)),
@@ -211,6 +239,7 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
         data = await json_body(request, "person:send")
 
         def work(session, auth: PersonAuth):
+            own_session_only(session, auth)
             if not isinstance(data, dict):
                 raise ApiError(400, "invalid", "request body must be a JSON object")
             chosen = choose_team(session, auth, data.get("team"))
@@ -248,7 +277,8 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
                 session, auth.user, team.id, id=req.id, to=req.to, body=req.body,
                 conversation_id=req.conversation_id, in_reply_to=req.in_reply_to,
                 max_pending=settings.max_pending, attachments=req.attachments,
-                quotas=quotas.Quotas.from_settings(settings), kind=req.kind)
+                quotas=quotas.Quotas.from_settings(settings), kind=req.kind, acting_user=auth.acting_user,
+                delegation=auth.person_session if auth.delegated else None)
             return created, {"message": m(session, msg, auth), "created": created}
         created, body = await run(request, "person:send", work, counted=False)
         return JSONResponse(body, status_code=201 if created else 200)
@@ -257,7 +287,8 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
     async def person_attachment(request: Request, message_id: str, ref: str):
         """``ref`` is an attachment id or its 1-based position (``raincli me fetch --attachment N``)."""
         def work(session, auth: PersonAuth):
-            msg = messaging.get_message_for_person(session, auth.user, message_id, auth.team_id)
+            msg = messaging.get_message_for_person(session, auth.user, message_id, auth.team_id,
+                                                   delegated=auth.delegated)
             if ref.isdigit() and len(ref) <= 2:
                 metas = messaging.attachments_json(msg)
                 index = int(ref) - 1
@@ -266,10 +297,49 @@ def register(api: FastAPI, *, sessionmaker: Callable, limiter, settings, ApiErro
                 ref_id = metas[index]["id"]
             else:
                 ref_id = ref
-            att = messaging.get_attachment_for_person(session, auth.user, msg.id, ref_id, auth.team_id)
+            att = messaging.get_attachment_for_person(session, auth.user, msg.id, ref_id, auth.team_id,
+                                                      delegated=auth.delegated)
             return att.filename, att.sha256, bytes(att.content)
         filename, sha, content = await run(request, "person:read", work)
         return Response(content, media_type=None, headers=attachment_headers(filename, sha, len(content)))
+
+    # §23 A3: the grants of an own session, and a delegated session made from it (never from a delegated one).
+    @api.get("/person/delegations")
+    async def person_delegations(request: Request):
+        def work(session, auth: PersonAuth):
+            own_session_only(session, auth)
+            team = session.get(Team, auth.team_id)
+            # A18.3/A18.4: per-user and team-wide accounts alike (available, never added by the server), each with the
+            # toasts flag of the grant that would be used.
+            return {"accounts": [{**account_json(session, account, team), "toasts": grant.toasts,
+                                  "kind": identity.grant_kind(grant)}
+                                 for grant, account in identity.grants_of(session, auth.user.id, auth.team_id)]}
+        return await run(request, "person:read", work)
+
+    @api.post("/person/delegations")
+    async def person_delegate(request: Request):
+        data = await json_body(request, "person:send")
+
+        def work(session, auth: PersonAuth):
+            own_session_only(session, auth)
+            if not isinstance(data, dict) or set(data) != {"account"} or not isinstance(data["account"], str) \
+                    or len(data["account"]) > 320:
+                raise ApiError(400, "invalid", 'request body must be {"account": <email>}')
+            try:
+                token, child, account = identity.issue_delegated_session(session, auth.person_session,
+                                                                         data["account"])
+            except identity.DelegationNotFound:
+                raise ApiError(404, "not_found", "not found") from None
+            except identity.TooManyAccounts:
+                raise ApiError(409, "too_many_accounts", "at most 5 accounts in one app") from None
+            except identity.PermissionDenied:
+                raise ApiError(401, "unauthorized", "missing, invalid, expired or revoked person session",
+                               {"WWW-Authenticate": "Bearer"}) from None
+            grant = identity.effective_grant(session, child)
+            account_out = {**account_json(session, account, session.get(Team, auth.team_id)), "toasts": grant.toasts,
+                           "kind": identity.grant_kind(grant)}
+            return {"person_session": token, "account": account_out}
+        return await run(request, "person:send", work)
 
     @api.post("/person/sign-out")
     async def person_sign_out(request: Request):

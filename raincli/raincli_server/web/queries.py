@@ -295,6 +295,7 @@ class MessageLine:
     unread: bool = False  # §21 H2: not yet seen by the viewer (messaging.is_unread_for), for the app's read marking
     hold_text: str = ""  # §21 C5.5: "held: …" in presentation's words, for the website
     updated_at: datetime | None = None  # the "updated" time this viewer may see (H1: never a person's read time)
+    sent_by: str = ""  # §23 A6: "sent by <Name>" on a message written through a grant, for the account itself only
 
     @property
     def shown_state(self) -> str:
@@ -371,14 +372,16 @@ def viewer_state(db: Session, user: User, m: Message) -> str:
     return "held" if state == "stored" and hold else state
 
 
-def _visible(user: User, owned: dict):
+def _visible(user: User, owned: dict, delegated: bool = False):
     """§21: the viewer's person conversations. A row merged into another (``merged_into``) is never listed or opened
-    by its own id; its old URL redirects (``final_conversation_id``)."""
+    by its own id; its old URL redirects (``final_conversation_id``). §23 (A16): acting for an account through a
+    grant, the account's "Your agents" conversation (``own_agents``) is neither listed nor found by id."""
     ids = list(owned)
     clauses = [Conversation.a_user_id == user.id, Conversation.b_user_id == user.id]
     if ids:
         clauses += [Conversation.agent_a_id.in_(ids), Conversation.agent_b_id.in_(ids)]
-    return and_(or_(*clauses), Conversation.merged_into.is_(None))
+    out = and_(or_(*clauses), Conversation.merged_into.is_(None))
+    return and_(out, Conversation.kind != "own_agents") if delegated else out
 
 
 def final_conversation_id(db: Session, conversation_id: object) -> uuid.UUID | None:
@@ -399,15 +402,16 @@ def _archived_by(db: Session, conv: Conversation, user: User, owned: dict) -> st
 
 
 def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
-                       archived: str = "exclude") -> list[ConversationRow]:
+                       archived: str = "exclude", *, delegated: bool = False) -> list[ConversationRow]:
     """The person's conversations and those of machines they own, newest first (§16.6). ``archived``:
-    ``exclude`` (the main list), ``only`` (the Archived view) or ``include`` (§17.2)."""
+    ``exclude`` (the main list), ``only`` (the Archived view) or ``include`` (§17.2). ``delegated`` (§23 A16): a
+    window acting through a grant never lists the account's ``own_agents`` history."""
     if not team_ids:
         return []
     owned = _owned_ids(db, user, team_ids)
     convs = db.execute(
         select(Conversation, Team).join(Team, Team.id == Conversation.team_id)
-        .where(Conversation.team_id.in_(team_ids), _visible(user, owned))
+        .where(Conversation.team_id.in_(team_ids), _visible(user, owned, delegated))
     ).all()
     if not convs:
         return []
@@ -447,7 +451,8 @@ def list_conversations(db: Session, user: User, team_ids: list[uuid.UUID],
     return rows
 
 
-def conversation_head(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object):
+def conversation_head(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object, *,
+                      delegated: bool = False):
     """``(conversation, team, me, peer, owned)`` when the viewer may see it, else None. No messages are read."""
     cid = parse_uuid(conversation_id)
     if cid is None or not team_ids:
@@ -456,7 +461,7 @@ def conversation_head(db: Session, user: User, team_ids: list[uuid.UUID], conver
     owned = _owned_ids(db, user, team_ids)
     row = db.execute(
         select(Conversation, Team).join(Team, Team.id == Conversation.team_id)
-        .where(Conversation.id == cid, Conversation.team_id.in_(team_ids), _visible(user, owned))
+        .where(Conversation.id == cid, Conversation.team_id.in_(team_ids), _visible(user, owned, delegated))
     ).first()
     if row is None:
         return None
@@ -568,15 +573,26 @@ def message_lines(db: Session, user: User, owned: dict, messages: list[Message],
             if outgoing else None,
             initials=present.initials(people.of(m)), state=state,
             hold_text=(presentation.held_line(hold, person, route) or "") if outgoing and hold else "",
-            updated_at=updated_at, unread=messaging.is_unread_for(db, user.id, m, mine)))
+            updated_at=updated_at, unread=messaging.is_unread_for(db, user.id, m, mine),
+            sent_by=_sent_by(db, user, m)))
     return lines, events
 
 
-def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object
-                     ) -> ConversationView | None:
+def _sent_by(db: Session, viewer: User, m: Message) -> str:
+    """§23 A6: the grantee's team name on a message sent through a grant, shown only when the viewer IS the account
+    (the sender), with any session. Never to anyone else (recipients see the account only, AS6)."""
+    acting = getattr(m, "acting_user_id", None)
+    if acting is None or m.sender_user_id != viewer.id:
+        return ""
+    actor = db.get(User, acting)
+    return presentation.name_in_team(db, m.team_id, actor) if actor is not None else ""
+
+
+def get_conversation(db: Session, user: User, team_ids: list[uuid.UUID], conversation_id: object, *,
+                     delegated: bool = False) -> ConversationView | None:
     from raincli_server.web import thread
 
-    head = conversation_head(db, user, team_ids, conversation_id)
+    head = conversation_head(db, user, team_ids, conversation_id, delegated=delegated)
     if head is None:
         return None
     conv, team, me, peer, owned = head
@@ -635,17 +651,21 @@ def attachment_meta(db: Session, message_ids: list[uuid.UUID]) -> dict[uuid.UUID
 
 
 def attachment_for_user(db: Session, user: User, team_ids: list[uuid.UUID], message_id: object,
-                        attachment_id: object) -> Attachment | None:
+                        attachment_id: object, *, delegated: bool = False) -> Attachment | None:
     """The attachment if the person may see its message (§16.6), in one of ``team_ids`` (the teams the session
     covers, §21.13)."""
     mid = parse_uuid(message_id)
     if mid is None or not team_ids:
         return None
     try:
-        att = messaging.get_attachment_for_person(db, user, mid, attachment_id)
+        att = messaging.get_attachment_for_person(db, user, mid, attachment_id, delegated=delegated)
     except messaging.MessagingError:
         return None
-    return att if db.scalar(select(Message.team_id).where(Message.id == mid)) in team_ids else None
+    row = db.execute(select(Message.team_id, Conversation.kind).join(Conversation, Conversation.id == Message.conversation_id)
+                     .where(Message.id == mid)).first()
+    if row is None or row[0] not in team_ids or (delegated and row[1] == "own_agents"):  # §23 A16
+        return None
+    return att
 
 
 def pending_for_user(db: Session, user: User, team_ids: list[uuid.UUID]) -> int:
@@ -748,16 +768,19 @@ _FRIENDLY = {
 def send_as_person(
     db: Session, user: User, team: Team, *, id: uuid.UUID, to: object, body: str,  # noqa: A002
     conversation_id: uuid.UUID | None, in_reply_to: uuid.UUID | None, max_pending: int,
-    attachments: list[tuple[str, bytes]] | None = None, quotas=None,
+    attachments: list[tuple[str, bytes]] | None = None, quotas=None, acting_user: User | None = None,
+    delegation=None,
 ) -> tuple[Message, bool]:
-    """Send as the person (§16.9) through ``messaging.send_as_person``. Raises SendError."""
+    """Send as the person (§16.9) through ``messaging.send_as_person``; ``acting_user``: the grantee of a delegated
+    window (§23 A6). Raises SendError."""
     try:
         return messaging.send_as_person(
             db, user, team.id, id=id, to=to, body=body, conversation_id=conversation_id,
             in_reply_to=in_reply_to, max_pending=max_pending, attachments=attachments or None, quotas=quotas,
+            acting_user=acting_user, delegation=delegation,
         )
     except messaging.MessagingError as exc:
-        if exc.code in ("address_people", "ambiguous_person"):
+        if exc.code in ("address_people", "ambiguous_person", "delegated_scope"):
             raise SendError(exc.code, exc.message) from exc  # presentation's own words (§21 C2)
         # "invalid" messages from the service name the problem (and attachment) without leaking data.
         text = _FRIENDLY.get(exc.code) or (exc.message[:1].upper() + exc.message[1:300] + ".")
