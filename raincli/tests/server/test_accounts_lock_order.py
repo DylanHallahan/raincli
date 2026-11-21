@@ -229,10 +229,12 @@ def test_a_disable_and_a_removal_lock_everything_in_one_call(session, monkeypatc
         session.rollback()
 
 
-def test_two_disables_over_shared_grantees_wait_instead_of_deadlocking(session, engine, monkeypatch,  # noqa: F811
-                                                                       accounts_seed):
-    """Disabling Help Desk and Billing at once: both reach Maya's and Jon's families. The first holds them all from
-    its first lock (paused right there), so the second waits on the roots, then finds nothing left to do there."""
+def test_two_disables_over_shared_grantees_both_complete(session, engine, monkeypatch, accounts_seed):  # noqa: F811
+    """A smoke test, not a reproduction of review L1 (it passes on the per-grant locking of 10106d8 too, since that
+    cycle needs each disable paused between its per-grant locks, and the old per-grant order isn't controllable from
+    here). Disabling Help Desk and Billing at once, the first paused after its first lock: the second waits, both
+    complete without error, and every shared grantee's session for either account ends. The deterministic guard for
+    L1 is ``test_a_disable_and_a_removal_lock_everything_in_one_call``, which fails on 10106d8."""
     from raincli_server.db import make_sessionmaker
 
     s = accounts_seed
