@@ -2109,6 +2109,78 @@ def screen_region(path, left, top, width, height):
         f.write(b"BM" + struct.pack("<IHHI", 54 + len(data), 0, 0, 54) + header + data)
 
 
+def process_environment(pid):
+    """Another process's environment block (64-bit, the same user): its PEB's process parameters, read with
+    ReadProcessMemory. Returns the block as text, or None when the process can't be read."""
+    import ctypes
+    from ctypes import wintypes
+    kernel32, ntdll = ctypes.windll.kernel32, ctypes.windll.ntdll
+    handle = kernel32.OpenProcess(0x0400 | 0x0010, False, int(pid))  # QUERY_INFORMATION | VM_READ
+    if not handle:
+        return None
+    try:
+        class PBI(ctypes.Structure):
+            _fields_ = [("ExitStatus", ctypes.c_void_p), ("PebBaseAddress", ctypes.c_void_p),
+                        ("AffinityMask", ctypes.c_void_p), ("BasePriority", ctypes.c_void_p),
+                        ("UniqueProcessId", ctypes.c_void_p), ("InheritedFromUniqueProcessId", ctypes.c_void_p)]
+        pbi, size = PBI(), wintypes.ULONG(0)
+        if ntdll.NtQueryInformationProcess(handle, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), ctypes.byref(size)) != 0:
+            return None
+
+        def read(address, n):
+            buf, got = ctypes.create_string_buffer(n), ctypes.c_size_t(0)
+            if not kernel32.ReadProcessMemory(handle, ctypes.c_void_p(address), buf, n, ctypes.byref(got)):
+                return None
+            return buf.raw[:got.value]
+        params = read((pbi.PebBaseAddress or 0) + 0x20, 8)  # PEB.ProcessParameters
+        if not params:
+            return None
+        params = int.from_bytes(params, "little")
+        env_ptr, env_size = read(params + 0x80, 8), read(params + 0x3F0, 8)  # Environment, EnvironmentSize
+        if not env_ptr or not env_size:
+            return None
+        block = read(int.from_bytes(env_ptr, "little"), min(int.from_bytes(env_size, "little"), 1 << 20))
+        return block.decode("utf-16-le", errors="replace") if block else None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def h_no_tokens_anywhere(app, tokens):
+    """Review F1 (A10, C22): no account session token in any process's command line, in any readable process
+    environment, or in any file under the app's folder or the RainCLI config folder (app.log, the runtime logs)."""
+    tokens = [t for t in tokens if t]
+    check(tokens, "no tokens to look for")
+    lines = subprocess.run(["powershell", "-NoProfile", "-Command",
+                            "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"],
+                           capture_output=True, text=True, timeout=120).stdout.splitlines()
+    pids = [int(line.split("\t", 1)[0]) for line in lines if line.split("\t", 1)[0].isdigit()]
+    check(not [line for line in lines if any(t in line for t in tokens)], "an account token is on a command line")
+    read = 0
+    for pid in pids:
+        env = process_environment(pid)
+        if env is None:
+            continue
+        read += 1
+        check(not any(t in env for t in tokens), f"an account token is in process {pid}'s environment")
+    app_procs = app_pids(app.root)
+    check(read >= len(app_procs) and read > 0, f"read {read} environments, fewer than the app's {len(app_procs)}")
+    files = 0
+    for root in (app.root, default_agent_config().parent):
+        for path in Path(root).rglob("*"):
+            try:
+                if not path.is_file() or path.stat().st_size > 20 * 1024 * 1024:
+                    continue
+                data = path.read_bytes()
+            except OSError:
+                continue
+            files += 1
+            check(not any(t.encode() in data or t.encode("utf-16-le") in data for t in tokens),
+                  f"an account token is in {path.name}")
+    say(f"PASS: H3. no account session token ({len(tokens)}) on any command line ({len(lines)} processes), in any "
+        f"readable environment ({read}, the app's {len(app_procs)} included) or in any file under the app and config "
+        f"folders ({files}, app.log and the runtime logs included)")
+
+
 def h_shot(page, scheme, name):
     """``themed_shot`` for part H: a message just sent keeps a looping "sending" animation until it's delivered, so
     this waits only for the finite ones (the theme's colour transitions) to finish."""
@@ -2228,6 +2300,14 @@ def part_h(app, server, installers, work):
                     h_shot(local, scheme, f"acc-win-5-this-computer-{size}-{scheme}")
                     local.click("nav.rc-nav button[data-open=inbox]", no_wait_after=True)
                     page = window.page(("app/inbox", "app/conversations/"), timeout=60)
+            # H3 (review F1): the account sessions, read back from accounts.json as this user (DPAPI), are nowhere a
+            # process line, an environment or a log could show them.
+            from raincli_agent import accounts as accounts_mod, person as person_mod
+            held = accounts_mod.load_accounts(str(default_agent_config()))
+            check(held, "accounts.json holds no account after the switches")
+            own = person_mod.load_session(str(default_agent_config()))
+            h_no_tokens_anywhere(app, [SECRETS.add(a.session.reveal()) for a in held]
+                                 + ([SECRETS.add(own.reveal())] if own is not None else []))
             # 3. A labelled toast for the inactive account (best effort: a native notification, captured from the
             # screen), and the window after the switch it asks for.
             h_switch(page, emails["maya"])
