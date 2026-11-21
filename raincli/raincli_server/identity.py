@@ -777,13 +777,7 @@ def repoint_or_revoke(session: Session, grant_id: uuid.UUID) -> int:
     return ended
 
 
-def revoke_grants(session: Session, user_id: uuid.UUID, team_id: uuid.UUID | None = None, *,
-                  grant_id: uuid.UUID | None = None) -> int:
-    """§23 A7: revoke live grants naming ``user_id`` as grantee or account (in ``team_id``, or every team), or the one
-    ``grant_id``, and every session issued through them, in the caller's transaction. Rows stay for the audit.
-
-    A17: a team-wide grant names no grantee, so a member leaving doesn't revoke it; their own delegated sessions in
-    that team (as the acting person, through any grant) end instead. The account leaving revokes it."""
+def _grant_match(user_id: uuid.UUID, team_id: uuid.UUID | None, grant_id: uuid.UUID | None) -> list:
     match = [Grant.revoked_at.is_(None)]
     if grant_id is not None:
         match.append(Grant.id == grant_id)
@@ -791,24 +785,74 @@ def revoke_grants(session: Session, user_id: uuid.UUID, team_id: uuid.UUID | Non
         match.append(or_(Grant.grantee_user_id == user_id, Grant.account_user_id == user_id))
     if team_id is not None:
         match.append(Grant.team_id == team_id)
-    # A19 E2: every live grant of each (team, account) concerned is locked FOR UPDATE, in id order, before anything is
-    # revoked or re-pointed, so two revocations of grants that cover the same sessions can't each re-point to the other.
+    return match
+
+
+def _lock_grants(session: Session, match: list) -> None:
+    """A19 E2: every live grant of each (team, account) the match concerns, FOR UPDATE, in id order, before anything
+    is revoked or re-pointed, so two revocations of grants that cover the same sessions can't each re-point to the
+    other. Grants come before person sessions in the lock order (§23.6)."""
     pairs = session.execute(select(Grant.team_id, Grant.account_user_id).where(*match)).all()
     if pairs:
         session.scalars(select(Grant.id).where(
             Grant.revoked_at.is_(None),
             or_(*[and_(Grant.team_id == t, Grant.account_user_id == a) for t, a in set(pairs)]))
             .order_by(Grant.id).with_for_update()).all()
+
+
+def _with_children(session: Session, ids: list) -> list:
+    if not ids:
+        return []
+    return list(ids) + list(session.scalars(select(PersonSession.id).where(
+        PersonSession.parent_session_id.in_(ids), PersonSession.revoked_at.is_(None))))
+
+
+def prelock_person(session: Session, user_id: uuid.UUID, team_id: uuid.UUID | None = None) -> None:
+    """Review L1: before a member's removal (``team_id``) or a disable (every team) revokes anything, lock ONCE, in
+    the lock order, all it may touch: the grants concerned (E2), then, through ONE ``lock_families`` call, every live
+    person session it may end or re-point (the person's own and delegated sessions, those acting for them, those on
+    their machines, those through their grants) and those sessions' children. Every later lock in the transaction then
+    touches rows it already holds, so two such operations over shared grantees or accounts wait instead of
+    deadlocking."""
+    match = _grant_match(user_id, team_id, None)
+    _lock_grants(session, match)
+    machines = select(Agent.id).where(Agent.owner_user_id == user_id)
+    if team_id is not None:
+        machines = machines.where(Agent.team_id == team_id)
+    ids = list(session.scalars(select(PersonSession.id).where(
+        PersonSession.revoked_at.is_(None),
+        or_(PersonSession.user_id == user_id, PersonSession.acting_user_id == user_id,
+            PersonSession.machine_agent_id.in_(machines),
+            PersonSession.grant_id.in_(select(Grant.id).where(*match))))))
+    lock_families(session, _with_children(session, ids))
+
+
+def revoke_grants(session: Session, user_id: uuid.UUID, team_id: uuid.UUID | None = None, *,
+                  grant_id: uuid.UUID | None = None) -> int:
+    """§23 A7: revoke live grants naming ``user_id`` as grantee or account (in ``team_id``, or every team), or the one
+    ``grant_id``, and every session issued through them, in the caller's transaction. Rows stay for the audit.
+
+    A17: a team-wide grant names no grantee, so a member leaving doesn't revoke it; their own delegated sessions in
+    that team (as the acting person, through any grant) end instead. The account leaving revokes it.
+
+    Review L1: the grants, then every session this may re-point or revoke, are locked once, up front."""
+    match = _grant_match(user_id, team_id, grant_id)
+    _lock_grants(session, match)
+    acting = select(PersonSession.id).join(Grant, Grant.id == PersonSession.grant_id).where(
+        PersonSession.acting_user_id == user_id, PersonSession.revoked_at.is_(None))
+    if team_id is not None:
+        acting = acting.where(Grant.team_id == team_id)
+    touched = list(session.scalars(select(PersonSession.id).where(
+        PersonSession.revoked_at.is_(None), PersonSession.grant_id.in_(select(Grant.id).where(*match)))))
+    if grant_id is None:
+        touched += list(session.scalars(acting))
+    lock_families(session, _with_children(session, touched))
     stmt = update(Grant).where(*match)
     ids = list(session.scalars(stmt.values(revoked_at=now()).returning(Grant.id)))
     session.flush()
     for gid in ids:
         repoint_or_revoke(session, gid)
     if grant_id is None:
-        acting = select(PersonSession.id).join(Grant, Grant.id == PersonSession.grant_id).where(
-            PersonSession.acting_user_id == user_id, PersonSession.revoked_at.is_(None))
-        if team_id is not None:
-            acting = acting.where(Grant.team_id == team_id)
         for sid in session.scalars(acting).all():
             revoke_person_sessions(session, session_id=sid)
     session.flush()
@@ -864,6 +908,7 @@ def remove_member(session: Session, team: Team, user: User, actor: User | None =
     if target.role == "owner" and sum(1 for m in rows if m.role == "owner") <= 1:
         raise IdentityError("cannot remove the last owner of a team")
     groups.leave_all(session, user.id, team.id)  # §22 G4: out of the team's groups, copies withdrawn
+    prelock_person(session, user.id, team.id)  # review L1: grants, then every session this may end, once
     revoke_grants(session, user.id, team.id)  # §23 A7: as grantee or account, with their delegated sessions
     session.delete(target)
     _revoke_owned_agents(session, user, team.id)
@@ -883,6 +928,7 @@ def set_user_active(session: Session, user: User, active: bool, actor: User | No
         for team_id in session.scalars(select(Membership.team_id).where(Membership.user_id == user.id)):
             groups.lock_groups_of(session, user.id, team_id)  # §22 M2: group rows first
             groups.leave_all(session, user.id, team_id)  # out of every group, copies withdrawn
+        prelock_person(session, user.id)  # review L1: grants, then every session this may end, before web sessions
         bump_credential_epoch(user)  # §18.1: a disable ends every recognised device too
         _revoke_web_sessions(session, user)
         revoke_grants(session, user.id)  # §23 A7: in every team, as grantee or account

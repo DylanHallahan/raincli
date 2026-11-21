@@ -2288,7 +2288,9 @@ them, and the app-mode web sessions and handoff codes of all of those.
 **The lock order** (every path that locks person sessions): the family ROOTS first (the own sessions concerned, and
 the parents of the delegated sessions concerned), by id; then the delegated sessions, by id; then their web sessions
 and handoff codes. A transaction never locks a delegated session without already holding its root. Grants, when
-locked, come before sessions: issuing locks the grant it resolved `FOR SHARE`, then the parent `FOR UPDATE`.
+locked, come before sessions: issuing locks the grant it resolved `FOR SHARE`, then the parent `FOR UPDATE`. An
+operation that may end many sessions (a member's removal, a disable, a grant's revocation) locks them all ONCE, up
+front: the grants concerned, then every session it may end or re-point and their children, in one pass of this order.
 - **The grantee's sign-out, password change and Signed-in apps revoke:** their own sessions, then the children.
 - **The machine's revoke or credential rotation:** every session on it, delegated ones included.
 - **Revoking a grant** (`grant-remove`, or a cascade below): every live grant of the (team, account) concerned is

@@ -185,3 +185,79 @@ def test_every_path_locks_roots_before_children(session, monkeypatch, accounts_s
     identity.revoke_person_sessions(session, session_id=parent)
     assert calls[:2] == [([parent], False), ([child], False)]
     session.rollback()
+
+
+# Review L1: a disable or a member's removal locks everything it may touch ONCE ---------------------------------
+
+def _shared_grantees(session, s):
+    """Maya and Jon may each act as Help Desk AND Billing, and hold a session for both: two accounts, two grantees."""
+    from conftest_accounts import make_grant, own_session
+
+    nw, jon = s["teams"]["northwind"], s["people"]["Jon"]
+    make_grant(session, nw, jon, s["people"]["Help Desk"])
+    make_grant(session, nw, jon, s["people"]["Billing"])
+    session.commit()
+    maya_root, jon_root = s["sessions"]["maya_own"], own_session(session, s["person_tokens"]["Jon"])
+    children = [s["sessions"]["helpdesk"].id]
+    for parent, email in ((maya_root, "billing@example.test"), (jon_root, "helpdesk@example.test"),
+                          (jon_root, "billing@example.test")):
+        children.append(identity.issue_delegated_session(session, parent, email)[1].id)
+    session.commit()
+    return children
+
+
+@pytest.mark.parametrize("who", ["Help Desk", "Maya"])
+def test_a_disable_and_a_removal_lock_everything_in_one_call(session, monkeypatch, accounts_seed, who):  # noqa: F811
+    s = accounts_seed
+    _shared_grantees(session, s)
+    calls = []
+    original = identity.lock_families
+
+    def spy(db, ids, *, share=False):
+        calls.append(set(ids))
+        original(db, ids, share=share)
+    monkeypatch.setattr(identity, "lock_families", spy)
+    for run in (lambda: identity.set_user_active(session, s["people"][who], False),
+                lambda: identity.remove_member(session, s["teams"]["northwind"], s["people"][who])):
+        calls.clear()
+        run()
+        assert calls and calls[0], "nothing was locked up front"
+        held = set(calls[0])
+        held |= {r for (r,) in session.execute(select(PersonSession.parent_session_id).where(
+            PersonSession.id.in_(held), PersonSession.parent_session_id.is_not(None)))}
+        assert all(c <= held for c in calls[1:]), "a later lock reached rows the first one didn't hold"
+        session.rollback()
+
+
+def test_two_disables_over_shared_grantees_wait_instead_of_deadlocking(session, engine, monkeypatch,  # noqa: F811
+                                                                       accounts_seed):
+    """Disabling Help Desk and Billing at once: both reach Maya's and Jon's families. The first holds them all from
+    its first lock (paused right there), so the second waits on the roots, then finds nothing left to do there."""
+    from raincli_server.db import make_sessionmaker
+
+    s = accounts_seed
+    children = _shared_grantees(session, s)
+
+    def disable(email):
+        def work():
+            other = make_sessionmaker(engine)()
+            try:
+                person = identity.find_user_by_email(other, email)
+                identity.set_user_active(other, person, False)
+                other.commit()
+            finally:
+                other.close()
+        return work
+    pause = Pause(monkeypatch, share=False)
+    first, fbox = _run(disable("helpdesk@example.test"))
+    assert pause.locked.wait(10)
+    second, sbox = _run(disable("billing@example.test"))
+    second.join(1.5)
+    assert second.is_alive()  # waiting on the families the first holds
+    pause.go.set()
+    first.join(20)
+    second.join(20)
+    assert "error" not in fbox and "error" not in sbox, (fbox, sbox)  # no DeadlockDetected
+    session.expire_all()
+    assert all(session.get(PersonSession, c).revoked_at is not None for c in children)
+    assert identity.authenticate_person(session, s["person_tokens"]["Maya"], touch=False) is not None  # hers stays
