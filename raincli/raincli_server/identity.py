@@ -641,14 +641,20 @@ def issue_delegated_session(session: Session, parent: PersonSession, account_ema
     (grantee = the parent's person, the account, the machine's team) and both people active members. One live child
     per (parent, grant) (A14 M5): an existing one is revoked, with its web sessions, and a fresh one issued. At most
     ``MAX_DELEGATED`` accounts per parent. The raw token is returned once."""
+    # S1 lock order: the grant (FOR SHARE, so a grant-remove can't commit between resolving and issuing), then the
+    # parent (the family root, FOR UPDATE: it serializes adds under one parent), then its children.
+    machine = session.get(Agent, parent.machine_agent_id)
+    account = find_user_by_email(session, account_email) if isinstance(account_email, str) else None
+    grant = usable_grant(session, machine.team_id, parent.user_id, account.id) \
+        if account is not None and machine is not None else None
+    if grant is not None:
+        grant = session.scalar(select(Grant).where(Grant.id == grant.id, Grant.revoked_at.is_(None))
+                               .with_for_update(read=True).execution_options(populate_existing=True))
     parent = session.scalar(select(PersonSession).where(PersonSession.id == parent.id).with_for_update()
-                            .execution_options(populate_existing=True))  # serializes adds under one parent
+                            .execution_options(populate_existing=True))
     ts = now()
     if parent is None or parent.delegated or not _session_live(session, parent, ts):
         raise PermissionDenied("a delegated session is issued only from a live own session")
-    machine = session.get(Agent, parent.machine_agent_id)
-    account = find_user_by_email(session, account_email) if isinstance(account_email, str) else None
-    grant = usable_grant(session, machine.team_id, parent.user_id, account.id) if account is not None else None
     if (grant is None or not _active_member(session, machine.team_id, account.id)
             or not _active_member(session, machine.team_id, parent.user_id)):
         raise DelegationNotFound("no such account to act as")
@@ -670,6 +676,27 @@ def issue_delegated_session(session: Session, parent: PersonSession, account_ema
     session.add(child)
     session.flush()
     return token, child, account
+
+
+def _lock_rows(session: Session, ids, *, share: bool) -> None:
+    """One step of ``lock_families``: these person session rows, by id."""
+    if ids:
+        session.execute(select(PersonSession.id).where(PersonSession.id.in_(ids)).order_by(PersonSession.id)
+                        .with_for_update(read=share))
+
+
+def lock_families(session: Session, ids, *, share: bool = False) -> None:
+    """THE lock order for person sessions (§23.6, server review S1): the family ROOTS first (the own sessions among
+    ``ids`` and the parents of the delegated ones), by id, then the delegated sessions among ``ids``, by id. A
+    transaction never locks a delegated session without already holding its root, so a window switch (``share``)
+    and a revocation of the same family wait for each other instead of deadlocking, whichever ids they have."""
+    ids = set(ids)
+    if not ids:
+        return
+    rows = session.execute(select(PersonSession.id, PersonSession.parent_session_id)
+                           .where(PersonSession.id.in_(ids))).all()
+    _lock_rows(session, sorted({parent or sid for sid, parent in rows}), share=share)
+    _lock_rows(session, sorted(sid for sid, parent in rows if parent is not None), share=share)
 
 
 def revoke_person_sessions(session: Session, *, session_id: uuid.UUID | None = None,
@@ -695,6 +722,11 @@ def revoke_person_sessions(session: Session, *, session_id: uuid.UUID | None = N
         stmt = stmt.where(PersonSession.grant_id == grant_id)
     if not include_delegated:
         stmt = stmt.where(PersonSession.acting_user_id.is_(None))
+    # S1: lock what this may revoke (the matches and their delegated children) in the one order, roots first.
+    matched = list(session.scalars(select(PersonSession.id).where(stmt.whereclause)))
+    if matched:
+        lock_families(session, matched + list(session.scalars(select(PersonSession.id).where(
+            PersonSession.parent_session_id.in_(matched), PersonSession.revoked_at.is_(None)))))
     ts = now()
     ids = list(session.scalars(stmt.values(revoked_at=ts).returning(PersonSession.id)))
     if ids:
@@ -731,8 +763,11 @@ def repoint_or_revoke(session: Session, grant_id: uuid.UUID) -> int:
     grant when one still covers it (so the audit names the grant in use), and revoked otherwise (with its web
     sessions and handoff codes). Returns how many were revoked."""
     ended = 0
-    for ps in session.scalars(select(PersonSession).where(PersonSession.grant_id == grant_id,
-                                                          PersonSession.revoked_at.is_(None))).all():
+    ids = list(session.scalars(select(PersonSession.id).where(PersonSession.grant_id == grant_id,
+                                                              PersonSession.revoked_at.is_(None))))
+    lock_families(session, ids)  # S1: roots first, then these sessions, by id
+    for ps in session.scalars(select(PersonSession).where(PersonSession.id.in_(ids), PersonSession.revoked_at.is_(None))
+                              .order_by(PersonSession.id).execution_options(populate_existing=True)).all():
         grant = effective_grant(session, ps)
         if grant is not None and delegated_ok(session, ps):
             ps.grant_id = grant.id

@@ -2284,6 +2284,11 @@ machine's runtime, connector, credential and inbox setting are never touched by 
 ### 23.6 The cascade
 `revoke_person_sessions` ends, in one transaction, the matching sessions, the delegated sessions whose parent is among
 them, and the app-mode web sessions and handoff codes of all of those.
+
+**The lock order** (every path that locks person sessions): the family ROOTS first (the own sessions concerned, and
+the parents of the delegated sessions concerned), by id; then the delegated sessions, by id; then their web sessions
+and handoff codes. A transaction never locks a delegated session without already holding its root. Grants, when
+locked, come before sessions: issuing locks the grant it resolved `FOR SHARE`, then the parent `FOR UPDATE`.
 - **The grantee's sign-out, password change and Signed-in apps revoke:** their own sessions, then the children.
 - **The machine's revoke or credential rotation:** every session on it, delegated ones included.
 - **Revoking a grant** (`grant-remove`, or a cascade below): every live grant of the (team, account) concerned is
@@ -2306,8 +2311,10 @@ them, and the app-mode web sessions and handoff codes of all of those.
 - **Every other case is refused exactly as before**, with the same response.
 - **A cookie of another install** reads as no session (§16.14 S3): the handoff succeeds as before, and the other
   install's session is left alone.
-- **Locking:** the handoff locks both person sessions `FOR SHARE` (by id), then the code, the order a revocation takes
-  (sessions, then their codes). A revocation in flight wins outright; the handoff then refuses.
+- **Locking:** the handoff locks the person sessions it decides on `FOR SHARE` in the lock order of §23.6 (the family
+  root first, then the delegated sessions by id), then the code. A revocation takes the same order, so the two wait
+  for each other and never deadlock: a revocation in flight wins outright and the handoff then refuses; a switch in
+  flight completes and the revocation then ends it.
 
 ### 23.8 Operator commands (`raincli-admin`)
 - `grant-add TEAM GRANTEE_EMAIL ACCOUNT_EMAIL [--toasts on|off]`, or `grant-add TEAM --account EMAIL --all-members

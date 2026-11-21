@@ -427,13 +427,14 @@ def app_handoff(request: Request, code: str = "", db: Session = Depends(get_db))
     if found is None:
         raise WebError(400, *_HANDOFF_ERROR)
     existing = auth.app_session(db, request)
-    # §23 A8 (A14 L1): the person sessions decided on are locked FOR SHARE first (in id order), then the code, the
-    # order a revocation takes (sessions, then their codes), so one running at the same time waits for this handoff or
-    # wins outright; never half of each, and never a lock cycle.
+    # §23 A8 (A14 L1, server review S1): the person sessions decided on are locked FOR SHARE in THE lock order
+    # (identity.lock_families: the family roots first, then the delegated sessions, each by id), then the code. A
+    # revocation takes the same order (roots, children, then their codes), so one running at the same time waits for
+    # this handoff or wins outright; never half of each, and never a lock cycle.
+    decided = {found} | ({existing.person_session_id} if existing is not None else set())
+    identity.lock_families(db, decided, share=True)
     locked = {row.id: row for row in db.scalars(
-        select(PersonSession).where(PersonSession.id.in_(
-            {found} | ({existing.person_session_id} if existing is not None else set())))
-        .order_by(PersonSession.id).with_for_update(read=True).execution_options(populate_existing=True))}
+        select(PersonSession).where(PersonSession.id.in_(decided)).execution_options(populate_existing=True))}
     hc = db.scalar(select(HandoffCode).where(HandoffCode.code_hash == security.hash_token(code))
                    .with_for_update().execution_options(populate_existing=True))
     if hc is None or hc.person_session_id not in locked:  # revoked (its code deleted) while we waited
