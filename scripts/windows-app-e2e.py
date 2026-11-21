@@ -2109,6 +2109,22 @@ def screen_region(path, left, top, width, height):
         f.write(b"BM" + struct.pack("<IHHI", 54 + len(data), 0, 0, 54) + header + data)
 
 
+def h_shot(page, scheme, name):
+    """``themed_shot`` for part H: a message just sent keeps a looping "sending" animation until it's delivered, so
+    this waits only for the finite ones (the theme's colour transitions) to finish."""
+    page.emulate_media(color_scheme=scheme)
+    try:
+        wait_for(f"the {scheme} theme to settle", lambda: page.evaluate(
+            "document.getAnimations().filter((a) => !a.effect || a.effect.getTiming().iterations !== Infinity).length")
+            == 0, timeout=10, interval=0.1)
+    except Failure:  # name what still runs, then shoot: the views are checked separately, the motion is decoration
+        running = page.evaluate("""() => document.getAnimations().map((a) => [a.animationName || a.transitionProperty
+            || a.id || 'animation', (a.effect && a.effect.target && a.effect.target.className || '').toString()
+            .slice(0, 40), a.effect ? a.effect.getTiming().iterations : null])""")
+        say(f"NOTE: {name}: animations still running after 10 s: {running[:6]}")
+    shot(page, name)
+
+
 def h_switch(page, email):
     """The switcher: open it, click the account, wait for the window to show it (the rail avatar's name)."""
     page.click("[data-switcher-toggle]")
@@ -2185,7 +2201,7 @@ def part_h(app, server, installers, work):
                     wait_for("Help Desk's unread count", lambda: page.locator(badge).count() == 1, timeout=30, interval=1)
                     count = page.inner_text(badge).split()[0]
                     check(count == "3", f"Help Desk's count in the switcher is {count!r}")
-                    themed_shot(page, scheme, f"acc-win-1-switcher-open-{size}-{scheme}")
+                    h_shot(page, scheme, f"acc-win-1-switcher-open-{size}-{scheme}")
                     page.keyboard.press("Escape")
                     # 2. Switched to Help Desk: the title, the rail avatar, its list, and "As:" in the composer.
                     h_switch(page, emails["helpdesk"])
@@ -2193,14 +2209,14 @@ def part_h(app, server, installers, work):
                     page.wait_for_selector(".rc-as")
                     check(page.inner_text(".rc-as") == "As: Help Desk" and page.title().endswith(" · Help Desk"),
                           f"the cues: {page.inner_text('.rc-as')!r}, {page.title()!r}")
-                    themed_shot(page, scheme, f"acc-win-2-as-help-desk-{size}-{scheme}")
+                    h_shot(page, scheme, f"acc-win-2-as-help-desk-{size}-{scheme}")
                     # 4. A message written as Help Desk shows "sent by Maya" in Help Desk's own view.
                     if (width, scheme) == (H_SIZES[0][0], "light"):
                         page.fill("textarea#body", "On it, Jon. Ticket 42.")
                         page.keyboard.press("Control+Enter")
                     page.wait_for_selector(".rc-sent-by")
                     check(page.inner_text(".rc-sent-by") == "sent by Maya", "no 'sent by Maya' on the delegated send")
-                    themed_shot(page, scheme, f"acc-win-4-sent-by-{size}-{scheme}")
+                    h_shot(page, scheme, f"acc-win-4-sent-by-{size}-{scheme}")
                     found = [h for h in hidden if h in page.content()]
                     check(not found, f"machine or agent names in Help Desk's window: {found}")
                     # 5. This computer while Help Desk shows: it belongs to Maya.
@@ -2209,7 +2225,7 @@ def part_h(app, server, installers, work):
                     wait_for("the belongs-to line", lambda: local.is_visible("#belongs"), timeout=30, interval=0.5)
                     check(local.inner_text("#belongs").startswith("This computer belongs to Maya."),
                           f"the line: {local.inner_text('#belongs')!r}")
-                    themed_shot(local, scheme, f"acc-win-5-this-computer-{size}-{scheme}")
+                    h_shot(local, scheme, f"acc-win-5-this-computer-{size}-{scheme}")
                     local.click("nav.rc-nav button[data-open=inbox]", no_wait_after=True)
                     page = window.page(("app/inbox", "app/conversations/"), timeout=60)
             # 3. A labelled toast for the inactive account (best effort: a native notification, captured from the
