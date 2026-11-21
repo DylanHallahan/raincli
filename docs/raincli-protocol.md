@@ -2184,3 +2184,151 @@ Every quoted value is escaped as in the 1:1 frame. Both reply commands are the 1
 **Open latest (D12):** Inbox opens the newest activity, compared by team number: the 1:1 conversation with the
 highest last message number, or the group with the highest post number. Both are numbers in the session's one team
 (§21.13).
+
+## 23. Account switching (v0.6.2, binding)
+One app on one machine can act as several people of the machine's team: its owner, and each account the operator has
+granted the owner. Switching changes only which person the app's window (and, per command, the CLI) acts as. The
+machine's runtime, connector, credential and inbox setting are never touched by it.
+
+**Terms:**
+- **the grantee:** the person who acts (the machine's owner);
+- **the account:** the person acted as;
+- **an own session:** a person session issued to the owner of its machine (§16.3);
+- **a delegated session:** one issued through a grant, acting as the account for the grantee.
+
+### 23.1 Grants
+- **An individual grant** names a team, a grantee and an account: two different people, both active members of that
+  team. There is at most one live individual grant per (team, grantee, account).
+- **An all-members grant** names a team and an account, and no grantee. It covers every current and future active
+  member of the team except the account itself and except any SHARED account: a person who is the account of a live
+  grant (of either kind) in that team. There is at most one live all-members grant per (team, account). A member who
+  leaves and re-joins is covered again at once.
+- **`toasts`:** each grant says whether the app shows toasts for the account used through it (set by `grant-add`:
+  on for an individual grant, off for an all-members grant, unless `--toasts on|off`).
+- **The effective grant** of a delegated session is decided at every use: the live individual grant for (grantee,
+  account) in the machine's team, else the live all-members grant for the account that covers the grantee, else none;
+  both people must be active members of that team. It authorizes the session and sets its capabilities (the toasts
+  flag, §23.3's reply rule). A session's recorded `grant_id` is for the audit only and never authorizes.
+- **Only the operator** adds, removes and lists grants, with `raincli-admin` (§23.8). No API, app or website route does.
+- **A grant is revoked, never deleted.** Revoked grants stay for the audit. A grant names users and a team, never a
+  membership, so removing a member works whatever grants name them. Active membership is checked when a grant is added,
+  when a session is issued through it, and whenever that session is used (§23.3).
+
+### 23.2 Delegated sessions
+- **`GET /api/v1/person/delegations`** (own session only): `{"accounts": [{email, display_name, team}]}`, the caller's
+  live grants in the team of its session's machine whose account is an active member.
+- **`POST /api/v1/person/delegations`** with `{"account": <email>}` (own session only; `person:send`).
+  - **Requires:** the caller's session is a live own session on an active machine; a live grant with the caller as
+    grantee, that account, in the machine's team; both people active members of that team.
+  - **Answers** `200 {"person_session": "rps_…", "account": {email, display_name, team}}`. The token is shown once.
+  - **Refusals:** no grant, an unknown email, a person of another team or the caller themselves: `404 not_found`, one
+    body for all. More than 4 delegated accounts under this session: `409 too_many_accounts` (5 accounts per app, the
+    own one included).
+  - **One live child per (parent, account):** a second add for the same account, through either kind of grant,
+    revokes the first child (with its app-mode web sessions and handoff codes) and issues a fresh one, in the same
+    transaction. Re-adding is how a lost token is replaced.
+  - **Both kinds are listed** with `kind` (`individual` or `all_members`) and `toasts` (the effective grant's flag).
+    An all-members account is AVAILABLE: the server never adds it; the app adds it on one click, the CLI on first use.
+- **The new session:** `user_id` = the account; the parent's machine; `acting_user_id` = the grantee; the effective
+  grant (audit);
+  `parent_session_id` = the caller's session; the parent's scopes. It ends no later than its parent: its expiry is the
+  earlier of its own and the parent's, and using it also keeps the parent alive (the same 30 s touch).
+- **The owner rule of §16.3 is relaxed only here.** Every other person session is still issued only to the owner of
+  an active machine.
+- **A new own sign-in on a machine** (`/app/login` with a person session, or the person-only sign-in) ends every
+  delegated session on that machine. The app adds its accounts again under the new session.
+- **Removing an account from the app:** `POST /api/v1/person/sign-out` with the delegated token ends only that
+  session. The grant stays.
+
+### 23.3 What a delegated session may do
+- **Everything the person API and app mode allow the account,** except, answered `403 delegated_scope` ("Not allowed
+  while acting for <account>."):
+  - `GET` and `PUT /api/v1/person/me/inbox`, and the app's `POST /app/inbox`;
+  - `GET` and `POST /api/v1/person/delegations`.
+- **Through an all-members effective grant,** a reply whose parent is an escalation or the account's own traffic
+  (route `self`, or its self or own_agents conversation) answers `403 delegated_scope`, "Replying to <account>'s
+  agents needs an individual grant." Reading them, archiving and unarchiving are allowed. An individual grant may
+  reply (§23.4).
+- **Never reachable from app mode anyway:** the account's password, settings and Signed-in apps (§16.12 C2).
+- **`raincli me approve`** acts on messages held on the machine that holds them, which is never the grantee's machine
+  for the account's agents; the client refuses `--as` on it.
+- **Reads** set the account's own read state (§21 H2), shared by everyone who works the account. Senders never see
+  reads (PR5).
+- **Every use checks the belt:** the parent is a live, unexpired own session of the grantee on the same machine, and
+  the session has an effective grant (§23.1), so both are active members of the machine's team. Otherwise the session is
+  refused as unknown (person API `401`, an app-mode cookie as signed out, a handoff as unusable).
+
+### 23.4 What a delegate sees (owner views)
+- **`owner_view`:** the viewer owns the machine AND the session isn't delegated. Every owner-only branch uses it.
+- **Through a grant,** the delegate sees the account's machines as a teammate would:
+  - message JSON: no `from_agent`, the coarse `hold_reason`, people endpoints only, no handles;
+  - no owner warnings, no inbox banner or candidates, no "Your inbox" step, no Machines page;
+  - the `routed=1` feed (the toasts' source) with the same redaction, so an escalation record carries no handle.
+- **"From your agents"** (`self`): shown, as "<Account> · agent", with no agent names. The delegate may reply to an
+  escalation (§21 H2 (ii)): the server takes the target (the escalating machine and its stated agent) from
+  `in_reply_to`; the request and every answer carry only the message id.
+- **"Your agents"** (`own_agents`, the migrated machine-to-machine history): hidden. It is absent from every list,
+  `/app/live` and the person API, and by id it gets the unknown-id answer.
+- **The account's Signed-in apps** never list a delegated session (it's on the grantee's machine) and can't end one.
+  The grantee, the operator, or the cascade (§23.6) does.
+
+### 23.5 Attribution
+- **A person send through a delegated session** (send or reply; person API or app) records `messages.acting_user_id` =
+  the grantee and `messages.grant_id` = the effective grant at send time (both, or neither).
+- **`sent_by`:** `{display_name, email}` of the grantee, in the message JSON for a PERSON reader who is the account
+  (any of its sessions); `null` for everyone else, for every machine reader, and on every other message. The app shows
+  "sent by <Name>" from the same rule.
+- **Recipients** see the account only: their message JSON, their machines (and so the frame), their pages and live
+  fragments never carry the grantee.
+
+### 23.6 The cascade
+`revoke_person_sessions` ends, in one transaction, the matching sessions, the delegated sessions whose parent is among
+them, and the app-mode web sessions and handoff codes of all of those.
+- **The grantee's sign-out, password change and Signed-in apps revoke:** their own sessions, then the children.
+- **The machine's revoke or credential rotation:** every session on it, delegated ones included.
+- **Revoking a grant** (`grant-remove`, or a cascade below): every live grant of the (team, account) concerned is
+  locked `FOR UPDATE` in id order first. Then each session recorded under a revoked grant is re-pointed to its new
+  effective grant, or, with none left, revoked (with its web sessions and handoff codes).
+- **Removing either person from the team:** their live individual grants in that team (as grantee or account), any
+  all-members grant for them as the account, and every delegated session they act in there. An all-members grant
+  stays when a member who isn't its account leaves.
+- **Disabling either person:** their live grants in every team, and every session through them or acting as them.
+- **The account's own password change** ends the account's own sessions and web sessions, but NOT the delegated
+  sessions acting as it, nor the app-mode web sessions made from them: no password of the account is involved in a
+  grant.
+
+### 23.7 Switching the window (the handoff)
+`GET /app/handoff` (§16.10) never replaces an app-mode session of another user, except:
+- **the switch:** the browser's existing app-mode session is live and bound to the same install as the code, and its
+  person session and the code's are LINKED: both live, on the same machine, and one is the own session at the root of
+  the other's family (the parent) or both are children of it. Then the old web session is revoked and the new one
+  starts, in one transaction.
+- **Every other case is refused exactly as before**, with the same response.
+- **A cookie of another install** reads as no session (§16.14 S3): the handoff succeeds as before, and the other
+  install's session is left alone.
+- **Locking:** the handoff locks both person sessions `FOR SHARE` (by id), then the code, the order a revocation takes
+  (sessions, then their codes). A revocation in flight wins outright; the handoff then refuses.
+
+### 23.8 Operator commands (`raincli-admin`)
+- `grant-add TEAM GRANTEE_EMAIL ACCOUNT_EMAIL [--toasts on|off]`, or `grant-add TEAM --account EMAIL --all-members
+  [--toasts on|off]`;
+- `grant-remove TEAM GRANTEE_EMAIL ACCOUNT_EMAIL`, or `grant-remove TEAM --account EMAIL --all-members` (each prints
+  how many sessions ended; re-pointed sessions don't count);
+- `grant-list TEAM`: every grant, live and revoked, with its toasts flag and times; an all-members grant reads
+  "<account>: all members";
+- `delegated-actions TEAM [--since DATE]`: each SEND made through a grant (actor, account, time, conversation by the
+  other side's person label, message id, "via individual grant" or "via all-members grant"). Reads and archives
+  aren't audited. Never a body.
+- **A refusal** names what's wrong and exits with code 2: a person who isn't an active member of that team (a grant
+  across teams included), the grantee as their own account, a duplicate live grant (of either kind), no live grant to
+  remove, mixed or missing arguments, a bad `--since`.
+- **Output** is people only (names and emails), never machines or agents.
+
+### 23.9 `/api/v1/person/me` and compatibility
+- **`GET /api/v1/person/me`** adds `unread` (the account's own unread count in the session's team, the switcher's
+  number), `delegated` (bool), `acting_user` (`{display_name, email}` or null), and, from the effective grant,
+  `toasts` and `grant_kind` (`individual`, `all_members`, or null for an own session). Fields are additive.
+- **Clients before 0.6.2** never ask for delegated sessions and read only `person.json`. They work as one person.
+- **Migration 0013** adds `grants` (both kinds, with `toasts`), the three delegated columns on `person_sessions`, and
+  `messages.acting_user_id` and `messages.grant_id`. Its downgrade deletes every delegated session (with its web
+  sessions and handoff codes) and every grant; the acting person and grant on messages are lost.

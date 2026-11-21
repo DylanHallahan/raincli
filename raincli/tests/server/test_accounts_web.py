@@ -1,0 +1,306 @@
+"""The app's account switching pages (protocol §23 A9; brief AS7, C3, C4, C7, C10; A14 L2, L3; A16), on the shared
+accounts seed (tests/conftest_accounts.py): Maya's own window and her window acting for Help Desk (a delegated
+session), on her machine zq-handle-maya. The switcher on "Signed in as", GET /app/accounts, the cues (the rail
+avatar, the page title, "As:"), "sent by" in the account's own view only, "Your agents" hidden under a grant, the
+version gate and the sentinel safety. Real PostgreSQL."""
+
+from __future__ import annotations
+
+import re
+import uuid
+
+import pytest
+from fastapi.testclient import TestClient
+
+from api_helpers import auth
+from conftest_accounts import accounts_seed  # noqa: F401  (fixture)
+from conftest_v06 import PASSWORD, v06_seed  # noqa: F401  (fixture)
+from raincli_server import accounts, markdown
+from test_app_mode import NAV, WEBVIEW_UA, handoff_code
+from test_v06_web import text
+from test_web_app import login
+
+UNKNOWN = str(uuid.uuid4())
+V062 = {"User-Agent": WEBVIEW_UA + " RainCLIAppVersion/0.6.2"}
+V061 = {"User-Agent": WEBVIEW_UA + " RainCLIAppVersion/0.6.1"}
+
+
+def _window(app, client, token, headers):
+    w = TestClient(app, headers=headers)
+    r = w.get(f"/app/handoff?code={handoff_code(client, token)}", headers=NAV, follow_redirects=False)
+    assert r.status_code == 303, r.text
+    return w
+
+
+@pytest.fixture
+def windows(app, client, accounts_seed):  # noqa: F811
+    s = accounts_seed
+    opened = {"own": _window(app, client, s["person_tokens"]["Maya"], V062),
+              "helpdesk": _window(app, client, s["delegated_token"], V062),
+              "old": _window(app, client, s["person_tokens"]["Maya"], V061),
+              "jon": _window(app, client, s["person_tokens"]["Jon"], V062)}
+    yield opened
+    for w in opened.values():
+        w.close()
+
+
+def switcher(html):
+    m = re.search(r'<div class="rc-whoami rc-switcher" data-switcher>(.*?)\n</div>\n', html, re.S)
+    return m.group(1) if m else None
+
+
+def rows(panel):
+    """(email, label text, unread) per account row of the switcher, in order."""
+    out = []
+    for email, inner in re.findall(r'data-account-switch="([^"]+)"[^>]*>(.*?)</button>', panel, re.S):
+        count = re.search(r'<span class="rc-count">(\d+)', inner)
+        out.append((email, text(inner), int(count.group(1)) if count else 0))
+    return out
+
+
+# C3, C7: the switcher and its counts -------------------------------------------------------------------------
+
+def test_the_switcher_lists_the_windows_accounts_with_unread_counts(windows, accounts_seed, session):  # noqa: F811
+    s = accounts_seed
+    nw = s["teams"]["northwind"].id
+    page = windows["own"].get("/app/inbox").text
+    panel = switcher(page)
+    assert panel is not None
+    helpdesk_unread = accounts.unread_total(session, s["people"]["Help Desk"].id, nw)
+    assert helpdesk_unread == 3  # Jon's message, Priya's agent's held one, and the ops agent's escalation
+    listed = rows(panel)
+    assert [(e, n) for e, _, n in listed] == [("maya@example.test", 0), ("helpdesk@example.test", 3)]  # own first
+    assert 'data-account-switch="maya@example.test" aria-current="true"' in panel  # the one shown
+    assert re.search(r'data-account-add="billing@example.test"', panel)  # granted, not added
+    assert re.search(r'data-account-remove="helpdesk@example.test"', panel)  # delegated: removable
+    assert 'data-account-remove="maya@example.test"' not in panel  # the own account isn't
+    assert ">3<" in panel.split("rc-switcher-btn", 1)[1].split("</button>", 1)[0]  # the others' total on the line
+    # The rail's avatar names the account and opens the switcher.
+    assert re.search(r'<button type="button" class="rc-rail-avatar" data-switcher-open aria-label="Signed in as Maya\. '
+                     r'Switch account" title="Maya">MA</button>', page)
+    # People, never machines or agents (AS13): none of Help Desk's machine names in Maya's own window either.
+    assert all(x not in page for x in s["helpdesk_strings"])
+
+
+def test_get_app_accounts(windows, client, accounts_seed):  # noqa: F811
+    own = windows["own"].get("/app/accounts").json()
+    assert [(a["email"], a["kind"], a["active"], a["unread"]) for a in own["accounts"]] == [
+        ("maya@example.test", "own", True, own["accounts"][0]["unread"]), ("helpdesk@example.test", "granted", False, 3)]
+    assert own["accounts"][0]["initials"] == "MA" and own["accounts"][1]["display_name"] == "Help Desk"
+    assert own["addable"] == [{"email": "billing@example.test", "display_name": "Billing", "kind": "individual"}]
+    hd = windows["helpdesk"].get("/app/accounts").json()
+    assert [(a["email"], a["active"]) for a in hd["accounts"]] == [("maya@example.test", False),
+                                                                    ("helpdesk@example.test", True)]
+    assert hd["addable"] == []  # adding is the own session's (A9)
+    assert all("zq-" not in str(v) for a in own["accounts"] + hd["accounts"] for v in a.values())
+    # Not on the website.
+    assert login(client, "maya@example.test", PASSWORD).status_code == 303
+    assert client.get("/app/accounts").status_code == 404
+
+
+def test_the_counts_move_with_the_live_list(windows, accounts_seed, client):  # noqa: F811
+    s = accounts_seed
+    first = windows["own"].get("/app/live?after=0").json()
+    before = rows(switcher(first["list"]["html"]))
+    r = client.post("/api/v1/messages", headers=auth(s["machine_tokens"]["jon"]),
+                    json={"id": str(uuid.uuid4()), "to": "helpdesk@example.test", "body": "And the printer."})
+    assert r.status_code == 201, r.text
+    moved = windows["own"].get(f"/app/live?after=0&list_rev={first['list_rev']}").json()
+    assert moved["list"] is not None and moved["list_rev"] != first["list_rev"]  # C7: the 5 s poll carries it
+    after = rows(switcher(moved["list"]["html"]))
+    assert after[1][2] == before[1][2] + 1 and after[0] == before[0]
+
+
+# L3: only a 0.6.2 window --------------------------------------------------------------------------------------
+
+def test_an_older_window_and_the_website_keep_the_plain_line(windows, client, accounts_seed):  # noqa: F811
+    old = windows["old"].get("/app/inbox").text
+    assert switcher(old) is None and "rc-rail-avatar" not in old and "data-account-" not in old
+    assert "Signed in as <strong>Maya</strong> (maya@example.test)" in old
+    assert login(client, "maya@example.test", PASSWORD).status_code == 303
+    site = client.get("/app/inbox").text
+    assert "data-switcher" not in site and "data-account-" not in site
+
+
+# C4: the cues -----------------------------------------------------------------------------------------------------
+
+def test_a_delegated_window_says_as_whom_everywhere(windows, accounts_seed):  # noqa: F811
+    s = accounts_seed
+    hd = windows["helpdesk"]
+    conv = str(s["conversations"]["helpdesk_jon"].id)
+    page = hd.get(f"/app/conversations/{conv}").text
+    assert re.search(r"<title>[^<]* · Help Desk</title>", page)
+    assert '<span class="rc-as">As: <strong>Help Desk</strong></span>' in page
+    assert re.search(r'class="rc-rail-avatar rc-rail-avatar-for"[^>]*aria-label="Signed in as Help Desk\. Switch account"'
+                     r'[^>]*>HD</button>', page)
+    assert "As <strong>Help Desk</strong>" in switcher(page) and "Maya · switch account" in text(switcher(page))
+    assert "Sent as Help Desk." in hd.get("/app/compose").text
+    own = windows["own"].get(f"/app/conversations/{s['conversations']['jon'].id}").text
+    assert "rc-as" not in own and not re.search(r"<title>[^<]* · Maya</title>", own)  # the own window: no "As:"
+
+
+# C10, AS6: "sent by" in the account's own view only ---------------------------------------------------------------
+
+def test_sent_by_shows_only_to_the_account(windows, accounts_seed, app, client, session):  # noqa: F811
+    s = accounts_seed
+    from raincli_server import identity
+
+    conv = str(s["conversations"]["helpdesk_jon"].id)
+    sent = str(s["messages"]["delegated_send"].id)
+    hd = windows["helpdesk"].get(f"/app/conversations/{conv}").text
+    line = hd.split(f'id="m-{sent}"', 1)[1].split("</li>", 1)[0]
+    assert '<span class="rc-sent-by">sent by Maya</span>' in line
+    # Help Desk's own session (its own machine, no grant) sees it too: "with any session".
+    own_hd = identity.issue_person_session(session, s["people"]["Help Desk"], s["machines"]["helpdesk"])
+    session.commit()
+    w = _window(app, client, own_hd, V062)
+    assert "sent by Maya" in w.get(f"/app/conversations/{conv}").text
+    w.close()
+    # Jon, the recipient: Help Desk only, never Maya.
+    jon = windows["jon"].get(f"/app/conversations/{conv}").text
+    assert sent in jon and "sent by" not in jon and "Maya" not in jon.split('<main', 1)[1]
+    live = windows["jon"].get(f"/app/live?conversation={conv}&after=0").json()
+    assert "sent by" not in str(live) and "Maya" not in "".join(m["html"] for m in live["messages"])
+
+
+# A16: "Your agents" hidden under a grant ---------------------------------------------------------------------------
+
+def test_your_agents_is_hidden_under_a_grant(windows, accounts_seed):  # noqa: F811
+    s = accounts_seed
+    hd = windows["helpdesk"]
+    oa = str(s["conversations"]["helpdesk_own_agents"].id)
+    for page in ("/app/inbox", "/app/archived", "/app/compose"):
+        assert oa not in hd.get(page).text, page
+    for path in (f"/app/conversations/{oa}", f"/app/live?conversation={oa}&after=0"):
+        a, b = hd.get(path), hd.get(path.replace(oa, UNKNOWN))
+        assert (a.status_code, a.content) == (b.status_code, b.content) and a.status_code == 404, path
+    # "From your agents" (the self conversation) stays.
+    assert str(s["conversations"]["helpdesk_self"].id) in hd.get("/app/inbox").text
+
+
+# A14 L2: the sentinels ------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", ["switch", "add-account", "remove-account"])
+def test_a_sentinel_in_a_browser_explains_and_reflects_nothing(windows, name):  # noqa: F811
+    r = windows["own"].get(f"/app/local/{name}?account=evil%40example.test&nonce=x<script>")
+    assert r.status_code == 200 and "evil@example.test" not in r.text and "<script>x" not in r.text
+    # Never a link in a message, nor a handoff destination.
+    rendered = str(markdown.render(f"[go](/app/local/{name}?account=helpdesk%40example.test)"))
+    assert "href" not in rendered and "<a" not in rendered  # left as text, never a link
+    from raincli_server.web import present
+    assert present.handoff_next(f"/app/local/{name}") is None
+
+
+# A18: team-wide grants in "Add an account"; read-only escalations under a team-wide grant ------------------------
+
+def _all_members_grant(session, team, account, toasts=False):
+    from raincli_server.models import Grant
+
+    g = Grant(id=uuid.uuid4(), team_id=team.id, grantee_user_id=None, account_user_id=account.id, all_members=True,
+              created_by="operator", toasts=toasts)
+    session.add(g)
+    session.flush()
+    return g
+
+
+def test_add_an_account_lists_individual_and_team_wide_grants_and_adds_nothing(windows, accounts_seed, session):  # noqa: F811
+    from raincli_server import identity
+
+    s = accounts_seed
+    nw = s["teams"]["northwind"]
+    release = identity.create_user(session, "release@example.test", "Release", PASSWORD)
+    identity.add_member(session, nw, release)
+    _all_members_grant(session, nw, release)
+    session.commit()
+    data = windows["own"].get("/app/accounts").json()
+    assert data["addable"] == [{"email": "billing@example.test", "display_name": "Billing", "kind": "individual"},
+                               {"email": "release@example.test", "display_name": "Release", "kind": "all_members"}]
+    assert [a["email"] for a in data["accounts"]] == ["maya@example.test", "helpdesk@example.test"]  # never auto-added
+    panel = switcher(windows["own"].get("/app/inbox").text)
+    assert 'data-account-add="billing@example.test"' in panel and 'data-account-add="release@example.test"' in panel
+    # A18.1: a team-wide grant never covers someone who is the account of a live grant (Help Desk).
+    assert [u.email for _, u, _ in accounts.available_grants(session, s["people"]["Help Desk"].id, nw.id)] == []
+    # Jon (no individual grant) is covered by the team-wide one only.
+    assert [(u.email, k) for _, u, k in accounts.available_grants(session, s["people"]["Jon"].id, nw.id)] == [
+        ("release@example.test", "all_members")]
+
+
+def test_the_effective_kind_prefers_the_individual_grant(accounts_seed, session):  # noqa: F811
+    from raincli_server import identity
+
+    s = accounts_seed
+    ps = s["sessions"]["helpdesk"]
+    assert accounts.effective_kind(session, ps) == "individual"
+    assert accounts.effective_kind(session, s["sessions"]["maya_own"]) is None  # an own session
+    _all_members_grant(session, s["teams"]["northwind"], s["people"]["Help Desk"])
+    s["grants"]["helpdesk"].revoked_at = identity.now()
+    session.commit()
+    assert accounts.effective_kind(session, ps) == "all_members"
+
+
+@pytest.mark.parametrize("kind", ["individual", "all_members"])
+def test_escalations_are_read_only_under_a_team_wide_grant(windows, accounts_seed, monkeypatch, kind):  # noqa: F811
+    s = accounts_seed
+    monkeypatch.setattr(accounts, "effective_kind", lambda session, ps: kind if ps is not None and ps.delegated else None)
+    own = str(s["conversations"]["helpdesk_self"].id)
+    esc = str(s["messages"]["helpdesk_escalation"].id)
+    hd = windows["helpdesk"]
+    page = hd.get(f"/app/conversations/{own}").text
+    with_parent = hd.get(f"/app/conversations/{own}?reply_to={esc}").text
+    live = hd.get(f"/app/live?conversation={own}&after=0").json()
+    live_html = "".join(m["html"] for m in live["messages"])
+    if kind == "all_members":
+        assert "rc-reply" not in page and "rc-reply" not in live_html
+        assert "Replying to Help Desk's agents needs an individual grant." in text(page)
+        assert 'name="body"' not in with_parent  # no composer, even from a reply link
+    else:
+        assert "rc-reply" in page and "rc-reply" in live_html and "needs an individual grant" not in page
+        assert 'name="body"' in with_parent
+
+
+# W1 (C20, C20a, A14 M1): the delegated window never shows the account's own machine or agents ------------------
+
+@pytest.mark.parametrize("inbox", ["with_inbox", "no_inbox"])
+def test_the_delegated_window_never_shows_the_accounts_machine(app, client, session, accounts_seed, inbox):  # noqa: F811
+    """Every app page, both live answers, the group page, Archived, People and /app/accounts, fetched as Maya acting
+    for Help Desk: none of Help Desk's handle or agent names. With ``no_inbox`` Help Desk has no inbox, so the owner's
+    banner and candidates path (and the first-run steps) would name its agents if they weren't gated."""
+    from conftest_accounts import HELPDESK_STRINGS
+    from conftest_groups import make_group
+    from raincli_server.models import Message, PersonInbox
+
+    s = accounts_seed
+    helpdesk = s["people"]["Help Desk"]
+    if inbox == "no_inbox":
+        session.query(PersonInbox).filter_by(user_id=helpdesk.id).delete()
+        session.query(Message).filter(Message.team_id == s["teams"]["northwind"].id,  # a first-run Inbox for the
+                                      (Message.sender_user_id == helpdesk.id)).delete()  # account's own messages
+    group = make_group(session, s["teams"]["northwind"], "helpdesk-ops", [helpdesk, s["people"]["Jon"]])
+    session.commit()
+    window = _window(app, client, s["delegated_token"], V062)
+    try:
+        convs = [c.id for c in s["conversations"].values()]
+        pages = ["/app", "/app/inbox", "/app/compose", "/app/people", "/app/archived", "/app/accounts",
+                 "/app/recipients", f"/app/groups/{group.id}", "/app/live", "/app/live?after=0",
+                 f"/app/live?group={group.id}"]
+        pages += [f"/app/conversations/{c}" for c in convs] + [f"/app/live?conversation={c}&after=0" for c in convs]
+        fetched = {p: window.get(p) for p in pages}
+        leaks = {p: [x for x in HELPDESK_STRINGS if x in r.text] for p, r in fetched.items()}
+        assert {p: v for p, v in leaks.items() if v} == {}
+        assert fetched["/app/inbox"].status_code == 200 and fetched["/app/accounts"].status_code == 200
+        assert fetched[f"/app/groups/{group.id}"].status_code == 200
+        # The same pages in the account's own window would show its machine: the scan isn't vacuous.
+        own = identity_own_window(app, client, session, s)
+        assert any(x in own.get("/app/inbox").text for x in HELPDESK_STRINGS)
+        own.close()
+    finally:
+        window.close()
+
+
+def identity_own_window(app, client, session, s):
+    """Help Desk's own window, signed in on its own machine (owner_view true)."""
+    from raincli_server import identity
+
+    token = identity.issue_person_session(session, s["people"]["Help Desk"], s["machines"]["helpdesk"])
+    session.commit()
+    return _window(app, client, token, V062)

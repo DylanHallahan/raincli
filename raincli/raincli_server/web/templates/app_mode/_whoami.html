@@ -1,2 +1,48 @@
-{# §16.14 S3: the app window always says whose session it is. #}
+{# §16.14 S3: the app window always says whose session it is. §23 (AS7): with more than one account in this window
+   (0.6.2 or later, A14 L3), the line is the account switcher: one click opens the accounts with their unread counts,
+   one click switches. Switching, adding and removing go through app-accounts.js only (A14 L2: the window acts on a
+   sentinel only with its per-load nonce); without JavaScript the buttons do nothing. #}
+{% if switcher_on and accounts and accounts.active and (accounts.accounts|length > 1 or accounts.addable) %}
+{% set me = accounts.active %}{% set others = accounts.accounts|rejectattr('active')|sum(attribute='unread') %}
+<div class="rc-whoami rc-switcher" data-switcher>
+  <button type="button" class="rc-switcher-btn" aria-expanded="false" aria-controls="rc-accounts" data-switcher-toggle>
+    <span class="rc-avatar" aria-hidden="true">{{ me.initials }}</span>
+    <span class="rc-switcher-who">{% if viewer.delegated %}As <strong>{{ me.name }}</strong><span class="rc-switcher-sub">{{ viewer.acting_user.display_name }} · switch account</span>{% else %}Signed in as <strong>{{ me.name }}</strong><span class="rc-switcher-sub">Switch account</span>{% endif %}</span>
+    {% if others %}<span class="rc-count">{{ others }}<span class="sr-only"> unread in your other accounts</span></span>{% endif %}
+    <svg class="rc-icon rc-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>
+  </button>
+  <div class="rc-accounts" id="rc-accounts" data-accounts hidden>
+    <ul class="rc-accounts-list" aria-label="Accounts in this app">
+      {% for a in accounts.accounts %}
+      <li class="rc-account-row">
+        <button type="button" class="rc-account" data-account-switch="{{ a.email }}"{% if a.active %} aria-current="true"{% endif %}>
+          <span class="rc-avatar" aria-hidden="true">{{ a.initials }}</span>
+          <span class="rc-account-text"><strong>{{ a.name }}</strong><span>{{ a.email }}</span></span>
+          {% if a.unread and not a.active %}<span class="rc-count">{{ a.unread }}<span class="sr-only"> unread</span></span>{% endif %}
+          {% if a.active %}<svg class="rc-icon rc-account-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 5 5 9-10"/></svg><span class="sr-only"> (showing)</span>{% endif %}
+        </button>
+        {% if not a.own %}<button type="button" class="rc-account-remove" data-account-remove="{{ a.email }}" data-account-name="{{ a.name }}" aria-label="Remove {{ a.name }} from this app" title="Remove {{ a.name }} from this app"><svg class="rc-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% if accounts.addable %}
+    <p class="rc-accounts-h">Add an account</p>
+    <ul class="rc-accounts-list" aria-label="Accounts you can add">
+      {% for a in accounts.addable %}
+      <li class="rc-account-row"><button type="button" class="rc-account rc-account-add" data-account-add="{{ a.email }}">
+        <span class="rc-avatar rc-avatar-add" aria-hidden="true">+</span>
+        <span class="rc-account-text"><strong>{{ a.name }}</strong><span>{{ a.email }}</span></span>
+      </button></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    <div class="rc-accounts-confirm" data-remove-confirm hidden>
+      <p data-remove-text></p>
+      <div><button type="button" class="rc-btn" data-remove-yes>Remove</button> <button type="button" class="rc-btn rc-btn-quiet" data-remove-no>Cancel</button></div>
+    </div>
+    <p class="rc-help rc-accounts-key">Ctrl+Shift+A switches to the next account.</p>
+  </div>
+</div>
+{% else %}
 <p class="rc-whoami">Signed in as <strong>{{ viewer.user.display_name }}</strong> ({{ viewer.user.email }})</p>
+{% endif %}

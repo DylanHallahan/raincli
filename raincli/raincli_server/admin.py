@@ -19,7 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from raincli_server import groups, identity, presence
+from raincli_server import grants, groups, identity, presence
 from raincli_server.db import make_engine, make_sessionmaker, session_scope
 from raincli_server.groups import GroupRuleError
 from raincli_server.models import Agent, AgentCredential, AgentPresence, ClientTarget, Conversation, Team, User
@@ -214,6 +214,26 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("group-members", help="list a group's members (people, and whether they take part)")
     c.add_argument("team", metavar="TEAM")
     c.add_argument("name", metavar="NAME")
+    # §23 A2: grants, by the operator only. People are emails of the team's members.
+    # A17: or every active member of the team (--account EMAIL --all-members).
+    for name, text in (("grant-add", "let GRANTEE act as ACCOUNT in the team (the app's account switching), or every "
+                                     "member with --account EMAIL --all-members"),
+                       ("grant-remove", "revoke the grant; every session issued through it ends")):
+        c = sub.add_parser(name, help=text)
+        c.add_argument("team", metavar="TEAM")
+        c.add_argument("people", metavar="GRANTEE_EMAIL ACCOUNT_EMAIL", nargs="*")
+        c.add_argument("--account", metavar="EMAIL", help="with --all-members: the account every member may act as")
+        c.add_argument("--all-members", action="store_true", help="a team-wide grant (every member but the account)")
+        if name == "grant-add":
+            c.add_argument("--toasts", choices=("on", "off"),
+                           help="the app's toasts for the account (default: on per-user, off with --all-members)")
+    c = sub.add_parser("grant-list", help="list a team's grants, live and revoked (people only); a member who leaves "
+                                          "and re-joins is covered by an all-members grant again at once")
+    c.add_argument("team", metavar="TEAM")
+    c = sub.add_parser("delegated-actions",
+                       help="list sends made through grants: who, as whom, when, which conversation (never the body)")
+    c.add_argument("team", metavar="TEAM")
+    c.add_argument("--since", metavar="DATE", help="only from DATE (YYYY-MM-DD or an ISO time, UTC)")
     return p
 
 
@@ -237,7 +257,7 @@ def main(argv: list[str] | None = None, *, env=None, stdin: TextIO | None = None
                 _dispatch(args, session, env, stdin, stdout, stderr, prompt)
         finally:
             engine.dispose()
-    except GroupRuleError as exc:  # §22 G8: a refused group command
+    except (GroupRuleError, grants.GrantRuleError) as exc:  # §22 G8, §23 A2: a refused group or grant command
         print(f"raincli-admin: {exc}", file=stderr)
         return 2
     except (AdminError, identity.IdentityError) as exc:
@@ -328,6 +348,8 @@ def _dispatch(args, session: Session, env, stdin, stdout, stderr, prompt) -> Non
         _client_status(session, _team(session, args.team), stdout)
     elif cmd.startswith("group-"):
         _group_command(session, cmd, args, stdout)
+    elif cmd.startswith("grant-") or cmd == "delegated-actions":
+        _grant_command(session, cmd, args, stdout)
 
 
 def _members_out(session: Session, group, stdout) -> None:
@@ -364,6 +386,70 @@ def _group_command(session: Session, cmd: str, args, stdout) -> None:
         group = groups.named_group(session, team, args.name)
         print(f'"{group.name}" in {team.slug}: {groups.members_n(session, group)} members', file=stdout)
         _members_out(session, group, stdout)
+
+
+def _since(text: str | None):
+    from datetime import datetime, timezone
+
+    if text is None:
+        return None
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        raise grants.GrantRuleError("--since must be a date (YYYY-MM-DD) or an ISO time") from None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _grant_command(session: Session, cmd: str, args, stdout) -> None:
+    """People only (names and emails); never machines, agents or message bodies."""
+    team = _team(session, args.team)
+    if cmd in ("grant-add", "grant-remove"):
+        if args.all_members:
+            if args.people or not args.account:
+                raise grants.GrantRuleError("a team-wide grant takes --account EMAIL --all-members and no other email")
+        elif len(args.people) != 2 or args.account:
+            raise grants.GrantRuleError(f"{cmd} takes GRANTEE_EMAIL ACCOUNT_EMAIL, or --account EMAIL --all-members")
+    toasts = None if cmd != "grant-add" or args.toasts is None else args.toasts == "on"
+    if cmd == "grant-add" and args.all_members:
+        grant = grants.add_team_grant(session, team, args.account, toasts=bool(toasts))
+        print(f"every member of {team.slug} may now act as {args.account} (toasts {'on' if grant.toasts else 'off'})",
+              file=stdout)
+    elif cmd == "grant-remove" and args.all_members:
+        ended = grants.remove_team_grant(session, team, args.account)
+        print(f"members of {team.slug} may no longer act as {args.account}; {ended} sessions ended", file=stdout)
+    elif cmd == "grant-add":
+        grantee, account = args.people
+        grant = grants.add_grant(session, team, grantee, account, toasts=True if toasts is None else toasts)
+        print(f"{grantee} may now act as {account} in {team.slug} (toasts {'on' if grant.toasts else 'off'})",
+              file=stdout)
+    elif cmd == "grant-remove":
+        grantee, account = args.people
+        ended = grants.remove_grant(session, team, grantee, account)
+        print(f"{grantee} may no longer act as {account} in {team.slug}; {ended} sessions ended", file=stdout)
+    elif cmd == "grant-list":
+        rows = grants.list_grants(session, team)
+        for r in rows:
+            who = f"{r.grantee} <{r.grantee_email}>" if r.grantee_email else "all members"
+            if not r.grantee_email:  # A17: "<account>: all members"
+                print("\t".join([f"{r.account} <{r.account_email}>: all members",
+                                 f"toasts {'on' if r.toasts else 'off'}", f"granted {r.created_at.isoformat()}",
+                                 f"revoked {r.revoked_at.isoformat()}" if r.revoked_at else "live"]), file=stdout)
+                continue
+            print("\t".join([who, f"as {r.account} <{r.account_email}>", f"toasts {'on' if r.toasts else 'off'}",
+                             f"granted {r.created_at.isoformat()}",
+                             f"revoked {r.revoked_at.isoformat()}" if r.revoked_at else "live"]), file=stdout)
+        if not rows:
+            print(f"{team.slug} has no grants", file=stdout)
+    elif cmd == "delegated-actions":
+        rows = grants.delegated_actions(session, team, _since(args.since))
+        for r in rows:
+            print("\t".join([r.at.isoformat(), f"{r.actor} <{r.actor_email}>", f"as {r.account} <{r.account_email}>",
+                             f"sent in conversation {r.conversation_id} with {r.with_label}",
+                             f"message {r.message_id}",
+                             "via all-members grant" if r.via == "all_members" else "via individual grant"]),
+                  file=stdout)
+        if not rows:
+            print(f"no sends through grants in {team.slug}", file=stdout)
 
 
 ROUTING_MIN_CLIENT = (0, 5, 0)  # the first routing-capable client (protocol §16.12 C1)
