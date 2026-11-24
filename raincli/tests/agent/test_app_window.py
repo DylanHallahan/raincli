@@ -261,10 +261,11 @@ def test_the_nonce_is_injected_only_into_local_pages(tmp_path):
     app, win, _ = make(tmp_path)
     app.load(SERVICE + "/app/inbox")
     app.on_loaded()
-    assert win.scripts == []
+    # §23 (A14 L2): a hosted page gets only its own switcher nonce, which the local pages' gate refuses.
+    assert len(win.scripts) == 1 and not app.gate.check(nonce_of(win), LOCAL + "settings.html")
     app.load(LOCAL + "settings.html")
     app.on_loaded()
-    assert len(win.scripts) == 1 and "__rcNonce" in win.scripts[0]
+    assert len(win.scripts) == 2 and "__rcNonce" in win.scripts[1] and app.gate.check(nonce_of(win), LOCAL + "settings.html")
 
 
 def test_js_api_never_returns_a_credential(tmp_path):
@@ -272,7 +273,8 @@ def test_js_api_never_returns_a_credential(tmp_path):
     assert set(names) == {"sign_in_defaults", "sign_in", "status", "settings", "save_settings", "toggle_pause",
                           "forget_device",
                           "open_log", "sign_out", "open", "retry", "hooks", "connect_hooks",
-                          "inbox", "set_inbox", "clear_inbox", "dismiss_inbox_notice"}
+                          "inbox", "set_inbox", "clear_inbox", "dismiss_inbox_notice",
+                          "account_note"}  # §23: names only (the owner, the account the window shows)
     source = (APP_DIR / "services.py").read_text()
     tree = ast.parse(source)
     status = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "status")

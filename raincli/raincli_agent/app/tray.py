@@ -203,6 +203,8 @@ class Tray:
                     return self.quit(code)
             self.refresh_icon()
             self.toasts()
+            if hasattr(self.window, "check_dropped"):  # §23: an account dropped by the runtime: the window says so
+                self.post(self.window.check_dropped)
 
     def signed_in(self):
         return os.path.exists(self.agent_config) and os.path.exists(self.runtime_config)
@@ -248,9 +250,69 @@ class Tray:
             if not policy.toast_wanted(entry, every):
                 continue
             text, thread = self.toast_for(entry)
-            self.toast_thread, self.toast_opens = thread, None  # a message toast opens its thread
+            active = self._active_account()
+            if active:  # §23: the window shows another account: name the own one first
+                text = policy.account_toast_text(self.own_name(), entry.get("kind"), self._sender_of(text))
+            self.toast_thread, self.toast_account, self.toast_opens = thread, None, None  # opens its thread
             if self.icon is not None:
                 self.icon.notify(text, TITLE)
+        self.account_toasts()
+
+    def _active_account(self):
+        """The delegated account the window shows, or None (the own one, or no window yet)."""
+        return getattr(getattr(self, "window", None), "active_account", None)
+
+    def own_name(self):
+        if getattr(self, "_own_name", None) is None:
+            try:
+                self._own_name = self.services.own_account().get("display_name") or "You"
+            except Exception:  # noqa: BLE001 - offline: a generic label this time
+                return "You"
+        return self._own_name
+
+    @staticmethod
+    def _sender_of(text):
+        for head in ("New message from ", "Escalation from "):
+            if text.startswith(head):
+                return text[len(head):]
+        return None
+
+    def account_toasts(self):
+        """§23 (AS5, A16, A18.4): each delegated account's feed. The account the window shows toasts like the own
+        one used to; the others are named first. An account whose grant has toasts off shows none (its count still
+        shows in the switcher). "Held for approval" never toasts for a delegated account (A14 M1). Clicking one
+        switches to that account and opens the thread."""
+        try:
+            held = self.services.held_accounts()
+        except Exception:  # noqa: BLE001
+            return
+        active = self._active_account()
+        for acc in held or ():
+            email, name = acc.get("email"), acc.get("display_name")
+            try:
+                entries = self.services.account_notifications(email)
+                wanted = self.services.account_toasts(email)
+                every = self.services.account_notify_all(email) is True
+            except Exception:  # noqa: BLE001 - its feed isn't there yet
+                continue
+            for entry in entries or ():
+                if not wanted or entry.get("kind") == "inbox_offline" or entry.get("hold") == "approval":
+                    continue  # taken quietly
+                if not policy.toast_wanted(entry, every):
+                    continue
+                kind, sender, thread = entry.get("kind"), None, None
+                try:
+                    summary = self.services.message_summary(entry["id"], account=email)
+                    kind, sender, thread = summary["kind"] or kind, summary["sender"], summary.get("conversation_id")
+                except Exception:  # noqa: BLE001 - offline: a toast without the name
+                    pass
+                if active and email.lower() == active.lower():
+                    text = policy.toast_text(kind, sender) if kind != "escalation" else "Escalation from its agent"
+                else:
+                    text = policy.account_toast_text(name, kind, sender)
+                self.toast_thread, self.toast_account, self.toast_opens = thread, email, None
+                if self.icon is not None:
+                    self.icon.notify(text, TITLE)
 
     def toast_for(self, entry):
         """``(text, conversation id or None)`` for a queue entry ``{id, kind, at, …}``."""
@@ -268,7 +330,16 @@ class Tray:
             self.post(self.open_this_computer)
             return
         thread = self.toast_thread
+        account = getattr(self, "toast_account", None)
+        if account is not None or self._active_account():
+            self.post(self.open_account_thread, account, thread)  # §23: switch to that account first
+            return
         self.post(self.open_thread, thread)
+
+    def open_account_thread(self, account, thread):
+        """§23 (AS5): a toast for another account switches the window to it and opens the thread."""
+        self.window.show()
+        self.window.switch_to(account, f"/app/conversations/{thread}" if thread else "/app/inbox")
 
     def open_this_computer(self):
         self.window.show()

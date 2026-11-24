@@ -54,16 +54,26 @@ def _sending(args, mid, action):
     except ApiError as exc:
         if exc.code == "team_required":
             raise team_choice(exc) from None
+        if exc.code == "delegated_scope":  # §23 A19 E4: the grant in effect refuses it: exit 7
+            from . import cli_accounts
+            raise cli_accounts.scope_refusal(exc) from None
         raise _cli.person_refusal(exc) from None
 
 
 # -- raincli me ... (person session, §16.4) ------------------------------------------------------------
 
 def _person(args):
-    return person.PersonClient.for_config(_agent_config(args))
+    """The own session, or ``--as``'s account (§23 A11, ``cli_accounts.person_for``)."""
+    from . import cli_accounts
+    return cli_accounts.person_for(args)
 
 
 def cmd_me_inbox(args):
+    if getattr(args, "all_accounts", False):  # §23 A11: one merged stream for every account here
+        from . import cli_accounts
+        if not args.watch or args.as_account:
+            raise UsageError("--all-accounts goes with --watch, and without --as")
+        return cli_accounts.watch_all(args)
     api = _person(args)
     if not args.watch:
         after, messages = 0, []
@@ -202,6 +212,8 @@ def cmd_me_fetch(args):
 
 
 def cmd_me_approve(args):
+    if args.as_account:  # §23 A4: a held message is approved on the machine that holds it, never through a grant
+        raise UsageError("--as can't be used with approve: a held message is approved on the machine that holds it")
     from . import trust
     record = trust.approve(_runtime_config(args), args.message_id, always=args.always)
     out(f"approved: {record['id']} is now {record['state']}")
@@ -211,6 +223,11 @@ def cmd_me_approve(args):
 
 
 def cmd_me_sign_out(args):
+    if args.as_account:  # §23 A14 Q10: remove that account from this app; the grant stays
+        from . import cli_accounts
+        if args.local_only:
+            raise UsageError("--local-only goes without --as")
+        return cli_accounts.remove_from_app(args)
     result = person.sign_out(_agent_config(args), local_only=args.local_only)
     if not result["removed"]:
         out("this machine had no person session")
@@ -325,6 +342,8 @@ def register(sub, parser_class):
         sp = original_add(*args, **kwargs)
         sp.add_argument("--utc", action="store_true", default=argparse.SUPPRESS,
                         help="show timestamps as UTC ISO instead of local time")
+        sp.add_argument("--as", dest="as_account", metavar="EMAIL|NAME",
+                        help="act as another account this machine may act as (raincli accounts); added on first use")
         return sp
     me_sub.add_parser = add_parser
     inbox = me_sub.add_parser("inbox", help="messages to you (unread by default)")
@@ -332,6 +351,8 @@ def register(sub, parser_class):
     inbox.add_argument("--once", action="store_true", help=argparse.SUPPRESS)
     inbox.add_argument("--timeout", type=float, metavar="S", help="with --watch: exit 4 if nothing arrives in S s")
     inbox.add_argument("--all", action="store_true", help="include messages already read")
+    inbox.add_argument("--all-accounts", action="store_true",
+                       help="with --watch: every account here in one stream, each message tagged with its account")
     inbox.add_argument("--json", action="store_true", help="print JSON")
     inbox.set_defaults(func=cmd_me_inbox)
     convs = me_sub.add_parser("conversations", help="your conversations; archived ones only with --archived or --all")
@@ -372,6 +393,14 @@ def register(sub, parser_class):
     sign_out = me_sub.add_parser("sign-out", help="end this machine's person session (the machine stays signed in)")
     sign_out.add_argument("--local-only", action="store_true", help="delete it here without revoking it")
     sign_out.set_defaults(func=cmd_me_sign_out)
+    from . import cli_accounts
+    for sp in me_sub.choices.values():  # §23 A11: --json errors as {"schema", "error"}, exit 7 for not_granted
+        sp.set_defaults(func=cli_accounts.guarded(sp.get_default("func")))
+    accts = sub.add_parser("accounts", help="the accounts this machine may act as (own, added and granted)",
+                           description="The own account, the accounts added to this app, and the accounts granted "
+                                       "but not added yet (§23). raincli me … --as EMAIL acts as one of them.")
+    accts.add_argument("--json", action="store_true", help="print JSON (schema 1, docs/raincli-cli-json.md)")
+    accts.set_defaults(func=cli_accounts.guarded(cli_accounts.cmd_accounts))
 
     trust = sub.add_parser("trust", help="who may reach your agents on this machine (team or list)",
                            description="Trust for messages to your agents on this machine (§16.12 C5, §21): your "

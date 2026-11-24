@@ -66,3 +66,17 @@
     window.rc.call("open", target.getAttribute("data-open")).catch(function () {});
   });
 }());
+
+// §23 (A10, C6): This computer and Settings are about this machine and its owner; when the window shows another
+// account, a line says whose computer it is.
+(function () {
+  "use strict";
+  var line = document.getElementById("belongs");
+  if (!line || !window.rc) return;
+  window.rc.read("account_note").then(function (r) {
+    if (r && r.active && r.owner) {
+      line.textContent = "This computer belongs to " + r.owner + ". The window shows " + r.active + ".";
+      line.hidden = false;
+    }
+  }, function () {});
+}());

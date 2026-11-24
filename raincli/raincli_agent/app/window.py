@@ -21,15 +21,17 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import threading
 import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 from ..config import Secret
 from . import policy
@@ -40,6 +42,8 @@ _HANDOFF_NEXT = re.compile(r"/app/(people|agents|archived|compose|conversations/
 
 LOCAL_DIR = Path(__file__).resolve().parent / "local"
 TITLE = "RainCLI"
+# §23 (A10): the switcher's sentinels; the window acts on them only with the page's nonce (A14 L2).
+_ACCOUNT_SENTINEL = re.compile(r"/app/local/(switch|add-account|remove-account)")
 LOAD_TIMEOUT = 20.0  # seconds before a hosted load counts as failed
 EXTERNAL_REPEAT = 2.0  # seconds within which the same outgoing link is handled once
 PROFILE_RESET_MARKER = "reset-profile"
@@ -162,6 +166,12 @@ class Api:
     def settings(self, nonce):
         self._guard(nonce)
         return self._app.services.settings()
+
+    def account_note(self, nonce):
+        """§23 (A10, C6): for This computer and Settings: the machine's owner, and the account the window shows
+        when it isn't the owner's (``active`` None otherwise). Names only, never a credential."""
+        self._guard(nonce)
+        return self._app.account_note()
 
     def save_settings(self, nonce, change):
         self._guard(nonce)
@@ -286,6 +296,11 @@ class AppWindow:
         self._core = None
         self.api = Api(self)
         self._last_good = None  # the last allowed page this window showed
+        # §23 (A10, A14 L2): the account the window shows (None: the own one), and the per-load nonce each hosted
+        # page gets for the switcher's sentinels. A sentinel without the current page's nonce does nothing.
+        self.active_account = None
+        self._hosted_nonce = None
+        self._pending_notice = None  # §23: the one-line notice for a dropped account, shown on the next hosted page
         self._recent_external = collections.deque(maxlen=16)  # links already handed to the policy
 
     # -- set-up ---------------------------------------------------------------------------------------
@@ -450,7 +465,17 @@ class AppWindow:
             return None
 
     def before_navigate(self, url):
-        """True to cancel ``url``: another origin opens in the browser, a sentinel shows the local page."""
+        """True to cancel ``url``: another origin opens in the browser, a sentinel shows the local page. The
+        account sentinels (§23) act only with the current hosted page's nonce."""
+        account = self._account_sentinel(url)
+        if account is not None:
+            kind, params = account
+            if self._sentinel_nonce_ok(params.get("nonce")):
+                self._log(f"account sentinel {kind}")
+                self._later(self.account_action, kind, params)
+            else:
+                self._log(f"account sentinel {kind} without the page's nonce: ignored")
+            return True
         decision, target = self.navigation.decide(url)
         if decision == "allow":
             if not self.navigation.is_local(url):
@@ -504,6 +529,13 @@ class AppWindow:
         if nonce is not None:
             self.window.evaluate_js(
                 f"window.__rcNonce = {json.dumps(nonce)}; window.dispatchEvent(new Event('rc-nonce'));")
+        elif url and not self.navigation.is_local(url):
+            # §23 (A14 L2): a hosted page gets its own per-load nonce, good only for the account sentinels (never
+            # for the local pages' js_api, whose gate has its own).
+            self._hosted_nonce = secrets.token_urlsafe(24)
+            self.window.evaluate_js(f"window.__rcNonce = {json.dumps(self._hosted_nonce)};")
+            if self._pending_notice:
+                self._show_notice()
 
     def on_navigation_completed(self, success, http_status=0, *, cancelled=False, status="", url=None):
         """A network failure shows the offline page. An HTTP error page is the service's own answer
@@ -563,15 +595,140 @@ class AppWindow:
     # -- what the window shows --------------------------------------------------------------------------------
 
     def home(self):
-        """The first page: sign-in without a credential or person session, else the hosted inbox."""
+        """The first page: sign-in without a credential or person session, else the hosted inbox, as the account
+        the window showed last (§23 A10: a restart opens on ``active``)."""
         if not self.services.signed_in() or not self.services.has_person_session():
             query = "person=1" if self.services.signed_in() else ""
             self.load(self.local_url("sign-in", query))
+            return
+        try:
+            self.active_account = self.services.active_account()
+        except Exception:  # noqa: BLE001
+            self.active_account = None
+        self._set_title()
+        if self.check_dropped():  # the account shown was dropped while the app was closed: switched to the own one
             return
         self.open_hosted("/app/inbox")
 
     def service_base(self):
         return self.service_url().rstrip("/")
+
+    # -- accounts (§23 A10) -------------------------------------------------------------------------------
+
+    def _account_sentinel(self, url):
+        """``(kind, params)`` for ``/app/local/switch|add-account|remove-account`` on the service origin, else None."""
+        if self.navigation is None or policy.origin(url) != self.navigation.service:
+            return None
+        parts = urlsplit(url)
+        match = _ACCOUNT_SENTINEL.fullmatch(parts.path)
+        if not match:
+            return None
+        params = {k: v[0] for k, v in parse_qs(parts.query, max_num_fields=8).items() if v}
+        return match.group(1), params
+
+    def _sentinel_nonce_ok(self, nonce):
+        current = self._hosted_nonce
+        return (isinstance(nonce, str) and current is not None
+                and hmac.compare_digest(nonce.encode(), current.encode()))
+
+    def _accounts_order(self):
+        """Own first, then the held accounts in the order they were added: ``[(email or None, name)]``."""
+        try:
+            held = self.services.held_accounts()
+        except Exception:  # noqa: BLE001 - a damaged file: only the own account
+            held = []
+        return [(None, None)] + [(a["email"], a["display_name"]) for a in held]
+
+    def account_action(self, kind, params):
+        """The switcher's request: switch (to an account, or ``next=1`` to cycle), add from a grant, or remove."""
+        self._hosted_nonce = None  # one action per page load
+        try:
+            if kind == "switch":
+                order = self._accounts_order()
+                if params.get("next") == "1":
+                    emails = [e for e, _ in order]
+                    current = emails.index(self.active_account) if self.active_account in emails else 0
+                    return self.switch_to(emails[(current + 1) % len(emails)])
+                email = params.get("account") or ""
+                held = {(e or "").lower(): e for e, _ in order if e}
+                return self.switch_to(held.get(email.lower()))  # an unknown email switches to the own account
+            if kind == "add-account":
+                added = self.services.add_account(params.get("account") or "")
+                return self.switch_to(added["email"])
+            if kind == "remove-account":
+                removed = self.services.remove_account(params.get("account") or "")
+                if removed is not None and self.active_account and \
+                        self.active_account.lower() == removed["email"].lower():
+                    return self.switch_to(None)
+                self.handed_off = False
+                return self.open_hosted("/app/inbox")
+        except Exception as exc:  # noqa: BLE001 - logged by type only; the window stays where it was
+            self._log(f"account {kind} failed: {type(exc).__name__}")
+            return False
+        return False
+
+    def switch_to(self, email, path="/app/inbox"):
+        """Show ``email``'s account (None: the own one): a fresh handoff with that session, then ``path``."""
+        self.active_account = email
+        try:
+            self.services.set_active_account(email)
+        except Exception:  # noqa: BLE001
+            pass
+        self._set_title()
+        self.handed_off = False  # the next page needs that account's app session
+        return self.open_hosted(path)
+
+    def check_dropped(self):
+        """§23 (A10): accounts the runtime dropped (their session answered 401: the grant revoked, removed from the
+        app elsewhere, or no longer a member). One line on the page says so; if the window showed one of them, it
+        switches back to the own account first."""
+        try:
+            dropped = self.services.take_dropped()
+        except Exception:  # noqa: BLE001
+            return False
+        if not dropped:
+            return False
+        names = [d["display_name"] for d in dropped]
+        listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        self._pending_notice = (f"{listed} {'was' if len(names) == 1 else 'were'} removed from this app: "
+                                "the access ended.")
+        gone = {d["email"].lower() for d in dropped}
+        if self.active_account and self.active_account.lower() in gone:
+            self.switch_to(None)  # the notice shows on the own account's page
+            return True
+        url = self.current_url() or ""
+        if url and self.navigation is not None and not self.navigation.is_local(url):
+            self._show_notice()
+        return False
+
+    def _show_notice(self):
+        text, self._pending_notice = self._pending_notice, None
+        self.window.evaluate_js(
+            "(function (t) { var m = document.querySelector('main'); if (!m) return;"
+            " var p = document.createElement('p'); p.className = 'rc-flash'; p.setAttribute('role', 'status');"
+            f" p.textContent = t; m.insertBefore(p, m.firstChild); }})({json.dumps(text)});")
+
+    def account_note(self):
+        active = None
+        if self.active_account:
+            active = next((n for e, n in self._accounts_order() if e and e.lower() == self.active_account.lower()),
+                          None)
+        if active is None:
+            return {"owner": None, "active": None}
+        try:
+            owner = self.services.own_account().get("display_name")
+        except Exception:  # noqa: BLE001 - offline: the line names no one
+            owner = None
+        return {"owner": owner, "active": active}
+
+    def _set_title(self):
+        name = None
+        if self.active_account:
+            name = next((n for e, n in self._accounts_order() if e and e.lower() == self.active_account.lower()), None)
+        try:
+            self.window.set_title(f"{TITLE} · {name}" if name else TITLE)
+        except Exception:  # noqa: BLE001 - no native window yet (tests, start-up)
+            pass
 
     def open_hosted(self, path="/app/inbox", thread_id=None):
         """A hosted page: directly while this run's app-mode session lasts, else through a fresh
@@ -587,9 +744,18 @@ class AppWindow:
             self.load(url)
             return True
         try:
-            url = self.services.handoff_url()
+            url = self.services.handoff_url(account=self.active_account) if self.active_account else \
+                self.services.handoff_url()
         except Exception as exc:  # noqa: BLE001 - offline, or the session ended
             log.warning("handoff failed: %s", type(exc).__name__)
+            if self.active_account and getattr(exc, "status", None) == 401:
+                # §23: that account's session ended (grant revoked, removed): drop it and show the own account.
+                self._log("an account's session ended: back to the own account")
+                try:
+                    self.services.drop_account(self.active_account)
+                except Exception:  # noqa: BLE001
+                    pass
+                return self.switch_to(None, path)
             # A refused session (401: revoked with its machine, §16.3) is not "offline": sign in, where the
             # credential check explains a revoked or foreign machine (§16.17 item 4).
             if not self.services.has_person_session() or getattr(exc, "status", None) == 401:
@@ -751,6 +917,8 @@ class AppWindow:
         self.services.host.resume()
         self.refresh_navigation()
         self.handed_off = False  # sign-in rotates the install token: the old app session is gone
+        self.active_account = None  # a new own session: the delegated ones are re-added under it (A14 M5)
+        self._set_title()
         if fresh and self._on_fresh_sign_in is not None:
             self._later(self._on_fresh_sign_in)
         self.open_hosted("/app/inbox")
@@ -768,6 +936,8 @@ class AppWindow:
             return _result(False, f"Signing out failed, so the credential was kept: {exc}")
         self.clear_profile()
         self.handed_off = False
+        self.active_account = None  # sign-out cleared every delegated account (person.clear_session)
+        self._set_title()
         self.refresh_install_token()  # rotated by sign-out (§16.14 S3)
         self.load(self.local_url("sign-in"))
         return _result(message="Signed out.")

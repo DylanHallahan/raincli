@@ -25,9 +25,9 @@ on:
         required: false
         default: ''
       only:
-        description: Run only one part on this ref's test installers (groups-shots, part G); empty runs everything
+        description: Run only one part on this ref's test installers (groups-shots, part G; accounts-shots, part H); empty runs everything
         type: choice
-        options: ['', 'groups-shots']
+        options: ['', 'groups-shots', 'accounts-shots']
         required: false
         default: ''
 permissions:

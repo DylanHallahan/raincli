@@ -7,6 +7,7 @@ EXIT_CONFLICT = 3  # forbidden or conflict
 EXIT_TIMEOUT = 4  # watch timeout
 EXIT_CAPACITY = 5
 EXIT_UNREACHABLE = 6
+EXIT_NOT_GRANTED = 7  # §23 A11: --as names no account this machine may act as, or a grant's scope refuses it
 
 
 class RainError(Exception):
@@ -128,3 +129,14 @@ def error_for(status, code, message, retry_after=None):
     if cls is None or (cls.status is not None and cls.status != status):
         cls = BY_STATUS.get(status, ApiError)
     return cls(message, code=code or cls.code, status=status, retry_after=retry_after)
+
+
+class NotGranted(RainError):
+    """§23 A11 (A14 Q9, A19 E4): ``--as`` names no account this machine may act as (``not_granted``), or the
+    grant in effect doesn't allow the request (``delegated_scope``)."""
+
+    exit_code = EXIT_NOT_GRANTED
+
+    def __init__(self, message, *, code="not_granted"):
+        super().__init__(message)
+        self.code = code
